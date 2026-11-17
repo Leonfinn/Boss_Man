@@ -4,14 +4,18 @@
 // merge_message_field, head_commit_id}; merge answers 200, or 405 (not allowed yet: approvals,
 // status checks, permissions) and 409 (conflicts, head out of date) with a message.
 import { strFromU8, unzipSync } from "fflate";
-import { apiBaseFor, parseRepoUrl, type GitHostKind } from "@boss-man/shared";
+import { apiBaseFor, parseRepoUrl, redactForModel, type GitHostKind } from "@boss-man/shared";
 
 export type GitHostConfig = { kind: GitHostKind; apiBase: string; owner: string; repo: string };
 export type PullRequest = { number: number; url: string; merged: boolean; closed: boolean; mergeCommit: string | null };
 /** What a commit's checks say (R86). GitHub's older commit statuses (not Actions check runs) aren't read. */
 export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total?: number; /** A page for the run: the first failing one, else the first reported (BOS-1418). */ url?: string };
-/** A failed CI job on the host, with its page (BOS-1070). */
-export type CiRun = { id: number; name: string; url: string };
+/**
+ * A failed CI job on the host, with its page (BOS-1070). On GitHub `id` is the Actions job id, which is also its check run's
+ * id (so its annotations can be asked for). `step`: the step that failed. `unstarted`: the job failed without running a
+ * step or getting a runner, which is how GitHub's jobs data shows a job it refused to start (BOS-1630).
+ */
+export type CiRun = { id: number; name: string; url: string; step?: string; unstarted?: boolean };
 /**
  * What the merge gate reads before it merges (BOS-1070). `waiting`: jobs not finished yet. `billing`: a job didn't start
  * because of the account's spending limit or payments, which isn't the agent's to fix.
@@ -40,7 +44,8 @@ export type WorkflowRun = {
   updatedAt: string;
 };
 export type WorkflowStep = { number: number; name: string; status: string; conclusion: string | null };
-export type WorkflowJob = { id: number; name: string; status: string; conclusion: string | null; url: string; steps: WorkflowStep[] };
+/** `runner`: the runner that took the job, null while none has (BOS-1630). */
+export type WorkflowJob = { id: number; name: string; status: string; conclusion: string | null; url: string; runner?: string | null; steps: WorkflowStep[] };
 /** The error annotations a failed check run published, grouped under the check's (the job's) name. */
 export type CommitAnnotations = { name: string; lines: string[] };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
@@ -53,6 +58,55 @@ export class GitHostError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+export const MAX_LINES = 15;
+export const MAX_LINE = 300;
+const TAIL_LINES = 10;
+
+const cleanLogLines = (log: string): string[] =>
+  log
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, "").replace(/\u001b\[[0-9;]*m/g, "").replace(/^##\[(error|warning|group|endgroup)\]/, "$1: ").trim())
+    .filter(Boolean);
+const shorten = (l: string) => redactForModel(l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)}…` : l);
+
+/** The lines of a log that most likely say what went wrong: error-looking ones, timestamps and colour codes removed, secrets redacted. */
+export function errorLines(log: string, max = MAX_LINES): string[] {
+  const clean = cleanLogLines(log);
+  const hits = clean.filter((l) => /(^error\b|\berror[: ]|\bfail(ed|ure|ing)?\b|✗|✕|×|assert|exception|\bFAIL\b|exit code|cannot find|not found|expected)/i.test(l));
+  // The last ones are nearest the failure.
+  return (hits.length ? hits : clean).slice(-max).map(shorten);
+}
+
+/** The error lines plus the last few lines of the log (redacted), for a ticket message. Tail lines already among the error lines are dropped. */
+export function logExcerpt(log: string): { errors: string[]; tail: string[] } {
+  const errors = errorLines(log);
+  const tail = cleanLogLines(log).slice(-TAIL_LINES).map(shorten).filter((l) => !errors.includes(l));
+  return { errors, tail };
+}
+
+/**
+ * The one reader of a failed job's log, shared by the main-CI watcher and the merge gate's CI send-back (BOS-1667).
+ * `lines` is never empty: the error lines, then the end of the log (secrets redacted), or one line saying why the
+ * log can't be had. `readable` is true only when real log lines came back. `read` fetches the raw log.
+ */
+export async function readFailureLog(cfg: GitHostConfig, jobId: number, read: () => Promise<string>): Promise<{ lines: string[]; readable: boolean }> {
+  if (cfg.kind !== "github") return { lines: ["(The job log isn't available from this git host; Boss Man can only read job logs on GitHub.)"], readable: false };
+  if (!jobId) return { lines: ["(No job ran, so there is no job log.)"], readable: false };
+  try {
+    const { errors, tail } = logExcerpt(await read());
+    if (!errors.length && !tail.length) return { lines: ["(The job log was empty.)"], readable: false };
+    return { lines: [...errors, ...(tail.length ? ["… end of the log:", ...tail] : [])], readable: true };
+  } catch (e) {
+    const status = e instanceof GitHostError ? e.status : 0;
+    const why =
+      status === 401 || status === 403 ? "the git token isn't allowed to read job logs"
+      : status === 404 || status === 410 ? "GitHub no longer has it (logs expire, or the job was deleted)"
+      : status === 413 ? "it is too large to read"
+      : `GitHub's answer couldn't be read (${(e instanceof Error ? e.message : String(e)).slice(0, 150)})`;
+    return { lines: [`(The job log couldn't be read: ${why}. Open the job link above.)`], readable: false };
   }
 }
 
@@ -158,60 +212,73 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const perms = (res.json.permissions ?? {}) as { push?: boolean; admin?: boolean };
       const canPush = perms.push === true || perms.admin === true;
       const message = canPush ? "The token can read and push to the repo." : "The token can read the repo but not push to it, so merges and pull requests would fail.";
-      // GitHub: can the merge gate read CI results (BOS-1070)? A fine-grained token needs Checks: Read-only.
-      const branch = typeof res.json.default_branch === "string" ? res.json.default_branch : null;
-      if (cfg.kind !== "github" || !branch) return { ok: true, canPush, message };
-      const probe = await call(cfg, token, "GET", `/commits/${encodeURIComponent(branch)}/check-runs?per_page=1`).catch(() => null);
+      // GitHub: can the merge gate read CI results (BOS-1070)? It reads them through Actions (BOS-1630), so a fine-grained
+      // token needs Actions: Read-only (Metadata comes with every token). `canReadChecks` keeps its name for the web page.
+      if (cfg.kind !== "github") return { ok: true, canPush, message };
+      const probe = await call(cfg, token, "GET", "/actions/runs?per_page=1").catch(() => null);
       const canReadChecks = !!probe?.ok;
-      return { ok: true, canPush, canReadChecks, message: `${message} ${canReadChecks ? "It can read GitHub checks." : `It can't read GitHub checks${probe ? ` (HTTP ${probe.status})` : ""}, so the merge gate can't wait for CI: give it Repository permissions → Checks: Read-only.`}` };
+      return { ok: true, canPush, canReadChecks, message: `${message} ${canReadChecks ? "It can read GitHub Actions runs." : `It can't read GitHub Actions runs${probe ? ` (HTTP ${probe.status})` : ""}, so the merge gate can't wait for CI: give it Repository permissions → Actions: Read-only (and Metadata: Read-only).`}` };
     },
 
     /**
-     * Whether CI on a commit is finished and green, for the merge gate (BOS-1070). GitHub makes a job's check run only when the
-     * job starts, so the runs alone can read "passed" while later jobs haven't begun: the workflow's check suite, which stays
-     * in progress until its last job ends, says whether anything is still to come. Suites with no runs are other apps' and are
-     * left out (they can sit "queued" for ever). Elsewhere (Gitea) it is the commit statuses, as checks() reads them.
+     * Whether CI on a commit is finished and green, for the merge gate (BOS-1070). Read through the Actions API (BOS-1630),
+     * which a fine-grained token with Actions: Read-only can use; the Checks API needs a permission the owner's token type
+     * doesn't offer. A workflow run stays in progress until its last job ends, so "pending" also covers jobs not begun yet.
+     * Only the newest run of each workflow and event counts, as a re-push or re-run replaces the older one. A failed run's
+     * jobs are read for the names and pages of the failing ones. Elsewhere (Gitea) it is the commit statuses, as checks() reads them.
      */
     async ciStatus(cfg: GitHostConfig, token: string, sha: string): Promise<CiStatus> {
       if (cfg.kind !== "github") {
         const c = await this.checks(cfg, token, sha);
         return { state: c.state, failed: c.failing.map((name) => ({ id: 0, name, url: "" })), waiting: [], billing: false };
       }
-      const suitesRes = await call(cfg, token, "GET", `/commits/${encodeURIComponent(sha)}/check-suites?per_page=100`);
-      const suites = (suitesRes.json && !Array.isArray(suitesRes.json) ? suitesRes.json.check_suites : null) as Array<Record<string, unknown>> | null;
-      if (!suitesRes.ok || !Array.isArray(suites)) throw new GitHostError(suitesRes.status, `Couldn't read the check suites on ${sha.slice(0, 8)}: ${messageOf(suitesRes.json, suitesRes.status)}`);
-      const runsRes = await call(cfg, token, "GET", `/commits/${encodeURIComponent(sha)}/check-runs?per_page=100&filter=latest`);
-      const runs = (runsRes.json && !Array.isArray(runsRes.json) ? runsRes.json.check_runs : null) as Array<Record<string, unknown>> | null;
-      if (!runsRes.ok || !Array.isArray(runs)) throw new GitHostError(runsRes.status, `Couldn't read the checks on ${sha.slice(0, 8)}: ${messageOf(runsRes.json, runsRes.status)}`);
-      const live = suites.filter((s) => Number(s.latest_check_runs_count) > 0);
-      const failed = runs
-        .filter((r) => FAILED_CONCLUSIONS.includes(String(r.conclusion)))
-        .map((r) => ({ id: Number(r.id), name: String(r.name), url: String(r.html_url ?? r.details_url ?? "") }));
-      const waiting = runs.filter((r) => r.status !== "completed").map((r) => String(r.name));
-      const outputOf = (r: Record<string, unknown>) => {
-        const o = (r.output ?? {}) as { title?: unknown; summary?: unknown };
-        return `${String(o.title ?? "")} ${String(o.summary ?? "")}`;
-      };
-      const billing = runs.some((r) => FAILED_CONCLUSIONS.includes(String(r.conclusion)) && billingRefusal(outputOf(r)));
-      const suiteFailed = live.some((s) => s.status === "completed" && FAILED_CONCLUSIONS.includes(String(s.conclusion)));
-      const suitePending = live.some((s) => s.status !== "completed");
-      const state = failed.length || suiteFailed ? "failed" : !live.length && !runs.length ? "none" : suitePending || waiting.length ? "pending" : "passed";
-      return { state, failed, waiting, billing };
+      const res = await call(cfg, token, "GET", `/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`);
+      const all = (res.json && !Array.isArray(res.json) ? res.json.workflow_runs : null) as Array<Record<string, unknown>> | null;
+      if (!res.ok || !Array.isArray(all)) throw new GitHostError(res.status, `Couldn't read the Actions runs on ${sha.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
+      const newest = new Map<string, Record<string, unknown>>();
+      for (const r of all) {
+        if (r.head_sha !== undefined && r.head_sha !== sha) continue;
+        const key = `${String(r.workflow_id ?? r.name)}:${String(r.event ?? "")}`;
+        const had = newest.get(key);
+        if (!had || String(r.created_at ?? "") > String(had.created_at ?? "")) newest.set(key, r);
+      }
+      const runs = [...newest.values()];
+      const nameOf = (r: Record<string, unknown>) => String(r.name ?? r.display_title ?? "CI");
+      const waiting = runs.filter((r) => r.status !== "completed").map(nameOf);
+      const failed: CiRun[] = [];
+      for (const r of runs.filter((x) => x.status === "completed" && FAILED_CONCLUSIONS.includes(String(x.conclusion)))) {
+        const jobs = await this.runJobs(cfg, token, Number(r.id));
+        const bad = jobs.filter((j) => FAILED_CONCLUSIONS.includes(String(j.conclusion)));
+        // A run that failed before any job (a broken workflow file) is named by the run itself.
+        if (!bad.length) failed.push({ id: 0, name: nameOf(r), url: String(r.html_url ?? "") });
+        for (const j of bad) {
+          const step = j.steps.find((s) => FAILED_CONCLUSIONS.includes(String(s.conclusion)));
+          failed.push({ id: j.id, name: j.name, url: j.url, ...(step ? { step: step.name } : {}), ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}) });
+        }
+      }
+      const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : "passed";
+      return { state, failed, waiting, billing: false };
     },
 
     /**
-     * The failure annotations of failed CI jobs (BOS-1070): vitest's GitHub reporter writes one per failing test, with its
-     * name, so the agent is told what failed. Up to `per` lines per job; the generic "Process completed with exit code" goes.
+     * What failed in failed CI jobs (BOS-1070): vitest's GitHub reporter writes an annotation per failing test, with its name,
+     * so the agent is told what failed. Up to `per` lines per job; the generic "Process completed with exit code" goes.
+     * Annotations sit behind the Checks permission, so they are optional (BOS-1630): a refused read gives the failed step
+     * instead, and a job GitHub never started is taken as its billing refusal, the one reason that leaves no step and no runner.
      */
     async failures(cfg: GitHostConfig, token: string, runs: CiRun[], per = 10): Promise<Array<{ run: CiRun; lines: string[]; billing: boolean }>> {
       if (cfg.kind !== "github") return [];
       const out: Array<{ run: CiRun; lines: string[]; billing: boolean }> = [];
       for (const run of runs.slice(0, 5)) {
-        const res = await call(cfg, token, "GET", `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null);
-        const rows = res?.ok && Array.isArray(res.json) ? res.json : [];
+        const res = run.id ? await call(cfg, token, "GET", `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null) : null;
+        if (!res?.ok || !Array.isArray(res.json)) {
+          out.push({ run, lines: run.step ? [`failed at step "${run.step}"`] : [], billing: !!run.unstarted });
+          continue;
+        }
+        const rows = res.json;
         const failing = rows.filter((a) => a.annotation_level === "failure");
         // Only GitHub's account-level note counts (no file, or ".github"): a test's annotation always names its file.
-        const billing = failing.some((a) => (!a.path || a.path === ".github") && billingRefusal(`${String(a.title ?? "")} ${String(a.message ?? "")}`));
+        const billing = failing.some((a) => (!a.path || a.path === ".github") && billingRefusal(`${String(a.title ?? "")} ${String(a.message ?? "")}`)) || (!failing.length && !!run.unstarted);
         const lines = failing
           .filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? "")))
           .map((a) => {
@@ -225,10 +292,22 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       return out;
     },
 
-    /** The checks on a commit: GitHub check runs, or Gitea's commit statuses. */
+    /**
+     * The checks on a commit: GitHub check runs, or Gitea's commit statuses. A GitHub token refused the Checks API (a
+     * fine-grained token with Actions: Read-only only, BOS-1630) gets the commit's Actions runs instead, one row per workflow.
+     */
     async checks(cfg: GitHostConfig, token: string, sha: string): Promise<CommitChecks> {
       const gh = cfg.kind === "github";
       const res = await call(cfg, token, "GET", gh ? `/commits/${encodeURIComponent(sha)}/check-runs?per_page=100` : `/commits/${encodeURIComponent(sha)}/status`);
+      if (gh && (res.status === 401 || res.status === 403)) {
+        const a = await call(cfg, token, "GET", `/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`);
+        const runs = (a.json && !Array.isArray(a.json) ? a.json.workflow_runs : null) as Array<Record<string, unknown>> | null;
+        if (!a.ok || !Array.isArray(runs)) throw new GitHostError(a.status, `Couldn't read the Actions runs on ${sha.slice(0, 8)}: ${messageOf(a.json, a.status)}`);
+        const bad = runs.filter((r) => r.status === "completed" && FAILED_CONCLUSIONS.includes(String(r.conclusion)));
+        const link = [...bad, ...runs].map((r) => r.html_url).find((u): u is string => typeof u === "string" && /^https?:\/\//.test(u));
+        const pending = runs.some((r) => r.status !== "completed");
+        return { state: bad.length ? "failed" : !runs.length ? "none" : pending ? "pending" : "passed", failing: bad.map((r) => String(r.name ?? "CI")), total: runs.length, ...(link ? { url: link } : {}) };
+      }
       const body = res.json && !Array.isArray(res.json) ? res.json : null;
       const rows = ((gh ? body?.check_runs : body?.statuses) ?? null) as Array<Record<string, unknown>> | null;
       if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the checks on ${sha.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
@@ -281,6 +360,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         status: String(j.status ?? ""),
         conclusion: typeof j.conclusion === "string" ? j.conclusion : null,
         url: String(j.html_url ?? ""),
+        runner: typeof j.runner_name === "string" && j.runner_name ? j.runner_name : null,
         steps: (Array.isArray(j.steps) ? (j.steps as Array<Record<string, unknown>>) : []).map((s) => ({
           number: Number(s.number ?? 0),
           name: String(s.name ?? "step"),
@@ -318,6 +398,14 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         text = new TextDecoder().decode(bytes);
       }
       return text.length > MAX_LOG_CHARS ? text.slice(-MAX_LOG_CHARS) : text;
+    },
+
+    /**
+     * What a failed job's log says, as lines for a ticket message (BOS-1667): its error lines, then the end of the log,
+     * secrets redacted. Never empty and never throws: when the log can't be had the one line says why.
+     */
+    async jobLogBlock(cfg: GitHostConfig, token: string, jobId: number): Promise<string[]> {
+      return readFailureLog(cfg, jobId, () => this.jobLog(cfg, token, jobId)).then((r) => r.lines);
     },
 
     /**

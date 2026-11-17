@@ -9,7 +9,8 @@ import { parseRepoUrl } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, projects, settings, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { GitHostError, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
+import { isBackgroundLaneTitle } from "./check-gate.js";
+import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
 /** The owner's switch: absent means on. Server-wide, like the other background watchers. */
 export const MAIN_CI_SWITCH = "main_ci_watch";
@@ -19,8 +20,6 @@ const EVENTS = new Set(["push", "schedule", "workflow_dispatch"]);
 const BAD = new Set(["failure", "timed_out", "startup_failure"]);
 /** How many older runs are read to find the first one that broke. */
 const LOOK_BACK = 10;
-const MAX_LINES = 15;
-const MAX_LINE = 300;
 
 /** The parent's rule, carried on every ticket this opens. */
 export const NEVER_WEAKEN = "Fix the cause. Never make CI green by weakening a test: no skipping, loosening an assertion, raising a time limit or deleting the check just to pass.";
@@ -42,16 +41,8 @@ export type Failure = { key: string; workflow: string; job: string; step: string
 
 const keyOf = (workflow: string, job: string, step: string) => `${workflow} / ${job} / ${step}`.toLowerCase();
 
-/** The lines of a log that most likely say what went wrong: error-looking ones, timestamps and colour codes removed, secrets redacted. */
-export function errorLines(log: string, max = MAX_LINES): string[] {
-  const clean = log
-    .split(/\r?\n/)
-    .map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, "").replace(/\u001b\[[0-9;]*m/g, "").replace(/^##\[(error|warning|group|endgroup)\]/, "$1: ").trim())
-    .filter(Boolean);
-  const hits = clean.filter((l) => /(^error\b|\berror[: ]|\bfail(ed|ure|ing)?\b|✗|✕|×|assert|exception|\bFAIL\b|exit code|cannot find|not found|expected)/i.test(l));
-  // The last ones are nearest the failure.
-  return (hits.length ? hits : clean).slice(-max).map((l) => redactForModel(l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)}…` : l));
-}
+// The log trimming lives in git-hosts.ts, shared with the merge gate's CI bounce message (BOS-1667).
+export { errorLines };
 
 export function mainCiService(
   db: Db,
@@ -95,12 +86,13 @@ export function mainCiService(
     for (const job of jobs) {
       if (!BAD.has(String(job.conclusion))) continue;
       const steps = job.steps.filter((s) => BAD.has(String(s.conclusion)));
-      let lines: string[] = [];
-      try {
-        lines = errorLines(await deps.gitHosts.jobLog(cfg, token, job.id));
-      } catch {
+      const log = await readFailureLog(cfg, job.id, () => deps.gitHosts.jobLog(cfg, token, job.id));
+      let lines = log.lines;
+      if (!log.readable) {
+        // The shared reader says why the log is out of reach; the check-run annotations may still carry error lines.
         annotations ??= await deps.gitHosts.commitAnnotations(cfg, token, run.headSha).catch(() => []);
-        lines = (annotations.find((a) => a.name === job.name)?.lines ?? []).slice(0, MAX_LINES).map((l) => redactForModel(l.slice(0, MAX_LINE)));
+        const fromAnnotations = (annotations.find((a) => a.name === job.name)?.lines ?? []).slice(0, MAX_LINES).map((l) => redactForModel(l.slice(0, MAX_LINE)));
+        if (fromAnnotations.length) lines = fromAnnotations;
       }
       // A job that failed without a failing step (cancelled setup, runner lost) is one failure of its own.
       for (const step of steps.length ? steps.map((s) => s.name) : ["(job failed before any step)"])
@@ -110,14 +102,17 @@ export function mainCiService(
   }
 
   /** The ticket whose merge produced `sha`: its assignee takes the failure; otherwise the CEO. */
-  async function breaker(projectId: string, companyId: string, sha: string): Promise<{ agentId: string | null; ticketTitle: string | null; byCeo: boolean }> {
+  async function breaker(projectId: string, companyId: string, sha: string): Promise<{ agentId: string | null; ticketTitle: string | null; byCeo: boolean; lead: string | null }> {
     const [t] = await db.select({ assignee: tickets.assigneeAgentId, title: tickets.title }).from(tickets).where(and(eq(tickets.projectId, projectId), eq(tickets.mergeCommit, sha)));
+    let lead: string | null = null;
     if (t?.assignee) {
-      const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, t.assignee), isNull(agents.retiredAt)));
-      if (a) return { agentId: a.id, ticketTitle: t.title, byCeo: false };
+      const [a] = await db.select({ id: agents.id, name: agents.name, title: agents.title }).from(agents).where(and(eq(agents.id, t.assignee), isNull(agents.retiredAt)));
+      // A background-lane agent never takes it: Boss Man doesn't interrupt a run, so urgent work would wait behind their long low-priority one (BOS-1635).
+      if (a && !isBackgroundLaneTitle(a.title)) return { agentId: a.id, ticketTitle: t.title, byCeo: false, lead: null };
+      if (a) lead = a.name;
     }
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-    return { agentId: ceo?.id ?? null, ticketTitle: t?.title ?? null, byCeo: true };
+    return { agentId: ceo?.id ?? null, ticketTitle: t?.title ?? null, byCeo: true, lead };
   }
 
   /** The first run of the current streak of failures in one workflow: the change that broke it. */
@@ -157,8 +152,7 @@ export function mainCiService(
     try {
       runs = (await deps.gitHosts.workflowRuns(cfg, token, p.defaultBranch)).filter((r) => EVENTS.has(r.event));
     } catch (err) {
-      const hint = err instanceof GitHostError && [401, 403, 404].includes(err.status) ? " On GitHub a fine-grained token needs Repository permissions → Actions: Read-only." : "";
-      setStatus({ state: "unreadable", detail: `The token can't read main's CI runs (${(err as Error).message}).${hint}` });
+      setStatus({ state: "unreadable", detail: `The token can't read main's CI runs (${(err as Error).message}).` });
       return writeState(p.id, state);
     }
     if (!runs.length) {
@@ -223,17 +217,18 @@ export function mainCiService(
           `- Step: ${f.step}`,
           `- First failing commit: ${first.headSha.slice(0, 8)}${first.headMessage ? ` — ${first.headMessage.split("\n")[0]!.slice(0, 120)}` : ""} (${first.url})`,
           who.ticketTitle ? `- That commit came from the ticket "${who.ticketTitle}".` : "- Boss Man couldn't tell which ticket that commit came from.",
+          ...(who.lead ? [`- Lead: ${who.lead} merged that ticket (background lane, so this went to the CEO to give to a foreground agent).`] : []),
           "",
           "Error lines (secrets redacted):",
           "```",
-          ...(f.lines.length ? f.lines : ["(the log and annotations gave no error lines: open the run)"]),
+          ...f.lines,
           "```",
           "",
           NEVER_WEAKEN,
           "",
           "Boss Man opens one ticket for each failing step and adds later failed runs here. It says here when main is green again.",
         ].join("\n");
-        const t = await deps.createTicket(p.id, { title, body, assigneeAgentId: who.agentId, urgent: who.byCeo, risk: "medium", state: "ready" });
+        const t = await deps.createTicket(p.id, { title, body, assigneeAgentId: who.agentId, urgent: true, risk: "medium", state: "ready" });
         state.open[f.key] = { ticketId: t.id, workflow, runs: [run.url] };
         // Saved at once: if a later ticket in this pass fails, the next pass must not open this one again.
         await writeState(p.id, state);

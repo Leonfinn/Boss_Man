@@ -5,6 +5,7 @@ import type { Decision, DecisionTally } from "../api";
 import { raisedAgo } from "../age";
 import type { MergeHealthView, SlowSummary, StuckSummary } from "./MergesStuckBanner";
 import { slowText, waitedText } from "./MergesStuckBanner";
+import { inForceHeadline, inForceReason, type LimitInForce } from "../limit-in-force";
 
 export const NEEDS_YOU_MAX = 5;
 
@@ -13,6 +14,8 @@ export type HealthData = {
   runner?: { registered: boolean; connected: boolean; lastSeenAt: string | null } | null;
   usage?: { agents: number; accounts: string[]; firstResetAt: string | null } | null;
   update?: { waiting: boolean; phase: string | null; deadline: string | null } | null;
+  /** BOS-1634: agents at once across all companies, as saved and in force; absent from an older server. */
+  runLimit?: LimitInForce | null;
 };
 
 export type LineTone = "ok" | "warn" | "bad" | "unknown";
@@ -72,6 +75,11 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   if (up == null) update = { key: "update", tone: "unknown", symbol: "?", state: "Updates: not known", pill: "Updates not known", text: "Couldn't check.", href: system, linkText: "Updates" };
   else if (up.waiting) update = { key: "update", tone: "warn", symbol: "↑", state: "Update waiting", pill: "Update waiting", text: up.deadline ? `Server update waits for a quiet machine; you'll be asked at ${clock(up.deadline)}.` : "Server update waits for a quiet machine.", href: system, linkText: "Updates" };
   else update = { key: "update", tone: "ok", symbol: "✓", state: "No update waiting", pill: "No update waiting", text: "Nothing is waiting to be installed.", href: system, linkText: "Updates" };
+  // BOS-1634: while the update's hold keeps fewer agents running than the owner saved, this line says so, with the
+  // server's numbers and reason, and links to the waiting update. It also covers the standby window after an update
+  // goes live, when the hold is still on.
+  const held = inForceHeadline(health?.runLimit);
+  if (held && health?.runLimit) update = { key: "update", tone: "warn", symbol: "↑", state: `Agents at once: ${held}`, pill: `Agents ${health.runLimit.inForce} of ${health.runLimit.saved}`, text: `${up?.waiting && up.deadline ? `Server update waits for a quiet machine; you'll be asked at ${clock(up.deadline)}. ` : ""}${inForceReason(health.runLimit)}`, href: `#/settings/${companyId}/updates`, linkText: "the waiting update" };
 
   return [runner, mergesLine, usage, update];
 }

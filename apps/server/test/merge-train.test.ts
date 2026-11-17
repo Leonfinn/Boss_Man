@@ -242,6 +242,25 @@ describe("merge train: what the check queue holds back (BOS-1504)", () => {
   });
 });
 
+describe("merge train: re-tier (BOS-1516)", () => {
+  it("moves a waiting ticket up, never a seated one, and never down", () => {
+    const tr = train(1);
+    tr.join("a", { priority: 1, place: 1 });
+    tr.join("b", { priority: 1, place: 2 });
+    tr.join("c", { priority: 1, place: 3 });
+    expect(tr.seated("a")).toBe(true);
+    expect(tr.queue()).toEqual(["b", "c"]);
+    expect(tr.retier("c", 0)).toBe(true); // Priority 1 set after joining
+    expect(tr.queue()).toEqual(["c", "b"]);
+    expect(tr.retier("a", 0)).toBe(false); // seated: untouched
+    expect(tr.retier("b", 2)).toBe(false); // lower tier never pushes down
+    expect(tr.retier("nobody", 0)).toBe(false);
+    expect(tr.list().map((m) => m.ticketId)).toEqual(["a"]);
+    tr.landed("a");
+    expect(tr.seated("c")).toBe(true);
+  });
+});
+
 describe("merge train: a landing cut off after its push (BOS-1604, 15 Nov)", () => {
   it("a commit that is main's tip is never lost: the next head is not stale", () => {
     const tr = train(2);

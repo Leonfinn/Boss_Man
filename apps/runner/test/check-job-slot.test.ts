@@ -61,7 +61,7 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     });
     expect(r.ok).toBe(true);
     expect(r.output).toContain("check-all: slot taken, running the checks");
-    expect(slotFree(coord)).toBe(true);
+    expect(await until(() => slotFree(coord))).toBe(true);
   });
 
   it("waits while another check holds the only slot, then runs", async () => {
@@ -69,7 +69,8 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     mkdirSync(path.join(coord, "queue"), { recursive: true });
     // A hand-run check holding slot 1 (same lock the job uses).
     const hold = spawn("flock", [path.join(coord, "queue", "check-all.slot.1"), "sleep", "4"], { stdio: "ignore" });
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for the lock to really be held (not a fixed sleep: a slow machine started flock late and the job took the slot first).
+    expect(await until(() => !slotFree(coord))).toBe(true);
     const ws = new Workspaces(root, env, coord);
     let seen = "";
     const started = Date.now();
@@ -92,7 +93,8 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     expect(await until(() => slotFree(coord))).toBe(true);
     const failed = await ws.runCommitCheck({ projectId, jobId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", commit }, "exit 3", 60_000);
     expect(failed.exitCode).toBe(3);
-    expect(slotFree(coord)).toBe(true);
+    // The slot's lock is dropped when the holder process exits, a moment after the job's own result: wait for it, with a deadline.
+    expect(await until(() => slotFree(coord))).toBe(true);
     expect(existsSync(path.join(coord, "queue"))).toBe(true);
   });
 

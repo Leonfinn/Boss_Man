@@ -3,12 +3,12 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
-import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type WorkspaceDiff } from "@boss-man/shared";
+import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, parseRepoUrl, ticketRef, type MergeResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { OWNER_MESSAGE_MAX, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
@@ -60,7 +60,9 @@ import { deploysService } from "./services/deploys.js";
 import { runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { holdView } from "./services/review-holds.js";
-import { type CI_TIMING, isSignoffPending, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
+import { type CI_TIMING, isSignoffPending, MERGE_WAIT_MS, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
+import { CI_TIMING as CI_PUBLISH_TIMING } from "./services/ci-publish.js";
+import { ciPreflightService } from "./services/ci-preflight.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
@@ -104,7 +106,7 @@ import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { PrivateDetailsRejected, privateDetailsService } from "./services/private-details.js";
-import type { ScanListWarning } from "./services/scan-list.js";
+import { scanListReader, type ScanListWarning } from "./services/scan-list.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkWorkersService } from "./services/check-workers.js";
@@ -115,6 +117,7 @@ import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
 import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
+import { retierWaiting } from "./services/merge-train.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
@@ -404,13 +407,16 @@ export async function buildApp(opts: AppOptions) {
     afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
     // DR-052: go-live setup cards are filled and checked with the host's facts, like every other owner card.
     // hostFacts is created just below; this only runs on a later release pass.
-    ownerSetupFacts: () => ownerSetupFacts(hostFacts),
+    // BOS-1650: the values behind `[when <fact>]` steps come from the same record server_status shows; null when it can't be read.
+    ownerSetupFacts: async () => ({ ...(await ownerSetupFacts(hostFacts)), when: { "network guard allow line can go": await netguardAllow().then((r) => (r ? r.lineCanGo : null)).catch(() => null) } }),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
   const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
   const deviceProfiles = deviceProfilesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
+    // BOS-1648: the CEO is woken once when Boss Man can't tell whether a runner update is needed.
+    wake: (agentId, input) => scheduler.notify(agentId, input),
     // Both colours, the same probe Settings shows: the runner trial ends as soon as the standby is stopped (BOS-953). `build` is defined further down; this only runs per request.
     colours: () => probeColours(colour(), build),
     // Quiet = no agent run in flight (an owner chat doesn't count) and no merge landing: a few seconds' outage of the database or proxy would cut them short (BOS-487).
@@ -643,7 +649,7 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => (ownerAnswerEmbeds.stop(), await ownerAnswerEmbeds.drain()));
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
-  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status() });
+  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status(), runLimit: async () => (await scheduler.limitsInForce()).allCompanies });
   const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -1205,7 +1211,42 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
+  // BOS-1664: GitHub's own jobs before review, for a branch that changes CI or image files (GitHub projects with a readable token only).
+  const preflightScanList = scanListReader({ read: () => privateDetails.forRunner(), ...scanListWarning });
+  const ciPreflight = ciPreflightService(db, {
+    hosts: gitHosts,
+    timing: { ...CI_PUBLISH_TIMING, ...opts.ciTiming },
+    wake: (agentId, w) => scheduler.notify(agentId, w),
+    context: async (t) => {
+      const [p] = await db.select({ repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase, defaultBranch: projects.defaultBranch }).from(projects).where(eq(projects.id, t.projectId));
+      const repo = p?.repoUrl ? parseRepoUrl(p.repoUrl) : null;
+      if (!p || p.gitHost !== "github" || !p.gitApiBase || !repo) return null;
+      const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, t.companyId));
+      // "ci-publish-scan": only a runner that applies the owner's private-details list before the push gets the early run;
+      // an older one pushes unscanned (or without the list), and the push can't be undone (the sha stays readable).
+      if (!runner || !runners.can(runner.id, "ci-publish") || !runners.can(runner.id, "ci-publish-scan")) return null;
+      const token = (await secretsSvc.resolveCompanyEnv(t.companyId, "pull_request")).GIT_TOKEN;
+      if (!token) return null;
+      const merge = (phase: "prepare" | "publish" | "unpublish", extra: Record<string, unknown> = {}) =>
+        runners.request<MergeResult>(runner.id, (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId: t.id, target: p.defaultBranch, message: phase === "prepare" ? "GitHub CI before review" : phase === "publish" ? "publish for CI" : "unpublish", phase, ...extra }) as never, MERGE_WAIT_MS);
+      return {
+        target: { cfg: { kind: "github" as const, apiBase: p.gitApiBase, owner: repo.owner, repo: repo.repo }, token },
+        prepare: () => merge("prepare"),
+        publish: async (commit) => {
+          const scanList = await preflightScanList.forScan();
+          // A list that is set but can't be read is not skipped: the push can't be taken back.
+          if (!scanList && (await privateDetails.isSet().catch(() => true))) throw new Error("Not pushed to GitHub: the owner's private-details list couldn't be read, so the scan before the push couldn't run in full. Saving the list again in Settings fixes it.");
+          return merge("publish", { commit, ...(scanList ? { scanList } : {}) });
+        },
+        unpublish: () => merge("unpublish"),
+      };
+    },
+  });
+  const checkRequests = checkRequestService(db, { preflight: ciPreflight, command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
+  // A restart loses the in-memory GitHub-CI pre-flight runs; start those again once runners have had time to reconnect.
+  const preflightRecover = setTimeout(() => void ciPreflight.recover().catch(() => undefined), 60_000);
+  preflightRecover.unref();
+  app.addHook("onClose", async () => clearTimeout(preflightRecover));
   await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId) }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
@@ -1770,6 +1811,8 @@ export async function buildApp(opts: AppOptions) {
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
       ownerSetup: z.string().max(4000).nullable(),
+      ownerSetupWhy: z.string().max(240).nullable(),
+      ownerSetupIfSkipped: z.string().max(240).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
@@ -1981,8 +2024,11 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1384: the owner puts a waiting merge next in line. Only the order changes: the merge still runs its whole check.
     owner.post("/api/companies/:id/merge-queue/:ticketId/front", async (req, reply) => {
       const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
-      const job = await checkQueueSvc.moveToFront(id, ticketId, await ownerName(req), "owner chose Move to front");
-      if (!job) return reply.code(409).send({ error: "That merge isn't waiting for a check slot, so there is nothing to move." });
+      const by = await ownerName(req);
+      const job = await checkQueueSvc.moveToFront(id, ticketId, by, "owner chose Move to front");
+      // BOS-1516: a ticket still waiting for a train seat has no job to mark: move it on the train instead.
+      const seat = await checkQueueSvc.moveSeatWaiter(id, ticketId, by, "owner chose Move to front");
+      if (!job && !seat) return reply.code(409).send({ error: "That merge isn't waiting for a check slot or a place in the merge train, so there is nothing to move." });
       return { ok: true };
     });
 
@@ -2066,7 +2112,27 @@ export async function buildApp(opts: AppOptions) {
       const { costCapUsd, ...fields } = TicketFields.extend({ costCapUsd: z.number().positive().nullable() }).partial().parse(req.body);
       // A per-ticket spend ceiling across all its runs (R53); null falls back to the project's default.
       if (costCapUsd !== undefined) await db.update(tickets).set({ costCapMicros: costCapUsd === null ? null : usdToMicros(costCapUsd) }).where(eq(tickets.id, id));
-      return work.updateTicket(id, fields);
+      // BOS-1516: the owner's urgent switch is "Priority 1": it records that the owner set it, and a ticket already waiting for a
+      // merge train seat moves up now (the landing's wait loop would also notice within a poll).
+      const updated = await work.updateTicket(id, fields.urgent === undefined ? fields : { ...fields, urgentByOwner: fields.urgent });
+      if (fields.urgent) retierWaiting(updated.projectId, id, 0);
+      return updated;
+    });
+
+    // BOS-1516: the owner's "Priority 1" switch on a feature: every open ticket of it carries the owner's urgent mark (new ones
+    // too, see createTicket). Turning it off clears only the marks the owner set; done and cancelled tickets are left alone.
+    owner.put("/api/features/:id/priority-one", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { on } = z.object({ on: z.boolean() }).parse(req.body);
+      const [f] = await db.select({ id: featuresTable.id }).from(featuresTable).where(eq(featuresTable.id, id));
+      if (!f) return reply.code(404).send({ error: "not_found" });
+      await db.update(featuresTable).set({ priorityOne: on }).where(eq(featuresTable.id, id));
+      const open = and(eq(tickets.featureId, id), ne(tickets.systemState, "done"));
+      const changed = on
+        ? await db.update(tickets).set({ urgent: true, urgentByOwner: true, version: sql`${tickets.version} + 1` }).where(and(open, or(eq(tickets.urgent, false), eq(tickets.urgentByOwner, false)))).returning({ id: tickets.id, projectId: tickets.projectId })
+        : await db.update(tickets).set({ urgent: false, urgentByOwner: false, version: sql`${tickets.version} + 1` }).where(and(open, eq(tickets.urgentByOwner, true))).returning({ id: tickets.id, projectId: tickets.projectId });
+      if (on) for (const c of changed) retierWaiting(c.projectId, c.id, 0);
+      return { ok: true, priorityOne: on, tickets: changed.length };
     });
 
     // The owner moves a ticket by hand (e.g. to unstick it). Done skips the merge: it is the owner's call.

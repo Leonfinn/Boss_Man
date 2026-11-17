@@ -247,7 +247,7 @@ export function registerDecisionTools(
             if (ask.error) return fail(ask.error);
             if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent reissue needs urgentWhy: one short sentence (10 to 200 characters) on what the owner must act on now (it is shown on their phone list).");
             const reissueSteps = ask.steps ?? input.steps;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";
@@ -350,8 +350,10 @@ export function registerDecisionTools(
           const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
           if (!t) return fail("No such ticket in your company.");
           const job = await checkQueue(db).moveToFront(scope.companyId, input.ticketId, me.name, input.reason.trim());
-          if (!job) return fail("That ticket has no merge or quick check waiting for a check slot (it may be running, held, or not queued yet), so there is nothing to move.");
-          const what = job.kind === "merge" ? "merge" : "quick check";
+          // BOS-1516: a ticket still waiting for a merge train seat has no job yet: it moves on the train.
+          const seat = await checkQueue(db).moveSeatWaiter(scope.companyId, input.ticketId, me.name, input.reason.trim());
+          if (!job && !seat) return fail("That ticket has no merge or quick check waiting for a check slot, and isn't waiting for a merge train seat (it may be running, held, or not queued yet), so there is nothing to move.");
+          const what = job ? (job.kind === "merge" ? "merge" : "quick check") : "merge (it waits for a train seat)";
           return text(`This ${what} is next in line, below a fix for a broken main. It still runs its whole check; nothing was skipped, and a check already running is not stopped.`);
         }
         if (input.action === "release_hold" || input.action === "cancel_hold") {

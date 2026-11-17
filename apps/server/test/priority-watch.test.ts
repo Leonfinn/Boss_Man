@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, notifications, runs, tickets } from "../src/db/schema.js";
+import { agents, checkJobs, notifications, runs, tickets, wakes } from "../src/db/schema.js";
+import { HELD_AGENT } from "../src/services/fair-share.js";
 import { judge, OWNER_AFTER_MS, priorityWatchService, QUIET_AFTER_MS, stopped, type Facts } from "../src/services/priority-watch.js";
 import { WAKE_CLASS } from "../src/services/wake-classes.js";
 
@@ -182,6 +183,50 @@ describe("priority watch: the sweep", () => {
     expect(await ctx.watch.run(true)).toMatchObject({ cleared: 1, told: 0 });
     const [n] = await ctx.db.select().from(notifications).where(eq(notifications.id, ctx.sent[0]!.id));
     expect(n!.readAt).not.toBeNull();
+  });
+
+  it("an urgent Ready ticket whose wake waits 30 minutes behind a busy agent wakes the CEO once, naming the agent, the run and the free foreground agents (BOS-1635)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const [dylan] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Dylan", title: "Background Developer", role: "worker", agentKind: "claude" }).returning();
+    await c.db.insert(agents).values({ companyId: c.company.id, name: "Ada", title: "Developer", role: "worker", agentKind: "claude" });
+    await c.db.insert(agents).values({ companyId: c.company.id, name: "Bea", title: "Background Developer", role: "worker", agentKind: "claude" });
+    const long = await c.ticket("Long low-priority job");
+    const t = await c.ticket("Main's CI is failing");
+    await c.db.update(tickets).set({ assigneeAgentId: dylan!.id }).where(eq(tickets.id, long.id));
+    await c.db.update(tickets).set({ urgent: true, systemState: "ready", assigneeAgentId: dylan!.id, lastActivityAt: ago(MIN) }).where(eq(tickets.id, t.id));
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: dylan!.id, ticketId: long.id, startedAt: ago(100 * MIN) });
+    const held = async (heldFor: number) => {
+      await c.db.delete(wakes).where(eq(wakes.ticketId, t.id));
+      await c.db.insert(wakes).values({ companyId: c.company.id, agentId: dylan!.id, ticketId: t.id, reason: "assigned", status: "queued", statusReason: HELD_AGENT, createdAt: ago(heldFor) });
+    };
+    // Held 29 minutes: not yet.
+    await held(29 * MIN);
+    await c.watch.run(true);
+    expect(c.told.filter((x) => x.note.includes("is busy"))).toHaveLength(0);
+    // Held 31 minutes: the CEO hears once, with the agent, the run, and the free foreground agent (not the background one).
+    await held(31 * MIN);
+    await c.watch.run(true);
+    const heard = c.told.filter((x) => x.note.includes("is busy"));
+    expect(heard).toHaveLength(1);
+    expect(heard[0]!.note).toContain("Dylan is busy");
+    expect(heard[0]!.note).toContain("Long low-priority job");
+    expect(heard[0]!.note).toContain("Ada (Developer)");
+    expect(heard[0]!.note).not.toContain("Bea");
+    // Later passes on the same held wake say nothing more.
+    c.advance(10 * MIN);
+    await c.watch.run(true);
+    expect(c.told.filter((x) => x.note.includes("is busy"))).toHaveLength(1);
+  });
+
+  it("a non-urgent ticket held behind a busy agent does not wake the CEO (BOS-1635)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const [dylan] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Dylan", role: "worker", agentKind: "claude" }).returning();
+    const t = await c.ticket("Ordinary work");
+    await c.db.update(tickets).set({ systemState: "ready", assigneeAgentId: dylan!.id }).where(eq(tickets.id, t.id));
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: dylan!.id, ticketId: t.id, reason: "assigned", status: "queued", statusReason: HELD_AGENT, createdAt: ago(90 * MIN) });
+    expect(await c.watch.run(true)).toMatchObject({ checked: 0, told: 0 });
   });
 
   it("a cut-off run is told to the CEO with the run's outcome, and a ticket with a live run is left alone", async () => {

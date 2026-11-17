@@ -64,28 +64,38 @@ grep -q "the failure" "$t/scratch.own/check-all.log" || fail "scratch: a failure
 grep -q "(exit 3)" "$t/scratch.own/check-all.log" || fail "scratch: a failure's log is not marked with its exit"
 grep -q "a step of output" "$t/scratch.own/check-all.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$t"/scratch.own)"
 # A fenced run can't write the scratch, but can write /tmp: the log waits there under a kept name, for the runner to move in.
-mkdir -p "$t/scratch.denied"; chmod 555 "$t/scratch.denied"
-# A ticket id of its own for this run, so no leftover or parallel run shares the /tmp file name.
-tid="$(printf '%08x-%04x-4%03x-8%03x-%012x' "$RANDOM$RANDOM" "$$" "$RANDOM" "$RANDOM" "$RANDOM$RANDOM$RANDOM" | cut -c1-36)"
-keep="/tmp/bossman-scratch-$tid.log"
-# -w says yes for a fenced /tmp that still refuses a write, so probe with a real write.
-if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && rm -f "/tmp/bossman-probe-$tid"; then
+# BOSSMAN_SCRATCH_TMP_DIR stands in for /tmp with a folder of this test's own (BOS-1690): a fenced or shared /tmp no
+# longer skips these cases, so they run in agent sessions, at the merge gate and on GitHub alike, and the exit trap's
+# rm -rf "$t" clears the read-only file below with the rest.
+mkdir -p "$t/scratch.denied" "$t/tmpdir"; chmod 555 "$t/scratch.denied"
+export BOSSMAN_SCRATCH_TMP_DIR="$t/tmpdir"
+tid=22222222-2222-4222-8222-222222222222
+keep="$t/tmpdir/bossman-scratch-$tid.log"
+# Root writes through a 555 folder and a 444 file, so neither case can be set up there; say so instead of passing quietly.
+if [ ! -w "$t/scratch.denied" ]; then
   BOSSMAN_TICKET_FOR_CASE=$tid
   scratch_case "scratch: a run that can't write it" "$t/scratch.denied" 'echo through the temp folder' 0
-  grep -q "through the temp folder" "$keep" || fail "scratch: no /tmp log for a fenced run: $(cat "$t/out")"
-  grep -q "check-all: finished .* (exit 0)" "$keep" || fail "scratch: the /tmp log is not marked finished"
+  grep -q "through the temp folder" "$keep" || fail "scratch: no temp-folder log for a fenced run: $(cat "$t/out")"
+  grep -q "check-all: finished .* (exit 0)" "$keep" || fail "scratch: the temp-folder log is not marked finished"
   rm -f "$keep"
-  # The kept name already holds a file the run can't write (another user's, or read-only): the run still passes and its log is kept under another name.
+  # The kept name already holds a file the run can't write (another user's, or read-only): the run still passes and its
+  # log is kept under another name. Before BOS-1641 this read `if ! { …; } >"$tmp"`, which never took the fallback
+  # (BOS-1689); this case fails on that line.
   : >"$keep"; chmod 444 "$keep"
-  if [ ! -w "$keep" ]; then
+  if ! : 2>/dev/null >>"$keep"; then
     scratch_case "scratch: kept /tmp name not writable" "$t/scratch.denied" 'echo beside the taken name' 0
-    # shellcheck disable=SC2144
-    grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log || fail "scratch: no fallback log beside a taken name: $(cat "$t/out")"
-    rm -f /tmp/bossman-scratch-"$tid".*.log
+    grep -lq "beside the taken name" "$t/tmpdir/bossman-scratch-$tid".*.log 2>/dev/null \
+      || fail "scratch: no fallback log beside a taken name (uid $(id -u), temp folder holds: $(echo "$t/tmpdir"/*)): $(tr '\n' ' ' <"$t/out")"
+    grep -q "log kept at $t/tmpdir/bossman-scratch-$tid\." "$t/out" || fail "scratch: the fallback log's name is not reported: $(cat "$t/out")"
+    [ ! -s "$keep" ] || fail "scratch: the read-only kept file was written"
+  else
+    echo "SKIP scratch: kept /tmp name not writable (running as uid $(id -u), which writes through a read-only file)"
   fi
-  rm -f "$keep"
+else
+  echo "SKIP scratch: a run that can't write it (running as uid $(id -u), which writes through a read-only folder)"
 fi
 chmod 755 "$t/scratch.denied"
+unset BOSSMAN_SCRATCH_TMP_DIR
 
 # The result store: a pass is kept and reused on identical content, the merge gate never reuses it, failures are not reused.
 # Needs a clean git checkout, so test in a scratch repo holding a copy of the script.

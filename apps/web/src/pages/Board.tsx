@@ -580,6 +580,11 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
           </span>
         )}
         {t.outcome === "cancelled" && <span className="tag">Cancelled</span>}
+        {t.urgent && t.systemState !== "done" && (
+          <span className={`tag ${t.urgentByOwner ? "red" : "blue"}`} data-testid="board-priority" title={t.urgentByOwner ? "The owner marked this Priority 1: it goes first everywhere, including the merge line." : "Marked urgent."}>
+            {t.urgentByOwner ? "Priority 1" : "Urgent"}
+          </span>
+        )}
         {t.number && <span className="mono muted ref">{ticketRef(prefix, t.number)}</span>}
       </div>
       <h3>

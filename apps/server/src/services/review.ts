@@ -6,12 +6,13 @@ import { deploysNothing, goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketMessages, ticketReviews, tickets } from "../db/schema.js";
+import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, deployTargets, projects, reviewRequests, runners, settings, ticketDependencies, ticketMessages, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
+import { CI_TIMING, CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop } from "./ci-publish.js";
 import { GitHostError, type CiStatus, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
@@ -25,6 +26,7 @@ import { record } from "./activity.js";
 import { lineEvent, TRAIN_CLASH_FILES, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
 import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
+import { priorityGroup } from "./priority-group.js";
 import { mainGen, mainMoved, trainFor, type RestackWhy, type TrainClash } from "./merge-train.js";
 import { closeHold, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
@@ -125,17 +127,8 @@ const TRAIN_TRIAL_FALLBACK_MS = 10 * 60_000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** BOS-1070: the owner's switch for waiting on the git host's CI before a merge. Off until they turn it on. */
 const WAIT_FOR_CI_KEY = "wait_for_ci";
-/** BOS-1070: how the gate waits for CI. Tests pass shorter ones through deps.ciTiming. */
-export const CI_TIMING = {
-  /** How often the CI result is read. */
-  pollMs: 30_000,
-  /** No CI run at all this long after the push: the workflow doesn't run on bossman-ci/**, so the gate merges on its own check. */
-  graceMs: 10 * 60_000,
-  /** CI still running after this: a card, and the ticket stays in review. */
-  ceilingMs: 90 * 60_000,
-  /** First pause after a failed read of the CI result (5xx, timeout); it doubles, and the 4th failure stops with a card. */
-  retryMs: 15_000,
-};
+/** BOS-1070: how the gate waits for CI; moved to ci-publish.ts (BOS-1664) and kept exported here. */
+export { CI_TIMING };
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
 /** How long a merge waits for a runner that is away (a swap: image pull, slow start) before it counts as a failed try. */
@@ -198,20 +191,6 @@ type CarriedInfo = CarriedTicket & { title: string; risk: RiskTier | null };
 /** What one landing attempt ends with (landOnce). */
 type LandOnceResult = { outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown };
 
-/** BOS-1070: how a wait for the git host's CI ended. "stopped": the gate's own check failed first, so CI no longer mattered. */
-type CiOutcome =
-  | { kind: "passed"; reused?: boolean }
-  | { kind: "none" }
-  | { kind: "no_workflows" }
-  | { kind: "stopped" }
-  | { kind: "failed"; status: CiStatus }
-  | { kind: "refused"; message: string }
-  | { kind: "error"; message: string }
-  | { kind: "timeout"; waiting: string[] };
-/** Outcomes that end a merge attempt without merging: the other side (the gate's own check) need not finish. */
-const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout";
-/** Shared by the gate's own check and the CI wait running beside it: set by whichever ends the attempt first. */
-type CiStop = { stopped: boolean };
 
 /** Narrow on purpose: only the owner's "Merge without the check" uses skipChecks, for one landing. */
 /** `adopt` (BOS-1371): a server that took charge picks up a merge whose check job is still live: skip "prepare" and wait on the job for this commit and tree; "finish" still pushes only if that exact tree is what the merge gives now. */
@@ -602,6 +581,7 @@ export function reviewService(
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     await lineEvent(db, t, { event: "merged", commit });
     if (commit) await tellCeoLiveFix(t, commit).catch(() => undefined);
+    if (commit) await pagePriorityMerge(t).catch(() => undefined);
     const left = afterMergeLeft(t);
     // With a live check still to show, the ticket isn't finished: go straight to the assignee without a
     // brief done state in between, so done hooks (worktree release, notifications) never fire for it.
@@ -691,6 +671,34 @@ export function reviewService(
       "fixes live merged",
       `${heading}. It merged as ${commit.slice(0, 12)}. The live server still runs the old code until the owner approves the deploy card, which Boss Man raises headed with these words and sorted first in Decisions. Make sure the owner knows; Boss Man never deploys by itself.`,
     );
+  }
+
+  /**
+   * BOS-1516: the owner's Priority 1 work merged. A company with a card that puts work live pages through that card (Boss Man's
+   * own update card: "Ready to put live", see self-deploy urgentFor; a deploy target: the deploy card, see deploys.ts). A company
+   * with neither has no card, so it is paged here, once, when the last ticket of the group merges: "Priority 1 work merged" and
+   * the next step if the ticket names one.
+   */
+  async function pagePriorityMerge(t: { id: string; companyId: string; title: string; number: number | null; urgent: boolean; ownerSetup: string | null }) {
+    const [mark] = await db.select({ byOwner: tickets.urgentByOwner }).from(tickets).where(eq(tickets.id, t.id));
+    if (!t.urgent || !mark?.byOwner) return;
+    const [target] = await db.select({ id: deployTargets.id }).from(deployTargets).where(eq(deployTargets.companyId, t.companyId)).limit(1);
+    if (target) return;
+    const [card] = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.companyId, t.companyId), sql`${decisions.context}->>'type' = 'self_deploy'`)).limit(1);
+    if (card) return;
+    if (!(await priorityGroup(db, t.id)).every((m) => m.finished)) return;
+    const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+    const ref = ticketRef(c?.prefix ?? null, t.number);
+    const next = t.ownerSetup?.trim().split("\n")[0]?.slice(0, 200);
+    await deps.notes?.notify({
+      companyId: t.companyId,
+      agentId: null,
+      level: "page",
+      urgentReason: "Work you marked Priority 1 has merged",
+      title: `Priority 1 work merged: ${t.title}${ref ? ` (${ref})` : ""}`,
+      body: next ? `Next step: ${next}` : "Nothing more is needed from you for it to be in place.",
+      link: `#/tickets/${t.id}`,
+    });
   }
 
   /** Wakes the company's CEO about a ticket, with a note; nothing when the company has no CEO. */
@@ -1359,10 +1367,7 @@ export function reviewService(
         return `CI on branch head ${at}: passed${c.total ? ` (${c.total} check${c.total === 1 ? "" : "s"})` : ""}.`;
       } catch (err) {
         if (err instanceof GitHostError) {
-          const hint = err.status === 401 || err.status === 403 || err.status === 404
-            ? " The company's git token may lack read access to checks: on GitHub a fine-grained token needs Repository permissions → Checks: Read-only."
-            : "";
-          return `CI on branch head: not available (${err.message}).${hint}`;
+          return `CI on branch head: not available (${err.message}).`;
         }
         return null;
       }
@@ -1551,7 +1556,12 @@ export function reviewService(
           url = (r.detail as { url?: string | null } | undefined)?.url ?? null;
           text = landingText(r, { branch: defaultBranch, assignee: a?.name ?? null });
         } catch (err) {
-          text = `Approved, but not merged: ${(err as Error).message}`;
+          // A hold found mid-merge (a merge-check fix or waits-on link marked while the check or CI ran, BOS-1173/1643)
+          // is a wait, not a failure: say "held" with its own message, as landApproved does for the visible merge.
+          if (err instanceof ReviewHeldError) {
+            outcome = "held";
+            text = (err as Error).message;
+          } else text = `Approved, but not merged: ${(err as Error).message}`;
         }
         landings.set(ticketId, { state: "finished", outcome, text, url, finishedAt: new Date().toISOString() });
       })();
@@ -2150,7 +2160,7 @@ export function reviewService(
       const checkMerged = !serverChecks && landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
 
       // BOS-1070: with the owner's switch on, a GitHub project's merge also waits for GitHub CI on the exact merge commit.
-      // The gate pushes that commit to bossman-ci/<ticket>, reads its check suites and runs, and merges only on green.
+      // The gate pushes that commit to bossman-ci/<ticket>, reads its Actions runs (BOS-1630), and merges only on green.
       // Everything here sits behind the switch: off, the flow below is unchanged.
       let ci: { cfg: GitHostConfig; token: string } | null = null;
       if (!opts?.skipChecks && landing !== "pull_request" && gitHost === "github" && deps.gitHosts && (await waitForCi())) {
@@ -2162,51 +2172,30 @@ export function reviewService(
           });
         }
       }
-      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-      // One read of CI on a commit; a temporary failure (5xx, timeout) is asked again 3 times with a growing pause.
-      // A refusal (401/403/404) is never retried: the token lacks Checks: Read-only or can't see the repo.
-      const readCi = async (sha: string, stop: CiStop): Promise<CiStatus | CiOutcome> => {
-        for (let fails = 0; ; fails++) {
-          try {
-            return await deps.gitHosts!.ciStatus(ci!.cfg, ci!.token, sha);
-          } catch (err) {
-            if (err instanceof GitHostError && [401, 403, 404].includes(err.status)) return { kind: "refused", message: err.message };
-            if (fails >= 3) return { kind: "error", message: (err as Error).message };
-            await sleep(ciTiming.retryMs * 2 ** fails);
-            if (stop.stopped) return { kind: "stopped" };
-          }
-        }
-      };
-      const publishAndWait = async (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> => {
-        // The same tree on new parents keeps its pass (P11a), so nothing is pushed again.
-        if (ciPassedTrees.has(prep.tree)) return { kind: "passed", reused: true };
-        // Asked on the target's head before anything is pushed, so a token that can't read checks costs no CI run.
-        const probe = await readCi(prep.targetSha, stop);
-        if ("kind" in probe) return probe;
-        const pub = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit: prep.commit }), MERGE_WAIT_MS);
-        if (pub.status !== "published") throw new ReviewError(409, `The runner answered the CI publish with "${pub.status}"; nothing was merged.`);
-        if (!pub.hasWorkflows) return { kind: "no_workflows" };
-        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${pub.branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
-        const since = Date.now();
-        ciWaits.set(ticketId, { since, waiting: [] });
-        try {
-          for (;;) {
-            if (stop.stopped) return { kind: "stopped" };
-            const s = await readCi(prep.commit, stop);
-            if ("kind" in s) return s;
-            if (s.state === "passed") return { kind: "passed" };
-            if (s.state === "failed") return { kind: "failed", status: s };
-            const waited = Date.now() - since;
-            if (s.state === "none" && waited >= ciTiming.graceMs) return { kind: "none" };
-            if (waited >= ciTiming.ceilingMs) return { kind: "timeout", waiting: s.waiting };
-            ciWaits.set(ticketId, { since, waiting: s.waiting });
-            await touch();
-            await sleep(ciTiming.pollMs);
-          }
-        } finally {
-          ciWaits.delete(ticketId);
-        }
-      };
+      // The push and the read live in ci-publish.ts (BOS-1664), where the pre-flight run reuses them.
+      const publishAndWait = (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> =>
+        ciPublishAndWait(
+          {
+            hosts: deps.gitHosts!,
+            target: ci!,
+            timing: ciTiming,
+            passedTrees: ciPassedTrees,
+            // BOS-1664: the runner scans before this push with the owner's list too (a runner without "ci-publish-scan" drops the field).
+            publish: async (commit) => {
+              const scanList = await scanListWarning.forScan();
+              return ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit, ...(scanList ? { scanList } : {}) }), MERGE_WAIT_MS);
+            },
+            announce: async (branch) => {
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
+            },
+            onWait: (s) => (s ? ciWaits.set(ticketId, s) : ciWaits.delete(ticketId)),
+            touch,
+          },
+          prep,
+          stop,
+        ).catch((err: Error) => {
+          throw err instanceof CiPublishError ? new ReviewError(409, err.message) : err;
+        });
       // Other tickets in this project that waited on an open CI card: CI can be read again, so start them.
       const startCiWaiters = () => {
         const held = ciCardWaiting.get(t.projectId);
@@ -2224,17 +2213,17 @@ export function reviewService(
         const switchOff = `To stop waiting for GitHub CI instead, turn off "Wait for GitHub CI" in Settings → Server and runner → Checks, then choose "${CHECK_AGAIN}".`;
         const question =
           why === "access"
-            ? `GitHub CI: the company's git token can't read GitHub's checks (${message}), so Boss Man can't tell whether CI passed. Nothing in this project merges until it can. To fix it on GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens → open the token Boss Man uses → Repository permissions → Checks: Read-only → Update token. Then choose "${CHECK_AGAIN}". ${switchOff}`
+            ? `GitHub CI: the company's git token can't read GitHub Actions runs (${message}), so Boss Man can't tell whether CI passed. Nothing in this project merges until it can. To fix it on GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens → open the token Boss Man uses → Repository permissions → Actions: Read-only (Metadata: Read-only is set with it) → Update token. Then choose "${CHECK_AGAIN}". ${switchOff}`
             : why === "billing"
               ? `GitHub CI didn't run for "${t.title}": GitHub wouldn't start its jobs because of the account's spending limit or a failed payment. This isn't a problem with the agent's work. To fix it on GitHub: Settings → Billing and licensing → check the payment method and the Actions budget. Then choose "${CHECK_AGAIN}". ${switchOff}`
               : `GitHub CI: Boss Man couldn't read the CI result for "${t.title}" from GitHub after several tries (${message}), so nothing was merged. If GitHub is having trouble (githubstatus.com), wait for it to recover, then choose "${CHECK_AGAIN}". ${switchOff}`;
-        const raised = await raiseCheckStuck(db, t, "GitHub CI", why === "access" ? "couldn't read GitHub's checks" : why === "billing" ? "wasn't started by GitHub (billing)" : "couldn't be read from GitHub", message, { question, tier: "owner", dedupeKey: `ci-${why}:${t.projectId}` });
+        const raised = await raiseCheckStuck(db, t, "GitHub CI", why === "access" ? "couldn't read GitHub Actions runs" : why === "billing" ? "wasn't started by GitHub (billing)" : "couldn't be read from GitHub", message, { question, tier: "owner", dedupeKey: `ci-${why}:${t.projectId}` });
         if (raised === null) {
           const held = ciCardWaiting.get(t.projectId) ?? new Set<string>();
           held.add(ticketId);
           ciCardWaiting.set(t.projectId, held);
         }
-        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub's checks" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : "It's in the owner's Decisions."}` });
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub Actions runs" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : "It's in the owner's Decisions."}` });
         return { outcome: "check_stuck", delivered: null, detail: { ci: why, message } };
       };
       // What a CI wait means for this attempt: null carries on to the merge, anything else ends it.
@@ -2273,9 +2262,22 @@ export function reviewService(
             if (o.status.billing || found.some((f) => f.billing)) return ciCard("billing", o.status.failed.map((r) => r.name).join(", ") || "jobs not started");
             const jobs = o.status.failed.map((r) => r.name);
             const listed = found.length ? found : o.status.failed.map((run) => ({ run, lines: [] as string[] }));
+            // The agent can't read GitHub's logs and never holds the token, so the server reads each failed job's log (BOS-1667).
+            const logs = new Map<number, string[]>();
+            for (const f of listed.slice(0, 5)) if (f.run.id) logs.set(f.run.id, await deps.gitHosts!.jobLogBlock(ci!.cfg, ci!.token, f.run.id));
             const body = listed.length
-              ? listed.map((f) => `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}`).join("\n")
+              ? listed
+                  .map((f) => {
+                    const log = logs.get(f.run.id);
+                    return `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}${log ? `\n  Log lines (secrets redacted):\n${log.map((l) => `  > ${l}`).join("\n")}` : ""}`;
+                  })
+                  .join("\n")
               : "- the workflow failed before any job ran; open the commit's checks on GitHub";
+            // As for the gate's own check (checkFailed, BOS-1173): a merge-check fix marked, or a waits-on link added, while
+            // CI ran means the failure is main's until that fix is in force (BOS-1643). The throw ends the attempt held, the
+            // way checkFailed's does: ciVerdict is awaited inside alongsideCi / ciThenChecked, so it reaches the landing.
+            const waiting = await holdForWaits(ticketId);
+            if (waiting) throw waiting;
             await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: false, detail: (jobs.join(", ") || "workflow failed").slice(0, 500) });
             const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: body, what: "GitHub CI" });
             const delivered = await sendBack(
@@ -2651,6 +2653,12 @@ export function reviewService(
                 const stop = await gone();
                 if (stop) return stop;
               }
+              // BOS-1516: Priority 1 set (or Move to front) after this ticket joined: the tier was fixed at join, so read it again.
+              // A copy that missed the owner's switch (another server copy, a restart) still picks it up here.
+              {
+                const [mark] = await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, ticketId));
+                if (mark?.urgent) train.retier(ticketId, 0);
+              }
               const onMain = await trialClash();
               if (onMain) {
                 await lineEvent(db, t, { event: "train_clash", on: "main", with: clash ? await namedTickets(clash.with) : [], files: onMain.slice(0, TRAIN_CLASH_FILES), fileCount: onMain.length, action: "sent_back" });
@@ -2927,6 +2935,7 @@ export function reviewService(
         // A fix riding along on this merge is just as live (BOS-639).
         const [rider] = await db.select().from(tickets).where(eq(tickets.id, c.ticketId));
         if (rider) await tellCeoLiveFix(rider, m.commit).catch(() => undefined);
+        if (rider) await pagePriorityMerge(rider).catch(() => undefined);
         if (rider) await lineEvent(db, rider, { event: "merged", commit: m.commit });
         await deps.work.updateTicket(c.ticketId, { state: "done", outcome: "completed", overLimit: true });
       }

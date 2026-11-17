@@ -427,10 +427,16 @@ export const tickets = pgTable(
     /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
      * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
     ownerSetupOverride: text("owner_setup_override"),
+    /** BOS-1650: one line on what the setup changes for the owner; the go-live card opens with it. Null on tickets written before it existed (the card says "not given"). */
+    ownerSetupWhy: text("owner_setup_why"),
+    /** BOS-1650: one line on what happens if the owner skips the setup ("nothing breaks" is an answer). */
+    ownerSetupIfSkipped: text("owner_setup_if_skipped"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /** BOS-1516: the owner's "Priority 1" switch. It is the urgent mark plus this flag (set by the owner only); tiers read `urgent`, only the merge page reads this. */
+    urgentByOwner: boolean("urgent_by_owner").notNull().default(false),
     /**
      * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
      * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
@@ -1619,6 +1625,8 @@ export const features = pgTable(
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
+    /** BOS-1516: the owner's "Priority 1" switch on a feature: its open tickets (and new ones) carry the owner's urgent mark. */
+    priorityOne: boolean("priority_one").notNull().default(false),
     portalVisible: boolean("portal_visible").notNull().default(false),
     /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
     keepOffPortal: boolean("keep_off_portal").notNull().default(false),

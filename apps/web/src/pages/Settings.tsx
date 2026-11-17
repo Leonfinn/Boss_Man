@@ -194,10 +194,17 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
   const menu = (
     <nav aria-label="Settings" className={current ? "set-nav" : "set-nav set-nav-index"}>
       {SETTINGS_GROUPS.map((g) => (
-        <div key={g.label} className="set-group">
+        <div key={g.label} className={g.items.some((p) => p.id === current?.id) ? "set-group set-group-current" : current ? "set-group set-group-other" : "set-group"}>
           <h2 id={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`} className="set-group-label">
             {g.label}
           </h2>
+          {/* BOS-1655: on a short window the groups you are not in fold to this one row (CSS only); it opens the group's first page. */}
+          {current && !g.items.some((p) => p.id === current.id) ? (
+            <a className="set-group-fold" href={`#/${settingsPath(company?.id, g.items[0]!.id)}`}>
+              <span>{g.label}</span>
+              <span className="set-item-chevron" aria-hidden="true">›</span>
+            </a>
+          ) : null}
           <ul aria-labelledby={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`}>
             {g.items.map((p) => (
               <li key={p.id}>
@@ -297,7 +304,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     ),
     limits: (
       <>
-        <RunLimits />
+        <RunLimits updatesHref={companyId ? `#/${settingsPath(companyId, "updates")}` : undefined} />
         <WipLimits company={company ?? undefined} onChanged={onChanged} />
         <CheckQueueSetting />
       </>

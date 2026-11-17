@@ -69,8 +69,9 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
-# Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
-RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
+# Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
+# packages/shared/src/go-live.ts: what the runner, launcher and netguard images COPY in, read from their Dockerfiles (BOS-1648).
+RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
@@ -269,11 +270,14 @@ compose_project() {
 # commit, so relative bind mounts render the same and don't look like a change), with the checkout's own .env, and
 # rendered under the live project's name and a pinned BOSSMAN_COMMIT, so nothing differs but the settings themselves.
 # Nothing in the checkout is touched. Returns non-zero (and logs why) when it can't render.
+unpack_commit() { (set -o pipefail; g archive "$1" | tar -x -C "$RENDER_DIR"); } # commit: into $RENDER_DIR
 render_hashes() { # commit project
   local commit=$1 project=$2 out="" rc=0
   [[ -n $project ]] || { log "Service compare: could not tell the compose project name."; return 1; }
   rm -rf "$RENDER_DIR"; mkdir -p "$RENDER_DIR"
-  if ! (set -o pipefail; g archive "$commit" | tar -x -C "$RENDER_DIR") 2>>"$LOG"; then
+  # A function and not `if ! ( … ) 2>>"$LOG"`: bash does not apply the `!` when a group's or subshell's own redirect
+  # fails, so that form would carry on unpacked (BOS-1689). scripts/negated-redirect.test.sh guards the pattern.
+  if ! unpack_commit "$commit" 2>>"$LOG"; then
     log "Service compare: could not unpack ${commit:0:8}."; rm -rf "$RENDER_DIR"; return 1
   fi
   # The commit may carry its own .env or secrets (even a link to another file): remove them first, so the copy below

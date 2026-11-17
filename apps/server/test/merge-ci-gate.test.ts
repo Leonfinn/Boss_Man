@@ -1,5 +1,7 @@
 // BOS-1070: the merge gate waits for GitHub CI on the exact merge commit before it merges. A fake GitHub answers the
-// check-suite, check-run and annotation reads; a fake runner answers the split merge (prepare, publish, finish).
+// Actions run and job reads (BOS-1630) and, only when a test says the token has Checks, the annotation reads; by default it
+// is the owner's kind of token (Actions: Read-only, no Checks) and refuses every Checks API read with 403. A fake runner
+// answers the split merge (prepare, publish, finish).
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -13,7 +15,8 @@ vi.hoisted(() => {
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, checkJobs, checkResults, decisions, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, checkResults, decisions, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { holdView } from "../src/services/review-holds.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -31,35 +34,56 @@ const MERGE = "e".repeat(40);
 const TREE = "f".repeat(40);
 const FINAL = "c".repeat(40);
 
-type Run = { id: number; name: string; status: string; conclusion: string | null; html_url?: string; output?: { title?: string; summary?: string } };
-type Ci = { suites: Array<{ status: string; conclusion: string | null; latest_check_runs_count: number }>; runs: Run[] };
-const green = (): Ci => ({ suites: [{ status: "completed", conclusion: "success", latest_check_runs_count: 2 }], runs: [{ id: 1, name: "check", status: "completed", conclusion: "success" }, { id: 2, name: "images (arm64)", status: "completed", conclusion: "success" }] });
-const running = (): Ci => ({ suites: [{ status: "in_progress", conclusion: null, latest_check_runs_count: 2 }], runs: [{ id: 1, name: "changes", status: "completed", conclusion: "success" }, { id: 2, name: "images (arm64)", status: "in_progress", conclusion: null }] });
+type Job = { id: number; name: string; status: string; conclusion: string | null; html_url?: string; runner_name?: string | null; steps?: Array<{ number: number; name: string; status: string; conclusion: string | null }> };
+/** One workflow run on the commit and its jobs, as GitHub's Actions API gives them. */
+type WorkflowRun = { id: number; name: string; workflow_id: number; event: string; status: string; conclusion: string | null; created_at: string; html_url?: string; jobs: Job[] };
+type Ci = { runs: WorkflowRun[] };
+const job = (name: string, conclusion: string, id: number, failedStep?: string): Job => ({ id, name, status: "completed", conclusion, runner_name: "GitHub Actions 1", steps: [{ number: 1, name: "Set up job", status: "completed", conclusion: "success" }, { number: 2, name: failedStep ?? "Run tests", status: "completed", conclusion: failedStep ? "failure" : "success" }] });
+const run = (status: string, conclusion: string | null, jobs: Job[], extra: Partial<WorkflowRun> = {}): WorkflowRun => ({ id: 9, name: "CI", workflow_id: 100, event: "push", status, conclusion, created_at: "2026-11-16T10:00:00Z", html_url: "https://github.com/leon/site/actions/runs/9", jobs, ...extra });
+const green = (): Ci => ({ runs: [run("completed", "success", [job("check", "success", 1), job("images (arm64)", "success", 2)])] });
+// GitHub makes a job only when it is reached: "images" hasn't begun, yet the run is still in progress, so the gate waits.
+const running = (): Ci => ({ runs: [run("in_progress", null, [job("changes", "success", 1)])] });
+const red = (jobs: Job[]): Ci => ({ runs: [run("completed", "failure", jobs)] });
 
-/** A fake GitHub: `ci(sha, nth)` says what CI looks like on the nth read of a commit; `status` forces an HTTP error. */
+/**
+ * A fake GitHub: `ci(sha, nth)` says what CI looks like on the nth read of a commit; `status` forces an HTTP error on every
+ * read; `checks` (off by default) lets the token read the Checks API, which only the annotations come from.
+ */
 function fakeGitHub() {
   const calls: string[] = [];
   const reads = new Map<string, number>();
   const state = {
     ci: (_sha: string, _nth: number): Ci => green(),
     status: null as number | null,
+    checks: false,
     annotations: new Map<number, unknown[]>(),
+    /** A job's log text, or the HTTP status the log read is refused with. Absent: 404. */
+    logs: new Map<number, string | number>(),
   };
+  const last = new Map<number, WorkflowRun>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const fetch = (async (input: string | URL | Request) => {
     const url = String(input);
     calls.push(url);
     if (state.status) return json(state.status, { message: "Resource not accessible by personal access token" });
-    const suites = /\/commits\/([0-9a-f]+)\/check-suites/.exec(url);
-    const runs = /\/commits\/([0-9a-f]+)\/check-runs/.exec(url);
+    if (/\/check-runs|\/check-suites/.test(url) && !state.checks) return json(403, { message: "Resource not accessible by personal access token" });
+    const runs = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(url);
+    const jobs = /\/actions\/runs\/(\d+)\/jobs/.exec(url);
     const notes = /\/check-runs\/(\d+)\/annotations/.exec(url);
-    if (suites) {
-      const sha = suites[1]!;
+    if (runs) {
+      const sha = runs[1]!;
       const nth = (reads.get(sha) ?? 0) + 1;
       reads.set(sha, nth);
-      return json(200, { check_suites: state.ci(sha, nth).suites });
+      const list = state.ci(sha, nth).runs;
+      for (const r of list) last.set(r.id, r);
+      return json(200, { total_count: list.length, workflow_runs: list.map(({ jobs: _jobs, ...r }) => ({ ...r, head_sha: sha })) });
     }
-    if (runs) return json(200, { check_runs: state.ci(runs[1]!, reads.get(runs[1]!) ?? 1).runs });
+    if (jobs) return json(200, { jobs: last.get(Number(jobs[1]))?.jobs ?? [] });
+    const logUrl = /\/actions\/jobs\/(\d+)\/logs/.exec(url);
+    if (logUrl) {
+      const l = state.logs.get(Number(logUrl[1]));
+      return typeof l === "number" ? json(l, { message: "Resource not accessible by personal access token" }) : l === undefined ? json(404, { message: "Not Found" }) : new Response(l, { status: 200 });
+    }
     if (notes) return json(200, state.annotations.get(Number(notes[1])) ?? []);
     return json(404, { message: `no fake for ${url}` });
   }) as typeof globalThis.fetch;
@@ -127,15 +151,67 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     const ci = await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")));
     expect(ci).toEqual([expect.objectContaining({ sha: MERGE, passed: true })]);
     // The token was tried on main's head before anything was pushed.
-    expect(c.gh.calls.findIndex((u) => u.includes(`/commits/${MAIN}/`))).toBeLessThan(c.gh.calls.findIndex((u) => u.includes(`/commits/${MERGE}/`)));
+    expect(c.gh.calls.findIndex((u) => u.includes(`head_sha=${MAIN}`))).toBeLessThan(c.gh.calls.findIndex((u) => u.includes(`head_sha=${MERGE}`)));
+    // The owner's kind of token: nothing was asked of the Checks API, and no card.
+    expect(c.gh.calls.filter((u) => /check-runs|check-suites/.test(u))).toEqual([]);
+    expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
   });
 
-  it("doesn't merge a red CI: the ticket goes back naming the failing job and test", async () => {
+  it("a token with Actions: Read-only and no Checks: a red CI goes back naming the failing job and step, with no card (BOS-1630)", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? red([job("check", "success", 1), { ...job("images (arm64)", "failure", 7, "Build image"), html_url: "https://github.com/leon/site/actions/runs/9/job/7" }]) : green());
+    const res = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(res).toMatchObject({ outcome: "verify_failed" });
+    expect(res.message).toMatch(/GitHub CI failed .*images \(arm64\)/);
+    expect(res.message).not.toMatch(/- check\b/);
+    expect(c.merges()).toEqual(["prepare", "publish"]);
+    const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
+    expect(wake!.note).toContain("images (arm64) (https://github.com/leon/site/actions/runs/9/job/7)");
+    expect(wake!.note).toContain('failed at step "Build image"');
+    // The annotation read was refused (no Checks permission) and that cost nothing: no access card, no billing card.
+    expect(c.gh.calls.some((u) => u.includes("/check-runs/7/annotations"))).toBe(true);
+    expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+    expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
+  });
+
+  it("a red CI goes back with the failed job's log lines, secrets redacted, and says plainly when the log can't be read (BOS-1667)", async () => {
+    // Built at run time so the source holds no token-shaped string for the secrets scan to flag.
+    const fakeToken = ["ghp", "_", "abcdefghijklmnopqrstuvwxyz", "0123456789ABCD"].join("");
+    const redRun = (sha: string) => (sha === MERGE ? red([{ ...job("images (amd64)", "failure", 7, "Shell tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/7" }, { ...job("images (arm64)", "failure", 8, "Shell tests") }]) : green());
+    const c = (ctx = await setup());
+    c.gh.state.ci = redRun;
+    c.gh.state.logs.set(7, ["2026-11-16T10:00:01Z starting", "2026-11-16T10:00:02Z FAIL host-deployer.test.sh: expected 3 got 4", `2026-11-16T10:00:03Z token ${fakeToken} used`, "2026-11-16T10:00:04Z ##[error]Process completed with exit code 1."].join("\n"));
+    c.gh.state.logs.set(8, 403);
+    const res = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(res).toMatchObject({ outcome: "verify_failed" });
+    const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
+    expect(wake!.note).toContain("Log lines (secrets redacted):");
+    expect(wake!.note).toContain("> FAIL host-deployer.test.sh: expected 3 got 4");
+    expect(wake!.note).toContain("> … end of the log:");
+    expect(wake!.note).not.toContain(fakeToken);
+    expect(wake!.note).toContain("The job log couldn't be read: the git token isn't allowed to read job logs");
+  });
+
+  it("a workflow run that failed before any job (a broken workflow file) goes back naming the run", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? { runs: [run("completed", "startup_failure", [])] } : green());
+    const res = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(res).toMatchObject({ outcome: "verify_failed" });
+    const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
+    expect(wake!.note).toContain("- CI (https://github.com/leon/site/actions/runs/9)");
+  });
+
+  it("only the newest run of a workflow counts: an older red run replaced by a green re-run merges", async () => {
     const c = (ctx = await setup());
     c.gh.state.ci = (sha) =>
-      sha === MERGE
-        ? { suites: [{ status: "completed", conclusion: "failure", latest_check_runs_count: 2 }], runs: [{ id: 1, name: "check", status: "completed", conclusion: "success" }, { id: 7, name: "images (arm64)", status: "completed", conclusion: "failure", html_url: "https://github.com/leon/site/actions/runs/9/job/7" }] }
-        : green();
+      sha === MERGE ? { runs: [run("completed", "success", [job("check", "success", 1)], { id: 11, created_at: "2026-11-16T10:05:00Z" }), run("completed", "failure", [job("check", "failure", 2, "Run tests")], { id: 10 })] } : green();
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+  });
+
+  it("doesn't merge a red CI: with Checks readable too, the ticket goes back naming the failing job and test", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.checks = true;
+    c.gh.state.ci = (sha) => (sha === MERGE ? red([job("check", "success", 1), { ...job("images (arm64)", "failure", 7, "Run tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/7" }]) : green());
     c.gh.state.annotations.set(7, [
       { annotation_level: "failure", path: "apps/server/test/fence.test.ts", start_line: 42, title: "fence > blocks a write outside the clone", message: "AssertionError: expected 0 to be 1" },
       { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
@@ -152,6 +228,35 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
   });
 
+  // BOS-1643: main's CI broke while this merge's CI ran, and the CEO marked a fix (or linked a waits-on) meanwhile. The red
+  // CI is main's, so the ticket stays approved in "Passed, held", as a failed own check does (BOS-1173), and isn't sent back.
+  const markedMidCi = async (mark: (c: Awaited<ReturnType<typeof setup>>, fix: string) => Promise<unknown>) => {
+    const c = (ctx = await setup());
+    const fix = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix main's CI", state: "in_progress" })).json() as { id: string };
+    let marked = false;
+    c.gh.state.ci = (sha) => (sha === MERGE ? (marked ? red([job("check", "failure", 3, "Run tests")]) : running()) : green());
+    const approved = approveAndWait(c.req, c.ticket.id);
+    for (let i = 0; i < 300 && !(c.gh.reads.get(MERGE) ?? 0); i++) await new Promise((r) => setTimeout(r, 10));
+    await mark(c, fix.id);
+    marked = true;
+    const res = (await approved).json();
+    expect(res).toMatchObject({ outcome: "held", message: expect.stringMatching(/^This ticket's merge waits on .*"Passed, held"/) });
+    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect(await c.state()).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(await holdView(c.db, c.ticket.id)).toMatchObject({ system: true });
+    // Not sent back: no wake for the author, no loop failure, no CI failure recorded against the ticket.
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([]);
+  };
+
+  it("a red CI after a merge-check fix was marked mid-CI holds the ticket instead of sending it back (BOS-1643)", async () => {
+    await markedMidCi((c, fix) => c.db.update(tickets).set({ fixesMergeCheck: true }).where(eq(tickets.id, fix)));
+  });
+
+  it("a red CI after a waits-on link was added mid-CI holds the ticket instead of sending it back (BOS-1643)", async () => {
+    await markedMidCi((c, fix) => c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerTicketId: fix }));
+  });
+
   it("waits while CI runs, says so on the merge queue, and runs its own check at the same time", async () => {
     const c = (ctx = await setup({ holdVerify: true }));
     let done = false;
@@ -162,7 +267,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(c.held.length).toBe(1);
     expect(c.gh.reads.get(MERGE)).toBeGreaterThanOrEqual(2);
     const queue = (await c.req("GET", `/api/companies/${c.company.id}/merge-queue`)).json() as { running: Array<{ ticketId: string; ci?: { minutes: number; waiting: string[] } }> };
-    expect(queue.running).toEqual([expect.objectContaining({ ticketId: c.ticket.id, ci: { minutes: 0, waiting: ["images (arm64)"] } })]);
+    expect(queue.running).toEqual([expect.objectContaining({ ticketId: c.ticket.id, ci: { minutes: 0, waiting: ["CI"] } })]);
     expect(c.merges()).toEqual(["prepare", "publish"]);
     // The check passes first; still no merge until CI is green.
     c.release();
@@ -171,9 +276,11 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     done = true;
     expect((await approved).json()).toMatchObject({ outcome: "merged" });
     expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
+    // Waited and merged with the owner's kind of token (Checks refused): no card at any point.
+    expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
   });
 
-  it("a token that can't read checks never merges and raises one owner card for the project, before pushing anything", async () => {
+  it("a token that can't read Actions runs never merges and raises one owner card for the project, before pushing anything", async () => {
     const c = (ctx = await setup());
     c.gh.state.status = 403;
     const res = (await approveAndWait(c.req, c.ticket.id)).json();
@@ -182,7 +289,9 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect((await c.state()).systemState).toBe("review");
     const cards = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
     expect(cards).toEqual([expect.objectContaining({ tier: "owner", dedupeKey: `ci-access:${c.project.id}` })]);
-    expect(cards[0]!.question).toMatch(/can't read GitHub's checks.*Repository permissions → Checks: Read-only/);
+    expect(cards[0]!.question).toMatch(/can't read GitHub Actions runs.*Repository permissions → Actions: Read-only/);
+    // No GitHub Checks permission named ("Settings → Server and runner → Checks" is Boss Man's own page).
+    expect(cards[0]!.question).not.toMatch(/Checks:/);
     expect(cards[0]!.context).toMatchObject({ type: "check_stuck", ticketId: c.ticket.id });
     // A second ticket in the project waits on the same card instead of adding its own.
     const second = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
@@ -191,32 +300,48 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toHaveLength(1);
   });
 
-  it("a checks API that keeps failing is retried, then never merges and raises a card", async () => {
+  it("an Actions API that keeps failing is retried, then never merges and raises a card", async () => {
     const c = (ctx = await setup());
     c.gh.state.status = 502;
     const res = (await approveAndWait(c.req, c.ticket.id)).json();
     expect(res).toMatchObject({ outcome: "check_stuck" });
     // The first read and three retries, all on main's head: nothing was pushed.
-    expect(c.gh.calls.filter((u) => u.includes("/check-suites"))).toHaveLength(4);
+    expect(c.gh.calls.filter((u) => u.includes(`/actions/runs?head_sha=${MAIN}`))).toHaveLength(4);
     expect(c.merges()).toEqual(["prepare"]);
     expect(await c.db.select({ dedupeKey: decisions.dedupeKey, tier: decisions.tier }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `ci-error:${c.project.id}`, tier: "owner" }]);
   });
 
-  it("a billing refusal is the owner's card, not a send-back", async () => {
+  // GitHub's jobs data for a job it refused to start: failed, no steps, no runner.
+  const unstarted = (id: number): Job => ({ id, name: "check", status: "completed", conclusion: "failure", runner_name: null, steps: [] });
+
+  it("a billing refusal is the owner's card, not a send-back: read from the annotation when Checks is readable", async () => {
     const c = (ctx = await setup());
-    c.gh.state.ci = (sha) =>
-      sha === MERGE
-        ? { suites: [{ status: "completed", conclusion: "failure", latest_check_runs_count: 1 }], runs: [{ id: 3, name: "check", status: "completed", conclusion: "failure", output: { title: "", summary: "The job was not started because your account's spending limit needs to be increased." } }] }
-        : green();
+    c.gh.state.checks = true;
+    c.gh.state.ci = (sha) => (sha === MERGE ? red([unstarted(3)]) : green());
+    c.gh.state.annotations.set(3, [{ annotation_level: "failure", path: ".github", message: "The job was not started because your account's spending limit needs to be increased." }]);
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "check_stuck" });
     expect((await c.state()).systemState).toBe("review");
     expect(await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `ci-billing:${c.project.id}` }]);
   });
 
+  it("a billing refusal with Actions: Read-only only: a job that never started is the owner's billing card (BOS-1630)", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? red([unstarted(3)]) : green());
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "check_stuck" });
+    expect(await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `ci-billing:${c.project.id}` }]);
+  });
+
+  it("a job cancelled before it started is a send-back, not a billing card", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? red([{ ...unstarted(3), conclusion: "cancelled" }]) : green());
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+    expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+  });
+
   it("a failing test whose name or message mentions billing still goes back to the assignee, with no owner card", async () => {
     const c = (ctx = await setup());
-    c.gh.state.ci = (sha) =>
-      sha === MERGE ? { suites: [{ status: "completed", conclusion: "failure", latest_check_runs_count: 1 }], runs: [{ id: 7, name: "check", status: "completed", conclusion: "failure" }] } : green();
+    c.gh.state.checks = true;
+    c.gh.state.ci = (sha) => (sha === MERGE ? red([job("check", "failure", 7, "Run tests")]) : green());
     c.gh.state.annotations.set(7, [
       { annotation_level: "failure", path: "apps/server/test/billing.test.ts", start_line: 5, title: "billing > spending limit card", message: "AssertionError: payment failed text not matched" },
     ]);
@@ -229,7 +354,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
 
   it("no CI run at all after the grace period: merges on its own check and says so", async () => {
     const c = (ctx = await setup());
-    c.gh.state.ci = (sha) => (sha === MERGE ? { suites: [], runs: [] } : green());
+    c.gh.state.ci = (sha) => (sha === MERGE ? { runs: [] } : green());
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
     expect((await c.events()).some((e) => /didn't start for this push.*own check only/.test(e))).toBe(true);
   });
@@ -261,7 +386,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect((await c.req("GET", "/api/settings/wait-for-ci")).json()).toEqual({ on: false });
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
     expect(c.merges()).toEqual(["plain"]);
-    expect(c.gh.calls.filter((u) => u.includes("check-"))).toEqual([]);
+    expect(c.gh.calls.filter((u) => /check-|\/actions\//.test(u))).toEqual([]);
   });
 
   describe("with the server check queue (DR-003)", () => {
@@ -282,7 +407,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     it("CI failing while the queued check runs ends the attempt at once: sent back, nothing merged", async () => {
       const c = (ctx = await setup());
       await serverMode(c);
-      c.gh.state.ci = (sha) => (sha === MERGE ? { suites: [{ status: "completed", conclusion: "failure", latest_check_runs_count: 1 }], runs: [{ id: 4, name: "check", status: "completed", conclusion: "failure" }] } : green());
+      c.gh.state.ci = (sha) => (sha === MERGE ? red([job("check", "failure", 4, "Run tests")]) : green());
       // The queued job is never finished here: CI's failure alone ends the attempt.
       expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
       expect(c.merges()).toEqual(["prepare", "publish"]);
