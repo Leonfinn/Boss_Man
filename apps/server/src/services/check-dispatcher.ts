@@ -271,7 +271,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   }
 
   /** BOS-1757: the message recorded on a merge check whose ticket is no longer in review. */
-  const LEFT_REVIEW_TEXT = "The ticket left review, so its merge check was stopped.";
+  const NEWER_COMMIT_TEXT = "A newer commit of this ticket was queued for checking, so this running merge check was stopped.";
+  const LEFT_REVIEW_TEXT ="The ticket left review, so its merge check was stopped.";
 
   return {
     pump,
@@ -425,6 +426,19 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
         .where(and(eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]), ne(tickets.systemState, "review")));
       for (const o of orphans) await cancelJob(o.id, LEFT_REVIEW_TEXT).catch(() => null);
+      // BOS-1757: a running merge check for an older commit is stale once the same ticket has a later check queued or running
+      // for a different commit (the branch moved on). The queue only drops queued jobs; stop the running one and free the slot.
+      const liveMerge = await db
+        .select()
+        .from(checkJobs)
+        .where(and(inArray(checkJobs.state, ["queued", "running"]), eq(checkJobs.kind, "merge")));
+      if (liveMerge.some((j) => j.state === "running")) {
+        const live = await db.select().from(checkJobs).where(and(inArray(checkJobs.state, ["queued", "running"]), inArray(checkJobs.ticketId, liveMerge.map((j) => j.ticketId))));
+        for (const j of liveMerge.filter((m) => m.state === "running")) {
+          const newer = live.some((n) => n.ticketId === j.ticketId && n.id !== j.id && n.commit !== j.commit && n.queuedAt > j.queuedAt);
+          if (newer) await cancelJob(j.id, NEWER_COMMIT_TEXT).catch(() => null);
+        }
+      }
       // BOS-1436: bundles whose job no longer runs on a worker (ended, re-queued, or left by a crash) go.
       if (deps.bundles) {
         const live = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), isNotNull(checkJobs.workerId)));

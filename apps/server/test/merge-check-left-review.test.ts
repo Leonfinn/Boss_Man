@@ -67,6 +67,20 @@ describe("merge check of a ticket that left review (BOS-1757)", () => {
     expect(row!.state).toBe("running");
   });
 
+  it("stops a running merge check once a newer commit of the same ticket has a check queued", async () => {
+    const s = await setup();
+    const t = await s.ticket("review");
+    const old = await s.merge(t, "old");
+    await s.d.pump();
+    const { db } = s;
+    const [tk] = await db.select().from(tickets).where(eq(tickets.id, t));
+    await checkQueue(db).enqueue({ companyId: tk!.companyId, projectId: tk!.projectId, ticketId: t, kind: "quick", scope: "quick", commit: "c-new", tree: "new" } as never);
+    await s.d.sweep();
+    const [row] = await db.select().from(checkJobs).where(eq(checkJobs.id, old.id));
+    expect(row!.state).toBe("cancelled");
+    expect(row!.reason).toMatch(/newer commit/);
+  });
+
   it("also drops a queued merge check of a ticket that left review", async () => {
     const s = await setup();
     await s.merge(await s.ticket("review"), "r1");
