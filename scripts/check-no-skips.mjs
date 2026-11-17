@@ -92,6 +92,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     let xml;
     try { xml = readFileSync(junit, "utf8"); } catch (e) { console.error(`check-no-skips: cannot read ${junit}: ${e.message}`); process.exit(1); }
     const name = rel(arg("--file") ?? "", root);
+    // An empty report means the test run never wrote one: fail rather than count it as "no skips".
+    if (!xml.trim()) { console.error(`check-no-skips: ${junit} is empty: no node:test report for ${name}`); process.exit(1); }
     const skips = junitSkips(xml, name);
     if (skips.length && !allowed.has(name)) {
       console.error(`check-no-skips: ${skips[0]}, and the file is not on the skip list${listFile ? ` ${listFile}` : ""}. Fix the cause, or add "${name} | <reason>" to the list.`);

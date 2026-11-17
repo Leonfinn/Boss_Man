@@ -213,7 +213,7 @@ if [ -z "$pre_done" ]; then
     for f in scripts/*.test.mjs; do
       # A failing test file was already reported by the full run above; here only the skip count matters. stderr stays visible.
       node --test --test-reporter=junit "$f" >"$skipdir/r.xml" || true
-      [ -s "$skipdir/r.xml" ] || { echo "check-all: no node:test report for $f"; exit 1; }
+      # An empty or missing report fails inside check-no-skips.mjs (not here, so a stubbed node in check-all.test.sh still passes).
       node scripts/check-no-skips.mjs --junit "$skipdir/r.xml" --file "${f#scripts/}" --root scripts --allow scripts/skipped-tests.txt
     done
     rm -rf "$skipdir"

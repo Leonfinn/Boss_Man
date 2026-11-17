@@ -72,6 +72,10 @@ test("node:test junit report: a skipped file needs a list entry", () => {
     const stale = run("x.test.mjs | needs /proc\n");
     assert.equal(stale.status, 0);
     assert.match(stale.stdout, /listed but did not skip: x\.test\.mjs/);
+    writeFileSync(xf, "");
+    const empty = run("");
+    assert.equal(empty.status, 1, "an empty report is a failure");
+    assert.match(empty.stderr, /is empty/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
