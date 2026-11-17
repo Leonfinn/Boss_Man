@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, tickets } from "../src/db/schema.js";
-import { closeCardBySystem, closeInvalidCards } from "../src/services/card-validity.js";
+import { closeInvalidCards } from "../src/services/card-validity.js";
 import { mergeHolds } from "../src/services/review-holds.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -54,26 +54,43 @@ describe("owner-only cards outlive their ticket (BOS-1755)", () => {
     expect((await cardOf(c, p.id)).status).toBe("withdrawn");
   });
 
-  it("a card Boss Man does close for the owner leaves a notice saying why", async () => {
+  it("a cancelled ticket's owner-only card stays open with a cancelled label, not withdrawn", async () => {
     const c = (ctx = await setup());
-    const t = await c.ticket("Research", true);
+    const t = await c.ticket("Dropped", false);
     const q = await ownerChoice(c, t.id);
-    expect(await closeCardBySystem(c.db, { id: q.id, companyId: c.company.id, question: q.question }, "the owner's ticket moved", {})).toBe(true);
-    const closed = await cardOf(c, q.id);
-    expect((closed.context as { closedNotice?: { why: string; text: string; until: string } }).closedNotice).toMatchObject({ why: "withdrawn", text: expect.stringContaining("the owner's ticket moved") });
+    await c.db.update(tickets).set({ systemState: "done", outcome: "cancelled" }).where(eq(tickets.id, t.id));
+    await closeInvalidCards(c.db);
+    const kept = await cardOf(c, q.id);
+    expect(kept.status).toBe("open");
+    expect((kept.context as { keptOpen?: { note: string } }).keptOpen?.note).toMatch(/was cancelled/);
   });
 
-  it("a no-code ticket is held by its own owner-only card, a code ticket is not", async () => {
+  // Both kinds of ticket: no-code (closes) and code (merges). The gate each path asks is mergeHolds (refuseIfHeld, startLanding, land).
+  for (const noCode of [true, false]) {
+    it(`end to end, ${noCode ? "no-code" : "code"} ticket: held while the owner-only card is open, sweep leaves it, goes on once answered`, async () => {
+      const c = (ctx = await setup());
+      const t = await c.ticket("Research", noCode);
+      const q = await ownerChoice(c, t.id);
+      const p = await plain(c, t.id);
+      expect(await mergeHolds(c.db, t.id)).toEqual([{ kind: "card", id: q.id }]);
+      await closeInvalidCards(c.db);
+      expect((await cardOf(c, q.id)).status).toBe("open");
+      expect(await mergeHolds(c.db, t.id)).toEqual([{ kind: "card", id: q.id }]); // still held after the sweep
+      await c.db.update(decisions).set({ status: "answered", answer: "Jenkins" }).where(eq(decisions.id, q.id));
+      expect(await mergeHolds(c.db, t.id)).toEqual([]); // a plain question never held
+      expect(p.id).toBeTruthy();
+      // The merge/close then goes ahead; a card on a finished ticket that is already answered is left alone.
+      await c.db.update(tickets).set({ systemState: "done", ...(noCode ? {} : { mergeCommit: "abc1234" }) }).where(eq(tickets.id, t.id));
+      expect((await cardOf(c, q.id)).status).toBe("answered");
+    });
+  }
+
+  it("a merged code ticket's unanswered owner-only card is not closed by the 'is merged' row", async () => {
     const c = (ctx = await setup());
-    const nc = await c.ticket("Research", true);
-    const code = await c.ticket("Feature", false);
-    const q = await ownerChoice(c, nc.id);
-    await ownerChoice(c, code.id);
-    expect(await mergeHolds(c.db, nc.id)).toEqual([{ kind: "card", id: q.id }]);
-    expect(await mergeHolds(c.db, code.id)).toEqual([]);
-    const p = await plain(c, nc.id);
-    await c.db.update(decisions).set({ status: "answered" }).where(eq(decisions.id, q.id));
-    expect((await mergeHolds(c.db, nc.id)).length).toBe(0); // a plain question never held
-    expect(p.id).toBeTruthy();
+    const t = await c.ticket("Feature", false);
+    const q = await ownerChoice(c, t.id);
+    await c.db.update(tickets).set({ mergeCommit: "abc1234" }).where(eq(tickets.id, t.id));
+    await closeInvalidCards(c.db);
+    expect((await cardOf(c, q.id)).status).toBe("open");
   });
 });

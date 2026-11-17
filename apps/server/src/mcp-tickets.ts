@@ -22,7 +22,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
-import { addTicketDependency, blockedHolds, openBlockers, openCardIds } from "./services/ticket-links.js";
+import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
 import { OWNER_WAIT_REFUSAL, WAIT_LINK_REFUSAL, ticketHasOpenCard, waitsForNote, waitsOnOwnerNote } from "./services/owner-todo.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
@@ -567,6 +567,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (lintOverride !== undefined && ownerSetup === undefined) return fail("lintOverride goes with ownerSetup.");
       // Same state again (DR-010): only the note changes. No enter-state hooks, no new review round.
       const sameState = withCriteria.prev === state;
+      // BOS-1755: the owner's own question on this ticket is unanswered, so closing it as completed would lose their answer.
+      if (state === "done" && !sameState && outcome !== "cancelled") {
+        const card = await openOwnerOnlyCard(db, ticketId);
+        if (card) return fail(`Card ${card} is the owner's question about this ticket and is still open. Keep the ticket in review (it waits there as "Passed, held") and it closes once the owner answers.`);
+      }
       // BOS-1361: closing with "X will do the rest" and nothing on X's queue loses the work.
       if (state === "done" && !sameState && outcome !== "cancelled") {
         const handOff = await handOffRefusal(db, ticketId, summary, { followUps, noFollowUpReason });

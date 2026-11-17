@@ -2,6 +2,8 @@
 // checked: when Boss Man can see from live rows that a card is dead, it closes it by itself, with the reason
 // in the card's history, instead of flagging it and leaving the owner to work it out. The first row that
 // matches wins:
+//   0. an owner-only question card (BOS-1755): never closed by this table; it stays open, labelled once its ticket
+//      is finished, merged or cancelled. The ticket itself can't finish while the card is open (openHoldingCard).
 //   1. its ticket is done or cancelled          4. a plan card, and the plan was approved on another card
 //   2. its ticket is merged                     5. a plan card, and a newer plan card replaces it
 //   3. a plan card, and the ticket is in review (clearsWhen, row 6, stays in alert-clearing.ts)
@@ -15,8 +17,6 @@ import { openBlockers } from "./ticket-links.js";
 import { mergeContext } from "./decision-context.js";
 import { record } from "./activity.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
-import { withdrawnNotice } from "./closed-notice.js";
-
 /** How long the author, then the CEO, has to settle a card that is being re-checked. */
 export const RECHECK_AUTHOR_MS = 30 * 60_000;
 export const RECHECK_CEO_MS = 30 * 60_000;
@@ -57,7 +57,7 @@ async function cardTickets(db: Db, d: CardRow) {
     ? [named]
     : (await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id))).map((r) => r.id);
   if (!ids.length) return [];
-  return db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState, mergeCommit: tickets.mergeCommit, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(inArray(tickets.id, ids), eq(tickets.companyId, d.companyId)));
+  return db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, mergeCommit: tickets.mergeCommit, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(inArray(tickets.id, ids), eq(tickets.companyId, d.companyId)));
 }
 
 /**
@@ -151,12 +151,6 @@ export async function closeCardBySystem(db: Db, d: { id: string; companyId: stri
     return row;
   });
   if (!closed) return false;
-  // BOS-1755: a card that reached the owner's screen never just vanishes: it leaves the notice Decisions shows for two hours.
-  const [shown] = await db.select({ tier: decisions.tier, ladder: sql<string | null>`${decisions.context}->'ladder'->>'rung'` }).from(decisions).where(eq(decisions.id, d.id));
-  if (shown?.tier === "owner" && (!shown.ladder || shown.ladder === "owner")) {
-    const notice = withdrawnNotice({ agent: "Boss Man", reason: note, replacedBy: deps.newer ? { kind: "card", id: deps.newer.id } : { kind: "none" }, ...(deps.newer ? { newerLabel: "the newer card" } : {}), now: at });
-    await db.update(decisions).set({ context: mergeContext({ closedNotice: notice }) }).where(eq(decisions.id, d.id));
-  }
   // Loaded here, not at the top: decisions.ts imports this module, and the settled-card listener lives there.
   await (deps.markRead ?? (async (id: string, when: Date) => (await import("./decisions.js")).markDecisionNotificationRead(db, id, when)))(d.id, at);
   const freed = await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id)).returning({ ticketId: ticketDependencies.blockedTicketId });
@@ -174,9 +168,12 @@ async function labelKeptOpen(db: Db, d: CardRow, deps: CloseDeps) {
   const c = d.context as Ctx;
   if (!isOwnerOnly(c) || c.keptOpen) return;
   const ts = await cardTickets(db, d);
-  if (!ts.length || !ts.every((t) => t.state === "done")) return;
+  if (!ts.length || !ts.every((t) => t.state === "done" || t.mergeCommit)) return;
   const at = (deps.now ?? (() => new Date()))();
-  const note = `Its ticket "${ts[0]!.title}" is finished, but this question is yours alone and nobody has answered it, so it stays open until you do.`;
+  const cancelled = ts.every((t) => t.state === "done" && t.outcome === "cancelled");
+  const note = cancelled
+    ? `Its ticket "${ts[0]!.title}" was cancelled, but this question is yours alone and nobody has answered it, so it stays open until you answer or dismiss it.`
+    : `Its ticket "${ts[0]!.title}" is finished, but this question is yours alone and nobody has answered it, so it stays open until you do.`;
   await db.update(decisions).set({ context: mergeContext({ keptOpen: { note, at: at.toISOString() } }) }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
 }
 
