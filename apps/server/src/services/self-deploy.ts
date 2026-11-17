@@ -1407,7 +1407,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     stagingTick,
     writeStagingRequest,
     stagingPending,
-    /** Settings → Deploy to staging (owner): main's newest commit, as the host last saw it. No card: staging isn't production. */
+    /** The "Deploy to staging" button on Settings → Server and runner (owner): main's newest commit, as the host last saw it. No card: staging isn't production. */
     async deployStaging() {
       if (!(await stagingLane())) return { error: "Staging isn't set up on this host yet: the host deployer's staging lane is off (STAGING_DIR in its host.conf, docs/22-staging.md)." } as const;
       if ((await stagingPending()) || (await stagingStatus())?.result === "running") return { error: "A staging deploy is already queued or running. Wait for its result." } as const;
