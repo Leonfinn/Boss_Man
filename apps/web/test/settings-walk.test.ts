@@ -232,8 +232,28 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
       {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
         for (const id of ["team", "permissions"]) {
+          // A hash change keeps the old page's links on screen for a moment, which the wait below would take for
+          // the new page's; a blank page in between gives each id a clean start.
+          await page.goto("about:blank");
           await page.goto(`${base}/#/settings/c1/${id}`);
-          await page.waitForFunction(() => document.querySelectorAll(".set-jump a").length > 3, undefined, { timeout: 10_000, polling: 100 }).catch(() => undefined);
+          // The links can draw, vanish and draw again while the section loads its answer, so "more than 3 links"
+          // must hold for a moment before they are read (the old 500 ms sleep stood in for this hold).
+          await page
+            .waitForFunction(
+              () => {
+                const w = window as any;
+                const n = document.querySelectorAll(".set-jump a").length;
+                if (n <= 3) {
+                  w.__jumpSince = 0;
+                  return false;
+                }
+                w.__jumpSince = w.__jumpSince || Date.now();
+                return Date.now() - w.__jumpSince >= 400;
+              },
+              undefined,
+              { timeout: 10_000, polling: 100 },
+            )
+            .catch(() => undefined);
           const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
           expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
           for (const target of hrefs) {
