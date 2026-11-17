@@ -626,7 +626,7 @@ export function alertLadder(
     },
 
     /** The CEO can't settle it: it goes to the owner with what was tried and the steps (the raise_decision rules). */
-    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; /** The owner must act now (BOS-1097): the card also reaches their phone. */ urgentWhy?: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
+    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; /** The owner must act now (BOS-1097): the card also reaches their phone. */ urgentWhy?: string; steps?: string[]; /** BOS-1660: the opening of a card with steps. */ why?: string; minutes?: number; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
       const [ceo] = await db.select().from(agents).where(and(eq(agents.id, ceoId), eq(agents.companyId, companyId), eq(agents.role, "ceo")));
       if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
@@ -648,7 +648,7 @@ export function alertLadder(
       }
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
       // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.
-      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.urgentWhy ? { urgentPush: { by: ceo.name, at: now().toISOString(), why: input.urgentWhy } } : {}), ...(input.steps?.length ? splitOwnerSteps(input.steps) : {}), ...(ask.lint ? { lint: ask.lint } : {}), ...(advice ? { advice } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
+      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.urgentWhy ? { urgentPush: { by: ceo.name, at: now().toISOString(), why: input.urgentWhy } } : {}), ...(input.steps?.length ? splitOwnerSteps(input.steps) : {}), ...(input.steps?.length && ask.opening ? { opening: ask.opening } : {}), ...(ask.lint ? { lint: ask.lint } : {}), ...(advice ? { advice } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
       return { id: d.id };
     },
   };

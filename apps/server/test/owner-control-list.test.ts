@@ -60,11 +60,11 @@ describe("R7: a card names a button that doesn't exist", () => {
   });
 
   it("is a refusal checkAsk passes on, with the card's options counted as buttons", () => {
-    const base = { triedFirst: "Checked the ticket screen in the web app code; there is no such button." };
+    const base = { triedFirst: "Checked the ticket screen in the web app code; there is no such button.", why: "The owner sees the right button named.", minutes: 2 };
     expect(checkAsk({ ...base, steps: ["Open BOS-368 and press Overrule and merge."] }).error).toMatch(/Overrule and merge/);
-    expect(checkAsk({ ...base, steps: ["Press Merge it on this card."], options: ["Merge it", "Not yet"] }).error).toBeNull();
+    expect(checkAsk({ ...base, steps: ["Press Merge it on this card, shown in Settings → Server and runner → This host."], options: ["Merge it", "Not yet"] }).error).toBeNull();
     // Overridable by the CEO with a reason, like R1 and R2 (the list can't see a label set in code).
-    const ceo = checkAsk({ ...base, steps: ["Press Copied under the command."], lintOverride: "The Copy button says Copied after a press.", byCeo: true });
+    const ceo = checkAsk({ ...base, steps: ["Press Copied under the command, shown in Settings → Server and runner → This host."], lintOverride: "The Copy button says Copied after a press.", byCeo: true });
     expect(ceo.error).toBeNull();
     expect(ceo.lint?.override?.findings.map((x) => x.rule)).toEqual(["R7"]);
   });

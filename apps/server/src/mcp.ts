@@ -24,7 +24,7 @@ import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesServi
 import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { ceoPlanText } from "./services/ceo-plan.js";
-import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OPENING_WHY_MAX, OWNER_ONLY_KINDS, checkAsk, fillCardText, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
@@ -398,6 +398,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // A restart of the server resets what this card measures (a memory reading, say), so the next
         // update card lists it to do first (BOS-551).
         resetsOnRestart: z.boolean().optional(),
+        // BOS-1660: the opening of a card with steps. Where each step happens is written by Boss Man from the steps.
+        why: z.string().max(OPENING_WHY_MAX).optional().describe("Required with steps: one sentence saying what the owner gets, or what breaks if they skip this. The card opens with it."),
+        minutes: z.number().int().min(1).max(480).optional().describe("Required with steps: a whole number of minutes the steps take the owner. The card says 'About N minutes'. Boss Man writes the 'Where' line itself from the steps (host fences, outside websites, Settings paths); a step that names no place is refused."),
         // Which of the ticket's after-merge acceptance criteria this card settles (BOS-963): its number (1, 2, ...)
         // or its text. The owner's answer then records that criterion's pass or fail however the card is worded.
         // A number also arrives as a string ("6") from some agents, so criterionArg accepts both (BOS-1012).
@@ -414,7 +417,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, clearsWhen }) => {
       if (ownerOnly === "owner_choice" && !ownerOnlyWhy?.trim()) return fail("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's and not the CEO's.");
       let clearWhen: ClearWhen[] | undefined;
       if (clearsWhen) {
@@ -433,10 +436,19 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
       if (summary === null) return fail("approveSummary is empty once line breaks and control characters are taken out. Write one plain line saying what your recommended option does, or leave it out.");
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ ...(steps?.length && usesOwnerSetupToken(steps) ? { ownerSetup: await ownerSetupFacts(db, scope.companyId) } : {}), triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined, ...(await seenImageDates(db, scope.companyId, steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
+      const ask = checkAsk({ ...(steps?.length && usesOwnerSetupToken(steps) ? { ownerSetup: await ownerSetupFacts(db, scope.companyId) } : {}), triedFirst, question, why, minutes, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps, question, options, triedFirst), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined, ...(await seenImageDates(db, scope.companyId, steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in, checker tags taken out (BOS-1665)
       const stepSources = ask.stepSources;
+      // BOS-1660: the owner reads the question, options and triedFirst with host tokens filled; the option a verdict or the recommendation names moves with its text.
+      if (ask.options?.some((o, i) => o !== options[i])) {
+        const filledAs = new Map(options.map((o, i) => [o, ask.options![i]!]));
+        recommended = filledAs.get(recommended) ?? recommended;
+        if (optionVerdicts) optionVerdicts = Object.fromEntries(Object.entries(optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v]));
+        options = ask.options;
+      }
+      question = ask.question ?? question;
+      triedFirst = ask.triedFirst ?? triedFirst;
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
@@ -497,7 +509,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -822,6 +834,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       },
     },
     async (input) => {
+      // BOS-1660: what the owner reads has host tokens filled, and one with no recorded value is refused, naming the field.
+      const shown = fillCardText({ question: input.title, triedFirst: input.body ?? "" }, await hostFacts.valuesFor(input.title, input.body));
+      if ("error" in shown) return fail(shown.error.replace(/^The question/, "The title").replace(/^triedFirst/, "The body"));
+      input = { ...input, title: shown.question ?? input.title, ...(input.body ? { body: shown.triedFirst } : {}) };
       const factHold = await ownerFactHeld(db, scope.companyId, input.title, input.body); // BOS-1596
       if (factHold) return fail(factHold);
       if (input.ticketId) {

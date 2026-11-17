@@ -74,6 +74,9 @@ export function registerWatchdog(server: McpServer, watchdog: Services["watchdog
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
         stillNeeded: z.string().max(500).optional(),
         proof: z.string().max(300).optional(),
+        // BOS-1660: with steps, the card opens with why and how long; Boss Man writes "Where" from the steps.
+        why: z.string().max(240).optional().describe("With steps: one sentence on what the owner gets, or what breaks if they skip this."),
+        minutes: z.number().int().min(1).max(480).optional().describe("With steps: a whole number of minutes the steps take the owner."),
       },
     },
     async (input) => {
@@ -112,7 +115,7 @@ export function registerWatchdog(server: McpServer, watchdog: Services["watchdog
             return done(await watchdog.escalate(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
           case "raise_decision":
             need("ticketId", "question", "options", "recommended", "triedFirst");
-            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason, stillNeeded: input.stillNeeded, proof: input.proof }));
+            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, why: input.why, minutes: input.minutes, reason, stillNeeded: input.stillNeeded, proof: input.proof }));
           case "alerts": {
             const mine = await alerts.mine(companyId, agentId);
             return text(mine.length ? JSON.stringify(mine) : "No alerts are waiting for you.");

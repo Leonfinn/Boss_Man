@@ -89,8 +89,8 @@ describe("card placeholders", () => {
     expect(fillOwnerSetupTokens(["Workers: {{checkWorkers.added}} added, {{checkWorkers.everConnected}} seen, {{ checkWorkers.online }} online"], facts)).toEqual({ steps: ["Workers: 1 added, 1 seen, 0 online"], missing: [] });
     expect(fillOwnerSetupTokens(["{{checkWorkers.bogus}}"], facts).missing).toEqual(["bogus"]);
     const tried = "Looked at server_status and the Settings page myself; only the owner can add a machine.";
-    const ok = checkAsk({ triedFirst: tried, steps: ["Open Settings → Server and runner → Checks. It lists {{checkWorkers.added}} workers."], ownerSetup: facts, options: ["Done"] });
+    const ok = checkAsk({ triedFirst: tried, why: "The owner sees the worker count.", minutes: 2, steps: ["Open Settings → Server and runner → Checks. It lists {{checkWorkers.added}} workers."], ownerSetup: facts, options: ["Done"] });
     expect(ok.steps?.[0]).toContain("lists 1 workers");
-    expect(checkAsk({ triedFirst: tried, steps: ["{{checkWorkers.bogus}}"], ownerSetup: facts, options: ["Done"] }).error).toMatch(/worker facts Boss Man doesn't have/);
+    expect(checkAsk({ triedFirst: tried, why: "The owner sees the worker count.", minutes: 2, steps: ["{{checkWorkers.bogus}}"], ownerSetup: facts, options: ["Done"] }).error).toMatch(/worker facts Boss Man doesn't have/);
   });
 });

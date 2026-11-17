@@ -96,7 +96,7 @@ describe("where a raise_decision card goes (BOS-1318)", () => {
   });
 
   it("ownerMustDo, or steps, keep the card with the owner without any ownerOnly", async () => {
-    const a = await row(idOf(textOf(await ask(ctx.dev.id, { ownerMustDo: true, steps: ["Open Settings → Server and runner → Updates and press Build and update runners.", "Undo: nothing to undo; the button only builds a new image."] }))));
+    const a = await row(idOf(textOf(await ask(ctx.dev.id, { ownerMustDo: true, why: "The runners get the new image.", minutes: 3, steps: ["Open Settings → Server and runner → Updates and press Build and update runners.", "Undo: nothing to undo in Settings → Server and runner → Updates; the button only builds a new image."] }))));
     expect(a.tier).toBe("owner");
     expect(ctxOf(a).ladder).toBeUndefined();
   });

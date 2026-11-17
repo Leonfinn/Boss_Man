@@ -65,7 +65,7 @@ import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
-import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
+import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillHostTokensIn, fillServerHost, lintLines, ownerWhere, unfilledTokens, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import { type OwnerRecordFacts, fillOwnerSetupTokens, usesOwnerSetupToken } from "./owner-record.js";
@@ -234,7 +234,7 @@ export function readyHeading(items: Array<{ symptom: string; ref: string }>): st
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** The agent that asked, so an "always" rule can be limited to it (BOS-294). */ alwaysAgent?: { id: string; name: string }; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** Why only the owner can take this card (BOS-1318). Counted by Moony; the CEO may never answer one. */ ownerOnly?: OwnerOnlyKind; ownerOnlyWhy?: string; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something, with no checker tags (BOS-1665). */ steps?: string[]; /** Where each step's clicks came from (R19), by step; the owner reads a muted line from it, never the tag. */ stepSources?: Array<StepSource | null>; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** What each option means for those criteria, by option text: pass, fail or none (BOS-1155). The only thing that turns an answer into a verdict. */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
+  | { type: "question"; /** Why only the owner can take this card (BOS-1318). Counted by Moony; the CEO may never answer one. */ ownerOnly?: OwnerOnlyKind; ownerOnlyWhy?: string; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something, with no checker tags (BOS-1665). */ steps?: string[]; /** Where each step's clicks came from (R19), by step; the owner reads a muted line from it, never the tag. */ stepSources?: Array<StepSource | null>; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The card opening: why and minutes from the agent, where generated from the steps (BOS-1660). */ opening?: CardOpening; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** What each option means for those criteria, by option text: pass, fail or none (BOS-1155). The only thing that turns an answer into a verdict. */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string; /** BOS-1516: the owner's Priority 1 work is in this deploy: the card is marked urgent, headed "Ready to put live". */ urgent?: DeployUrgent }
@@ -644,6 +644,23 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
   const company = t.facts?.company ?? (await loadCompanyFacts(db, t.companyId, t.steps));
   const check = checkOwnerSetup(t.steps, { ...(t.facts ?? {}), ...(company ? { company } : {}) }, "raise");
   const override = t.override?.trim() || null;
+  // BOS-1660: the why and if-skipped lines are read by the owner as much as the steps: host tokens are filled there too,
+  // and one left over (no recorded fact) sends the CEO the same fix card, never the owner a raw `{{…}}`.
+  const hostValues = t.facts?.values ?? {};
+  const textGaps: LintFinding[] = [];
+  const filledTickets = t.tickets.map((x) => {
+    const fill = (label: string, v: string | null | undefined) => {
+      if (!v?.trim()) return v;
+      const r = fillHostTokensIn(v, hostValues);
+      for (const tok of unfilledTokens(r.text)) textGaps.push({ step: 0, rule: "R4", problem: `${label} of "${x.title}" has ${tok}, which Boss Man has no value for. Write the value itself, or use a {{host.…}} fact Boss Man has recorded` });
+      return r.text;
+    };
+    return { ...x, why: fill("the why line", x.why), ifSkipped: fill("the if-skipped line", x.ifSkipped) };
+  });
+  if (textGaps.length) {
+    await raiseOwnerSetupFix(db, { companyId: t.companyId, tickets: t.tickets, findings: [...check.hard, ...check.soft, ...textGaps], commit: t.commit });
+    return null;
+  }
   if (check.hard.length || (check.soft.length && !override)) {
     await raiseOwnerSetupFix(db, { companyId: t.companyId, tickets: t.tickets, findings: [...check.hard, ...check.soft], commit: t.commit });
     return null;
@@ -666,8 +683,8 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
   // still raised, saying "not given", so nothing is dropped.
   const given = (v: string | null | undefined) => v?.trim() || NOT_GIVEN;
   const whyLines = t.tickets.length === 1
-    ? `Why: ${given(first.why)}\nIf you skip it: ${given(first.ifSkipped)}`
-    : t.tickets.map((x) => `"${x.title}"\nWhy: ${given(x.why)}\nIf you skip it: ${given(x.ifSkipped)}`).join("\n\n");
+    ? `Why: ${given(filledTickets[0]!.why)}\nIf you skip it: ${given(filledTickets[0]!.ifSkipped)}`
+    : filledTickets.map((x) => `"${x.title}"\nWhy: ${given(x.why)}\nIf you skip it: ${given(x.ifSkipped)}`).join("\n\n");
   const [row] = await db
     .insert(decisions)
     .values({
@@ -678,7 +695,7 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
       recommendedOption: TODO_DONE,
       tier: "owner",
       dedupeKey: ownerSetupKey(first.ticketId),
-      context: { type: "owner_setup", ticketId: first.ticketId, tickets: t.tickets, steps: check.steps, commit: t.commit } satisfies DecisionContext,
+      context: { type: "owner_setup", ticketId: first.ticketId, tickets: filledTickets, steps: check.steps, commit: t.commit } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id, companyId: decisions.companyId });
@@ -796,6 +813,49 @@ const replaceOption = (i: number, lesson: string) => `Replace #${i + 1}: ${lesso
 /** The lesson a drop answer names, in the numbered or the older "Replace: " form. */
 const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec(answer)?.[1];
 
+/** The opening of a card with steps (BOS-1660): why and minutes come from the agent, where is generated from the steps. */
+export type CardOpening = { why: string; minutes: number; where: string[] };
+export const OPENING_WHY_MAX = 240;
+
+/** The refusal for a card with steps whose why or minutes is missing or malformed, or null. */
+export function cardOpeningProblem(why: string | undefined, minutes: number | undefined): string | null {
+  const w = why?.trim() ?? "";
+  const problems: string[] = [];
+  if (!w) problems.push("why is missing: one sentence saying what the owner gets, or what breaks if they skip this.");
+  else if (/[\r\n]/.test(w) || w.length > OPENING_WHY_MAX) problems.push(`why must be one line of at most ${OPENING_WHY_MAX} characters.`);
+  if (minutes === undefined) problems.push("minutes is missing: a whole number, how long the steps take the owner.");
+  else if (!Number.isInteger(minutes) || minutes < 1 || minutes > 480) problems.push("minutes must be a whole number from 1 to 480.");
+  return problems.length ? `A card with steps opens with why and how long. ${problems.join(" ")} Boss Man writes the Where line itself from the steps.` : null;
+}
+
+/**
+ * Fill host tokens in the owner-visible text around the steps (BOS-1660, extends DR-052), then refuse any `{{…}}` left,
+ * naming the field. Without `hostValues` nothing is filled, so a token there is refused the same way (R4).
+ */
+export function fillCardText(f: { question?: string; options?: string[]; triedFirst: string }, hostValues?: Record<string, string>): { error: string } | { question?: string; options?: string[]; triedFirst: string } {
+  const fill = (label: string, s: string): { text: string } | { error: string } => {
+    let out = s;
+    if (hostValues) {
+      const r = fillHostTokensIn(s, hostValues);
+      if (r.missing.length) return { error: `${label} uses host facts Boss Man doesn't have: ${r.missing.map((k) => `{{host.${k}}}`).join(", ")}. The host deployer hasn't reported them (it may not be applied yet, or the fact can't be detected). Ask the owner to confirm it in Settings → This host, or wait for the host's report, then raise the card again.` };
+      out = r.text;
+    }
+    const left = unfilledTokens(out);
+    return left.length ? { error: `${label} has ${left.join(", ")}, which Boss Man has no value for, so the owner would read it raw. Write the value itself, or use a {{host.…}} fact Boss Man has recorded.` } : { text: out };
+  };
+  const q = f.question === undefined ? undefined : fill("The question", f.question);
+  if (q && "error" in q) return q;
+  const options: string[] = [];
+  for (const [i, o] of (f.options ?? []).entries()) {
+    const r = fill(`Option ${i + 1}`, o);
+    if ("error" in r) return r;
+    options.push(r.text);
+  }
+  const tf = fill("triedFirst", f.triedFirst);
+  if ("error" in tf) return tf;
+  return { ...(q ? { question: q.text } : {}), ...(f.options ? { options } : {}), triedFirst: tf.text };
+}
+
 /**
  * Whether an agent's ask may be raised: it must say what was tried first, give steps when the owner has to act,
  * and its steps must work as written (BOS-417: `lintOwnerSteps`). `error` is the refusal; otherwise `lint` is what
@@ -814,7 +874,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
  * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string; company?: CompanyFacts; images?: Record<string, string>; mismatchedSites?: Record<string, string> }): { error: string; lint?: undefined; steps?: undefined; stepSources?: undefined } | { error: null; lint?: CardLint; steps?: string[]; stepSources?: Array<StepSource | null> } {
+export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string; /** BOS-1660: the owner-visible text, filled and checked like the steps. */ question?: string; /** BOS-1660: one line on what the owner gets, or what breaks if they skip it; required with steps. */ why?: string; /** BOS-1660: a whole number of minutes; required with steps. */ minutes?: number; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string; company?: CompanyFacts; images?: Record<string, string>; mismatchedSites?: Record<string, string> }): { error: string; lint?: undefined; steps?: undefined; stepSources?: undefined; question?: undefined; options?: undefined; triedFirst?: undefined; opening?: undefined } | { error: null; lint?: CardLint; steps?: string[]; stepSources?: Array<StepSource | null>; /** The text as the owner reads it, host tokens filled (BOS-1660). */ question?: string; options?: string[]; triedFirst?: string; /** The card's opening: why and minutes from the agent, where generated from the steps (BOS-1660). */ opening?: CardOpening } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -825,7 +885,12 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
   const override = a.lintOverride?.replace(/\s+/g, " ").trim();
   if (override !== undefined && !a.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the steps instead, or ask the CEO to raise the card." };
   if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
-  if (!a.steps?.length) return { error: null };
+  // BOS-1660: the question, the options and triedFirst are read by the owner as much as the steps, so host tokens are filled
+  // there too, and one left over (no recorded fact, or a caller with none) refuses the card, naming the field.
+  const text = fillCardText({ question: a.question, options: a.options, triedFirst: a.triedFirst.trim() }, a.hostValues);
+  if ("error" in text) return { error: text.error };
+  const shown = { question: text.question, options: text.options, triedFirst: text.triedFirst };
+  if (!a.steps?.length) return { error: null, ...shown };
   const proof = a.proof?.trim() ? parseProof(a.proof) : undefined;
   if (typeof proof === "string") return { error: `The ${proof}.` };
   // `{{host.…}}` tokens (DR-008): filled from the recorded host facts before the lint, so the lint reads what the owner
@@ -873,11 +938,17 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
   if (hard.length) return { error: `These steps can't go to the owner as written:\n${lintLines(refuse)}\n${tail}${override ? " lintOverride can't let through a command that isn't copy-safe, a value Boss Man doesn't have, or a command that waits for typed input, opens a pager or never returns." : ""}` };
   if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
+  // BOS-1660: after the lint, so a step that can't work as written is told so first. "Where" is worked out from the steps,
+  // never typed; a step that names no place is refused, and the card opens with why and minutes.
+  const openingProblem = cardOpeningProblem(a.why, a.minutes);
+  if (openingProblem) return { error: openingProblem };
+  const place = ownerWhere(steps, a.serverHost);
+  if (place.missing.length) return { error: `${place.missing.length === 1 ? `Step ${place.missing[0]} doesn't` : `Steps ${place.missing.join(", ")} don't`} say where ${place.missing.length === 1 ? "it" : "they"} happen${place.missing.length === 1 ? "s" : ""}. Say where this step happens: a command block that names its host, a Settings → path, or the website it is on. Boss Man writes the card's Where line from these.` };
   const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}), ...(proof ? { proof } : {}) };
   // BOS-1665: the checker read the tags above; the owner's steps leave here without them, and the source of each step
   // is kept beside them for the muted "Written from…" line. No screen or push has to remember to strip a tag.
   const owner = splitOwnerSteps(steps, a.images);
-  return { error: null, steps: owner.steps, ...(owner.stepSources ? { stepSources: owner.stepSources } : {}), ...(lint.warn.length || lint.override || lint.proof ? { lint } : {}) };
+  return { error: null, ...shown, opening: { why: a.why!.trim(), minutes: a.minutes!, where: place.where }, steps: owner.steps, ...(owner.stepSources ? { stepSources: owner.stepSources } : {}), ...(lint.warn.length || lint.override || lint.proof ? { lint } : {}) };
 }
 
 /** An agent's model setup as the CEO sets it and the owner sees it (BOS-128). */
@@ -2099,7 +2170,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Other tickets this one card holds too, so one answer releases them all (BOS-1591). */ alsoBlocksTicketIds?: string[]; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stepSources?: Array<StepSource | null>; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean; /** Why only the owner can take this card (BOS-1318); it stays on the owner's queue. */ ownerOnly?: OwnerOnlyKind; /** The one-line reason an owner_choice card is the owner's. */ ownerOnlyWhy?: string; /** An agent's card via raise_decision (BOS-1318): goes to the CEO first unless it needs the owner. Plans and system cards leave it out and keep their routing. */ ceoFirst?: boolean }) {
+    async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Other tickets this one card holds too, so one answer releases them all (BOS-1591). */ alsoBlocksTicketIds?: string[]; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stepSources?: Array<StepSource | null>; stillNeeded?: string; ownerMustDo?: boolean; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean; /** Why only the owner can take this card (BOS-1318); it stays on the owner's queue. */ ownerOnly?: OwnerOnlyKind; /** The one-line reason an owner_choice card is the owner's. */ ownerOnlyWhy?: string; /** An agent's card via raise_decision (BOS-1318): goes to the CEO first unless it needs the owner. Plans and system cards leave it out and keep their routing. */ ceoFirst?: boolean }) {
       // BOS-1318: where this card goes. Decided by routeAgentCard from the card's structure, never its wording.
       if (input.ownerOnly === "owner_choice" && !input.ownerOnlyWhy?.trim()) throw new AnswerError("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's.");
       let route: { tier: "owner" | "ceo"; why: string } = { tier: "owner", why: "unchanged" };
@@ -2140,7 +2211,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
             ...(route.tier === "ceo" ? { tier: "ceo" as const } : {}),
-            context: { type: "question", ...(input.ownerOnly ? { ownerOnly: input.ownerOnly, ...(input.ownerOnlyWhy?.trim() ? { ownerOnlyWhy: input.ownerOnlyWhy.trim().slice(0, 200) } : {}) } : {}), ...(route.tier === "ceo" ? { ladder: { rung: "ceo", since: now().toISOString(), minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: input.blocksTicketId ?? null, about: input.agentId ? [input.agentId] : [], hops: [{ to: "ceo", at: now().toISOString(), why: route.why }] } } : {}), ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.criterionIndexes?.length && input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}) } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
+            context: { type: "question", ...(input.ownerOnly ? { ownerOnly: input.ownerOnly, ...(input.ownerOnlyWhy?.trim() ? { ownerOnlyWhy: input.ownerOnlyWhy.trim().slice(0, 200) } : {}) } : {}), ...(route.tier === "ceo" ? { ladder: { rung: "ceo", since: now().toISOString(), minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: input.blocksTicketId ?? null, about: input.agentId ? [input.agentId] : [], hops: [{ to: "ceo", at: now().toISOString(), why: route.why }] } } : {}), ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.criterionIndexes?.length && input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}) } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.opening ? { opening: input.opening } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
               ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
@@ -2881,7 +2952,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; stepSources?: Array<StepSource | null>; lint?: CardLint; /** What each new option means for the criteria the card settles (BOS-1155); needed when the card is linked to criteria. */ optionVerdicts?: Record<string, string>; /** The owner must act now (BOS-1110): stored as the card's urgent mark, so it also reaches their phone. */ urgentWhy?: string } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; stepSources?: Array<StepSource | null>; /** BOS-1660: the opening of a card with steps. */ opening?: CardOpening; lint?: CardLint; /** What each new option means for the criteria the card settles (BOS-1155); needed when the card is linked to criteria. */ optionVerdicts?: Record<string, string>; /** The owner must act now (BOS-1110): stored as the card's urgent mark, so it also reaches their phone. */ urgentWhy?: string } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
       const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
@@ -2935,7 +3006,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (!(d.kind === "question" && ctx.type === "question")) {
           // An approval, plan, hire, deploy and the like keep their id, kind, options and context, so what resumes on
           // them still works: the CEO only rewrites the question and adds what was tried and the steps.
-          const clarified = { triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}), lint: input.lint } : {}), advice: { ...advice, state: "clarified", at, originalQuestion: advice.originalQuestion ?? d.question } };
+          const clarified = { triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}), ...(input.opening ? { opening: input.opening } : {}), lint: input.lint } : {}), advice: { ...advice, state: "clarified", at, originalQuestion: advice.originalQuestion ?? d.question } };
           const done = await db.transaction(async (tx) => {
             const [row] = await tx
               .update(decisions)
@@ -2976,7 +3047,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: d.raisedByAgentId,
             // The card says the CEO wrote it and points back at the original (advice.replaces).
             // A card that held its ticket's merge still does once reworded (BOS-1078): the hold moves with the link below.
-            context: { type: "question", ...(linked?.length ? { criterionIndexes: linked, optionVerdicts: input.optionVerdicts as OptionVerdicts } : {}), triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}) } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
+            context: { type: "question", ...(linked?.length ? { criterionIndexes: linked, optionVerdicts: input.optionVerdicts as OptionVerdicts } : {}), triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps, ...(input.stepSources?.length ? { stepSources: input.stepSources } : {}), ...(input.opening ? { opening: input.opening } : {}) } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
           });
           await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
           return true;

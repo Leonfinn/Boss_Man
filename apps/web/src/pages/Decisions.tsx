@@ -860,6 +860,14 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {d.context?.update && <DeployUpdateView u={d.context.update} />}
+                    {/* BOS-1660: a card with steps opens with why, where and how long. Where is written by Boss Man from the steps. */}
+                    {d.context?.opening && !done && (
+                      <dl data-opening className="card-opening" style={{ margin: "0 0 8px", padding: "8px 12px", borderRadius: 8, background: "var(--surface-2, rgba(127,127,127,0.1))", fontSize: 14 }}>
+                        <div><dt style={{ display: "inline", fontWeight: 600 }}>Why: </dt><dd style={{ display: "inline", margin: 0 }}>{d.context.opening.why}</dd></div>
+                        <div><dt style={{ display: "inline", fontWeight: 600 }}>Where: </dt><dd style={{ display: "inline", margin: 0 }}>{d.context.opening.where.join(" · ")}</dd></div>
+                        <div><dt style={{ display: "inline", fontWeight: 600 }}>How long: </dt><dd style={{ display: "inline", margin: 0 }}>About {d.context.opening.minutes} minute{d.context.opening.minutes === 1 ? "" : "s"}</dd></div>
+                      </dl>
+                    )}
                     {d.context?.type === "self_deploy" && d.context.urgent ? (
                       // The question's first paragraph is the heading shown just above; the rest is the usual deploy question.
                       <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n") || d.question} refs={d.refs} /></h2>
