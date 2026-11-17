@@ -193,13 +193,21 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
  */
 export const holdsMergeSql = sql`(${decisions.context}->>'type' = 'review_loop' or (${decisions.context}->>'type' = 'question' and ${decisions.context}->>'holdsMerge' = 'true'))`;
 
-/** An open card that holds this ticket's merge (see holdsMergeSql), or null. */
+/**
+ * BOS-1755: a no-code ticket has no merge, so closing it is the only "merge" there is, and its own owner-only question
+ * (owner_choice, owner_setup, secret...) is the answer it exists to get. Such a card holds the ticket in "Passed, held"
+ * until the owner answers it. A plan card and an after-merge criterion card never hold (they are answered at other times).
+ */
+export const ownerOnlyQuestionSql = sql`(${decisions.context}->>'type' = 'question' and (${decisions.context}->>'ownerOnly' is not null or ${decisions.context}->>'ownerMustDo' = 'true') and coalesce(${decisions.context}->>'plan', '') <> 'true' and ${decisions.context}->'criterionIndexes' is null)`;
+
+/** An open card that holds this ticket's merge (see holdsMergeSql), or null. A no-code ticket is also held by its own owner-only card. */
 export async function openHoldingCard(db: Db, ticketId: string): Promise<string | null> {
+  const [t] = await db.select({ noCode: tickets.noCode }).from(tickets).where(eq(tickets.id, ticketId));
   const [d] = await db
     .select({ id: decisions.id })
     .from(ticketDependencies)
     .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-    .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open"), holdsMergeSql))
+    .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open"), t?.noCode ? sql`(${holdsMergeSql} or ${ownerOnlyQuestionSql})` : holdsMergeSql))
     .limit(1);
   return d?.id ?? null;
 }

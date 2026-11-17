@@ -15,6 +15,7 @@ import { openBlockers } from "./ticket-links.js";
 import { mergeContext } from "./decision-context.js";
 import { record } from "./activity.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
+import { withdrawnNotice } from "./closed-notice.js";
 
 /** How long the author, then the CEO, has to settle a card that is being re-checked. */
 export const RECHECK_AUTHOR_MS = 30 * 60_000;
@@ -27,7 +28,7 @@ export const checkableCard = sql`(${decisions.raisedByAgentId} is not null and $
 
 type CardRow = { id: string; companyId: string; createdAt: Date; question: string; context: unknown };
 
-type Ctx = { type?: string; plan?: boolean; ticketId?: string; runId?: string; criterionIndexes?: unknown; steps?: unknown; setsUp?: unknown; engagementId?: string; ladder?: { ticketId?: string | null } };
+type Ctx = { type?: string; ownerOnly?: unknown; ownerMustDo?: unknown; keptOpen?: unknown; plan?: boolean; ticketId?: string; runId?: string; criterionIndexes?: unknown; steps?: unknown; setsUp?: unknown; engagementId?: string; ladder?: { ticketId?: string | null } };
 
 /** The same cards as `checkableCard`, for a row already in hand (answering and phone approve). */
 export function isCheckableCard(d: { raisedByAgentId: string | null; context: unknown }): boolean {
@@ -42,6 +43,11 @@ export async function holdsLiveRun(db: Db, context: unknown): Promise<boolean> {
   if (c.type !== "permission" || typeof c.runId !== "string" || !UUID_RE.test(c.runId)) return false;
   const [run] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, c.runId));
   return !!run && !run.endedAt;
+}
+
+/** A question card marked as the owner's alone (ownerOnly kind or ownerMustDo), BOS-1755. */
+export function isOwnerOnly(c: { type?: string; ownerOnly?: unknown; ownerMustDo?: unknown }): boolean {
+  return c.type === "question" && (!!c.ownerOnly || c.ownerMustDo === true);
 }
 
 /** The tickets a card is about: the one it names, else the ones it holds up. */
@@ -69,6 +75,9 @@ export async function cardInvalidReason(db: Db, d: CardRow): Promise<string | nu
   if (await holdsLiveRun(db, d.context)) return null;
   const ts = await cardTickets(db, d);
   const afterMerge = !isPlan && (c.criterionIndexes !== undefined || c.steps !== undefined || c.setsUp !== undefined);
+  // BOS-1755: a card only the owner can answer is never closed because its ticket finished: the owner may be reading it
+  // (the Jenkins card vanished that way). It stays open until they answer; closeInvalidCards labels it.
+  if (isOwnerOnly(c)) return null;
   if (ts.length && !afterMerge) {
     if (ts.every((t) => t.state === "done")) return `its ticket "${ts[0]!.title}" is finished`;
     if (ts.every((t) => t.state === "done" || t.mergeCommit)) return `its ticket "${ts[0]!.title}" is merged`;
@@ -142,6 +151,12 @@ export async function closeCardBySystem(db: Db, d: { id: string; companyId: stri
     return row;
   });
   if (!closed) return false;
+  // BOS-1755: a card that reached the owner's screen never just vanishes: it leaves the notice Decisions shows for two hours.
+  const [shown] = await db.select({ tier: decisions.tier, ladder: sql<string | null>`${decisions.context}->'ladder'->>'rung'` }).from(decisions).where(eq(decisions.id, d.id));
+  if (shown?.tier === "owner" && (!shown.ladder || shown.ladder === "owner")) {
+    const notice = withdrawnNotice({ agent: "Boss Man", reason: note, replacedBy: deps.newer ? { kind: "card", id: deps.newer.id } : { kind: "none" }, ...(deps.newer ? { newerLabel: "the newer card" } : {}), now: at });
+    await db.update(decisions).set({ context: mergeContext({ closedNotice: notice }) }).where(eq(decisions.id, d.id));
+  }
   // Loaded here, not at the top: decisions.ts imports this module, and the settled-card listener lives there.
   await (deps.markRead ?? (async (id: string, when: Date) => (await import("./decisions.js")).markDecisionNotificationRead(db, id, when)))(d.id, at);
   const freed = await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id)).returning({ ticketId: ticketDependencies.blockedTicketId });
@@ -149,6 +164,20 @@ export async function closeCardBySystem(db: Db, d: { id: string; companyId: stri
   const ticketId = freed.find((f) => f.ticketId)?.ticketId;
   await record(db, { companyId: d.companyId, ...(ticketId ? { ticketId } : {}), kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at });
   return true;
+}
+
+/**
+ * BOS-1755: an owner-only card whose ticket has finished stays open; it is labelled once (context.keptOpen) so the
+ * screen can say the ticket is done but the owner's answer is still wanted. The ticket is not reopened.
+ */
+async function labelKeptOpen(db: Db, d: CardRow, deps: CloseDeps) {
+  const c = d.context as Ctx;
+  if (!isOwnerOnly(c) || c.keptOpen) return;
+  const ts = await cardTickets(db, d);
+  if (!ts.length || !ts.every((t) => t.state === "done")) return;
+  const at = (deps.now ?? (() => new Date()))();
+  const note = `Its ticket "${ts[0]!.title}" is finished, but this question is yours alone and nobody has answered it, so it stays open until you do.`;
+  await db.update(decisions).set({ context: mergeContext({ keptOpen: { note, at: at.toISOString() } }) }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
 }
 
 /**
@@ -164,6 +193,7 @@ export async function closeInvalidCards(db: Db, deps: CloseDeps = {}, input: { c
   for (const d of rows) {
     const reason = await cardInvalidReason(db, d);
     if (reason && (await closeCardBySystem(db, d, reason, deps))) closed++;
+    else if (!reason) await labelKeptOpen(db, d, deps);
   }
   return closed;
 }
