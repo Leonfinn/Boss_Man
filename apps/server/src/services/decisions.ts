@@ -89,6 +89,7 @@ import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
 import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
+import { heldTicketIds } from "./review-holds.js";
 import { runCapabilities } from "./run-capabilities.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -3681,7 +3682,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         kept = [];
       }
+      // BOS-1717: a ticket held in review on a waits-on link or system hold isn't woken by an answer on another ticket's card.
+      const heldKept = kept.length ? await heldTicketIds(db, kept.map((t) => t.id)) : new Set<string>();
+      const cardTicketId = (ctx as { ticketId?: string | null }).ticketId ?? null;
       for (const t of kept) {
+        if (heldKept.has(t.id) && cardTicketId && cardTicketId !== t.id) continue;
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
       }
       // BOS-1591 (R21): the owner's answer to a question may be what other parked tickets wait for in a note only. Tell the CEO once.

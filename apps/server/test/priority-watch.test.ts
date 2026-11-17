@@ -85,6 +85,19 @@ describe("priority watch: what counts as a next step", () => {
   });
 });
 
+describe("priority watch: held on a recorded hold (BOS-1717)", () => {
+  const quietReview = { state: "review", lastActiveAt: ago(3 * 60 * MIN), movedBack: { id: "a1", text: "in_progress -> review" } } as const;
+  it("raises no alarm for a review ticket held on a waits-on link or system hold", () => {
+    expect(causes(facts({ ...quietReview, heldOnRecord: true }))).toEqual([]);
+  });
+  it("still alarms for the same quiet review ticket when no hold is recorded", () => {
+    expect(causes(facts({ ...quietReview, heldOnRecord: false }))).toContain("nothing");
+  });
+  it("a hold on a ticket that isn't in review doesn't silence the alarm", () => {
+    expect(causes(facts({ state: "in_progress", lastActiveAt: ago(3 * 60 * MIN), heldOnRecord: true }))).toContain("nothing");
+  });
+});
+
 describe("priority watch: merged, waiting for go-live (BOS-1547)", () => {
   const blocked = (over: Partial<Facts> = {}) => facts({ state: "blocked", ...over });
   it("a fresh go-live wait is a step under way, named for the server update, and raises no alarm", () => {
