@@ -1699,6 +1699,8 @@ export function reviewService(
           else if (r.outcome === "lock_wait" && (r.detail as { status?: string } | undefined)?.status === "main_moved") await failed("main_moved");
           else if (r.outcome === "lock_wait" && attempt >= LOCK_RETRY_ATTEMPTS) await failed("lock_timeout");
           if (r.outcome !== "lock_wait") return r;
+          // BOS-1752: a copy no longer in charge retries nothing; the server now in charge restarts this merge (DR-026).
+          if (deps.isLeader && !deps.isLeader()) return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited; the server now in charge restarts it." } };
           const { t } = await ticketWithRepo(ticketId);
           // A main_moved lock wait carries only { status } (no command or output): BOS-1604 crashed here with "reading 'slice'".
           const d = r.detail as { command?: string; output?: string; status?: string } | undefined;
@@ -1720,6 +1722,7 @@ export function reviewService(
           // Approval can be withdrawn while we wait: don't merge something no longer in review.
           const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
           if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge check waited, so it was not retried." } };
+          if (deps.isLeader && !deps.isLeader()) return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited; the server now in charge restarts it." } };
         }
       } catch (caught) {
         const err = caught instanceof Error ? caught : new Error(String(caught));
@@ -2259,6 +2262,9 @@ export function reviewService(
       };
       // What a CI wait means for this attempt: null carries on to the merge, anything else ends it.
       const ciVerdict = async (o: CiOutcome, prep: { commit: string; tree: string }): Promise<LandOnceResult | null> => {
+        // BOS-1752: a copy that handed over acts on no CI result: the server now in charge published its own merge commit and
+        // reads CI on that. Before this, a standby sent tickets back, raised cards or retried on a run the new leader replaced.
+        if (deps.isLeader && !deps.isLeader()) return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while GitHub CI ran; the server now in charge carries on with the merge." } };
         switch (o.kind) {
           case "stopped":
             return null;
@@ -2435,7 +2441,7 @@ export function reviewService(
       type Prepared = Extract<MergeResult, { status: "prepared" }>;
       type CheckFailed = Extract<MergeResult, { status: "check_failed" }>;
       // "stopped": GitHub CI failed while the round's job ran (BOS-1070); CI's verdict is the attempt's answer.
-      type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | CheckFailed;
+      type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | { status: "handed_over" } | CheckFailed;
       const message = `Merge "${t.title}" (${ticketId})`;
       const retargetOn = async () => {
         // Never while CI gating is on (BOS-1070): CI was published for this commit, and a retargeted tree is one CI never ran on.
@@ -2485,6 +2491,10 @@ export function reviewService(
             if (reused !== "passed") await started(job);
             let cur = job;
             while (cur.state === "queued" || cur.state === "running") {
+              // BOS-1752: a copy that handed over (blue/green deploy) stops here. The server now in charge waits on this same job
+              // (it adopts or reuses it), so this copy writes no line rows: before this, its second check_started and its early
+              // check_ended (when the new leader's CI push superseded this copy's run) looked like a check nobody waited on.
+              if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
               // GitHub CI failed meanwhile (BOS-1070): the job runs on (a pass is reused next time), but this attempt is over.
               if (o.stop?.stopped) {
                 await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "GitHub CI failed first; the job carries on and a pass is reused" });
@@ -2534,6 +2544,8 @@ export function reviewService(
                 }
               }
             }
+            // BOS-1752: the job ended while this copy handed over (between two polls): the server in charge records and lands it.
+            if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
             await lineEvent(db, t, { event: "check_ended", ...line, passed: cur.state === "passed" ? true : cur.state === "failed" ? checkVerdict({ ok: false, exitCode: cur.exitCode, timedOut: /timed out/i.test(cur.reason ?? ""), output: cur.logTail ?? "", ms: 0 }) : null, ...(cur.reason && cur.state !== "passed" ? { why: cur.reason.slice(0, 200) } : {}) }, reused === "passed" ? new Date() : (cur.endedAt ?? new Date()));
             if (cur.state === "passed") {
               await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: kindOf(command), passed: true, detail: null });
@@ -2877,7 +2889,7 @@ export function reviewService(
       if (m1.status === "early") return m1.result;
       // Merge train: the ticket left review while it waited in or for the train; nothing was pushed.
       if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while it waited in the merge train, so it was not merged." } };
-      if (m1.status === "handed_over") return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited in the merge train; the server now in charge restarts it." } };
+      if (m1.status === "handed_over") return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited (in the merge train or on its check job); the server now in charge restarts it." } };
       const m0 = m1;
       // BOS-1413: the branch got a commit the reviews never covered. Nothing was pushed; the queued check is dropped, the sign-off
       // card (if any) is withdrawn and the ticket goes back to its author, then to a new review round.
