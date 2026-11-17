@@ -201,9 +201,12 @@ if [ -z "$pre_done" ]; then
       echo "script tests failed; failing subtests:"
       grep -nE '^\s*not ok' "$script_test_log" || true
       grep -nE -B2 -A12 '^\s*not ok' "$script_test_log" | head -150 || true
+      echo "script tests failed; full output:"
+      cat "$script_test_log"
       rm -f "$script_test_log"
       exit 1
     fi
+    cat "$script_test_log"
     rm -f "$script_test_log"
     node scripts/lint-migrations.mjs
     node scripts/check-doc-numbers.mjs

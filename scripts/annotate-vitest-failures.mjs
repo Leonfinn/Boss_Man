@@ -23,7 +23,13 @@ export function annotation(file, title) {
   } catch {
     return `::error title=${title}::no JSON report was written`;
   }
-  return `::error title=${title}::${failureSummary(report) || "no failed test in the report"}`;
+  let summary;
+  try {
+    summary = failureSummary(report);
+  } catch {
+    return `::error title=${title}::the JSON report had no test results`;
+  }
+  return `::error title=${title}::${summary || "no failed test in the report"}`;
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

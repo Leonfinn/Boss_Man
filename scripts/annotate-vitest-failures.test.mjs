@@ -25,3 +25,10 @@ test("writes an error annotation, and says so when no report exists", () => {
   assert.match(annotation(file, "runner tests failed"), /^::error title=runner tests failed::b\.test\.ts: waits for it/);
   assert.equal(annotation(path.join(dir, "missing.json"), "t"), "::error title=t::no JSON report was written");
 });
+
+test("still posts an annotation when the JSON has no testResults", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "annot-"));
+  const file = path.join(dir, "r.json");
+  writeFileSync(file, "{}");
+  assert.equal(annotation(file, "t"), "::error title=t::the JSON report had no test results");
+});
