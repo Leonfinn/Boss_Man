@@ -131,7 +131,7 @@ describe("the main-CI watcher", () => {
     expect(made).toHaveLength(1);
     expect(made[0]!.body).toContain("https://github.com/leon/site/actions/runs/40");
     expect(made[0]!.body).toContain("Run tests");
-    expect(made[0]!.body).toContain("Error lines weren't readable with this token");
+    expect(made[0]!.body).toContain("The job log couldn't be read");
     const [s] = await c.service.statuses();
     expect(s!.status.state).toBe("failing");
     expect("detail" in s!.status ? s!.status.detail : "").not.toMatch(/can't read/);

@@ -203,12 +203,13 @@ Settings → Server and runner lists the entries the launcher is using. How the 
 
 ## Where release notes are
 
-There are no public release notes or changelog. Boss Man's own release notes are kept in a private wiki that only its maintainers can read.
+To see what changed, use these 3 sources:
 
-To see what changed, use these 2 sources:
-
+- [CHANGELOG.md](../CHANGELOG.md), also on the website as "What's new": one dated entry per day, listing the changes a user would notice, in plain words
 - the git history, as in step 1, where each merge line names one change
 - the [Breaking changes](#breaking-changes) list on this page, for anything you need to do by hand
+
+Boss Man's fuller release notes (what went live on its own server and when) are kept in a private wiki that only its maintainers can read.
 
 ## Common problems
 

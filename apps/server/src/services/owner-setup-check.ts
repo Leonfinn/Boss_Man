@@ -7,6 +7,7 @@
 // `{{host.env.file}}` or `{{host.compose.cmd}} restart <service>`, and the card shows this server's real values.
 import { type CompanyFacts, fillCompanyFacts } from "./company-facts.js";
 import { composeFactsFrom } from "./compose-steps.js";
+import { type WhenFacts, branchingFindings, settleWhen } from "./owner-setup-when.js";
 import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
 
 /**
@@ -55,7 +56,29 @@ export function fillOwnerSetup(steps: readonly string[], values: Readonly<Record
 }
 
 /** `company` (DR-057): other companies' records for `{{company.…}}` tokens, branches and R18b (company-facts.ts). */
-export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[]; company?: CompanyFacts };
+export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[]; company?: CompanyFacts; /** BOS-1650: settled `[when <fact>]` values (owner-setup-when.ts); read at raise time only. */ when?: WhenFacts };
+
+/** The one-line limit for the "why" and "if skipped" fields of a ticket's owner setup (BOS-1650). */
+export const SETUP_LINE_MAX = 240;
+/** What the card says when a ticket was written before these fields existed: raised anyway, never dropped. */
+export const NOT_GIVEN = "not given";
+
+/**
+ * BOS-1650: a ticket with owner setup steps says why (what it changes for the owner) and what happens if skipped
+ * ("nothing breaks" is an answer). Checks presence and shape (one line), not prose quality. Null when fine or when
+ * there are no steps.
+ */
+export function ownerSetupShapeProblem(steps: readonly string[], why: string | null | undefined, ifSkipped: string | null | undefined): string | null {
+  if (!steps.length) return null;
+  const bad = (label: string, field: string, v: string | null | undefined) => {
+    const t = v?.trim() ?? "";
+    if (!t) return `${field} is missing: one line saying ${label}.`;
+    if (/[\r\n]/.test(t) || t.length > SETUP_LINE_MAX) return `${field} must be one line of at most ${SETUP_LINE_MAX} characters.`;
+    return null;
+  };
+  const problems = [bad("what this changes for the owner", "ownerSetupWhy", why), bad('what happens if they skip it (write "nothing breaks" if that is true)', "ownerSetupIfSkipped", ifSkipped)].filter((p): p is string => !!p);
+  return problems.length ? `The owner setup needs two one-line fields besides its steps, and the card opens with them. ${problems.join(" ")}` : null;
+}
 
 /** The facts both checks use, read from the host-facts service: every recorded fact's value, the server's
  * reported name and the hosts for R6. The same inputs raise_decision gives checkAsk. */
@@ -72,6 +95,8 @@ export type OwnerSetupCheck = {
   /** Refusals a CEO override can let through, with a reason. */
   soft: LintFinding[];
   warn: LintFinding[];
+  /** BOS-1650: steps left out because their `[when <fact>]` is false (raise mode). */
+  dropped: { step: number; fact: string }[];
 };
 
 /**
@@ -84,18 +109,20 @@ export type OwnerSetupCheck = {
  */
 export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts, mode: "write" | "raise"): OwnerSetupCheck {
   // Company facts first (DR-057): a branch the record settles is dropped before anything else reads the steps.
-  const company = fillCompanyFacts(steps, facts.company, mode);
+  const settled = settleWhen(steps, facts.when, mode);
+  const company = fillCompanyFacts(settled.steps, facts.company, mode);
   const filled = fillOwnerSetup(company.steps, facts.values ?? {});
   const shown = fillServerHost(filled.steps, facts.serverHost);
   const compose = composeFactsFrom(facts.values);
   const lint = lintOwnerSteps(shown, { ...(compose ? { compose } : {}), ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
-  const refuse = [...company.findings, ...lint.refuse];
+  // R20 (BOS-1650) runs on the steps as the owner will read them, after every marker is settled.
+  const refuse = [...settled.findings, ...company.findings, ...lint.refuse, ...branchingFindings(shown)];
   const warn = lint.warn;
   // When written, a company token may have no record yet (the other company adds its target before go-live); a
   // known host fact may be unreported. At go-live both stay, and the steps go to the CEO.
   const knownGap = (f: LintFinding) => f.rule === "R4" && (Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "") || /^has \{\{company\.[a-z0-9-]+\.deployTarget\.(?:name|kind|address|tagName)\}\}/.test(f.problem));
   const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)));
-  return { steps: shown, generic: filled.generic, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn };
+  return { steps: shown, generic: filled.generic, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn, dropped: settled.dropped };
 }
 
 /**

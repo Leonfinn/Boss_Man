@@ -43,7 +43,7 @@ function setupStepsOf(steps: string[]) {
 }
 
 /** A live ticket and the owner steps it still needs after the runner-update-only ones are taken out (BOS-741). */
-type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string; /** The CEO's lintOverride for these steps (DR-052). */ override: string | null };
+type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string; /** The CEO's lintOverride for these steps (DR-052). */ override: string | null; /** BOS-1650: the card's opening lines; null on a ticket written before they existed. */ why: string | null; ifSkipped: string | null };
 
 const short = (sha: string) => sha.slice(0, 8);
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
@@ -255,7 +255,7 @@ export const releaseLogService = (
       // A ticket whose every step is the runner update comes through with no steps: it is named on the
       // runner-update card instead of getting one of its own (BOS-741).
       const steps = setupStepsOf(t.steps);
-      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit, override: t.override });
+      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit, override: t.override, why: t.why, ifSkipped: t.ifSkipped });
     }
     // Take back each affected card once, clearing every ticket that pointed at it (BOS-741). A ticket
     // still live here that shared a withdrawn card now has no card, so the grouping below raises one for
@@ -277,7 +277,7 @@ export const releaseLogService = (
       // steps are the card's (a bigger card shared with other tickets carries steps it never saw).
       const same = (t: SetupTicket) => t.steps.size === group.steps.length && group.steps.every((s) => t.steps.has(stepKey(s)));
       const override = group.tickets.find((t) => t.override && same(t))?.override ?? null;
-      const card = await raiseOwnerSetup(db, { companyId, tickets: group.tickets.map((t) => ({ ticketId: t.id, title: t.title })), steps: group.steps, commit: to, facts, override });
+      const card = await raiseOwnerSetup(db, { companyId, tickets: group.tickets.map((t) => ({ ticketId: t.id, title: t.title, why: t.why, ifSkipped: t.ifSkipped })), steps: group.steps, commit: to, facts, override });
       if (!card) continue;
       raised++;
       const ids = group.tickets.filter((t) => t.decisionId !== card.id).map((t) => t.id);
@@ -337,12 +337,12 @@ export const releaseLogService = (
   /** Done tickets in this company that carry setup steps and a merge commit, with their card if raised. */
   async function ticketsWithSetup(companyId: string) {
     const rows = await db
-      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, ownerSetupOverride: tickets.ownerSetupOverride, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
+      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, ownerSetupOverride: tickets.ownerSetupOverride, why: tickets.ownerSetupWhy, ifSkipped: tickets.ownerSetupIfSkipped, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
       .from(tickets)
       .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")));
     return rows
       .filter((t) => !!t.mergeCommit && !!t.ownerSetup?.trim())
-      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!), override: t.ownerSetupOverride }));
+      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!), override: t.ownerSetupOverride, why: t.why, ifSkipped: t.ifSkipped }));
   }
 
   return {

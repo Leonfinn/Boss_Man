@@ -10,6 +10,7 @@
   "ogAlt": "Boss Man: AI agents that plan, build and review your software, on your own server.",
   "nav": [
     { "key": "guides", "label": "Guides", "href": "/guides/" },
+    { "key": "whats-new", "label": "What's new", "href": "/whats-new" },
     { "key": "roadmap", "label": "Roadmap", "href": "{{portal}}", "portal": true },
     { "key": "about", "label": "About", "href": "/about" },
     { "key": "faq", "label": "FAQ", "href": "/faq" },

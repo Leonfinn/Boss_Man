@@ -10,6 +10,8 @@ lead: Boss Man backs up its database before every update. This guide covers upda
 
 ## Update the server
 
+To see what an update brings before you run it, read [What's new](/whats-new).
+
 From the install folder, run:
 
 ```sh Run on the Linux machine, as root

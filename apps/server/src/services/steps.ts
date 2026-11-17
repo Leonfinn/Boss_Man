@@ -12,6 +12,7 @@ import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.j
 import { type ComposeFacts, type ComposeStep, composeFindings } from "./compose-steps.js";
 import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
 import { norm, screenFindings, type Pressed } from "./owner-screens.js";
+import { WHEN_MARKER } from "./owner-setup-when.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
 export { parseStep, strayFence, type StepPiece, type Where };
@@ -61,7 +62,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R31" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R20" | "R31" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -917,6 +918,13 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   steps.forEach((text, i) => {
     const m = BRANCH_MARKER.exec(text);
     if (m) refuse.push({ step: i + 1, rule: "R4", problem: `starts "${m[0].trim()}", a branch only Boss Man's own record can settle, and it couldn't (no such company, or no single deploy target to read). Write the step without the branch, with every value` });
+  });
+  // BOS-1650: a `[when <fact>]` marker is settled from Boss Man's record when a ticket's setup card is raised
+  // (owner-setup-when.ts) and is gone by now; one still here would reach the owner as raw text. (R20, prose
+  // branching, is checked on ticket setup steps only: owner-setup-check.ts.)
+  steps.forEach((text, i) => {
+    const m = WHEN_MARKER.exec(text);
+    if (m) refuse.push({ step: i + 1, rule: "R4", problem: `starts "${m[0].trim()}", a branch only Boss Man's own record can settle, and it hasn't (only a ticket's setup steps are settled that way). Write the step without the branch` });
   });
   if (hostStep && !proof) {
     refuse.push({ step: hostStep, rule: "R11", problem: `has a host command, so the card needs proof: "rehearsed <script> @ <commit>" once a CI rehearsal passed, or "not rehearsed: <what and why>" with a look-only check as the last step` });
