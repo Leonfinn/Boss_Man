@@ -427,6 +427,10 @@ export const tickets = pgTable(
     /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
      * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
     ownerSetupOverride: text("owner_setup_override"),
+    /** BOS-1650: one line on what the setup changes for the owner; the go-live card opens with it. Null on tickets written before it existed (the card says "not given"). */
+    ownerSetupWhy: text("owner_setup_why"),
+    /** BOS-1650: one line on what happens if the owner skips the setup ("nothing breaks" is an answer). */
+    ownerSetupIfSkipped: text("owner_setup_if_skipped"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */

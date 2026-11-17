@@ -741,7 +741,7 @@ export class SessionManager {
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
                       : mergePhaseOf(command) === "invalid"
                         ? Promise.reject(new Error(`The "${command.phase}" merge step needs its commit${command.phase === "finish" ? " and tree" : ""}; nothing was merged.`))
-                        : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, mergePhaseOf(command) as MergePhase | null, command.pin, command.expectTree),
+                        : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, mergePhaseOf(command) as MergePhase | null, command.pin, command.expectTree, command.scanList),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),

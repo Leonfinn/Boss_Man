@@ -29,6 +29,18 @@ describe("fact clauses", () => {
     expect(evalFactClause({ kind: "equals", key: "repo.probe", value: "ok" }, facts)).toEqual({ met: false, seen: "repo.probe = failed" });
     expect(evalFactClause({ kind: "equals", key: "repo.nope", value: "ok" }, facts).seen).toContain("not reported");
     expect(evalFactClause({ kind: "no-failing-check" }, facts)).toEqual({ met: false, seen: "check.repo.probe = failed" });
+  });
+  it("compares two facts when the value names another reported fact (BOS-1696)", () => {
+    const [clause] = factClauses("Same (fact: deployer.scriptSha = deployer.repoSha)");
+    const sha = "740c4d40".padEnd(64, "a");
+    expect(evalFactClause(clause!, { "deployer.scriptSha": { value: sha }, "deployer.repoSha": { value: sha.toUpperCase() } }).met).toBe(true);
+    const diff = evalFactClause(clause!, { "deployer.scriptSha": { value: sha }, "deployer.repoSha": { value: "b".repeat(64) } });
+    expect(diff.met).toBe(false);
+    expect(diff.seen).toContain("deployer.repoSha = bbbb");
+    expect(evalFactClause(clause!, { "deployer.scriptSha": { value: sha } }).met).toBe(false);
+    expect(evalFactClause(clause!, {}).met).toBe(false);
+    // a plain literal that merely looks like a key, with no such fact reported, still compares as text
+    expect(evalFactClause({ kind: "equals", key: "a.b", value: "example.com" }, { "a.b": { value: "example.com" } }).met).toBe(true);
     expect(evalFactClause({ kind: "no-failing-check" }, {}).met).toBe(true);
   });
 });

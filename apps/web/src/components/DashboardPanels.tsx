@@ -4,7 +4,7 @@
 import type { Decision, DecisionTally } from "../api";
 import { raisedAgo } from "../age";
 import type { MergeHealthView, SlowSummary, StuckSummary } from "./MergesStuckBanner";
-import { slowText, waitedText } from "./MergesStuckBanner";
+import { heldSummary, heldText, slowText, waitedText } from "./MergesStuckBanner";
 import { inForceHeadline, inForceReason, type LimitInForce } from "../limit-in-force";
 
 export const NEEDS_YOU_MAX = 5;
@@ -59,6 +59,10 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
     mergesLine = { key: "merges", tone: "bad", symbol: "!", state: "Merges stuck", pill: "Merges stuck", text: `${stuck.title}.${behind}`, href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
   } else if (slow) {
     mergesLine = { key: "merges", tone: "warn", symbol: "…", state: "Merging, but slowly", pill: "Merging slowly", text: slowText(slow), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else if (heldSummary(merges)) {
+    // R28: calm amber, never the red "stuck" line: merges wait on the main fix on purpose.
+    const h = heldSummary(merges)!;
+    mergesLine = { key: "merges", tone: "warn", symbol: "‖", state: "Merges held behind the main fix", pill: "Main is red", text: heldText(h), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
   } else mergesLine = { key: "merges", tone: "ok", symbol: "✓", state: "Merges moving", pill: "Merges moving", text: merges.waitingCount > 0 ? `${merges.waitingCount} waiting, none stuck.` : "Nothing waiting to merge.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
 
   let usage: HealthLine;

@@ -159,8 +159,9 @@ describe("a card hidden for a re-check leaves a line in its place (BOS-1691)", (
   });
 });
 
+// The resolver itself is BOS-1695's (services/card-id.ts, tested in card-short-id.test.ts); this pins the read case.
 describe("decisions read takes a short id (BOS-1691)", () => {
-  it("reads a card by its first 8 characters, says when a prefix is ambiguous, and other actions still need the full id", async () => {
+  it("reads a card by its first 8 characters and says when a prefix is ambiguous or unknown", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Payments");
     const a = await c.card(t.id, { id: "a65d0309-1111-4111-8111-111111111111", question: "Card A" });
@@ -173,14 +174,13 @@ describe("decisions read takes a short id (BOS-1691)", () => {
     expect(textOf(one)).toContain("Card A");
     const both = await ceo.callTool({ name: "decisions", arguments: { action: "read", id: "ff1f7a1b" } });
     expect(isError(both)).toBe(true);
-    expect(textOf(both)).toMatch(/More than one card starts with ff1f7a1b: .*ff1f7a1b-2222.*ff1f7a1b-3333|More than one card starts with ff1f7a1b: .*ff1f7a1b-3333.*ff1f7a1b-2222/);
+    expect(textOf(both)).toMatch(/ff1f7a1b matches more than one card/);
+    expect(textOf(both)).toContain("ff1f7a1b-2222-4222-8222-222222222222");
+    expect(textOf(both)).toContain("ff1f7a1b-3333-4333-8333-333333333333");
     const none = await ceo.callTool({ name: "decisions", arguments: { action: "read", id: "0badc0de" } });
     expect(isError(none)).toBe(true);
-    expect(textOf(none)).toMatch(/No card with the id 0badc0de/);
+    expect(textOf(none)).toMatch(/No card in your company starts with 0badc0de/);
     const full = await ceo.callTool({ name: "decisions", arguments: { action: "read", id: a.id } });
     expect(isError(full)).toBe(false);
-    const act = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: "a65d0309", note: "No longer needed, the ticket moved on." } });
-    expect(isError(act)).toBe(true);
-    expect(textOf(act)).toMatch(/needs the card's full id/);
   });
 });

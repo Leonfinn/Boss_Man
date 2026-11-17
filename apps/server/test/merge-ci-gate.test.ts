@@ -15,7 +15,8 @@ vi.hoisted(() => {
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, checkJobs, checkResults, decisions, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, checkResults, decisions, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { holdView } from "../src/services/review-holds.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -56,6 +57,12 @@ function fakeGitHub() {
     status: null as number | null,
     checks: false,
     annotations: new Map<number, unknown[]>(),
+    /** A job's log text, or the HTTP status the log read is refused with. Absent: 404. */
+    logs: new Map<number, string | number>(),
+    /** The runs the CI branch lists (GitHub's `?branch=` read): used to tell a run replaced by a newer push from a lone cancel. */
+    branchRuns: [] as Array<{ id: number; head_sha: string; created_at: string; status: string; conclusion: string | null }>,
+    reruns: [] as string[],
+    rerunStatus: 201,
   };
   const last = new Map<number, WorkflowRun>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -67,6 +74,11 @@ function fakeGitHub() {
     const runs = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(url);
     const jobs = /\/actions\/runs\/(\d+)\/jobs/.exec(url);
     const notes = /\/check-runs\/(\d+)\/annotations/.exec(url);
+    if (/\/actions\/runs\/\d+\/rerun$/.test(url)) {
+      state.reruns.push(url);
+      return state.rerunStatus === 201 ? json(201, {}) : json(state.rerunStatus, { message: "Resource not accessible by personal access token" });
+    }
+    if (/\/actions\/runs\?branch=/.test(url)) return json(200, { total_count: state.branchRuns.length, workflow_runs: state.branchRuns });
     if (runs) {
       const sha = runs[1]!;
       const nth = (reads.get(sha) ?? 0) + 1;
@@ -76,6 +88,11 @@ function fakeGitHub() {
       return json(200, { total_count: list.length, workflow_runs: list.map(({ jobs: _jobs, ...r }) => ({ ...r, head_sha: sha })) });
     }
     if (jobs) return json(200, { jobs: last.get(Number(jobs[1]))?.jobs ?? [] });
+    const logUrl = /\/actions\/jobs\/(\d+)\/logs/.exec(url);
+    if (logUrl) {
+      const l = state.logs.get(Number(logUrl[1]));
+      return typeof l === "number" ? json(l, { message: "Resource not accessible by personal access token" }) : l === undefined ? json(404, { message: "Not Found" }) : new Response(l, { status: 200 });
+    }
     if (notes) return json(200, state.annotations.get(Number(notes[1])) ?? []);
     return json(404, { message: `no fake for ${url}` });
   }) as typeof globalThis.fetch;
@@ -166,6 +183,24 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
   });
 
+  it("a red CI goes back with the failed job's log lines, secrets redacted, and says plainly when the log can't be read (BOS-1667)", async () => {
+    // Built at run time so the source holds no token-shaped string for the secrets scan to flag.
+    const fakeToken = ["ghp", "_", "abcdefghijklmnopqrstuvwxyz", "0123456789ABCD"].join("");
+    const redRun = (sha: string) => (sha === MERGE ? red([{ ...job("images (amd64)", "failure", 7, "Shell tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/7" }, { ...job("images (arm64)", "failure", 8, "Shell tests") }]) : green());
+    const c = (ctx = await setup());
+    c.gh.state.ci = redRun;
+    c.gh.state.logs.set(7, ["2026-11-16T10:00:01Z starting", "2026-11-16T10:00:02Z FAIL host-deployer.test.sh: expected 3 got 4", `2026-11-16T10:00:03Z token ${fakeToken} used`, "2026-11-16T10:00:04Z ##[error]Process completed with exit code 1."].join("\n"));
+    c.gh.state.logs.set(8, 403);
+    const res = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(res).toMatchObject({ outcome: "verify_failed" });
+    const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
+    expect(wake!.note).toContain("Log lines (secrets redacted):");
+    expect(wake!.note).toContain("> FAIL host-deployer.test.sh: expected 3 got 4");
+    expect(wake!.note).toContain("> … end of the log:");
+    expect(wake!.note).not.toContain(fakeToken);
+    expect(wake!.note).toContain("The job log couldn't be read: the git token isn't allowed to read job logs");
+  });
+
   it("a workflow run that failed before any job (a broken workflow file) goes back naming the run", async () => {
     const c = (ctx = await setup());
     c.gh.state.ci = (sha) => (sha === MERGE ? { runs: [run("completed", "startup_failure", [])] } : green());
@@ -200,6 +235,35 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(wake!.note).toContain("apps/server/test/fence.test.ts:42: fence > blocks a write outside the clone: AssertionError: expected 0 to be 1");
     expect(wake!.note).not.toContain("Process completed with exit code");
     expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
+  });
+
+  // BOS-1643: main's CI broke while this merge's CI ran, and the CEO marked a fix (or linked a waits-on) meanwhile. The red
+  // CI is main's, so the ticket stays approved in "Passed, held", as a failed own check does (BOS-1173), and isn't sent back.
+  const markedMidCi = async (mark: (c: Awaited<ReturnType<typeof setup>>, fix: string) => Promise<unknown>) => {
+    const c = (ctx = await setup());
+    const fix = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix main's CI", state: "in_progress" })).json() as { id: string };
+    let marked = false;
+    c.gh.state.ci = (sha) => (sha === MERGE ? (marked ? red([job("check", "failure", 3, "Run tests")]) : running()) : green());
+    const approved = approveAndWait(c.req, c.ticket.id);
+    for (let i = 0; i < 300 && !(c.gh.reads.get(MERGE) ?? 0); i++) await new Promise((r) => setTimeout(r, 10));
+    await mark(c, fix.id);
+    marked = true;
+    const res = (await approved).json();
+    expect(res).toMatchObject({ outcome: "held", message: expect.stringMatching(/^This ticket's merge waits on .*"Passed, held"/) });
+    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect(await c.state()).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(await holdView(c.db, c.ticket.id)).toMatchObject({ system: true });
+    // Not sent back: no wake for the author, no loop failure, no CI failure recorded against the ticket.
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([]);
+  };
+
+  it("a red CI after a merge-check fix was marked mid-CI holds the ticket instead of sending it back (BOS-1643)", async () => {
+    await markedMidCi((c, fix) => c.db.update(tickets).set({ fixesMergeCheck: true }).where(eq(tickets.id, fix)));
+  });
+
+  it("a red CI after a waits-on link was added mid-CI holds the ticket instead of sending it back (BOS-1643)", async () => {
+    await markedMidCi((c, fix) => c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerTicketId: fix }));
   });
 
   it("waits while CI runs, says so on the merge queue, and runs its own check at the same time", async () => {
@@ -281,6 +345,52 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     c.gh.state.ci = (sha) => (sha === MERGE ? red([{ ...unstarted(3), conclusion: "cancelled" }]) : green());
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+  });
+
+  // The cancelled-run cases: GitHub stops a run when a newer run on the same branch replaces it. Nothing was tested, so it's never a send-back.
+  const cancelledRun = (): Ci => ({ runs: [run("completed", "cancelled", [{ ...job("check", "cancelled", 1), steps: [] }])] });
+  const landingEnds = async (c: NonNullable<typeof ctx>) => {
+    await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+    let landing: { state?: string; outcome?: string } | undefined;
+    for (let i = 0; i < 600 && landing?.state !== "finished"; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    }
+    return landing;
+  };
+
+  it("a run cancelled because a newer run on the CI branch replaced it is no failure: nothing goes back and no card", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? cancelledRun() : green());
+    c.gh.state.branchRuns = [
+      { id: 10, head_sha: "9".repeat(40), created_at: "2026-11-16T10:05:00Z", status: "in_progress", conclusion: null },
+      { id: 9, head_sha: MERGE, created_at: "2026-11-16T10:00:00Z", status: "completed", conclusion: "cancelled" },
+    ];
+    await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+    for (let i = 0; i < 300 && !(await c.events()).some((e) => /newer run/.test(e)); i++) await new Promise((r) => setTimeout(r, 10));
+    expect((await c.events()).some((e) => /replaced it\. No test failed/.test(e))).toBe(true);
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+    expect(c.gh.state.reruns).toEqual([]);
+  });
+
+  it("a run cancelled with no newer run is run once more, and merges when that passes", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha, nth) => (sha === MERGE ? (nth < 2 ? cancelledRun() : green()) : green());
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    expect(c.gh.state.reruns).toEqual([`${API}/actions/runs/9/rerun`]);
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+  });
+
+  it("a run cancelled with no newer run and a refused re-run says plainly that GitHub cancelled it, with a card and no send-back", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? cancelledRun() : green());
+    c.gh.state.rerunStatus = 403;
+    expect(await landingEnds(c)).toMatchObject({ state: "finished", outcome: "check_stuck" });
+    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect((await c.events()).some((e) => /GitHub cancelled the run/.test(e))).toBe(true);
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    expect(await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `merge-stuck:${c.ticket.id}` }]);
   });
 
   it("a failing test whose name or message mentions billing still goes back to the assignee, with no owner card", async () => {

@@ -22,6 +22,7 @@ import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 import { ago } from "./Dashboard";
 import { ageShort } from "../age";
+import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
 const DONE_SHOWN = 8;
 const PROJECT_TABS = [
@@ -694,7 +695,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // BOS-1546: the merge queue's own status line for each approved ticket (place in line, check running since, the ticket it waits for). Asked only when the board has such a ticket.
   const inMergeLine = (board.data?.columns ?? []).some((c) => c.tickets.some((t) => t.reviewStage === "merging" || t.reviewStage === "held"));
   const mergeLines = usePoll(
-    (signal) => (current && inMergeLine ? api<{ running: Array<{ ticketId: string; statusLine?: StatusLine }>; waiting: Array<{ ticketId: string; statusLine?: StatusLine }> }>(`/api/companies/${current.companyId}/merge-queue`, { signal }) : Promise.resolve(null)),
+    (signal) => (current && inMergeLine ? api<{ running: Array<{ ticketId: string; statusLine?: StatusLine }>; waiting: Array<{ ticketId: string; statusLine?: StatusLine }>; line?: MergeLine }>(`/api/companies/${current.companyId}/merge-queue`, { signal }) : Promise.resolve(null)),
     20_000,
     `board-mq-${current?.companyId ?? "none"}-${inMergeLine}`,
   );
@@ -1092,6 +1093,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         ? "Approved, but the merge waits on another ticket to be merged and live. Nothing is wrong: each one merges by itself afterwards."
                         : "A reviewer passed these but is holding the merge on purpose. Nothing is wrong, and nobody is woken until the hold ends."}
                     </span>
+                    {heldSummary(mergeLines.data) && <HeldBehindFixLine held={heldSummary(mergeLines.data)!} />}
                   </header>
                 ) : renaming === col.id ? (
                   <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />

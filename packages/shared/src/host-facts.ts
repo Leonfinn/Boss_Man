@@ -43,6 +43,8 @@ export function factClauses(text: string): FactClause[] {
   return out;
 }
 
+const FACT_KEY = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/;
+
 /** What the host's newest report says about one clause: whether it holds, and the value to quote when it doesn't. */
 export function evalFactClause(clause: FactClause, facts: Record<string, { value: string }>): { met: boolean; seen: string } {
   if (clause.kind === "no-failing-check") {
@@ -51,6 +53,13 @@ export function evalFactClause(clause: FactClause, facts: Record<string, { value
   }
   const f = facts[clause.key];
   const seen = f ? f.value.trim() : "";
+  // BOS-1696: a value that names another reported fact (`deployer.scriptSha = deployer.repoSha`) compares the two facts;
+  // read as the literal text "deployer.repoSha" it could never hold. Both must be reported and non-empty.
+  const other = FACT_KEY.test(clause.value) ? facts[clause.value] : undefined;
+  if (other) {
+    const ov = other.value.trim();
+    return { met: !!f && !!seen && seen.toLowerCase() === ov.toLowerCase(), seen: `${clause.key} = ${f ? seen || "(empty)" : "(not reported)"}, ${clause.value} = ${ov || "(empty)"}` };
+  }
   return { met: !!f && seen.toLowerCase() === clause.value.toLowerCase(), seen: `${clause.key} = ${f ? seen || "(empty)" : "(not reported)"}` };
 }
 

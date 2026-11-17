@@ -1254,9 +1254,32 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}) };
+      const mergedInto = tip && head !== recorded ? await this.landedOn(repo, dir, head, tip) : null;
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}), ...(mergedInto ? { mergedInto } : {}) };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * BOS-1647: the commit on `tip` that brought `head` in, or null when head isn't inside tip. A merge commit's own
+   * files come with it; a fast-forward (head is on tip's first-parent line) is head itself. Never throws: a git failure
+   * reads as "not merged", which leaves the ticket to the normal merge path.
+   */
+  private async landedOn(repo: string, dir: string, head: string, tip: string): Promise<{ commit: string; files?: string[] } | null> {
+    try {
+      if ((await this.gitCode(["merge-base", "--is-ancestor", head, tip], { cwd: dir, repo })).code !== 0) return null;
+      if (head === tip) return { commit: head };
+      const line = (await this.git(["rev-list", "--first-parent", "--ancestry-path", `${head}..${tip}`], { cwd: dir, repo })).split("\n").filter(Boolean);
+      const first = line[line.length - 1];
+      if (!first) return { commit: head };
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", first], { cwd: dir, repo })).split(" ").slice(1);
+      // The first commit of the target's own line that holds head: a merge of the branch when head isn't its first parent.
+      if (parents[0] === head || parents.length < 2) return { commit: head };
+      const names = await this.git(["diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", parents[0]!, first], { cwd: dir, repo });
+      return { commit: first, files: names ? names.split("\n") : [] };
+    } catch {
+      return null;
     }
   }
 
@@ -1883,8 +1906,8 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string, expectTree?: string): Promise<MergeResult> {
-    if (phase?.phase === "publish" || phase?.phase === "unpublish") return this.ciPublish(spec, secrets, phase);
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string, expectTree?: string, scanList?: string): Promise<MergeResult> {
+    if (phase?.phase === "publish" || phase?.phase === "unpublish") return this.ciPublish(spec, secrets, phase, scanList);
     if (phase) return this.mergePhase(spec, target, message, secrets, phase, pin);
     if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, expectTree, pin);
     const auth = gitAuthEnv(secrets);
@@ -1978,7 +2001,7 @@ export class Workspaces {
    * no CI to run, so nothing is pushed and the server is told. "unpublish" deletes that branch once the merge is done.
    * Neither records a refs/remotes/origin ref (unlike pushOrigin): the branch is the host's, not a ticket's.
    */
-  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }): Promise<MergeResult> {
+  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }, scanList?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = ciBranchFor(spec.ticketId);
@@ -1998,6 +2021,18 @@ export class Workspaces {
       const workflows = await this.gitCode(["ls-tree", "--name-only", phase.commit, ".github/workflows/"], { cwd: repo });
       const hasWorkflows = workflows.code === 0 && /\.ya?ml$/m.test(workflows.stdout);
       if (!hasWorkflows) return { status: "published", branch, commit: phase.commit, hasWorkflows: false };
+      // BOS-1664: the push makes the commit public (and readable by sha after the branch is deleted), so the secrets scan
+      // (BOS-979, the runner's own installed copy) must pass on exactly this commit first. A runner without it skips the scan.
+      const scanDir = path.join(this.scratch("ci-scan"), "tree");
+      try {
+        await this.git(["worktree", "add", "--quiet", "--detach", scanDir, phase.commit], { cwd: repo });
+        const blocked = await this.scanBeforeCheck(scanDir, spec.projectId, scanList);
+        if (blocked) throw new Error(`Not pushed to GitHub: the secrets scan found something in the branch.\n${blocked.slice(0, 800)}`);
+      } finally {
+        await this.git(["worktree", "remove", "--force", scanDir], { cwd: repo }).catch(() => undefined);
+        rmSync(path.dirname(scanDir), { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+      }
       const r = await this.gitCode(["push", "--quiet", "--force", url, `${phase.commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
       if (r.code !== 0) throw new Error(`Couldn't push the merge commit to ${branch} for the git host's CI: ${r.stderr.slice(0, 500)}`);
       return { status: "published", branch, commit: phase.commit, hasWorkflows: true };
