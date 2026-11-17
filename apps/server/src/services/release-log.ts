@@ -48,8 +48,13 @@ type SetupTicket = { id: string; title: string; steps: Map<string, string>; deci
 const short = (sha: string) => sha.slice(0, 8);
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
 
-/** What each company's last pass recorded: the commit before `pending` and the one being reconciled. */
-type Seen = { old?: string; new?: string; ticketId?: string | null };
+/**
+ * What each company's last pass recorded: the commit before `pending` and the one being reconciled. `contains`
+ * (BOS-1640): earlier live commits `new` is known to contain, newest first (see go-live-wait.ts liveServerRecord).
+ */
+type Seen = { old?: string; new?: string; ticketId?: string | null; contains?: string[] };
+/** Enough to step over a few unrecorded merges in a row; the list never grows past it. */
+const CONTAINS_MAX = 5;
 
 /**
  * How each deployer result names what went live. A switch-back and a rollback both end on the older
@@ -117,19 +122,28 @@ export const releaseLogService = (
    * that is a change. No ticket and no wake here: `releaseManagerWakes` does both, on the leader.
    * The first observation only records, so installing this never wakes anyone for the commit already live.
    */
-  async function noteLiveCommit(companyId: string, commit: string) {
+  async function noteLiveCommit(companyId: string, commit: string, from?: string) {
     const next = commit.toLowerCase();
     if (!isSha(next)) return { changed: false };
+    const base = isSha(from) && from.toLowerCase() !== next ? from.toLowerCase() : null;
     const seen = await seenOf(companyId);
-    if (seen.new === next) return { changed: false };
+    // BOS-1640: what `next` is known to contain: the commit it was deployed over and, when that is the one recorded
+    // live, what that one contained. Lets go-live place a live commit the merge gate never recorded.
+    const contains = (prior: string[]) => (base ? [...new Set([base, ...prior])].slice(0, CONTAINS_MAX) : prior);
+    if (seen.new === next) {
+      // The host's report can come a tick after the build's own commit was recorded: add what it says to the record.
+      if (base && !seen.contains?.includes(base)) await saveSeen(companyId, { ...seen, contains: contains(seen.contains ?? []) });
+      return { changed: false };
+    }
     // Another pass reconciled this commit already (seen.old === next): the record is ahead of what
     // this process was built from, so it never rewinds.
     if (seen.new && seen.old === next) return { changed: false };
+    const known = contains(base && base === seen.new ? (seen.contains ?? []) : []);
     if (!seen.new) {
-      await saveSeen(companyId, { old: next, new: next });
+      await saveSeen(companyId, { old: next, new: next, ...(known.length ? { contains: known } : {}) });
       return { changed: false };
     }
-    await saveSeen(companyId, { old: seen.new, new: next });
+    await saveSeen(companyId, { old: seen.new, new: next, ...(known.length ? { contains: known } : {}) });
     return { changed: true };
   }
 
@@ -347,8 +361,8 @@ export const releaseLogService = (
 
   return {
     /** Records the live commit it is given (see noteLiveCommit). Nothing else happens until the leader's pass. */
-    async note(companyId: string, commit: string) {
-      return noteLiveCommit(companyId, commit);
+    async note(companyId: string, commit: string, from?: string) {
+      return noteLiveCommit(companyId, commit, from);
     },
 
     /**
@@ -374,7 +388,7 @@ export const releaseLogService = (
           }
           if (!isSha(seen.old) || !isSha(seen.new) || seen.old === seen.new) continue;
           // The record moves on whatever happens below, so a retry (or the next pass) can't double the ticket.
-          await saveSeen(companyId, { old: seen.new, new: seen.new });
+          await saveSeen(companyId, { old: seen.new, new: seen.new, ...(seen.contains?.length ? { contains: seen.contains } : {}) });
           // The owner's setup cards (DR-011) go on the same change, and don't need a Release Manager.
           try {
             await ownerSetupPass(companyId, seen.new, how);
