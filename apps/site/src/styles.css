@@ -314,10 +314,9 @@ a { color: inherit; text-underline-offset: 3px; }
   .foot p { max-width: 560px; }
 }
 
-/* Phone */
-@media (max-width: 640px) {
-  body { font-size: 17px; }
-  .wrap { padding: 0 20px; }
+/* Phone header: the Menu button from 760 px down (not 640), since the brand and seven menu links no longer fit in one
+   row below that (measured on /whats-new, BOS-1658). */
+@media (max-width: 760px) {
   .top .wrap { min-height: 64px; gap: 12px; }
   .top .wrap { flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
   .top nav { margin-left: 0; flex-wrap: wrap; }
@@ -326,11 +325,18 @@ a { color: inherit; text-underline-offset: 3px; }
   /* Open menu: a panel under the header, one big row per link, Install last and full width. The page stays put. */
   .top { position: relative; }
   .top.open .menu { border-color: var(--amber); }
-  .top.open nav { display: flex; flex-direction: column; align-items: stretch; gap: 0; position: absolute; z-index: 20; left: 0; right: 0; top: 64px; padding: 4px 20px 24px; background: var(--night); border-bottom: 2px solid var(--line-dark); box-shadow: 0 24px 48px rgba(5, 9, 15, 0.5); }
+  .top.open nav { display: flex; flex-direction: column; align-items: stretch; gap: 0; position: absolute; z-index: 20; left: 0; right: 0; top: 64px; padding: 4px 32px 24px; background: var(--night); border-bottom: 2px solid var(--line-dark); box-shadow: 0 24px 48px rgba(5, 9, 15, 0.5); }
   .top.open nav a { min-height: 56px; padding: 0; font-size: 18px; color: var(--chalk); border-bottom: 1px solid var(--line-dark); flex-wrap: wrap; align-content: center; }
   .top.open nav a[aria-current] { box-shadow: inset 4px 0 0 var(--amber); padding-left: 14px; }
   .top.open nav .menu-sub { display: block; width: 100%; font-weight: 400; font-size: 15px; color: var(--chalk-2); padding-bottom: 8px; }
   .top.open nav a.btn { margin: 20px 0 0; border-bottom: 0; justify-content: center; color: var(--ink); }
+}
+
+/* Phone */
+@media (max-width: 640px) {
+  body { font-size: 17px; }
+  .wrap { padding: 0 20px; }
+  .top.open nav { padding-left: 20px; padding-right: 20px; } /* in line with the logo, as .wrap's padding is */
   .own-portal { padding: 22px 20px; }
   .own-portal .btn { width: 100%; }
   .hero { padding-top: 40px; }
@@ -517,4 +523,28 @@ a { color: inherit; text-underline-offset: 3px; }
   .g-fig.diagram figcaption { padding: 0; }
   .g-next { grid-template-columns: 1fr; }
   .g-next .next { text-align: left; }
+}
+
+/* Header menu just above the phone header (761 to 880 px): the brand and seven links fit on one line, unwrapped, only
+   with less space between them. Without this "What's new" broke onto two lines and ran into the brand. */
+@media (min-width: 761px) {
+  .top nav a, .top .brand { white-space: nowrap; }
+  .top .brand { flex-shrink: 0; }
+}
+@media (min-width: 761px) and (max-width: 880px) {
+  .top .wrap { gap: 8px; }
+  .top nav a { padding: 0 5px; font-size: 15px; }
+  .top nav a.btn { margin-left: 4px; padding: 0 12px; }
+}
+
+/* What's new (/whats-new): the guide layout without the guide list, the dates in the right-hand column. After the
+   guide media queries so these win at every width. */
+.guide.news { grid-template-columns: minmax(0, 1fr) 220px; max-width: 1100px; }
+.news .g-main { max-width: 760px; }
+.news .g-main > h2 { margin-top: 48px; padding-top: 24px; border-top: 2px solid var(--line-light); font-size: 26px; }
+@media (max-width: 1100px) {
+  .guide.news { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .news .g-main > h2 { font-size: 22px; margin-top: 36px; }
 }

@@ -36,6 +36,7 @@ import { EngagementError, type EngagementAction, type engagementsService } from 
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
+import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { openReviewLines } from "./services/review-kinds.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
@@ -372,7 +373,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
         // BOS-1193: the open question card this one corrects. Created and the old one closed as superseded in one call.
-        replaces: z.string().uuid().optional(),
+        replaces: cardIdInput().optional(),
         // BOS-1318: the only reasons a card stays on the owner's queue without steps. Without one (and without ownerMustDo or steps) the CEO takes it first.
         ownerOnly: z.enum(OWNER_ONLY_KINDS).optional().describe("Only for a card that really needs the owner: secret, money, host (a host step or runner rebuild), signoff, owner_choice (product direction or scope the owner kept for themselves; needs ownerOnlyWhy) or owner_setup. Without it, and without ownerMustDo or steps, your CEO answers the card first."),
         ownerOnlyWhy: z.string().max(200).optional().describe("One line on why this choice is the owner's; required with ownerOnly owner_choice."),
@@ -416,7 +417,13 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+      let replaces: string | undefined;
+      if (givenReplaces) {
+        const r = await resolveCardId(db, scope.companyId, givenReplaces);
+        if (!r.ok) return fail(`replaces: ${r.error}`);
+        replaces = r.id;
+      }
       if (ownerOnly === "owner_choice" && !ownerOnlyWhy?.trim()) return fail("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's and not the CEO's.");
       let clearWhen: ClearWhen[] | undefined;
       if (clearsWhen) {
@@ -437,7 +444,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
       const ask = checkAsk({ ...(steps?.length && usesOwnerSetupToken(steps) ? { ownerSetup: await ownerSetupFacts(db, scope.companyId) } : {}), triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined, ...(await seenImageDates(db, scope.companyId, steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
       if (ask.error) return fail(ask.error);
-      steps = ask.steps ?? steps; // {{host.…}} filled in
+      steps = ask.steps ?? steps; // {{host.…}} filled in, checker tags taken out (BOS-1665)
+      const stepSources = ask.stepSources;
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
@@ -498,7 +506,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -553,10 +561,17 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "withdraw_decision",
     {
       description: "Take back a decision card you raised, once it no longer needs the owner: they have already acted, or the thing resolved itself. Only a card you raised and only while it is open; any ticket it blocked can move again. Say why in reason (at least 10 characters) and what replaces the card in replacedBy, both required: card:<id> (a newer open card), ticket:<ref> with when (what brings the card back), or none (then the reason must say why, 30+ characters). If the card had reached the owner, Boss Man tells them with a note on Decisions and a quiet feed note. A question card or a plan card (once its run has ended) can be withdrawn. When a card is being re-checked (you were woken to confirm or withdraw it), use action confirm with checked, one line on what you checked against the live state, if it still holds: the flag clears and nothing is written on the card. Boss Man refuses a confirm for a card it can see is dead.",
-      inputSchema: { decisionId: z.string().uuid(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional(), replacedBy: z.string().max(80).optional(), when: z.string().max(300).optional() },
+      inputSchema: { decisionId: cardIdInput(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional(), replacedBy: z.string().max(80).optional(), when: z.string().max(300).optional() },
     },
-    async ({ decisionId, reason, action, checked, replacedBy, when }) => {
+    async ({ decisionId: givenId, reason, action, checked, replacedBy: givenReplacedBy, when }) => {
       if (!scope.agentId) return fail("Only an agent's run can withdraw a decision.");
+      // BOS-1695: the short id agents are shown (a unique prefix in this company) works as well as the full one.
+      const resolved = await resolveCardId(db, scope.companyId, givenId);
+      if (!resolved.ok) return fail(resolved.error);
+      const decisionId = resolved.id;
+      const rb = await resolveReplacedBy(db, scope.companyId, givenReplacedBy);
+      if (!rb.ok) return fail(rb.error);
+      const replacedBy = rb.value;
       if (action === "confirm") {
         try {
           const r = await decisions.confirmRecheck(decisionId, { agentId: scope.agentId }, checked ?? "");

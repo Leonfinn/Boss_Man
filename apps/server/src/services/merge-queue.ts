@@ -12,7 +12,77 @@ import { softHold } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
 import { clashWords } from "./merge-line.js";
-import { mergeLineHealth, type MergeLineHealth } from "./merge-line-health.js";
+import { mergeLineHealth, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
+import { goLiveWaitOf } from "./go-live-wait.js";
+import { goLiveWaitWords } from "@boss-man/shared";
+
+/** A fix that has been landing this long with no result is stalled (R28). */
+export const FIX_LANDING_LIMIT_MIN = 60;
+
+/**
+ * R28: the approved rows held only by waits, narrowed to those waiting on a ticket marked as fixing the merge check.
+ * The ids come from mergeHolds (the call that holds them), so the line can't disagree with the hold.
+ */
+async function heldBehindFixOf(
+  db: Db,
+  prefix: string | null | undefined,
+  heldWaits: Map<string, { ids: string[]; since: string }>,
+  view: { running: RunningNow[]; waiting: WaitingRow[] },
+): Promise<HeldBehindFix | null> {
+  const all = [...new Set([...heldWaits.values()].flatMap((h) => h.ids))];
+  if (!all.length) return null;
+  const fixes = await db
+    .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt })
+    .from(tickets)
+    .where(and(inArray(tickets.id, all), eq(tickets.fixesMergeCheck, true)));
+  if (!fixes.length) return null;
+  const fixIds = new Set(fixes.map((f) => f.id));
+  const rows = [...heldWaits.values()].filter((h) => h.ids.some((id) => fixIds.has(id)));
+  const out: HeldFix[] = [];
+  let updateCardId: string | null | undefined;
+  for (const f of fixes) {
+    const run = view.running.find((r) => r.ticketId === f.id);
+    const wait = view.waiting.find((w) => w.ticketId === f.id);
+    const goLive = f.mergeCommit ? await goLiveWaitOf(db, f).catch(() => null) : null;
+    let stateText: string;
+    let stalled: HeldFix["stalled"] = null;
+    if (f.mergeCommit) stateText = goLive === "own" ? "merged, waiting for the CEO to mark it live" : goLive ? `merged, ${goLiveWaitWords(goLive).replace(/^waiting for go-live: /, "waiting for ")}` : "merged";
+    else if (run) {
+      stateText = `merge check running, ${run.minutes} min`;
+      // The time with no result: the wait for GitHub CI when there is one, else the check's own run.
+      const noResult = Math.max(run.minutes, run.ci?.minutes ?? 0);
+      if (noResult >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been ${run.ci ? "waiting for GitHub CI" : "landing"} for ${noResult} minutes with no result` };
+    } else if (wait) {
+      stateText = `approved, waiting to land, ${wait.minutes} min`;
+      // Whoever owns the wait (Boss Man, the CEO, an agent), an approved fix that has not landed in an hour is stalled.
+      if (wait.minutes >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been approved for ${wait.minutes} minutes and has not landed` };
+    } else if (f.state === "review") stateText = "in review";
+    else if (f.state === "in_progress") {
+      // Sent back: its latest review round asked for changes. Nobody's review is moving it now, so the line is stuck on it.
+      const [last] = await db.select({ round: reviewRequests.round }).from(reviewRequests).where(eq(reviewRequests.ticketId, f.id)).orderBy(desc(reviewRequests.round)).limit(1);
+      const sentBack = last ? (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, f.id), eq(reviewRequests.round, last.round), eq(reviewRequests.status, "changes_requested"))).limit(1)).length > 0 : false;
+      stateText = sentBack ? "sent back for changes" : "being fixed";
+      if (sentBack) stalled = { reason: "it was sent back from review, so it is not landing yet" };
+    } else {
+      stateText = f.state === "blocked" ? "blocked" : f.state === "ready" || f.state === "backlog" ? "not started" : f.state;
+      stalled = { reason: `it is ${stateText}, so nobody is working on it` };
+    }
+    const ownerUpdate = !!f.mergeCommit && !!goLive && goLive !== "own";
+    // Only the owner's server update is left: link the update card that is already open, and never raise a new one.
+    if (ownerUpdate && updateCardId === undefined) {
+      const [card] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.companyId, f.companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'deploy'`))
+        .orderBy(desc(decisions.createdAt))
+        .limit(1);
+      updateCardId = card?.id ?? null;
+    }
+    out.push({ ticketId: f.id, ref: ticketRef(prefix, f.number), title: f.title, stateText, ownerUpdate, updateCardId: ownerUpdate ? (updateCardId ?? null) : null, stalled });
+  }
+  const since = rows.map((h) => h.since).sort()[0] ?? null;
+  return { held: rows.length, fixes: out, since };
+}
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -513,6 +583,7 @@ export function mergeQueueService(
       const sinceOf = new Map<string, string>();
       const blockerOf = new Map<string, string>();
       const stepOf = new Map<string, string>();
+      const heldWaits = new Map<string, { ids: string[]; since: string }>();
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
         const card = cards.get(r.id);
@@ -528,6 +599,9 @@ export function mergeQueueService(
         // DR-061 Q2b: the one merge-hold answer (mergeHolds), the same one the merge paths refuse on.
         const holds = await mergeHolds(db, r.id);
         const hold = holds.some((h) => h.kind === "hold") ? await holdView(db, r.id, t) : null;
+        // R28: what holds this row is only waits on other tickets (Boss Man's own hold, or none yet): note them for the line's one verdict.
+        const waitIds = holds.find((h): h is Extract<typeof h, { kind: "waits" }> => h.kind === "waits")?.ids ?? [];
+        if (waitIds.length && holds.every((h) => h.kind === "waits" || (h.kind === "hold" && hold?.system))) heldWaits.set(r.id, { ids: waitIds, since: hold?.createdAt ?? r.lastActivityAt.toISOString() });
         if (hold) {
           // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
           if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
@@ -684,7 +758,8 @@ export function mergeQueueService(
       const slots = queue?.slots ?? limit;
       const emptySeatSince = deps.emptySeatSince ? await deps.emptySeatSince(companyId).catch(() => null) : null;
       const workerReady = deps.workerReady ? await deps.workerReady(companyId).catch(() => undefined) : undefined;
-      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady });
+      const heldBehindFix = await heldBehindFixOf(db, prefix, heldWaits, { running, waiting });
+      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix });
       return {
         companyId,
         mode: queue?.mode ?? "legacy",

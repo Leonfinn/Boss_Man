@@ -123,7 +123,7 @@ export function fillCompanyFacts(steps: readonly string[], facts: CompanyFacts |
     text = text.replace(ENGAGEMENT, (all, id: string) => {
       const e = facts.engagements[id.toLowerCase()];
       const by = e && facts.companies.find((c) => c.id === e.providerCompanyId);
-      return e?.answeredAt && by ? `(confirmed by ${by.name} on ${e.answeredAt.slice(0, 10)})` : all;
+      return e?.answeredAt && by ? `(confirmed by ${by.name} on ${e.answeredAt.slice(0, 10)})` : "(not yet confirmed by the other company)"; // never the bare id (BOS-1665)
     });
     text = text.replace(COMPANY_TOKEN, (token, slug: string, field: string) => {
       const t = bySlug.get(slug)?.target;

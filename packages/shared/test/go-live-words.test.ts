@@ -7,6 +7,8 @@ describe("deploysNothing (BOS-1609)", () => {
     expect(deploysNothing(["packages/shared/src/go-live.test.ts", "scripts/deploy.test.sh", "apps/web/tests/e2e/board.spec.ts"])).toBe(true);
     expect(deploysNothing(["docs/10-migrations.md", "docs/img/board.png", "CLAUDE.md", "README.md"])).toBe(true);
     expect(deploysNothing([".github/workflows/ci.yml"])).toBe(true);
+    // A package's vitest config only steers its tests (BOS-1693).
+    expect(deploysNothing(["apps/runner/vitest.config.ts", "apps/web/vitest.config.mts", "vitest.workspace.ts"])).toBe(true);
   });
 
   it("is false when any file can go live, and for an empty list", () => {

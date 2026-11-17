@@ -6,7 +6,7 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { parseRepoUrl } from "@boss-man/shared";
-import { checkWorkers, projects, runners } from "../db/schema.js";
+import { checkWorkers, projects, runners, settings } from "../db/schema.js";
 import { onlineWorkerCount } from "./check-workers.js";
 import type { GitHostConfig } from "./git-hosts.js";
 
@@ -23,6 +23,8 @@ export type OwnerRecordFacts = {
   runner: { registered: boolean; everConnected: boolean };
   /** Whether the git token can read GitHub Actions (R34, BOS-1670): a live probe, filled only when text claims something about it. */
   gitTokenActionsRead?: "yes" | "no" | "unknown";
+  /** Whether the owner has saved a public address for Boss Man (Notifications, publicUrl). */
+  publicAddress: { set: boolean };
 };
 
 /** Answers whether a company's git token can read GitHub Actions runs right now; "unknown" when it can't tell. */
@@ -67,9 +69,12 @@ export async function ownerSetupFacts(db: Db, companyId: string): Promise<OwnerR
   // Only workers granted to this company count as its setup; a worker with no companies runs nobody's checks.
   const workers = (await db.select({ lastSeenAt: checkWorkers.lastSeenAt, companyIds: checkWorkers.companyIds }).from(checkWorkers)).filter((w) => w.companyIds.includes(companyId));
   const [runner] = await db.select({ lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
+  const [notify] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "notifications"));
+  const publicUrl = (notify?.value as { publicUrl?: string | null } | undefined)?.publicUrl;
   return {
     checkWorkers: { added: workers.length, everConnected: workers.filter((w) => w.lastSeenAt).length, online: onlineWorkerCount() },
     runner: { registered: !!runner, everConnected: !!runner?.lastSeenAt },
+    publicAddress: { set: !!publicUrl },
   };
 }
 
@@ -81,6 +86,7 @@ export function ownerSetupLines(f: OwnerRecordFacts): string[] {
   return [
     `- ${workersLine(f)}. A worker is installed only once it has connected; with 0 ever connected, never call one set up, existing or idle.`,
     `- Runner: ${!f.runner.registered ? "none registered" : f.runner.everConnected ? "has connected" : "registered, never connected"}.`,
+    `- Public address: ${f.publicAddress.set ? "set" : "not set; never ask the owner to open Boss Man from outside their network"}.`,
   ];
 }
 
@@ -129,6 +135,17 @@ const FACT_TABLE: FactRow[] = [
     contradicted: (f) => f.gitTokenActionsRead === "yes",
     live: () => "the git token can read GitHub Actions runs (a live check just now)",
     hold: (live) => `This text offers to change the git token, or says it can't read CI, but a live check says: ${live}. Don't ask the owner to change the token. Agents can't read CI logs because they never hold the token (BOS-322); Boss Man reads them for you (main's CI watcher and the merge gate's bounce). Say what the live check says. If a read really fails, the check would say so.`,
+  },
+  {
+    // A step that needs Boss Man reachable from outside the owner's network cannot be done with no public address.
+    key: "publicAddress.outside",
+    claims: [
+      /\b(?:open|reach|use|visit|log ?in to|sign in to|connect to|get to)\b[^.\n]{0,60}\b(?:from outside|outside (?:of )?(?:your|the|their)|away from (?:your|the) (?:home )?(?:network|wifi))\b/i,
+      /\b(?:open|reach|use|visit|log ?in to|connect to)\b[^.\n]{0,40}\bon (?:mobile data|cellular|4g|5g|your phone'?s data)\b/i,
+    ],
+    contradicted: (f) => !f.publicAddress.set,
+    live: () => "Public address: not set",
+    hold: (live) => `This text asks the owner to reach Boss Man from outside their network, but no public address is set, so they cannot. Say how to set one first (Notifications), or drop the step; it passes once one is set. The record says: ${live}. Source: server_status ownerSetup.`,
   },
 ];
 

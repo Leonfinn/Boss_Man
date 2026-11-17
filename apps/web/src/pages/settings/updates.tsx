@@ -52,6 +52,8 @@ export type SelfDeployView = {
   previousRun?: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
   /** BOS-1469: the runner image's version next to the one the live server needs. */
   runnerImage?: { running: string | null; needed: string | null };
+  /** BOS-1648: the server's one answer to "is a runner update needed?", with its words; null when there is no runner. */
+  runnerUpdate?: { state: "needed" | "not_needed" | "unknown"; words: string; tickets: string[] } | null;
   /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
   deployWait?: { until: string; target?: string } | null;
   /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
@@ -326,12 +328,14 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   // 8. Up to date.
   const server = s && s.target === "server" && s.result === "deployed" ? `Server updated ${when(s.ended || s.started)}. ` : "";
   const runners = extras.runnersAt ? `Runners updated ${when(extras.runnersAt)}. ` : "";
-  const ri = view.runnerImage;
-  const image = ri?.needed ? `Runner image: ${ri.running ? ri.running.slice(0, 8) : "version not recorded"}; the live server needs ${ri.needed.slice(0, 8)}${ri.running ? (ri.running === ri.needed ? " (match). " : " (a runner update may still be needed). ") : ". "}` : "";
+  // BOS-1648: the runner line is the server's one answer, word for word: needed, not needed, or can't tell (a fault,
+  // with its reason). Never "may be needed".
+  const ru = view.runnerUpdate;
+  const image = ru ? `${ru.words}${ru.state === "needed" ? " Press Build and update runners under Other actions." : ""} ` : "";
   return {
-    tone: "green",
-    tag: "Up to date",
-    say: "Boss Man is up to date.",
+    tone: ru && ru.state !== "not_needed" ? "amber" : "green",
+    tag: ru?.state === "needed" ? "Runner update needed" : ru?.state === "unknown" ? "Can't tell" : "Up to date",
+    say: ru?.state === "needed" ? "The server is up to date; the runners need an update." : ru?.state === "unknown" ? "The server is up to date; Boss Man can't tell whether the runners need an update." : "Boss Man is up to date.",
     more: `${server}${runners}${image}${runnerAgain}Last checked for changes ${ago(view.available.checkedAt, now)}.`,
     next: null,
     primary: { id: "check-now", label: "Check for updates now", blue: false },

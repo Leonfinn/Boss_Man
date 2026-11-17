@@ -9,6 +9,7 @@ import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable }
 import { record } from "./services/activity.js";
 import { AnswerError, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
+import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { ReviewError, type HoldInput } from "./services/review.js";
 import { checkQueue } from "./services/check-queue.js";
 import { pageDiff } from "./services/review-diff-page.js";
@@ -47,7 +48,7 @@ export function registerDecisionTools(
         options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
         recommended: z.string().max(200).optional(),
         summary: z.string().max(1000).optional(),
-        id: z.string().uuid().optional(),
+        id: cardIdInput().optional(),
         answer: z.string().max(200).optional(),
         assigneeAgentId: z.string().uuid().optional(),
         note: z.string().max(2000).optional(),
@@ -78,6 +79,17 @@ export function registerDecisionTools(
       const isCeo = me?.role === "ceo";
       // A plan approver answers only plans put to them, never permission requests.
       const mine = (d: typeof decisionsTable.$inferSelect) => isCeo || (!!scope.agentId && d.forAgentId === scope.agentId && (d.context as { plan?: boolean }).plan === true);
+      // BOS-1695: the 8-character short id agents are shown works as well as the full one (a unique prefix in this company).
+      if (input.id) {
+        const r = await resolveCardId(db, scope.companyId, input.id);
+        if (!r.ok) return fail(r.error);
+        input.id = r.id;
+      }
+      if (input.replacedBy) {
+        const r = await resolveReplacedBy(db, scope.companyId, input.replacedBy);
+        if (!r.ok) return fail(r.error);
+        input.replacedBy = r.value;
+      }
       if (input.action === "changes") {
         if (!isCeo) return fail("Only the CEO reads workflow-retro changes.");
         const { changes } = await retro.latest(scope.companyId);
@@ -247,7 +259,7 @@ export function registerDecisionTools(
             if (ask.error) return fail(ask.error);
             if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent reissue needs urgentWhy: one short sentence (10 to 200 characters) on what the owner must act on now (it is shown on their phone list).");
             const reissueSteps = ask.steps ?? input.steps;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";

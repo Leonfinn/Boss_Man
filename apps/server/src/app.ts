@@ -408,13 +408,16 @@ export async function buildApp(opts: AppOptions) {
     afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
     // DR-052: go-live setup cards are filled and checked with the host's facts, like every other owner card.
     // hostFacts is created just below; this only runs on a later release pass.
-    ownerSetupFacts: () => ownerSetupFacts(hostFacts),
+    // BOS-1650: the values behind `[when <fact>]` steps come from the same record server_status shows; null when it can't be read.
+    ownerSetupFacts: async () => ({ ...(await ownerSetupFacts(hostFacts)), when: { "network guard allow line can go": await netguardAllow().then((r) => (r ? r.lineCanGo : null)).catch(() => null) } }),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
   const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
   const deviceProfiles = deviceProfilesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
+    // BOS-1648: the CEO is woken once when Boss Man can't tell whether a runner update is needed.
+    wake: (agentId, input) => scheduler.notify(agentId, input),
     // Both colours, the same probe Settings shows: the runner trial ends as soon as the standby is stopped (BOS-953). `build` is defined further down; this only runs per request.
     colours: () => probeColours(colour(), build),
     // Quiet = no agent run in flight (an owner chat doesn't count) and no merge landing: a few seconds' outage of the database or proxy would cut them short (BOS-487).
@@ -870,6 +873,8 @@ export async function buildApp(opts: AppOptions) {
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // The run time limit stops a run through the Stop button's own cancel (BOS-846).
     cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
+    // BOS-1647: a push that landed but was never recorded is recorded, wherever the ticket sits now.
+    recordLanded: (ticketId) => review.recordLanded(ticketId).then((r) => !!r),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId, adopt) => review.startLanding(ticketId, adopt ? "Boss Man (the server restarted; carrying on with the merge check that is still running)" : "Boss Man (the server restarted during this merge; starting it again)", undefined, adopt ? { adopt } : undefined),
@@ -1809,6 +1814,8 @@ export async function buildApp(opts: AppOptions) {
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
       ownerSetup: z.string().max(4000).nullable(),
+      ownerSetupWhy: z.string().max(240).nullable(),
+      ownerSetupIfSkipped: z.string().max(240).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),

@@ -307,18 +307,22 @@ if command -v flock >/dev/null; then
   kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
 
   # Queue order: a merge check that arrives later goes ahead of a hand-run check; hand-run checks keep their order.
-  rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
-  ( lock env >"$t/hand1.out"; date +%s%N >"$t/hand1.at" ) & hand1=$!
+  # The order is read from the slot log's start lines, each written while its check holds the slot (BOS-1697: the old
+  # "<name>.at" stamps were taken when each check had exited, so on a busy machine a later check could exit first).
+  # Only slot 1 is freed and slot 2 stays held, so the three take turns in one slot and the log order is the serving order.
+  rm -rf "$t/lock.queue" "$t/lock.slotlog" "$t"/lock.holder.*; hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
+  ( lock env >"$t/hand1.out" ) & hand1=$!
   waitq 1   # each check is in the queue before the next starts, so the order is the one asserted
-  ( lock env CHECK_ALL_FOLDER=other >"$t/hand2.out"; date +%s%N >"$t/hand2.at" ) & hand2=$!
+  ( lock env CHECK_ALL_FOLDER=other >"$t/hand2.out" ) & hand2=$!
   waitq 2
-  ( lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=20 >"$t/merge.out"; date +%s%N >"$t/merge.at" ) & merge=$!
-  waitq 3; kill "$h1" "$h2" 2>/dev/null || true
-  wait "$h1" "$h2" "$hand1" "$hand2" "$merge"
+  ( lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=20 >"$t/merge.out" ) & merge=$!
+  waitq 3; kill "$h1" 2>/dev/null || true
+  wait "$h1" "$hand1" "$hand2" "$merge" 2>/dev/null || true
+  kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
   for f in hand1 hand2 merge; do grep -q "lock held" "$t/$f.out" || fail "queue: $f did not get a slot: $(cat "$t/$f.out")"; done
   grep -q "place [23] of [23]" "$t/hand2.out" || fail "queue: no place shown: $(cat "$t/hand2.out")"
-  [ "$(cat "$t/merge.at")" -le "$(cat "$t/hand1.at")" ] || fail "hand-run check got in ahead of the merge check"
-  [ "$(cat "$t/hand1.at")" -le "$(cat "$t/hand2.at")" ] || fail "hand-run checks got in out of order"
+  order=$(grep ' start ' "$t/lock.slotlog" | sed -n 's/.* kind=\([a-z]*\) .* folder=\(.*\)$/\1:\2/p' | sed 's/^hand:other$/hand2/; s/^hand:.*/hand1/; s/^merge:.*/merge/' | tr '\n' ' ')
+  [ "$order" = "merge hand1 hand2 " ] || fail "queue: want slots taken in the order merge, hand1, hand2, got '$order': $(cat "$t/lock.slotlog")"
   [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "queue entries left behind"
 
   # A waiter that died drops out of the queue instead of blocking those behind it.
@@ -399,7 +403,10 @@ if command -v flock >/dev/null; then
   # Ageing: a hand-run check that has waited CHECK_ALL_AGE_AFTER is served before merge checks queued after it. A merge
   # check (a live process that never takes the slot, standing for a steady stream of them) sits ahead of it in the name order.
   rm -rf "$t/lock.queue" "$t/lock.slotlog"; mkdir -p "$t/lock.queue"
-  sleep 120 & mproc=$!
+  # It lives until killed at the end of these cases (BOS-1697): a timed "sleep 120" ran out on GitHub's slower runners before
+  # BOS-613 (b), and check-slot.sh rightly drops a queue entry whose process is gone, so nothing was left to wait behind.
+  sleep 3600 & mproc=$!
+  mproc_alive() { [ -d "/proc/$mproc" ] || fail "$1: the stand-in merge check (pid $mproc) ended early, so the case proves nothing"; }
   hold 1 3600; h1=$!; sleep 0.3
   # Young hand-run check, merge check queued: the merge check goes first, so the hand-run check gives up without a slot.
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
@@ -458,6 +465,7 @@ if command -v flock >/dev/null; then
   waitq 2; sleep 2
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   sleep 2
+  mproc_alive "BOS-613 (a)"
   ! grep -q "lock held" "$t/older.out" || fail "BOS-613 (a): an aged hand-run check went ahead of an older merge check: $(cat "$t/older.out")"
   wait "$a" || true
   # BOS-613 (b): two slots, a merge check waiting, one hand-run check running: a second hand-run check waits, even aged and
@@ -468,8 +476,15 @@ if command -v flock >/dev/null; then
   ( lock env CHECK_ALL_AGE_AFTER=1 >"$t/cap.out" 2>&1 ) & a=$!
   waitq 1; sleep 2
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
+  # Free slot 2 only once the waiting check has counted the merge entry ("of 2"): a pass that read the line just before the
+  # entry was written and tried the slot just after it was freed would take it, as a real check would (BOS-1697). The cap
+  # is what this case tests, so it must start from a line where the merge check is already seen; with the cap broken the
+  # check still takes slot 2 below and the case fails.
+  for _ in $(seq 300); do grep -Eq "place [0-9]+ of 2," "$t/cap.out" 2>/dev/null && break; sleep 0.2; done
+  grep -Eq "place [0-9]+ of 2," "$t/cap.out" || fail "BOS-613 (b): the waiting check never counted the merge entry: $(cat "$t/cap.out")"
   kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
   sleep 2
+  mproc_alive "BOS-613 (b)"
   ! grep -q "lock held" "$t/cap.out" || fail "BOS-613 (b): a second hand-run check took a slot while a merge check waited: $(cat "$t/cap.out")"
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   for _ in $(seq 300); do grep -q "lock held" "$t/cap.out" 2>/dev/null && break; sleep 0.2; done

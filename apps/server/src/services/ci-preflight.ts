@@ -28,7 +28,7 @@ export type PreflightContext = {
 };
 
 export type PreflightDeps = {
-  hosts: Pick<ReturnType<typeof gitHostService>, "ciStatus" | "failures">;
+  hosts: Pick<ReturnType<typeof gitHostService>, "ciStatus" | "failures" | "workflowRuns" | "rerunRun">;
   context: (ticket: { id: string; companyId: string; projectId: string }) => Promise<PreflightContext | null>;
   wake?: (agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => PromiseLike<unknown> | unknown;
   timing?: CiTiming;
@@ -62,6 +62,10 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         return { passed: false, text: `Boss Man can't read GitHub's CI runs for this project (${o.message}). That is the git token's access, not your code: tell the CEO, or mark the job not applicable with a reason if it truly doesn't apply.` };
       case "error":
         return { passed: false, text: `GitHub's CI result couldn't be read (${o.message}). Ask again later; if it keeps happening, tell the CEO.` };
+      case "superseded":
+        return { passed: false, text: `GitHub replaced this CI run with a newer one on the same branch (${short(o.newerSha)}), so no test failed. Ask again with request_check.` };
+      case "cancelled":
+        return { passed: false, text: `GitHub cancelled the CI run${o.runs.length ? ` (${o.runs.join(", ")})` : ""}${o.rerunTried ? " again after one re-run" : ""}, so no test failed. Ask again with request_check; if it keeps happening, tell the CEO.` };
       case "failed": {
         const found = await deps.hosts.failures(ctx.target.cfg, ctx.target.token, o.status.failed).catch(() => []);
         const listed = found.length ? found : o.status.failed.map((run) => ({ run, lines: [] as string[] }));

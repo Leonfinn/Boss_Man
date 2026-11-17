@@ -12,7 +12,47 @@ import { usePoll } from "../hooks";
 export type MergeLine =
   | { state: "healthy" }
   | { state: "stuck"; cause: string; title: string; reason: string; fix: string; others: number }
-  | { state: "over_capacity"; waiting: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null };
+  | { state: "over_capacity"; waiting: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null }
+  | { state: "held_behind_fix"; held: number; fixes: HeldFix[]; since: string | null };
+
+/** A ticket that fixes the merge check and holds approved work (R28). */
+export type HeldFix = { ticketId: string; ref: string | null; title: string; stateText: string; ownerUpdate: boolean; updateCardId?: string | null };
+export type HeldSummary = { held: number; fixes: HeldFix[]; since: string | null };
+
+/** Approved work held behind a main fix, or null: only the server's "held_behind_fix" verdict counts. */
+export function heldSummary(view: Pick<MergeHealthView, "line"> | null | undefined): HeldSummary | null {
+  const l = view?.line;
+  return l?.state === "held_behind_fix" ? { held: l.held, fixes: l.fixes, since: l.since } : null;
+}
+
+/** The one plain sentence for the line, with what ends it; the same words everywhere it shows. */
+export function heldText(h: HeldSummary): string {
+  const fixes = h.fixes.map((f) => `${f.ref ?? `"${f.title}"`} (${f.stateText})`).join(" and ");
+  const end = h.fixes.some((f) => f.ownerUpdate) ? "They go on once the server update runs." : "They merge by themselves once it is merged and live.";
+  return `Main is red: ${h.held} approved ${h.held === 1 ? "ticket is" : "tickets are"} held behind the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}. ${end}`;
+}
+
+/** The calm amber line (never the red "stuck" banner); links the fix tickets. */
+export function HeldBehindFixLine({ held }: { held: HeldSummary }) {
+  return (
+    <div className="mq-held-fix" role="status" data-held-behind-fix="true">
+      <strong>Main is red: {held.held} approved {held.held === 1 ? "ticket is" : "tickets are"} held behind the fix</strong>{" "}
+      {held.fixes.map((f, i) => (
+        <span key={f.ticketId}>
+          {i > 0 ? " and " : ""}
+          <a href={`#/tickets/${f.ticketId}`} title={f.title}>{f.ref ?? f.title}</a> ({f.stateText})
+        </span>
+      ))}
+      {held.since ? `, since ${clock(held.since)}` : ""}. {held.fixes.some((f) => f.ownerUpdate) ? "They go on once the server update runs." : "They merge by themselves once it is merged and live."}
+      {held.fixes.filter((f) => f.ownerUpdate && f.updateCardId).slice(0, 1).map((f) => (
+        <span key={f.updateCardId}>
+          {" "}
+          <a href={`#/decisions/${f.updateCardId}`} data-update-card={f.updateCardId}>Open the update card</a>.
+        </span>
+      ))}
+    </div>
+  );
+}
 
 /** The part of the Merge queue read the banner and the Dashboard's Merges line need. */
 export type MergeHealthView = {

@@ -148,7 +148,8 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         await menuReady(page);
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         const navHtml = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.outerHTML.slice(0, 400));
-        expect(await page.locator("nav[aria-label='Settings'] a").count(), `${vp.name}: 14 menu links ${navHtml}`).toBe(14);
+        // (BOS-1655: the one-row fold links for the other groups are not pages, so they are not counted.)
+        expect(await page.locator("nav[aria-label='Settings'] a:not(.set-group-fold)").count(), `${vp.name}: 14 menu links ${navHtml}`).toBe(14);
         expect(await page.locator("[role='tablist']").count(), `${vp.name}: no tab row`).toBe(0);
         // The current page is marked, and shown by weight and a bar as well as colour.
         const cur = page.locator("nav[aria-label='Settings'] a[aria-current='page']");
@@ -164,7 +165,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         // Rows are big enough to press.
         // (Below 900 px a page has no menu; BOS-1224 checks that below.)
         if (vp.width >= 900) {
-          const row = await page.locator("nav[aria-label='Settings'] a").first().boundingBox();
+          const row = await page.locator("nav[aria-label='Settings'] a:not(.set-group-fold):visible").first().boundingBox();
           expect(row && row.height, `${vp.name}: rows are at least 40 px`).toBeGreaterThanOrEqual(vp.touch ? 44 : 40);
         }
         await saveShot(`settings-${vp.name}.png`, page);
@@ -218,6 +219,46 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       await phone.close();
     } finally {
       for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
+    }
+  }, LIMIT);
+
+  it("BOS-1655: on a short window the other groups fold to one row each and the current group's pages all show; the old address marks Server and runner", async () => {
+    const browser = await launch();
+    if (!browser) return;
+    try {
+      const f = sizes[1]!;
+      const page = await browser.newPage({ viewport: { width: f.width, height: f.height }, deviceScaleFactor: 1, hasTouch: f.touch });
+      await page.goto(`${base}/#/settings/c1/system`); // the old one-page address redirects to Updates
+      await menuReady(page);
+      await page.waitForFunction(() => location.hash.includes("/updates"), null, { timeout: 15_000 });
+      const nav = page.locator("nav[aria-label='Settings']");
+      const cur = page.locator(".set-group-current");
+      expect(await cur.count(), "one current group").toBe(1);
+      expect(await cur.locator(".set-group-label").innerText()).toMatch(/server and runner/i);
+      expect(await cur.locator("a:visible").count(), "every page of the current group shows").toBe(await cur.locator("a").count());
+      const folds = nav.locator("a.set-group-fold:visible");
+      expect(await folds.count(), "the two other groups are one row each").toBe(2);
+      expect(await nav.locator(".set-group-other ul").first().isVisible(), "folded group's pages are hidden").toBe(false);
+      const box = await nav.boundingBox();
+      expect(await nav.evaluate((el: Element) => el.scrollHeight - el.clientHeight), "side list needs no scrolling").toBeLessThanOrEqual(1);
+      expect(box!.y + box!.height, "the side list fits the window").toBeLessThanOrEqual(f.height + 1);
+      await saveShot("settings-fold-foldable.png", page);
+      // Tapping a folded row opens that group's first page.
+      await folds.first().click();
+      await page.waitForFunction(() => !location.hash.includes("/updates"), null, { timeout: 15_000 });
+      expect(await page.locator(".set-group-current").count(), "the tapped group is now current").toBe(1);
+      expect(await nav.locator("a[aria-current='page']").count()).toBe(1);
+      await page.close();
+      // A tall window (desktop) is unchanged: no fold rows show.
+      const d = sizes[0]!;
+      const tall = await browser.newPage({ viewport: { width: d.width, height: d.height }, deviceScaleFactor: 1 });
+      await tall.goto(`${base}/#/settings/c1/updates`);
+      await menuReady(tall);
+      expect(await tall.locator("a.set-group-fold:visible").count(), "no folds on a tall window").toBe(0);
+      await saveShot("settings-fold-desktop-tall.png", tall);
+      await tall.close();
+    } finally {
+      for (const ctx of browser.contexts()) await ctx.close();
     }
   }, LIMIT);
 
