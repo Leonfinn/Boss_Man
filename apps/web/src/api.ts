@@ -190,6 +190,8 @@ export type Decision = {
   blocks: Array<{ ticketId: string; ref?: string | null; title: string }>;
   /** The tickets this decision is about (the ones it holds up directly). */
   about?: Array<{ ticketId: string; ref: string | null; title: string }>;
+  /** BOS-1744: the projects of the tickets this card is about; empty = company-wide. */
+  projects?: Array<{ id: string; name: string }>;
   /** Ticket references written in the card's text, resolved in the owner's own company. */
   refs?: Record<string, { ticketId: string; ref: string; title: string }>;
   score: number;
