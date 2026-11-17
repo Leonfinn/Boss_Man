@@ -319,7 +319,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
                     view.reload();
                     return r.message ?? "The runner update is queued.";
                   }
-                  // BOS-1644: Boss Man couldn't confirm a fix is live and went ahead; say why instead of moving on silently.
+                  // BOS-1644: Boss Man could not confirm a fix is live and went ahead; say why instead of moving on silently.
                   if (r?.note) return `${r.note} Its card is in Decisions.`;
                   go("decisions");
                 })
