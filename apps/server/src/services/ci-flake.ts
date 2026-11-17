@@ -139,7 +139,8 @@ export function gateRerunCommand(files: string[]): string {
     'if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile --prefer-offline || cant "pnpm install failed";',
     'elif [ -f package-lock.json ]; then npm ci || cant "npm ci failed";',
     'else cant "no pnpm-lock.yaml or package-lock.json"; fi',
-    'out=$(mktemp) || cant "no temp file"',
+    // In the throwaway checkout, not $TMPDIR: a fenced job may not be allowed to write /tmp.
+    'out="$root/.boss-man-rerun.out"',
     "rerun() {",
     '  f=$1; [ -f "$root/$f" ] || cant "$f is not in the merge commit"',
     '  dir=$(dirname "$root/$f")',
