@@ -1338,7 +1338,7 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
     // Same chain as the old whole-table walk.
     const legacyRaw = await legacyQueue(ctx.db, () => new Date());
-    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, projects: row.projects, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
     expect(mine).toEqual(old);
   });
 
@@ -1373,6 +1373,8 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
       rechecking: null,
       notRechecked: null,
       about: r.id === heldCards[0]!.id ? about(root[0]!.id) : r.id === heldCards[1]!.id ? about(branch[0]!.id) : [],
+      // The project of each ticket a card is about; the unrelated card names none, so it is company-wide.
+      projects: r.id === heldCards[0]!.id || r.id === heldCards[1]!.id ? [{ id: ctx.project.id, name: "Customer app" }] : [],
       // A Date in the old body, an ISO string over HTTP.
       createdAt: r.createdAt.toISOString(),
     }));
