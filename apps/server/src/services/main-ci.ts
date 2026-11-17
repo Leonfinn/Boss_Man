@@ -164,11 +164,17 @@ export function mainCiService(
     const latest = new Map<string, WorkflowRun>();
     for (const r of runs) if (r.status === "completed" && !latest.has(r.name)) latest.set(r.name, r);
     let failing = 0;
-    for (const [workflow, run] of latest) {
+    for (const [workflow, newest] of latest) {
+      if (BAD.has(String(newest.conclusion))) failing++;
+      // Every finished run since the last one looked at, oldest first: a newer run that is green, cancelled or
+      // skipped must not hide an older red one the watcher never saw (BOS-1703). With no record, only the newest.
+      const finished = runs.filter((r) => r.name === workflow && r.status === "completed");
+      const seenId = Number((state.seen[workflow] ?? "").split(":")[0]);
+      const at = finished.findIndex((r) => r.id === seenId);
+      const pending = at < 0 ? [newest] : finished.slice(0, at + (`${finished[at]!.id}:${finished[at]!.attempt}` === state.seen[workflow] ? 0 : 1)).reverse();
+      for (const run of pending) {
       const seenKey = `${run.id}:${run.attempt}`;
       const bad = BAD.has(String(run.conclusion));
-      if (bad) failing++;
-      if (state.seen[workflow] === seenKey) continue;
       if (!bad && run.conclusion !== "success") {
         // Cancelled or skipped: says nothing either way.
         state.seen[workflow] = seenKey;
@@ -181,7 +187,7 @@ export function mainCiService(
         } catch (err) {
           // Try again next pass: the run isn't marked seen.
           deps.log?.(`main CI: couldn't read run ${run.id}: ${(err as Error).message}`);
-          continue;
+          break;
         }
         if (!found.length) found = [{ key: keyOf(workflow, "(run)", "(no failing job found)"), workflow, job: "(run)", step: "(no failing job found)", jobUrl: run.url, lines: [] }];
       }
@@ -205,9 +211,17 @@ export function mainCiService(
           }
           continue;
         }
+        const title = `Main's CI is failing: ${f.workflow} / ${f.job} / ${f.step}`.slice(0, 200);
+        // A ticket opened by hand for this same failure counts: don't open a second one (BOS-1703).
+        // (Tickets this watcher opened carry its closing line in the body; one it called green earlier is not "by hand", so a second break opens a fresh one.)
+        const [byHand] = (await db.select({ id: tickets.id, title: tickets.title, body: tickets.body }).from(tickets).where(and(eq(tickets.projectId, p.id), ne(tickets.systemState, "done"))))
+          .filter((t) => !(t.body ?? "").includes("Boss Man opens one ticket for each failing step") && t.title.toLowerCase().includes("main's ci is failing") && t.title.toLowerCase().includes(f.job.toLowerCase()) && t.title.toLowerCase().includes(f.step.toLowerCase()));
+        if (byHand) {
+          state.open[f.key] = { ticketId: byHand.id, workflow, runs: [run.url] };
+          continue;
+        }
         const first = firstBad(runs, run);
         const who = await breaker(p.id, p.companyId, first.headSha);
-        const title = `Main's CI is failing: ${f.workflow} / ${f.job} / ${f.step}`.slice(0, 200);
         const body = [
           `GitHub CI is failing on ${p.defaultBranch} in ${p.name}.`,
           "",
@@ -236,6 +250,7 @@ export function mainCiService(
         if (who.agentId && deps.notify) await deps.notify(who.agentId, { ticketId: t.id, reason: "main CI failed", note: `Main's CI failed at ${f.job} → ${f.step}. ${NEVER_WEAKEN}`, priority: 2 }).catch(() => undefined);
       }
       state.seen[workflow] = seenKey;
+      }
     }
     setStatus(failing ? { state: "failing", detail: `Main's CI is failing in ${failing} workflow${failing === 1 ? "" : "s"}.` } : { state: "green", detail: "Main's CI is green." });
     await writeState(p.id, state);
