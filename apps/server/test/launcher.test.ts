@@ -311,7 +311,8 @@ describe("runners through the launcher (R55)", () => {
   it("start-up sync tries again while the launcher is coming up, and never throws", async () => {
     const c = (ctx = await setup());
     await c.req("POST", "/api/companies", { name: "App Co" });
-    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    // The start sends PUT /runners/app-co and then PUT /runners/app-co/allow; wait for both before clearing the log.
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT" && x.path === "/runners/app-co/allow")).toBe(true));
     c.fake.calls.length = 0;
     c.fake.fail(true);
     const done = c.launcher.syncAll(1, 3);
@@ -338,7 +339,7 @@ describe("runners through the launcher (R55)", () => {
   it("at server start, removes the runner and token the launcher keeps for a company that no longer exists (BOS-497)", async () => {
     const c = (ctx = await setup());
     await c.req("POST", "/api/companies", { name: "App Co" });
-    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT" && x.path === "/runners/app-co/allow")).toBe(true));
     // A leftover: the launcher still has a runner (and token file) for a company deleted from the database.
     await c.db.insert(settings).values({ key: `runner-slug:${randomUUID()}`, value: "gone-co" });
     c.fake.running.set("gone-co", "exited");
