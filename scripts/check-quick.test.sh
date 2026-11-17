@@ -237,6 +237,12 @@ run 0 "a web change at the gate" env BOSSMAN_MERGE_CHECK=1
 logged "pnpm --filter @boss-man/web exec vitest run test/inventory.test.ts test/shell-layout.test.ts" "gate web"
 notlogged "pure.test.ts" "gate web pure"
 notlogged "@boss-man/server exec vitest run" "gate web only"
+# The browser tests open apps/web/dist and skip without it: the build runs first, once, before the whole-repo run.
+[ "$(grep -cF "pnpm --filter @boss-man/web build" "$LOG")" -eq 1 ] || fail "web built not exactly once: $(cat "$LOG")"
+[ "$(grep -nF "pnpm --filter @boss-man/web build" "$LOG" | head -n 1 | cut -d: -f1)" -lt "$(grep -nF "pnpm --filter @boss-man/web exec vitest run test/inventory" "$LOG" | head -n 1 | cut -d: -f1)" ] || fail "web build after the browser tests: $(cat "$LOG")"
+# A hand run (no whole-repo tests) still builds after the slot, as before.
+run 0 "a hand run of a web change builds once" env
+[ "$(grep -cF "pnpm --filter @boss-man/web build" "$LOG")" -eq 1 ] || fail "hand run: web built not exactly once: $(cat "$LOG")"
 # A failing whole-repo test fails the check.
 run 1 "a failing whole-repo test fails the gate" env BOSSMAN_MERGE_CHECK=1 FAIL_ON=inventory.test
 grep -q "^FAIL  whole-repo tests (apps/web" "$t/out" || fail "no FAIL line: $(cat "$t/out")"

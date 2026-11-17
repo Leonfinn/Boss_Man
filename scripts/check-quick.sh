@@ -258,6 +258,9 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
       files="$(whole_repo_tests "$d")"
       [ -n "$files" ] || continue
       name="$(node -p "require('./$d/package.json').name")"
+      # The browser tests of apps/web open the built app (apps/web/dist) and skip when it is missing: build it first, here in
+      # the slot, so they really run. The build step after the slot wait is then left out (web_built_early).
+      if [ "$d" = apps/web ]; then step "build web (before the browser tests)" pnpm --filter @boss-man/web build; fi
       # shellcheck disable=SC2086  # one argument per file; paths have no spaces
       step "whole-repo tests ($d, $(grep -c . <<<"$files") files)" pnpm --filter "$name" exec vitest run $files
     done
@@ -309,7 +312,12 @@ if [ "$need_slot" -eq 1 ]; then
   elif [ "$rc" -ne 0 ]; then failed=1; fi
 fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
-if [ "$web_build" -eq 1 ]; then step "build web" pnpm --filter @boss-man/web build; fi
+# At the gate the heavy phase already built the web app when apps/web has whole-repo tests (web_built_early).
+web_built_early=0
+if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web)" ]; then
+  for d in "${pkgs[@]}"; do [ "$d" != apps/web ] || web_built_early=1; done
+fi
+if [ "$web_build" -eq 1 ] && [ "$web_built_early" -eq 0 ]; then step "build web" pnpm --filter @boss-man/web build; fi
 
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
