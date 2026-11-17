@@ -1533,6 +1533,19 @@ smoke_credentials_ok() { # the smoke account file: a plain file of ours, mode 60
   local f="$D/smoke-credentials"
   [[ -f $f && ! -L $f && $(stat -c %u "$f") == "$(id -u)" && $(stat -c %a "$f") =~ ^[0-7]00$ ]]
 }
+# A staging deploy that was cut off (host restart, killed deployer, out of memory) leaves staging-status.json at "running" for
+# ever, and the server then refuses every later staging request. Same rule as recover_interrupted: we hold the lock here, so
+# nothing is running; say so. Files only; no container is touched.
+recover_staging_interrupted() {
+  local sf="$OUTBOX/staging-status.json" st
+  [[ -f $sf && ! -L $sf ]] || return 0
+  st="$(cat "$sf")"
+  [[ $(jfield result <<<"$st") == running ]] || return 0
+  ((DRY)) && { log "[dry-run] the last staging run was cut off (status still 'running'); a real tick would mark it failed"; return 0; }
+  S_ID="$(jfield id <<<"$st")" S_COMMIT="$(jfield to_commit <<<"$st")" S_STARTED="$(jfield started <<<"$st")" S_KV=(smoke=skipped)
+  [[ -z $S_ID ]] && S_ID="interrupted-$(date +%s)"
+  staging_done failed "The staging deploy of ${S_COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way). Check what staging runs, then ask again; scripts/deploy-staging.sh --rollback in the staging folder puts the last good commit back."
+}
 staging_tick() {
   local sreq="$INBOX/staging-request.json"
   staging_lane_file
@@ -1799,6 +1812,7 @@ main() {
   fi
   handle_phone_login
   recover_interrupted
+  recover_staging_interrupted
   if bluegreen_enabled; then soak_tick; fi
   if [[ ! -e $req && ! -L $req ]]; then staging_tick || log "The staging lane stopped with an error; production is unaffected."; refresh_available; exit 0; fi
   # The floor: left in the inbox, so the next minute looks again.

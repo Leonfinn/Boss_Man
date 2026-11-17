@@ -1372,7 +1372,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         const st = await stagingStatus();
         const busy = st?.result === "running";
         const done = st?.to_commit === ctx.commit && (st.result === "deployed" || st.result === "failed" || st.result === "rejected");
-        if (auto?.commit !== ctx.commit && !busy && !done) {
+        // A request the host turned down only for its 5-minute rate limit (another staging deploy ran just before) is asked
+        // again once the limit has passed, so a merge right after another staging deploy doesn't leave the card "not checked".
+        const rateLimited = done && st?.result === "rejected" && /only one staging deploy/.test(st.message) && Date.now() - Date.parse(st.at ?? "") > 6 * 60_000;
+        if (!busy && ((auto?.commit !== ctx.commit && !done) || rateLimited)) {
           await writeStagingRequest(randomUUID(), ctx.commit, "deploy-card");
           await putSetting(STAGED_AUTO, { commit: ctx.commit });
         }

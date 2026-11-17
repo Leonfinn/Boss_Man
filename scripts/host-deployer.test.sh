@@ -1311,6 +1311,14 @@ rm -f "$D/state/last-staging"; : >"$STUB_LOG"; sreq "$s1"; STUB_STAGING_RC=1 hos
 [[ $(sstatus result) == failed && $(sstatus smoke) == skipped ]] || fail "deploy failure: $(cat "$D/outbox/staging-status.json")"
 hasnt "$STUB_LOG" "smoke-staging.sh"
 
+# A staging deploy cut off by a restart leaves "running" behind: the next tick marks it failed, so the lane isn't wedged (review).
+cut="$(node -e 'console.log(crypto.randomUUID())')"
+printf '{"id":"%s","target":"staging","result":"running","message":"Running","to_commit":"%s","started":"2026-10-20T12:00:00Z","ended":"","at":"2026-10-20T12:00:00Z"}\n' "$cut" "$s1" >"$D/outbox/staging-status.json"
+: >"$STUB_LOG"; host
+[[ $(sstatus result) == failed && $(sstatus id) == "$cut" ]] || fail "cut-off staging run not marked failed: $(cat "$D/outbox/staging-status.json")"
+has "$D/outbox/staging-status.json" "cut off"
+hasnt "$STUB_LOG" "deploy-staging.sh"
+
 # A production request waiting is handled first; the staging request waits for the next tick.
 rm -f "$D/state/last-staging" "$D/state/last-server"; sreq "$s1"; : >"$STUB_LOG"
 c2="$(push apps/server/b)"; (cd "$T/src" && git fetch -q origin main); req server "$c2"; host

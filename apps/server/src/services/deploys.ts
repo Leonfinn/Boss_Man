@@ -59,6 +59,8 @@ export function sameRepo(a: string | null | undefined, b: string | null | undefi
 }
 /** A staging deploy the host never answers (the lane was switched off, the host is down) is failed after this long. */
 const STAGING_GIVE_UP_MS = 3 * 60 * 60_000;
+/** A staging status still "running" this long after it was written is stale: the host's limit is 30 minutes (STAGING_TIMEOUT_SECONDS). */
+const STAGING_RUNNING_STALE_MS = 60 * 60_000;
 export type TargetInput = { name: string; kind: Target["kind"]; endpoint: string; isProduction?: boolean; requiresApproval?: boolean; liveTag?: LiveTag | null };
 type WakeHook = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number; deployId?: string; causedByRunId?: string | null }) => Promise<unknown>;
 
@@ -388,6 +390,10 @@ export function deploysService(
         outcome = `${st.message}${st.result === "deployed" ? ` Smoke checks: ${st.smoke ?? "not run"}${checks ? ` (${checks})` : ""}.` : ""}${st.runner_image ? ` Runner image ${st.runner_image}.` : ""}`.slice(0, 4000);
       } else if (now().getTime() - d.createdAt.getTime() > STAGING_GIVE_UP_MS && !(await lane.pending()) && (!st || st.id !== d.id)) {
         outcome = "The host never answered this staging request (the staging lane may have been switched off or the host deployer isn't running).";
+      } else if (st && st.id === d.id && st.result === "running" && now().getTime() - Date.parse(st.at ?? "") > STAGING_RUNNING_STALE_MS) {
+        // The host marks a cut-off run failed itself when it restarts; this is the backstop if that never happens
+        // (the deployer is off for good), so a "running" that outlived the host's own 30-minute limit can't wedge the lane.
+        outcome = "The staging deploy has said \"running\" for far longer than the host allows, so it was cut off (the host restarted or the deployer stopped). Check what staging runs, then ask again.";
       }
       if (outcome === null) continue;
       const [row] = await db.update(deploys).set({ status: ok ? "succeeded" : "failed", outcome, finishedAt: now() }).where(and(eq(deploys.id, d.id), eq(deploys.status, "running"))).returning();

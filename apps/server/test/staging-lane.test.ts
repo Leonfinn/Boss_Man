@@ -168,6 +168,25 @@ describe("the staging lane (BOS-1472)", () => {
     expect((await c.db.select().from(deploys).where(eq(deploys.id, r.deploy.id)))[0]).toMatchObject({ status: "failed", outcome: expect.stringContaining("never answered") });
   });
 
+  it("fails a deploy whose host status stayed 'running' long after the host's own limit, so a restart can't wedge the lane", async () => {
+    const c = (ctx = await setup());
+    lane(true);
+    await c.deploys.syncStaging();
+    const r = await c.deploys.request(c.actor, { target: "staging", ref: "main" });
+    rmSync(inbox("staging-request.json"));
+    // Fresh "running": left alone.
+    hostStatus(r.deploy.id, { result: "running", message: "Running", ended: "", at: new Date().toISOString() });
+    await c.deploys.syncStaging();
+    expect((await c.db.select().from(deploys).where(eq(deploys.id, r.deploy.id)))[0]!.status).toBe("running");
+    // Two hours old: cut off.
+    hostStatus(r.deploy.id, { result: "running", message: "Running", ended: "", at: new Date(Date.now() - 2 * 3600_000).toISOString() });
+    await c.deploys.syncStaging();
+    expect((await c.db.select().from(deploys).where(eq(deploys.id, r.deploy.id)))[0]).toMatchObject({ status: "failed", outcome: expect.stringContaining("cut off") });
+    // And the lane takes a new request again.
+    const again = await c.deploys.request(c.actor, { target: "staging", ref: "main" });
+    expect(again.deploy.status).toBe("running");
+  });
+
   it("the Settings button writes a request for main's newest commit, owner only", async () => {
     const c = (ctx = await setup());
     expect((await c.req("POST", "/api/self-deploy/deploy-staging")).statusCode).toBe(409); // lane off
