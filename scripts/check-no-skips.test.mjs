@@ -48,6 +48,12 @@ test("a skip passes only when its file is on the skip list with a reason (BOS-17
     assert.equal(noReason.status, 1, "an entry with no reason fails");
     assert.match(noReason.stderr, /no reason/);
     assert.equal(spawnSync("node", [script, rf, "--root", dir, "--allow", path.join(dir, "gone.txt")], { encoding: "utf8" }).status, 1, "a missing list fails");
+    // A listed file that ran and did not skip: reported as a note, exit stays 0.
+    writeFileSync(rf, JSON.stringify({ numPassedTests: 1, testResults: [{ name: path.join(dir, "test/a.test.ts"), assertionResults: [{ status: "passed", fullName: "ok" }] }] }));
+    const stale = run("test/a.test.ts | needs a browser\ntest/never-ran.test.ts | other\n");
+    assert.equal(stale.status, 0, "a stale entry does not fail");
+    assert.match(stale.stdout, /listed but did not skip: test\/a\.test\.ts\b(?!,)/);
+    assert.doesNotMatch(stale.stdout, /never-ran/, "a listed file that did not run is not called stale");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -63,6 +69,9 @@ test("node:test junit report: a skipped file needs a list entry", () => {
     assert.equal(run("x.test.mjs | needs /proc\n").status, 0);
     writeFileSync(xf, "<!-- skipped 0 -->\n<!-- todo 0 -->");
     assert.equal(run("").status, 0, "no skip, no entry needed");
+    const stale = run("x.test.mjs | needs /proc\n");
+    assert.equal(stale.status, 0);
+    assert.match(stale.stdout, /listed but did not skip: x\.test\.mjs/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

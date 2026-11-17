@@ -199,7 +199,9 @@ if [ -z "$pre_done" ]; then
     # One run per file, so a skip is tied to its file and checked against scripts/skipped-tests.txt (BOS-1729).
     skipdir="$(mktemp -d)"
     for f in scripts/*.test.mjs; do
-      node --test --test-reporter=junit "$f" >"$skipdir/r.xml" 2>/dev/null || true
+      # A failing test file was already reported by the full run above; here only the skip count matters. stderr stays visible.
+      node --test --test-reporter=junit "$f" >"$skipdir/r.xml" || true
+      [ -s "$skipdir/r.xml" ] || { echo "check-all: no node:test report for $f"; exit 1; }
       node scripts/check-no-skips.mjs --junit "$skipdir/r.xml" --file "${f#scripts/}" --root scripts --allow scripts/skipped-tests.txt
     done
     rm -rf "$skipdir"

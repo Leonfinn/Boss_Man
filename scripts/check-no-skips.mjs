@@ -3,8 +3,8 @@
 // The merge check runs every package's suite with this (BOS-1071 for web, BOS-1729 for all): tests that need a build, a browser, a
 // sandbox or a real service skip quietly where those are missing, and a skip nobody listed is how a layout or sandbox break got through
 // to GitHub CI. A list is a text file, one `path | reason` per line (path relative to the package folder, `#` starts a comment).
-// A listed file may skip; an unlisted one may not. A listed file that no longer skips is fine (the same list serves hosts that skip and
-// hosts that don't). A list line with no reason fails.
+// A listed file may skip; an unlisted one may not. A listed file that ran without skipping is reported as a note ("listed but did not
+// skip"), never a failure: the same list serves hosts that skip and hosts that don't. A list line with no reason fails.
 // Usage:
 //   check-no-skips.mjs <vitest-report.json> [--allow <list>] [--root <package folder>]
 //   check-no-skips.mjs --junit <node-test-report.xml> --file <path> [--allow <list>] [--root <folder>]   (one node:test file's report)
@@ -49,7 +49,18 @@ export function summarise(report, opts = {}) {
     }
     // A file that registered no test at all because its describe was skipped shows up as pending suites only.
   }
-  return { passed: report.numPassedTests ?? 0, skipped, unlisted };
+  return { passed: report.numPassedTests ?? 0, skipped, unlisted, stale: staleEntries(report, allowed, root) };
+}
+
+/** Listed files that ran in this report without skipping anything: a note only, never a failure (the same list serves hosts that skip and hosts that don't). */
+function staleEntries(report, allowed, root) {
+  const ran = new Map();
+  for (const f of report.testResults ?? []) {
+    const skips = (f.assertionResults ?? []).some((t) => t.status !== "passed" && t.status !== "failed");
+    const key = rel(f.name, root);
+    ran.set(key, (ran.get(key) ?? false) || skips);
+  }
+  return [...allowed.keys()].filter((p) => ran.get(p) === false);
 }
 
 /** One node:test file's junit report: the skipped count sits in a trailing comment. */
@@ -86,14 +97,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
       console.error(`check-no-skips: ${skips[0]}, and the file is not on the skip list${listFile ? ` ${listFile}` : ""}. Fix the cause, or add "${name} | <reason>" to the list.`);
       process.exit(1);
     }
+    if (!skips.length && allowed.has(name)) console.log(`check-no-skips: note: listed but did not skip: ${name} (fine on a host that has what it needs; drop the line if it never skips anywhere)`);
     process.exit(0);
   }
   let report;
   try { report = JSON.parse(readFileSync(file, "utf8")); } catch (e) {
     console.error(`check-no-skips: cannot read ${file}: ${e.message}`); process.exit(1);
   }
-  const { passed, skipped, unlisted } = summarise(report, { root, allowed });
+  const { passed, skipped, unlisted, stale } = summarise(report, { root, allowed });
   const failing = listFile ? unlisted : skipped;
+  if (stale.length) console.log(`check-no-skips: note: listed but did not skip: ${stale.join(", ")} (fine on a host that has what it needs; drop a line that never skips anywhere)`);
   console.log(`check-no-skips: ${passed} passed, ${skipped.length} skipped${listFile ? `, ${skipped.length - unlisted.length} of them on the skip list` : ""}`);
   if (failing.length || passed === 0) {
     if (failing.length) {
