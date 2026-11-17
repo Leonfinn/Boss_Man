@@ -71,6 +71,29 @@ const Status = z.object({
 });
 export type DeployStatus = z.infer<typeof Status>;
 
+/** outbox/staging-lane.json (BOS-1472): whether the host's staging lane is on. The shell writes every value as a string. */
+const StagingLane = z.object({ configured: z.string() });
+/**
+ * outbox/staging-status.json: the last staging request's result. Every value is a string; `check_<name>` and `why_<name>`
+ * carry each smoke check's result (pass, fail or skipped) and its one line of why, so they come through the catch-all.
+ */
+const StagingStatus = z
+  .object({
+    id: z.string(),
+    target: z.literal("staging"),
+    result: z.enum(["running", "held", "deployed", "failed", "rejected"]),
+    message: z.string(),
+    to_commit: z.string(),
+    started: z.string(),
+    ended: z.string(),
+    at: z.string(),
+    smoke: z.enum(["passed", "failed", "skipped"]).optional(),
+    failed_checks: z.string().optional(),
+    runner_image: z.string().optional(),
+  })
+  .catchall(z.string());
+export type StagingStatus = z.infer<typeof StagingStatus>;
+
 /** What the host deployer says about its memory every tick (outbox/headroom.json, BOS-420). Every field but the time is optional. */
 const Headroom = z.object({
   version: z.literal(1),
@@ -1146,11 +1169,51 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     await raiseOwnerTodo(db, { companyId, question, key: DEPLOYER_SCRIPT_CARD, steps: c.steps, check: c.check, rollback: c.rollback, ofDecisionId: "system" });
   }
 
+  // ---- The staging lane (BOS-1472, docs/22-staging.md): its own files, beside production's, never sharing a slot ----
+  const stagingLane = async () => (dir ? ((await readJson(path.join(dir, "outbox", "staging-lane.json"), StagingLane))?.configured === "true") : false);
+  const stagingStatus = () => (dir ? readJson(path.join(dir, "outbox", "staging-status.json"), StagingStatus) : Promise.resolve(null));
+  /** One staging request for the host: same flat format as production's, target "staging", written beside its name and renamed. */
+  async function writeStagingRequest(id: string, commit: string) {
+    if (!dir) throw new Error("The host deployer folder isn't set up.");
+    const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
+    const body = { id, target: "staging", commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
+    const file = path.join(dir, "inbox", "staging-request.json");
+    const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
+    await rename(tmp, file);
+  }
+
+  /** Whether a staging request is waiting in the inbox (a held one stays there until memory frees up). */
+  const stagingPending = async () => !!dir && (await stat(path.join(dir, "inbox", "staging-request.json")).then(() => true, () => false));
+  /** What agents (server_status) and Settings see of staging: the lane, and the last result with each smoke check. */
+  async function stagingBlock() {
+    const [configured, pend, st] = await Promise.all([stagingLane(), stagingPending(), stagingStatus()]);
+    if (!st) return { configured, pending: pend, last: null };
+    const checks = Object.keys(st)
+      .filter((k) => k.startsWith("check_"))
+      .map((k) => ({ name: k.slice(6), result: st[k] as string, why: (st[`why_${k.slice(6)}`] as string | undefined) ?? "" }));
+    return { configured, pending: pend, last: { id: st.id, result: st.result, message: st.message, commit: st.to_commit, runnerImage: st.runner_image ?? null, smoke: st.smoke ?? null, failedChecks: st.failed_checks ?? null, checks, at: st.at } };
+  }
+
   return {
     enabled: !!dir,
     /** What the host deployer last reported: its last request's result, and what is live and on main (BOS-420's wait reads both). */
     status,
     available,
+    stagingLane,
+    stagingStatus,
+    stagingBlock,
+    writeStagingRequest,
+    stagingPending,
+    /** Settings → Deploy to staging (owner): main's newest commit, as the host last saw it. No card: staging isn't production. */
+    async deployStaging() {
+      if (!(await stagingLane())) return { error: "Staging isn't set up on this host yet: the host deployer's staging lane is off (STAGING_DIR in its host.conf, docs/22-staging.md)." } as const;
+      if ((await stagingPending()) || (await stagingStatus())?.result === "running") return { error: "A staging deploy is already queued or running. Wait for its result." } as const;
+      const commit = (await available())?.tip;
+      if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return { error: "The host hasn't reported main's newest commit yet. Try again in a minute." } as const;
+      await writeStagingRequest(randomUUID(), commit);
+      return { commit } as const;
+    },
 
     /**
      * The owner's hand-apply to-dos the host has caught up with (BOS-122): once the live commit is no
@@ -1323,6 +1386,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         enabled: !!dir,
         status: s,
         available: a,
+        staging: await stagingBlock(),
         pending: await pending(),
         deployer: await deployerSeen(a, s),
         deployerScript: await deployerScriptState().catch((): DeployerScriptState => ({ state: "none" })),
