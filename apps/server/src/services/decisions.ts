@@ -3684,6 +3684,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // BOS-1717: a ticket held in review on a waits-on link or system hold isn't woken by an answer on another ticket's card.
       const heldKept = kept.length ? await heldTicketIds(db, kept.map((t) => t.id)) : new Set<string>();
+      // A card with no ticket of its own (cardTicketId null) still wakes: nothing says it is someone else's.
       const cardTicketId = (ctx as { ticketId?: string | null }).ticketId ?? null;
       for (const t of kept) {
         if (heldKept.has(t.id) && cardTicketId && cardTicketId !== t.id) continue;

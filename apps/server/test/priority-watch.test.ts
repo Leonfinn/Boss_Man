@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, checkJobs, notifications, runs, tickets, wakes } from "../src/db/schema.js";
+import { agents, checkJobs, notifications, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { closeHold, ensureSystemHold, openHold } from "../src/services/review-holds.js";
 import { HELD_AGENT } from "../src/services/fair-share.js";
 import { judge, OWNER_AFTER_MS, priorityWatchService, QUIET_AFTER_MS, stopped, type Facts } from "../src/services/priority-watch.js";
 import { WAKE_CLASS } from "../src/services/wake-classes.js";
@@ -196,6 +197,34 @@ describe("priority watch: the sweep", () => {
     expect(await ctx.watch.run(true)).toMatchObject({ cleared: 1, told: 0 });
     const [n] = await ctx.db.select().from(notifications).where(eq(notifications.id, ctx.sent[0]!.id));
     expect(n!.readAt).not.toBeNull();
+  });
+
+  it("an urgent review ticket held on an open waits-on link or an open system hold is left alone; with the hold closed it alarms again (BOS-1717)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const quiet = async (title: string) => {
+      const t = await c.ticket(title);
+      await c.db.update(tickets).set({ urgent: true, systemState: "review", lastActivityAt: ago(3 * 60 * MIN) }).where(eq(tickets.id, t.id));
+      return t;
+    };
+    const blocker = await c.ticket("What it waits on");
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, blocker.id));
+    const onLink = await quiet("Held on a waits-on link");
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: onLink.id, blockerTicketId: blocker.id });
+    const onHold = await quiet("Held on a system hold");
+    await ensureSystemHold(c.db, onHold.id, [blocker.id], "waits on another ticket");
+    const control = await quiet("No hold recorded");
+    const told = async () => (c.told.map((x) => x.ticketId));
+    await c.watch.run(true);
+    // Only the ticket with no recorded hold is told to the CEO.
+    expect(await told()).toEqual([control.id]);
+    // Close the system hold and finish the link: both alarm like the control.
+    await closeHold(c.db, (await openHold(c.db, onHold.id))!, "released", "test");
+    await c.db.update(tickets).set({ systemState: "done", mergeCommit: "c".repeat(40) }).where(eq(tickets.id, blocker.id));
+    c.told.length = 0;
+    await c.watch.run(true);
+    // (The control was told on the first pass and isn't told twice for the same stop.)
+    expect((await told()).sort()).toEqual([onLink.id, onHold.id].sort());
   });
 
   it("an urgent Ready ticket whose wake waits 30 minutes behind a busy agent wakes the CEO once, naming the agent, the run and the free foreground agents (BOS-1635)", async () => {

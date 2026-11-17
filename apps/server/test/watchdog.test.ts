@@ -133,6 +133,19 @@ describe("the watchdog sweep (BOS-58)", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("a review ticket with an open hold is not flagged for no movement; once the hold is closed it is (BOS-1717)", async () => {
+    await ctx.switchOn();
+    const held = await ctx.ticket({ title: "Held on a waits-on hold", systemState: "review", stateChangedAt: ctx.ago(240) });
+    const control = await ctx.ticket({ title: "Quiet, no hold", systemState: "review", stateChangedAt: ctx.ago(240) });
+    const [hold] = await ctx.db.insert(reviewHolds).values({ ticketId: held.id, reason: "Waits on another ticket" }).returning();
+    await ctx.watchdog.run();
+    const flagged = async () => (await ctx.db.select().from(watchdogFlags)).map((f) => f.ticketId);
+    expect(await flagged()).toEqual([control.id]);
+    await ctx.db.update(reviewHolds).set({ status: "released", closedAt: ctx.ago(1) }).where(eq(reviewHolds.id, hold!.id));
+    await ctx.watchdog.run();
+    expect((await flagged()).sort()).toEqual([control.id, held.id].sort());
+  });
+
   it("wakes the Scrum Master once per sweep with every due problem, and not at all when nothing trips", async () => {
     await ctx.switchOn();
     await ctx.watchdog.run();
