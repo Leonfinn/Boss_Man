@@ -164,7 +164,10 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
     took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
     if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
-    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
+    # One clock read: two `date` calls (now, and now as the default slot time) straddling a second boundary made the
+    # elapsed time -1 and let a retry through that the budget forbids (BOS-1702).
+    now=$(date +%s)
+    if [ "$n" -lt "$attempts" ] && [ $(( now - ${slot_at:-$now} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
       sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
@@ -195,7 +198,19 @@ if [ -z "$pre_done" ]; then
   # run that one command while holding it, and exit with its status. None of the full checks run.
   if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
     pnpm install --frozen-lockfile --prefer-offline >/dev/null
-    node --test scripts/*.test.mjs
+    # Print the failing subtests' "not ok" lines and their errors first: a log that is cut to its last lines shows only passes.
+    script_test_log=$(mktemp)
+    if ! node --test scripts/*.test.mjs >"$script_test_log" 2>&1; then
+      echo "script tests failed; failing subtests:"
+      grep -nE '^\s*not ok' "$script_test_log" || true
+      grep -nE -B2 -A12 '^\s*not ok' "$script_test_log" | head -150 || true
+      echo "script tests failed; full output:"
+      cat "$script_test_log"
+      rm -f "$script_test_log"
+      exit 1
+    fi
+    cat "$script_test_log"
+    rm -f "$script_test_log"
     node scripts/lint-migrations.mjs
     node scripts/check-doc-numbers.mjs
   fi

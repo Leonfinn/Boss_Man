@@ -36,6 +36,37 @@ export function checkFailureFacts(output: string): string {
   return parts.join(". ");
 }
 
+// "error\b" with no boundary before it, so AssertionError and TypeError count; "errors" (as in "0 errors") does not.
+const ERROR_LINE = /(?:error\b|\bERR_[A-Z_]+|\bfatal\b|\bfailed\b|\bexception\b|\btimed out\b|\bTraceback\b)/i;
+
+/**
+ * BOS-1723: one line that says what went wrong, for a list of failed checks: the first failing test, else the first
+ * failed step, else the first error-looking line, else null. Cut to 300 characters.
+ */
+export function firstFailingLine(output: string): string | null {
+  const f = checkLogFacts(output);
+  if (f.test) return f.test;
+  if (f.steps.length) return `step "${f.steps[0]}" failed`;
+  for (const raw of output.replace(ANSI, "").split("\n")) {
+    const line = raw.replace(/\r$/, "").trim();
+    if (line && ERROR_LINE.test(line)) return line.slice(0, 300);
+  }
+  return null;
+}
+
+/** BOS-1723: the log's failing lines (failing tests, failed steps, error-looking lines), in order, at most `max` of them. */
+export function failingLines(output: string, max = 15): string[] {
+  const out: string[] = [];
+  for (const raw of output.replace(ANSI, "").split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (!line.trim() || !(TEST_LINE.test(line) || STEP_LINE.test(line) || ERROR_LINE.test(line))) continue;
+    const kept = line.trim().slice(0, 300);
+    if (!out.includes(kept)) out.push(kept);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 /**
  * A log tail is the last 8 KB, and a failing step's FAIL line is often long gone by then. The runner puts the facts it
  * saw in the whole log in front of the tail when the tail no longer shows them.

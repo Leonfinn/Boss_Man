@@ -4,6 +4,7 @@
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { checkQueue } from "./services/check-queue.js";
+import { failedChecksText } from "./services/check-failures.js";
 import { FULL_LOG_RETENTION_DAYS, PLAN_REAL_USE_REFUSAL, realUseWalkthrough, usabilityGated } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
@@ -1154,7 +1155,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "tickets",
     {
       description:
-        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) reads the whole redacted log of a failed check job of that ticket (the newest one without a jobId), kept 14 days; the bounce message names the jobId.",
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
       inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional() },
     },
     async ({ action, q, state, ticketId: given, path, offset, jobId }) => {
@@ -1182,9 +1183,14 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         }
       }
       if (action === "check_log") {
-        // BOS-1228: the whole, redacted log of a failed check job of this company's ticket (the newest one without a jobId).
+        // BOS-1228: the whole, redacted log of a failed check job of this company's ticket.
         if (!ticketId) return fail("Give the ticketId of the ticket whose check failed.");
-        const kept = await checkQueue(db).readLog(scope.companyId, ticketId, jobId ?? null);
+        // BOS-1723: no jobId lists the ticket's failed checks; the newest log is often a different failure from the one asked about.
+        if (!jobId) {
+          const list = await failedChecksText(db, scope.companyId, ticketId);
+          return list ? text(list) : fail("This ticket has no failed check on record.");
+        }
+        const kept = await checkQueue(db).readLog(scope.companyId, ticketId, jobId);
         if (!kept) return fail(`No kept check log for that ${jobId ? "job" : "ticket"}. A log is kept for ${FULL_LOG_RETENTION_DAYS} days after a failed check; a passed, stopped or older check has none, and a runner older than this change sent only the log tail.`);
         return text(`Full log of the ${kept.scope} check job ${kept.jobId}${kept.endedAt ? ` (ended ${kept.endedAt.toISOString()})` : ""}, redacted:\n\n${cut(kept.log, CAP, (m) => `continue with tickets check_log offset=${m}`, offset)}`);
       }

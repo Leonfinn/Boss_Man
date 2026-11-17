@@ -25,11 +25,9 @@
     "apps/server/test/hot-path-budget.test.ts": 2,
     "apps/server/test/idle-slots.test.ts": 1,
     "apps/server/test/infinite-mode.test.ts": 2,
-    "apps/server/test/launcher.test.ts": 1,
     "apps/server/test/leader-freeze.test.ts": 4,
     "apps/server/test/leader.test.ts": 1,
     "apps/server/test/loop-guards.test.ts": 1,
-    "apps/server/test/maintenance.test.ts": 1,
     "apps/server/test/merge-ci-gate.test.ts": 3,
     "apps/server/test/merge-failures-wiring.test.ts": 1,
     "apps/server/test/merge-line.test.ts": 2,
@@ -63,7 +61,6 @@
     "apps/web/test/stop-all-work.test.tsx": 1,
     "apps/web/test/ticket-summary.test.tsx": 1,
     "apps/web/test/transcript.test.tsx": 1,
-    "apps/web/test/wrap-up-layout.test.ts": 1,
     "apps/web/test/wrap-up-settings.test.tsx": 1
   },
   "elapsed-limit": {

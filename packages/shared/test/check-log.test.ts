@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkFailureFacts, checkFailureSentence, checkLogFacts, fullLogPointer, prepareFullLog, withCheckFacts } from "../src/check-log.js";
+import { checkFailureFacts, checkFailureSentence, checkLogFacts, failingLines, firstFailingLine, fullLogPointer, prepareFullLog, withCheckFacts } from "../src/check-log.js";
 
 const LOG = "PASS  merge check\nFAIL  typecheck (exit 2)\n      error TS1\nFAIL  related tests (exit 1)\n       FAIL  test/a.test.ts > suite > first\n       FAIL  test/b.test.ts > second\ncheck-quick: FAILED\n";
 
@@ -49,5 +49,21 @@ describe("check log facts (BOS-1220)", () => {
     expect(checkFailureSentence({ exitCode: undefined, output: "" })).toBe("was stopped before it reported");
     expect(checkFailureSentence({ exitCode: null, output: "", reason: "killed by the server" })).toBe("was stopped before it reported: killed by the server");
     expect(checkFailureSentence({ exitCode: 1, output: "" })).toBe("failed (exit code 1)");
+  });
+});
+
+// BOS-1723: one line per failed job for check_log's list, and the failing lines a bounce record keeps.
+describe("first failing line and failing lines (BOS-1723)", () => {
+  it("prefers the failing test, then the failed step, then an error-looking line", () => {
+    expect(firstFailingLine(LOG)).toBe("test/a.test.ts > suite > first");
+    expect(firstFailingLine("PASS  lint\nFAIL  typecheck (exit 2)\n")).toBe('step "typecheck (exit 2)" failed');
+    expect(firstFailingLine("cloning\nfatal: invalid reference: abc123\n")).toBe("fatal: invalid reference: abc123");
+    expect(firstFailingLine("AssertionError: expected 1 to be 2")).toBe("AssertionError: expected 1 to be 2");
+    expect(firstFailingLine("Found 0 errors.\nall good\n")).toBeNull();
+  });
+
+  it("lists failing lines in order, once each, up to the limit", () => {
+    expect(failingLines(LOG)).toEqual(["FAIL  typecheck (exit 2)", "error TS1", "FAIL  related tests (exit 1)", "FAIL  test/a.test.ts > suite > first", "FAIL  test/b.test.ts > second", "check-quick: FAILED"]);
+    expect(failingLines("Error: x\nError: x\nError: y\nError: z", 2)).toEqual(["Error: x", "Error: y"]);
   });
 });
