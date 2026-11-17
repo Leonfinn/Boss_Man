@@ -188,6 +188,39 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
   return { state: "healthy" };
 }
 
+/** The line must have grown for this long before the start-brake warning shows (R47). */
+export const BRAKE_GROWN_MIN = 60;
+/** The suggested limit is this many hours of the landing rate: a line the team clears in about that time. */
+export const BRAKE_SUGGEST_HOURS = 2.5;
+/** The landing rate is read over this many hours (a day, so one quiet night doesn't read as a zero rate beyond the floor below). */
+const BRAKE_RATE_HOURS = 24;
+/** Never suggest a limit below this: a limit of 1 or 2 would hold starts for no reason. */
+const BRAKE_MIN_SUGGEST = 3;
+
+export type StartBrakeOff = { waiting: number; suggestedLimit: number };
+
+/**
+ * R47: the start brake (BOS-1489) has no limit and the merge line has grown for an hour: say so, with a limit to set. Pure.
+ * "Grown" = more tickets joined the line in the last hour than landed in it (the line's rows carry how long each has waited).
+ * Null when a limit is set, the line has not grown, or the line is no longer than the suggested limit.
+ * `landed` is the landing times (epoch ms) of the last day.
+ */
+export function startBrakeOff(i: { brakeLimit: number | null; waiting: Array<{ minutes: number }>; landed: number[]; now: Date }): StartBrakeOff | null {
+  if (i.brakeLimit != null) return null;
+  const nowMs = i.now.getTime();
+  const joined = i.waiting.filter((w) => w.minutes < BRAKE_GROWN_MIN).length;
+  const landed = i.landed.filter((t) => nowMs - t <= BRAKE_GROWN_MIN * 60_000).length;
+  if (joined <= landed) return null;
+  const perDay = i.landed.filter((t) => nowMs - t <= BRAKE_RATE_HOURS * 3_600_000).length;
+  const suggestedLimit = Math.max(BRAKE_MIN_SUGGEST, Math.round((perDay / BRAKE_RATE_HOURS) * BRAKE_SUGGEST_HOURS));
+  if (i.waiting.length <= suggestedLimit) return null;
+  return { waiting: i.waiting.length, suggestedLimit };
+}
+
+export function startBrakeText(b: StartBrakeOff): string {
+  return `Start brake off, ${b.waiting} waiting; suggested limit ${b.suggestedLimit}`;
+}
+
 /** "Merging, but slowly: ..." as one plain sentence; `clock` turns the last landing into HH:MM (the server uses UTC). */
 export function slowText(s: SlowLine, clock: (iso: string) => string): string {
   const eta = s.etaMinutes === null ? "" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;

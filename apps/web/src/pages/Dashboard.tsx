@@ -6,7 +6,7 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
 import { NeedsYou, RightNow, healthLines, type HealthData } from "../components/DashboardPanels";
-import { MergesStuckBanner, slowSummary, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
+import { MergesStuckBanner, brakeOffSummary, slowSummary, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
 import { RunLabelLink } from "./Runs";
 
 type Result = "running" | "succeeded" | "failed" | "other";
@@ -138,7 +138,7 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
         </div>
       </header>
 
-      <MergesStuckBanner stuck={stuck} slow={slow} companyId={company.id} />
+      <MergesStuckBanner stuck={stuck} slow={slow} brakeOff={merges.data && !company.paused ? brakeOffSummary(merges.data) : null} companyId={company.id} />
 
       <div className="dash-lead">
         <RightNow lines={lines} paused={company.paused} companyId={company.id} />

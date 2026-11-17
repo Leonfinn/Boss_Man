@@ -60,6 +60,8 @@ export type MergeHealthView = {
   stuckCount?: number;
   /** Absent from a server older than BOS-1594: then nothing is shown rather than a guess. */
   line?: MergeLine;
+  /** R47: absent from an older server, and null when a limit is set or the line has not grown. */
+  startBrakeOff?: BrakeOffSummary | null;
 };
 
 export type StuckSummary = { title: string; reason: string; fix: string; others: number };
@@ -95,8 +97,29 @@ export function slowText(s: SlowSummary): string {
   return `Merging, but slowly: ${s.waiting} merge ${s.waiting === 1 ? "check" : "checks"} waiting${eta}${last}.`;
 }
 
-export function MergesStuckBanner({ stuck, slow, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; companyId?: string }) {
+/** R47: the start brake has no limit and the line has grown for an hour; null when a limit is set (nothing is said then). */
+export type BrakeOffSummary = { waiting: number; suggestedLimit: number };
+export function brakeOffSummary(view: Pick<MergeHealthView, "startBrakeOff">): BrakeOffSummary | null {
+  return view.startBrakeOff ?? null;
+}
+export const brakeOffText = (b: BrakeOffSummary) => `Start brake off, ${b.waiting} waiting; suggested limit ${b.suggestedLimit}`;
+
+export function MergesStuckBanner({ stuck, slow, brakeOff, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; brakeOff?: BrakeOffSummary | null; companyId?: string }) {
   const href = companyId ? `#/merge-queue/${companyId}` : "#/merge-queue";
+  if (!stuck && !slow && brakeOff) {
+    return (
+      <div className="merges-banner merges-banner-slow" role="status">
+        <a className="merges-banner-link" href="#/settings">
+          <span className="merges-banner-sym" aria-hidden="true">…</span>
+          <span className="merges-banner-text">
+            <strong>{brakeOffText(brakeOff)}</strong>
+            <span>The merge line has grown for an hour and new starts are not held. Set "Hold new starts while this many merges are waiting" in Settings.</span>
+          </span>
+          <span className="merges-banner-go">Open Settings</span>
+        </a>
+      </div>
+    );
+  }
   if (stuck) {
     const behind = stuck.others > 0 ? ` ${stuck.others === 1 ? "1 more is" : `${stuck.others} more are`} waiting behind it.` : "";
     return (
@@ -140,5 +163,5 @@ export function MergesStuckBannerFor({ companyId }: { companyId: string | undefi
     20_000,
     `merge-banner-${companyId}`,
   );
-  return <MergesStuckBanner stuck={view.data ? stuckSummary(view.data) : null} slow={view.data ? slowSummary(view.data) : null} companyId={companyId} />;
+  return <MergesStuckBanner stuck={view.data ? stuckSummary(view.data) : null} slow={view.data ? slowSummary(view.data) : null} brakeOff={view.data ? brakeOffSummary(view.data) : null} companyId={companyId} />;
 }
