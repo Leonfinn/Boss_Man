@@ -861,6 +861,7 @@ export function CheckQueueSetting() {
       </div>
       {act.view}
       <WaitForCiSetting />
+      <MergeCarrySetting />
     </Section>
   );
 }
@@ -893,6 +894,62 @@ export function WaitForCiSetting() {
             Before each merge Boss Man pushes the exact merged result to a bossman-ci/ branch on GitHub and merges only once GitHub CI passes on it, while its own check runs at the same time. A CI failure goes back to the agent with the failing jobs and tests. Each merge uses GitHub Actions minutes, which a private repo pays for. Projects on other git hosts, or whose CI doesn't run on bossman-ci/ branches, merge on Boss Man's own check as before.
           </span>
         </span>
+      </label>
+      {act.view}
+    </div>
+  );
+}
+
+/** BOS-1762: land a passed merge when main's newer changes touch none of its files, and the landing turn's cap. Both on by default. */
+export function MergeCarrySetting() {
+  const view = usePoll((signal) => api<{ on: boolean; turnMinutes: number }>("/api/settings/merge-carry", { signal }), 60_000, "merge-carry");
+  const act = useAction();
+  const [minutes, setMinutes] = useState<string | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const shown = minutes ?? String(d.turnMinutes);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }} data-testid="merge-carry">
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input
+          type="checkbox"
+          checked={d.on}
+          disabled={act.busy}
+          onChange={(e) => {
+            const next = e.target.checked;
+            void act.run(async () => {
+              await api("/api/settings/merge-carry", { method: "PUT", body: { on: next } });
+              view.reload();
+              return next ? "Saved. A passed merge now lands when main's newer changes touch none of its files." : "Saved. A merge is tested again whenever main moves.";
+            });
+          }}
+        />
+        <span>
+          <strong>Land passed merges when main moved elsewhere</strong>{" "}
+          <span className="muted">
+            When a change has passed its checks but main moved meanwhile, Boss Man lands it anyway if main's newer changes touch none of its files and none of the project's dependency, build, CI or migration files. Main's own CI checks the result. Off: every main move means testing the change again.
+          </span>
+        </span>
+      </label>
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <span>
+          <strong>Landing turn</strong>{" "}
+          <span className="muted">A change rebuilt twice because main moved gets a turn: other changes wait to land for up to this many minutes. 0 turns it off.</span>
+        </span>
+        <input type="number" min={0} max={240} step={5} value={shown} style={{ width: 80 }} disabled={act.busy} onChange={(e) => setMinutes(e.target.value)} aria-label="Landing turn in minutes" />
+        <button
+          disabled={act.busy || minutes === null || !/^\d+$/.test(shown) || Number(shown) > 240}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/settings/merge-carry", { method: "PUT", body: { turnMinutes: Number(shown) } });
+              setMinutes(null);
+              view.reload();
+              return Number(shown) === 0 ? "Saved. No landing turns." : `Saved. Landing turns last up to ${shown} minutes.`;
+            })
+          }
+        >
+          Save
+        </button>
       </label>
       {act.view}
     </div>
