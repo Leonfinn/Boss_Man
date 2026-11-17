@@ -36,6 +36,7 @@ A pass at the merge gate is not enough: GitHub CI runs every test again on main,
 - **No fixed sleeps standing in for "the other side is ready".** Wait for the event: the port answering, the line in the log, the file appearing, with a deadline.
 - **No hidden stderr** (`2>/dev/null`) on a step whose failure would end the test silently.
 - **A test that needs a build or a browser runs at the gate, not quietly skips there.** Make sure the gate (and CI) supply what it needs before relying on it.
+- **A flake fix shows the test failing before and passing after.** Run `scripts/squeeze-test.sh <test file>` (one file, one worker, one CPU shared with busy loops, 200 s stop) on the old test and on the fixed one, and put both results on the ticket. It shows a time-limit flake only: a race between processes or a too-short fixed sleep may pass under it, so say so if it did.
 - **Don't depend on git's version.** Tests that read git output must not rely on its ordering or on refs a newer git adds; sort, or ask for exactly the refs you need.
 
 ## Running a full check by hand
