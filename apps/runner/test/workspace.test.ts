@@ -440,7 +440,7 @@ describe("workspace clean-up (R54)", () => {
     const b = await ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" });
     writeFileSync(path.join(a.path, "big.bin"), Buffer.alloc(256 * 1024, 1));
     // b's folder vanishes behind git's back, then something unrelated appears in tickets/.
-    rmSync(b.path, { recursive: true, force: true });
+    rmSync(b.path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     const stray = path.join(root, "tickets", "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
     mkdirSync(stray, { recursive: true });
     writeFileSync(path.join(stray, "leftover.txt"), "x");
