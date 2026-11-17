@@ -57,6 +57,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "github security": "scheduled",
   // The runner-update answer is "can't tell" (BOS-1648): a fault the CEO must hear, once per cause, never dropped.
   "runner update: can't tell": "scheduled",
+  // The live commit still can't be placed after the missed-merge sweep (BOS-1645): once per commit, never dropped.
+  "live commit not placed": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",
