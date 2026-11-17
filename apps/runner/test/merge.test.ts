@@ -8,6 +8,14 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { isClone, Workspaces } from "../src/workspace.js";
 
+// Root fix for the ENOTEMPTY cleanup flake: stop git starting detached background work (gc, maintenance) in the test
+// repos at all. Set on process.env so the Workspaces code under test (which reads it by default) is covered as well.
+process.env.GIT_CONFIG_COUNT = "2";
+process.env.GIT_CONFIG_KEY_0 = "gc.auto";
+process.env.GIT_CONFIG_VALUE_0 = "0";
+process.env.GIT_CONFIG_KEY_1 = "maintenance.auto";
+process.env.GIT_CONFIG_VALUE_1 = "false";
+
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
 
@@ -17,10 +25,22 @@ const tmp = (prefix: string) => {
   dirs.push(d);
   return d;
 };
-afterEach(() => {
-  // Retries cover ENOTEMPTY: git 2.47+ runs its automatic maintenance detached, so it can still be writing in a repo here.
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
+afterEach(async () => {
+  // Backstop only (background git is switched off above): wait with a deadline, not a fixed sleep, if something
+  // still writes in a repo. Any other error is thrown at once; ENOTEMPTY still fails the test once the deadline passes.
+  const deadline = Date.now() + 30_000;
+  for (const d of dirs.splice(0)) {
+    for (;;) {
+      try {
+        rmSync(d, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY" || Date.now() >= deadline) throw err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+  }
+}, 40_000);
 
 /** A bare origin plus a scratch clone for pushing "other people's" commits to it. */
 function origin() {
