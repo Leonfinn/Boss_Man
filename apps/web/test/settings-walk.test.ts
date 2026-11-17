@@ -168,11 +168,13 @@ const SIZES = [
 ];
 
 describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page", () => {
-  it("shows each mapped section, with no page error, at desktop, foldable and phone sizes", async () => {
+  // One test per size (BOS-1708): the three sizes walked in one test shared a single 90 s budget, which GitHub's
+  // slower runners overran; each size now has its own, and the walk waits for each page's events, not a sleep.
+  for (const vp of SIZES) it(`shows each mapped section, with no page error, at ${vp.name}`, async () => {
     const browser = await launch();
     if (!browser) return;
     try {
-      for (const vp of SIZES) {
+      {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
         const errors: string[] = [];
         const wide: string[] = [];
@@ -182,7 +184,22 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           await page.waitForSelector(".set-page h2", { timeout: 8000 }).catch(async (e: any) => {
             throw new Error(`${vp.name}: ${id} shows no section: ${String(e).slice(0, 80)}; page says ${JSON.stringify((await page.locator("body").innerText()).slice(-300))}`);
           });
-          await new Promise((r) => setTimeout(r, 500));
+          // Wait for the mapped headings to show (a section that loads its own answer draws them late), with a
+          // deadline; a miss falls through to the assertion below, which names what was found.
+          await page
+            .waitForFunction(
+              (hs: string[]) => {
+                const texts = [...document.querySelectorAll(".set-page h2, .set-page h3")].map((e) => (e.textContent ?? "").trim());
+                return hs.every((h) => texts.some((f) => f === h || f.startsWith(h)));
+              },
+              headings,
+              { timeout: 10_000, polling: 100 },
+            )
+            .catch(() => undefined);
+          if (id === "funding") {
+            await page.waitForSelector(".set-page .source-card", { timeout: 10_000 }).catch(() => undefined);
+            await page.waitForSelector(".set-page table", { timeout: 10_000 }).catch(() => undefined);
+          }
           const found = (await page.locator(".set-page h2, .set-page h3").allInnerTexts()).map((t: string) => t.trim());
           for (const h of headings) {
             expect(found.some((f: string) => f === h || f.startsWith(h)), `${vp.name}: "${h}" on ${id}; found ${JSON.stringify(found)}; errors ${JSON.stringify(errors)}; body ${JSON.stringify((await page.locator("main, body").first().innerText()).split("TypeError")[1]?.slice(0, 200))}`).toBe(true);
@@ -207,16 +224,16 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
   }, 90_000);
 
   // BOS-1063: a plain "#id" link replaced the route and sent the owner to the dashboard.
-  it("every 'On this page' link keeps the route and brings its own section into view", async () => {
+  // One test per size (BOS-1708), for the same reason as the walk above.
+  for (const vp of SIZES) it(`every 'On this page' link keeps the route and brings its own section into view at ${vp.name}`, async () => {
     const browser = await launch();
     if (!browser) return;
     try {
-      for (const vp of SIZES) {
+      {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
         for (const id of ["team", "permissions"]) {
           await page.goto(`${base}/#/settings/c1/${id}`);
-          await page.waitForSelector(".set-jump a", { timeout: 8000 });
-          await new Promise((r) => setTimeout(r, 500));
+          await page.waitForFunction(() => document.querySelectorAll(".set-jump a").length > 3, undefined, { timeout: 10_000, polling: 100 }).catch(() => undefined);
           const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
           expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
           for (const target of hrefs) {
