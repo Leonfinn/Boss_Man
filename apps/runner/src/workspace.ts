@@ -27,7 +27,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MainLogResult,type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -2176,6 +2176,39 @@ export class Workspaces {
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
+    });
+  }
+
+  /**
+   * The target's newest `max` first-parent commits after a fetch, newest first (BOS-1645): the server compares them with the
+   * merges it recorded, so a merge whose answer was lost (a runner swap between push and record) is still recorded.
+   * Read-only. `filesFor`: commits to list changed files for, against their first parent (what a merge brought in).
+   */
+  async mainLog(projectId: string, target: string, max: number, filesFor: string[] = [], secrets: Record<string, string | undefined> = {}): Promise<MainLogResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(projectId, async () => {
+      const repo = this.repoDir(projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) return { commits: [] };
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      const ref = `refs/remotes/origin/${target}`;
+      if ((await this.gitCode(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })).code !== 0) return { commits: [] };
+      // NUL-separated records of unit-separated fields: a subject can hold any other character.
+      const out = await this.git(["log", "--first-parent", `--max-count=${Math.max(1, Math.min(200, Math.floor(max)))}`, "--format=%H%x1f%cI%x1f%s%x00", ref], { cwd: repo });
+      const wanted = new Set(filesFor.map((s) => s.toLowerCase()));
+      const commits: MainLogResult["commits"] = [];
+      for (const rec of out.split("\0")) {
+        // The subject is the last field, so a unit separator inside it stays part of it.
+        const [sha, at, ...subject] = rec.replace(/^\n/, "").split("\x1f");
+        if (!sha || !/^[0-9a-f]{40}$/.test(sha) || !at) continue;
+        const c: MainLogResult["commits"][number] = { sha, at, subject: subject.join("\x1f") };
+        if (wanted.has(sha)) {
+          // A root commit has no first parent: then nothing to compare it with, and no files are claimed.
+          const d = await this.gitCode(["diff", "--name-only", `${sha}^1`, sha], { cwd: repo });
+          if (d.code === 0) c.files = d.stdout.split("\n").filter(Boolean);
+        }
+        commits.push(c);
+      }
+      return { commits };
     });
   }
 

@@ -125,6 +125,12 @@ export type MaintenanceDeps = {
   swapTries?: number;
   swapRetryMs?: number;
   connected: (companyId: string) => Promise<boolean>;
+  /**
+   * BOS-1645: merges past their check, being pushed and recorded, per company. A swap waits for them even when the owner
+   * chose "update now" (that stops checks, not a push): on 16 Nov a swap cut the gate off between BOS-1635's push and
+   * its record, so main had the merge and the ticket said "not merged". The phase ends when the runner answers the push.
+   */
+  landingMerges?: () => Promise<Map<string, number>>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
   tick: () => Promise<unknown>;
@@ -178,6 +184,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
    * in flight. The shared function is also what a server update's quiet-host wait reads (runner-busy.ts).
    */
   const busyByCompany = async () => (await runnerBusy(db, true)).byCompany;
+  const landing = async () => (deps.landingMerges ? await deps.landingMerges().catch(() => new Map<string, number>()) : new Map<string, number>());
 
   /**
    * The wrap-up panel's list (BOS-929): every work run still going, with its agent, ticket reference and when it
@@ -627,10 +634,13 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         if (swapped[r.slug] && t.getTime() - new Date(swapped[r.slug]!).getTime() < 60_000) continue;
         if (tries[r.slug] && t < new Date(tries[r.slug]!.next)) continue; // a failed swap, waiting for its next try
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
+        // BOS-1645: a merge being pushed holds the swap even under force; the record is written as soon as the push answers.
+        if (r.companyId && ((await landing()).get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
         active = await busyByCompany();
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
+        if (r.companyId && ((await landing()).get(r.companyId) ?? 0) > 0) continue;
         try {
           // Said before the call, so the runner's next hello is recorded as this, not as a crash (BOS-594).
           if (r.companyId) await expectRestart(db, r.companyId, h.kind === "settings" ? "setting change" : "update", now());
