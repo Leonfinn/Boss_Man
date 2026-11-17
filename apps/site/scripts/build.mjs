@@ -1,4 +1,5 @@
-// Builds the static site: src/pages/*.html and src/guides/*.md + shared header/footer -> dist/, plus public/ copied as
+// Builds the static site: src/pages/*.html, src/guides/*.md and the repo's CHANGELOG.md (the "What's new" page) + shared
+// header/footer -> dist/, plus public/ copied as
 // is, _headers, _redirects, robots.txt and (when SITE_URL is set) sitemap.xml.
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -94,7 +95,7 @@ function footer(vars) {
       <p>Boss Man is in alpha. Its own agents build it, and some parts are still rough. Free and open source under the Apache 2.0 licence.</p>
     </div>
     <nav aria-label="Footer">
-      <a href="/guides/">Guides</a>${roadmap}<a href="/about">About</a><a href="/faq">FAQ</a><a href="${vars.repo}">GitHub</a><a href="${vars.issues}">Report a problem</a><a href="${vars.licence}">Licence</a>
+      <a href="/guides/">Guides</a><a href="/whats-new">What's new</a>${roadmap}<a href="/about">About</a><a href="/faq">FAQ</a><a href="${vars.repo}">GitHub</a><a href="${vars.issues}">Report a problem</a><a href="${vars.licence}">Licence</a>
     </nav>
   </div>
 </footer>`;
@@ -229,7 +230,56 @@ ${lists}
   return { content, wrapMain: false };
 }
 
-export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl } = {}) {
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/**
+ * Reads the repo's CHANGELOG.md for the "What's new" page. Everything above the first `## ` heading (the file's title, its
+ * note for GitHub readers and the release-step comment) is left out. Every `## ` heading must be a date such as
+ * "16 November 2026", newest first and never twice, and no entry may carry a ticket number: the page is for users, in
+ * plain words. Any slip stops the build, so a release step that adds an entry can't ship a broken page.
+ */
+export function readChangelog(file) {
+  const name = path.basename(file);
+  const text = readFileSync(file, "utf8").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "");
+  const start = text.search(/^## /m);
+  if (start < 0) throw new Error(`${name}: no entries (each entry starts with "## <day> <Month> <year>")`);
+  const source = text.slice(start);
+  const ticket = /\bBOS-\d+\b/i.exec(source);
+  if (ticket) throw new Error(`${name}: "${ticket[0]}" looks like a ticket number; describe the change in plain words instead`);
+  let previous = Infinity;
+  const dates = [];
+  for (const m of source.matchAll(/^## (.*)$/gm)) {
+    const heading = m[1].trim();
+    const d = /^(\d{1,2}) ([A-Z][a-z]+) (\d{4})$/.exec(heading);
+    const month = d ? MONTHS.indexOf(d[2]) : -1;
+    const time = month >= 0 ? Date.UTC(+d[3], month, +d[1]) : NaN;
+    if (Number.isNaN(time) || new Date(time).getUTCDate() !== +d[1]) throw new Error(`${name}: heading "${heading}" is not a date such as "16 November 2026"`);
+    if (time >= previous) throw new Error(`${name}: "${heading}" is out of order (newest first, one entry per day)`);
+    previous = time;
+    dates.push(heading);
+  }
+  return { source, dates };
+}
+
+function whatsNewPage(changelog, ctx) {
+  const { html, headings } = renderMarkdown(changelog.source, { name: "CHANGELOG.md", repo: ctx.vars.repo });
+  const toc = headings.map((h) => `<li><a href="#${h.id}">${escapeHtml(h.text)}</a></li>`).join("");
+  const content = `<div class="wrap guide news">
+<main id="main" class="g-main" tabindex="-1">
+<h1>What's new</h1>
+<p class="g-lead">The changes you will notice in Boss Man, newest first, in plain words. Each day's entry covers what was added that day. Boss Man has no numbered releases: to get these changes, <a href="/guides/updates-and-backups">update your server</a>.</p>
+${html}
+<p class="g-edit muted">The full history, with every change, is in the <a href="${ctx.vars.repo}/commits/main">list of changes on GitHub</a>.</p>
+</main>
+<nav class="g-toc" aria-label="Entries">
+<p class="g-group">Entries</p>
+<ul>${toc}</ul>
+</nav>
+</div>`;
+  return { content, wrapMain: false };
+}
+
+export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl, changelogFile = path.join(root, "..", "..", "CHANGELOG.md") } = {}) {
   siteUrl = siteUrl.replace(/\/+$/, "");
   if (siteUrl && !/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(siteUrl)) {
     throw new Error(`SITE_URL must be an https origin such as https://example.com (no path, query or spaces), got "${siteUrl}"`);
@@ -278,6 +328,10 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
       write(meta, guidePage(g, guides, { vars }), `${g.meta.path.slice(1)}.html`);
     }
   }
+
+  const changelog = readChangelog(changelogFile);
+  const newsMeta = { title: "What's new: Boss Man", description: `The changes you will notice in Boss Man, newest first, in plain words. Latest entry: ${changelog.dates[0]}.`, path: "/whats-new", nav: "whats-new", body: "guide-page" };
+  write(newsMeta, whatsNewPage(changelog, { vars }), "whats-new.html");
 
   writeFileSync(path.join(outDir, "robots.txt"), `User-agent: *\nAllow: /\n${siteUrl ? `\nSitemap: ${siteUrl}/sitemap.xml\n` : ""}`);
   if (siteUrl) {
