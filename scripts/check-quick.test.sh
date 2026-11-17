@@ -200,46 +200,52 @@ if command -v flock >/dev/null; then
   notlogged "typecheck" "signalled run"
 fi
 
-# A path-reading test (BOS-881): a change to the paths it reads runs it, even though it imports none of them, and from the
-# package the test lives in. Its entry reads apps/web/src/pages/, apps/web/src/components/ and packages/shared/src/owner-controls.ts.
-own="pnpm --filter @boss-man/server exec vitest related --run test/owner-control-list.test.ts"
-g checkout -q -B pathpages origin/main; commit apps/web/src/pages/Plan.tsx
-run 0 "web page change runs the owner-controls list" env
-logged "$own" "web page"
-logged "pnpm --filter @boss-man/server typecheck" "web page typecheck"
-grep -q "^PASS  path-reading test owner-control-list.test.ts (apps/server)" "$t/out" || fail "no PASS line: $(cat "$t/out")"
-g checkout -q -B pathcomponents origin/main; commit apps/web/src/components/Sidebar.tsx
-run 0 "web component change runs it" env
-logged "$own" "web component"
-g checkout -q -B pathshared origin/main; commit packages/shared/src/owner-controls.ts
-run 0 "owner-controls list change runs it" env
-logged "$own" "shared owner-controls"
-# A web change that is neither a page nor a component, and other shared code, leave it out.
-g checkout -q -B pathother origin/main; commit apps/web/src/lib/format.ts packages/shared/src/other.ts
-run 0 "an unrelated web and shared change leaves it out" env
-notlogged "owner-control-list" "unrelated web change"
-# A page change on top of a broad server list still runs it (the broad list is skipped, the path-reading test is not).
-g checkout -q -B pathbroad origin/main; commit apps/web/src/pages/Decisions.tsx apps/server/src/mcp.ts
-run 0 "a page change beside a broad server change" env
-grep -qF "SKIP related tests: too broad" "$t/out" || fail "expected the broad list skipped: $(cat "$t/out")"
-logged "$own" "broad beside page"
-notlogged "vitest related --run src/mcp.ts" "broad beside page"
-# The merge gate never skips it either.
-run 0 "merge check runs it" env BOSSMAN_MERGE_CHECK=1
-logged "$own" "merge check"
-
-# BOS-1613: any apps/web/src change runs the screen inventory test; a styles.css change runs the CSS text tests.
-inv="pnpm --filter @boss-man/web exec vitest related --run test/screen-inventory.test.ts"
-g checkout -q -B inventory origin/main; commit apps/web/src/lib/format.ts
-run 0 "a web lib change runs the screen inventory" env
-logged "$inv" "web lib"
-grep -q "^PASS  path-reading test screen-inventory.test.ts (apps/web)" "$t/out" || fail "no inventory PASS line: $(cat "$t/out")"
-g checkout -q -B inventorycss origin/main; commit apps/web/src/styles.css
-run 0 "a styles.css change runs the CSS text tests" env
-logged "vitest related --run test/ticket-layout.test.ts" "styles.css"
-g checkout -q -B inventoryserver origin/main; commit apps/server/src/other.ts
-run 0 "a server-only change leaves the inventory out" env
-notlogged "screen-inventory" "server-only change"
+# Whole-repo tests (BOS-1732): at the merge gate every test of a touched package that reads repo files by path, or renders the
+# built web app in a browser, runs; found by what the file contains, so new tests need no list. A hand run skips them.
+# The test files live in the base commit (they are not what the branch changes), as in a real repo.
+g checkout -q main
+wr() { mkdir -p "$repo/$(dirname "$1")"; printf '%s\n' "$2" >"$repo/$1"; }
+wr apps/server/test/ratchet.test.ts 'import { readFileSync } from "node:fs"; const root = new URL(".", import.meta.url); readFileSync(root);'
+wr apps/server/test/plain.test.ts 'import { readFileSync } from "node:fs"; readFileSync("/tmp/fixture-made-by-the-test");'
+wr apps/server/test/locate-only.test.ts 'const here = __dirname; it("x", () => here);'
+wr apps/web/test/scan.ts 'import { readdirSync } from "node:fs"; export const SRC = new URL("..", import.meta.url); readdirSync(SRC);'
+wr apps/web/test/inventory.test.ts 'import { SRC } from "./scan"; it("x", () => SRC);'
+wr apps/web/test/shell-layout.test.ts 'import { launch } from "./real-page"; await launch();'
+wr apps/web/test/pure.test.ts 'it("adds", () => 1 + 1);'
+wr apps/runner/test/fence.test.ts '// mentions chromium only in a comment'
+g add -A; g commit -q -m "test files"; g update-ref refs/remotes/origin/main HEAD
+wrt() { grep -qF "$1" "$t/out" || fail "$2: expected '$1' in: $(cat "$t/out")"; }
+# Not at the gate and not asked for: skipped.
+g checkout -q -B wr1 origin/main; commit apps/server/src/other.ts
+run 0 "a hand run leaves whole-repo tests out" env
+notlogged "ratchet.test.ts" "hand run whole-repo"
+# At the gate: the server's reading tests run, as one named-file run from the package; a test that reads only its own fixture
+# and a test that only finds its folder do not.
+run 0 "the gate runs the whole-repo tests of a touched package" env BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/server exec vitest run test/ratchet.test.ts" "gate server"
+notlogged "plain.test.ts" "gate server plain"
+notlogged "locate-only.test.ts" "gate server locate-only"
+notlogged "@boss-man/web exec vitest run" "gate untouched web package"
+notlogged "@boss-man/runner exec vitest run" "gate untouched runner package"
+wrt "PASS  whole-repo tests (apps/server, 1 files)" "gate PASS line"
+# CHECK_QUICK_WHOLE_REPO=1 asks for them in a hand run.
+run 0 "a hand run can ask for them" env CHECK_QUICK_WHOLE_REPO=1
+logged "pnpm --filter @boss-man/server exec vitest run test/ratchet.test.ts" "asked for"
+# A web change runs the browser tests and the tests that read through a helper; a pure test stays out.
+g checkout -q -B wr2 origin/main; commit apps/web/src/lib/format.ts
+run 0 "a web change at the gate" env BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/web exec vitest run test/inventory.test.ts test/shell-layout.test.ts" "gate web"
+notlogged "pure.test.ts" "gate web pure"
+notlogged "@boss-man/server exec vitest run" "gate web only"
+# A failing whole-repo test fails the check.
+run 1 "a failing whole-repo test fails the gate" env BOSSMAN_MERGE_CHECK=1 FAIL_ON=inventory.test
+grep -q "^FAIL  whole-repo tests (apps/web" "$t/out" || fail "no FAIL line: $(cat "$t/out")"
+# A shared change touches every package.
+g checkout -q -B wr3 origin/main; commit packages/shared/src/other.ts
+run 0 "a shared change at the gate" env BOSSMAN_MERGE_CHECK=1
+logged "@boss-man/server exec vitest run test/ratchet.test.ts" "gate shared server"
+logged "@boss-man/web exec vitest run" "gate shared web"
+g checkout -q -B feature origin/main
 
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
 g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
