@@ -9,6 +9,7 @@ import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { FIXES_LIVE_MAX, fixesLiveProblem, ownerSetupFixKey } from "./services/decisions.js";
+import { LINT_OVERRIDE_HELP, type LintOverrideInput, lintOverrideSchema, parseStoredOverride } from "./services/lint-override.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, SETUP_LINE_MAX, ownerSetupFacts, ownerSetupShapeProblem, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
 import { loadCompanyFacts } from "./services/company-facts.js";
 import { splitSteps } from "./services/runner-image.js";
@@ -37,7 +38,7 @@ const runTicketNoter = (scope: Scope, hooks: McpHooks) => (ticketId: string) => 
 
 /** The words every ownerSetup field adds to its help (DR-052). */
 const SETUP_HELP = `${HOST_TOKEN_HELP} Each step is checked like an owner card when you write it; a vague host step (".env" with no path, "restart the add-on" with no command or button path) is refused. lintOverride (CEO only) lets a wrong finding through with a reason. With steps, also give ownerSetupWhy (what it changes for the owner) and ownerSetupIfSkipped (what happens if they skip it, or "nothing breaks"): the go-live card opens with them. No "If …", "Only if …", "Unless …" or "nothing to do" in a step: start a step that applies only sometimes with [when <fact>] (known facts: network guard allow line can go) and Boss Man keeps or drops it from its own record at go-live.`;
-const LINT_OVERRIDE = z.string().max(500).optional().describe("CEO only: the reason, for the owner, to let ownerSetup past a card-check finding you judge wrong. It can't let through a command that isn't copy-safe or a value Boss Man doesn't have.");
+const LINT_OVERRIDE = lintOverrideSchema.optional().describe(`${LINT_OVERRIDE_HELP} The reason is for the owner, to let ownerSetup past a card-check finding you judge wrong. It can't let through a command that isn't copy-safe or a value Boss Man doesn't have. Rewriting the steps without it clears it.`);
 
 /** BOS-1650: the two one-line fields the go-live card opens with. Required whenever a ticket has setup steps. */
 const SETUP_WHY = z.string().max(SETUP_LINE_MAX).optional().describe("Required with ownerSetup: one line on what the setup changes for the owner (the go-live card opens with it).");
@@ -58,7 +59,7 @@ async function setupShapeFail(db: Db, ticketId: string | null, w: { ownerSetup?:
  * DR-052 point 1: the card check on a ticket's owner setup steps, as they are written. Blank steps (none) pass.
  * Returns the refusal, or the CEO override to store with the steps (null when none was needed).
  */
-async function checkSetupWrite(db: Db, hostFacts: Services["hostFacts"] | undefined, scope: Scope, ownerSetup: string | null | undefined, lintOverride: string | undefined) {
+async function checkSetupWrite(db: Db, hostFacts: Services["hostFacts"] | undefined, scope: Scope, ownerSetup: string | null | undefined, lintOverride: LintOverrideInput | undefined) {
   const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
   const steps = splitSteps(ownerSetup ?? "");
   return ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride, byCeo: me?.role === "ceo" });
@@ -584,7 +585,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (!setup && state === "review" && !sameState) {
         const [stored] = await db.select({ ownerSetup: tickets.ownerSetup, override: tickets.ownerSetupOverride }).from(tickets).where(eq(tickets.id, ticketId));
         const steps = splitSteps(stored?.ownerSetup ?? "");
-        const again = steps.length ? ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride: stored?.override ?? undefined, byCeo: true }) : null;
+        const again = steps.length ? ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride: parseStoredOverride(stored?.override), byCeo: true, strict: false }) : null;
         if (again && again.error !== null) return fail(`${again.error}\nFix them with set_ticket_state ownerSetup, then move to review again.`);
       }
       const note = summary ?? withCriteria.current;

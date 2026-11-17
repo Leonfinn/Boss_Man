@@ -497,7 +497,49 @@ describe("checkAsk with the lint", () => {
     expect(checkAsk({ triedFirst: TRIED, steps: bad, byCeo: true }).error).toMatch(/pass lintOverride/);
     const r = checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: "  The owner asked for the doc  reference. ", byCeo: true });
     expect(r.error).toBeNull();
-    expect(r.lint?.override).toEqual({ reason: "The owner asked for the doc reference.", findings: [expect.objectContaining({ step: 1, rule: "R1" })] });
+    const f = [expect.objectContaining({ step: 1, rule: "R1" })];
+    expect(r.lint?.override).toEqual({ reason: "The owner asked for the doc reference.", findings: f, entries: [{ reason: "The owner asked for the doc reference.", findings: f }] });
+  });
+
+  describe("R35: an override names the steps and rules it covers", () => {
+    const two = ["Follow docs/06 for the folder.", "Open Settings → Funding → Add funding source.", "Follow docs/07 for the other folder."];
+    const why = "The docs are right for these steps.";
+    it("a plain reason can't cover refusals on two steps (it used to clear both; this fails on the old code)", () => {
+      const r = checkAsk({ triedFirst: TRIED, steps: two, lintOverride: why, byCeo: true });
+      expect(r.error).toMatch(/name the steps it covers/);
+      expect(r.lint).toBeUndefined();
+    });
+
+    it("a refused step the override doesn't name stays refused", () => {
+      const r = checkAsk({ triedFirst: TRIED, steps: two, lintOverride: [{ steps: [1], reason: why }], byCeo: true });
+      expect(r.error).toMatch(/Step 3: points to a doc/);
+      expect(r.error).toMatch(/covers step 1; step 3 \(R1\) isn't covered/);
+      expect(r.error).not.toMatch(/Step 1: points/);
+    });
+
+    it("a rule the entry doesn't list stays refused on a step it names", () => {
+      const r = checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: [{ steps: [1], rules: ["R19"], reason: why }], byCeo: true });
+      expect(r.error).toMatch(/Step 1: points to a doc/);
+    });
+
+    it("naming every refused step lets them through, and the card keeps one entry per reason", () => {
+      const r = checkAsk({ triedFirst: TRIED, steps: two, lintOverride: [{ steps: [1], rules: ["R1"], reason: why }, { steps: [3], reason: "The seventh doc is right as well." }], byCeo: true });
+      expect(r.error).toBeNull();
+      expect(r.lint?.override?.entries).toEqual([
+        { reason: why, findings: [expect.objectContaining({ step: 1, rule: "R1" })] },
+        { reason: "The seventh doc is right as well.", findings: [expect.objectContaining({ step: 3, rule: "R1" })] },
+      ]);
+    });
+
+    it("an override naming a step or rule with no refusal is itself refused", () => {
+      expect(checkAsk({ triedFirst: TRIED, steps: two, lintOverride: [{ steps: [1, 2, 3], reason: why }], byCeo: true }).error).toMatch(/override for step 2 matches nothing/);
+      expect(checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: [{ steps: [1], rules: ["R1", "R19"], reason: why }], byCeo: true }).error).toMatch(/names R19 on step 1/);
+    });
+
+    it("a reason in a list is still 10 characters or more, and only the CEO's", () => {
+      expect(checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: [{ steps: [1], reason: "ok" }], byCeo: true }).error).toMatch(/at least 10/);
+      expect(checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: [{ steps: [1], reason: why }] }).error).toMatch(/Only the CEO/);
+    });
   });
 
   it("never lets an override through a command that isn't copy-safe", () => {
