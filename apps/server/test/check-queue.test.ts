@@ -410,5 +410,58 @@ describe("check queue", () => {
       expect(await s.q.logChars(j.id)).toBeNull();
       await s.close();
     });
+
+    // BOS-1723: a check that failed before its first step sends no whole log; its tail is kept instead, so it can be read.
+    it("keeps the tail as the log when a failed job sends no whole log, and still keeps nothing for a pass", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l7", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(j.id, { commit: j.commit, exitCode: null, logTail: "The runner could not start the check: fatal: invalid reference: c-l7", runnerId: null });
+      const kept = await s.q.readLog(s.companyId, j.ticketId, j.id);
+      expect(kept?.log).toContain("Only the end of the log reached the server");
+      expect(kept?.log).toContain("fatal: invalid reference: c-l7");
+      const ok = (await s.req({ tree: "l8", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(ok.id, { commit: ok.commit, exitCode: 0, logTail: "all passed", runnerId: null });
+      expect(await s.q.logChars(ok.id)).toBeNull();
+      await s.close();
+    });
+
+    it("reads a quick check's log whole, far past the old 8 KB tail", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l9", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      const log = `FAIL  apps/server/test/early.test.ts > an early test > fails\n${"passing line\n".repeat(5_000)}LAST-LINE`;
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 1, logTail: log.slice(-8192), runnerId: null, fullLog: log });
+      const kept = await s.q.readLog(s.companyId, j.ticketId, j.id);
+      expect(kept?.scope).toBe("quick");
+      expect(kept?.log).toBe(log);
+      await s.close();
+    });
+  });
+
+  // BOS-1723: check_log without a jobId lists the ticket's failed jobs instead of picking the newest one silently.
+  it("lists a ticket's failed and stuck jobs newest first, with the first failing line, and none of another ticket's", async () => {
+    const s = await setup();
+    const ticketId = await s.ticket();
+    const first = (await s.req({ tree: "f1", ticketId, kind: "pre_review", scope: "quick" })).job;
+    await s.q.claimNext(null, T(0));
+    await s.q.complete(first.id, { commit: first.commit, exitCode: 1, logTail: "lint ok\n FAIL  test/a.test.ts > suite > breaks\n", runnerId: null, fullLog: "whole" }, T(1));
+    const passed = (await s.req({ tree: "f2", ticketId, kind: "pre_review", scope: "quick" })).job;
+    await s.q.claimNext(null, T(2));
+    await s.q.complete(passed.id, { commit: passed.commit, exitCode: 0, logTail: "", runnerId: null }, T(3));
+    const second = (await s.req({ tree: "f3", ticketId })).job;
+    await s.q.claimNext(null, T(4));
+    await s.q.complete(second.id, { commit: second.commit, exitCode: 1, logTail: "FAIL  typecheck (server)\n", runnerId: null }, T(5));
+    const other = (await s.req({ tree: "f4" })).job;
+    await s.q.claimNext(null, T(6));
+    await s.q.complete(other.id, { commit: other.commit, exitCode: 1, logTail: "x", runnerId: null }, T(7));
+
+    const list = await s.q.failedJobs(s.companyId, ticketId);
+    expect(list.map((j) => j.jobId)).toEqual([second.id, first.id]);
+    expect(list[0]).toMatchObject({ kind: "merge", firstLine: 'step "typecheck (server)" failed' });
+    expect(list[1]).toMatchObject({ kind: "pre_review", scope: "quick", firstLine: "test/a.test.ts > suite > breaks", logChars: 5 });
+    expect(await s.q.failedJobs(OTHER_RUNNER, ticketId)).toEqual([]);
+    await s.close();
   });
 });

@@ -4,7 +4,7 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { deploysNothing, goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough, REAL_USE_REFUSAL, touchesInstallSurface, touchesRunnerCode, touchesRunnerUpdate, usabilityGated } from "@boss-man/shared";
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
-import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { checkFailureFacts, checkFailureSentence, failingLines, FULL_LOG_RETENTION_DAYS, fullLogPointer, redactForModel,criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, deployTargets, projects, reviewRequests, runners, settings, ticketDependencies, ticketMessages, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
@@ -178,6 +178,33 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
     default:
       return `Approved, but not merged (${r.outcome.replace(/_/g, " ")}).`;
   }
+}
+
+/**
+ * BOS-1723: a bounce is told to the agent in its wake note, which nobody can read once it is gone; 91 of 171 failed gate
+ * checks left nothing readable. So each check bounce also leaves this record in the ticket's conversation: the job id
+ * first (agents see only the first 1500 characters of a message), then what failed and the failing lines.
+ */
+export const BOUNCE_RECORD_MAX = 4000;
+const fitLines = (head: string, lines: string[], prefix: string) => {
+  let out = head;
+  for (const l of lines) {
+    if (out.length + prefix.length + l.length + 1 > BOUNCE_RECORD_MAX) break;
+    out += `\n${prefix}${l}`;
+  }
+  return out;
+};
+
+export function gateBounceRecord(b: { command: string; why: string; output: string; jobId?: string | null; ticketId: string }): string {
+  const facts = checkFailureFacts(b.output);
+  const where = b.jobId ? `Job ${b.jobId}; the whole log: tickets check_log, ticketId ${b.ticketId}, jobId ${b.jobId} (kept ${FULL_LOG_RETENTION_DAYS} days).` : "No job id: this check ran outside the check queue, so only these lines were kept.";
+  const named = failingLines(b.output);
+  const lines = named.length ? named : b.output.trimEnd().split("\n").slice(-10).map((l) => l.slice(0, 300));
+  return redactForModel(fitLines(`Merge check bounced: \`${b.command.slice(0, 300)}\` ${b.why}. ${where}${facts ? `\nWhat failed: ${facts}.` : ""}\n${named.length ? "Failing lines:" : "Last lines:"}`, lines, "> "));
+}
+
+export function ciBounceRecord(b: { commit: string; target: string; body: string }): string {
+  return redactForModel(fitLines(`GitHub CI bounced the merge of this branch with ${b.target} (merge commit ${b.commit.slice(0, 12)}). Failed jobs, with GitHub's job links and the failing lines:`, b.body.split("\n").map((l) => l.slice(0, 400)), ""));
 }
 
 /** The highest of several risk tiers; unrated tickets are medium (BOS-130). */
@@ -1975,6 +2002,14 @@ export function reviewService(
         await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true, internal: true });
         return tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
       };
+      // BOS-1723: the bounce's record in the ticket's conversation, kept after the wake note is gone. Never stops the bounce.
+      const keepBounce = async (text: string) => {
+        try {
+          await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "system", text });
+        } catch (err) {
+          console.warn(`bounce record for ticket ${ticketId} not kept: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
       // Checks can run for half an hour and merges can queue behind other work: keep saying the ticket
       // is active while we wait, so the unmerged-approvals sweep never starts a second landing beside it.
       const whileActive = async <T>(work: () => Promise<T>): Promise<T> => {
@@ -2178,6 +2213,9 @@ export function reviewService(
         // The same failing check again and again means the agent is going round in circles (R50).
         const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });
         const facts = checkFailureFacts(v.output);
+        // The failing lines come from the whole kept log when there is one: the tail often starts after the failure.
+        const whole = v.keptLog ? ((await queue.readLog(t.companyId, ticketId, v.keptLog.jobId).catch(() => null))?.log ?? null) : null;
+        await keepBounce(gateBounceRecord({ command, why, output: whole ?? v.output, jobId: v.keptLog?.jobId, ticketId }));
         const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review. If the failure isn't caused by your branch (the same step fails on main, or the check itself is broken), don't change your code: tell the CEO, who marks the ticket fixing the check (update_ticket fixesMergeCheck), then move this ticket back to review on the same commit; its approvals and sign-off are kept and it waits, held, for that fix.${facts ? `\n\nWhat failed: ${facts}.` : ""}\n\nLast output:\n${v.output.slice(-4000)}${v.keptLog ? `\n\n${fullLogPointer(v.keptLog.jobId, v.keptLog.ticketId, v.keptLog.chars)}` : ""}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
         return { outcome: "verify_failed", delivered, detail: v };
       };
@@ -2320,6 +2358,7 @@ export function reviewService(
             const waiting = await holdForWaits(ticketId);
             if (waiting) throw waiting;
             await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: false, detail: (jobs.join(", ") || "workflow failed").slice(0, 500) });
+            await keepBounce(ciBounceRecord({ commit: prep.commit, target: defaultBranch, body }));
             const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: body, what: "GitHub CI" });
             const delivered = await sendBack(
               `The review was approved, but GitHub CI failed on the merge of your branch with ${defaultBranch} (commit ${prep.commit.slice(0, 12)}), so it can't be merged yet. Failed:\n${body}\n\nFix it on your branch (merge origin/${defaultBranch} in if the failure comes from the two together), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`,
