@@ -389,6 +389,77 @@ describe("a merge-check fix that needs no deploy releases at merge (BOS-1609)", 
   });
 });
 
+// BOS-1694: Boss Man's own hold kept the waits copied when it opened. BOS-1628 stayed held on BOS-1641 after the CEO
+// removed the link, and 13 tickets stayed held on BOS-1697/1702 after their fix marks were cleared. Each test fails
+// on the code before it: releaseHolds returned [] because the stored blocker was still not in force.
+describe("Boss Man's own hold follows the ticket's current waits (BOS-1694)", () => {
+  it("a waits-on link removed after the hold opened releases it", async () => {
+    ctx = await setup();
+    const blocker = await ctx.ticket("Not merging soon", { systemState: "in_progress" });
+    const id = await ctx.ticket("Approved work");
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: id, blockerTicketId: blocker, until: "merged" });
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    await ctx.db.delete(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, id));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+    expect((await ctx.rounds(id)).map((r) => r.status)).toEqual(["approved"]);
+  });
+
+  it("clearing a ticket's merge-check fix mark releases the holds that mark placed", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Fix the merge check", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    await ctx.db.update(tickets).set({ fixesMergeCheck: false }).where(eq(tickets.id, fix));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+  });
+
+  it("with one of two links removed it stays held, and the board names only the one left", async () => {
+    ctx = await setup();
+    const a = await ctx.ticket("First blocker", { systemState: "in_progress" });
+    const b = await ctx.ticket("Second blocker", { systemState: "in_progress" });
+    const id = await ctx.ticket("Approved work");
+    await ctx.db.insert(ticketDependencies).values([{ blockedTicketId: id, blockerTicketId: a, until: "merged" }, { blockedTicketId: id, blockerTicketId: b, until: "merged" }]);
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    expect((await holdView(ctx.db, id))!.waits.map((w) => w.id).sort()).toEqual([a, b].sort());
+    await ctx.db.delete(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, id), eq(ticketDependencies.blockerTicketId, a)));
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    const view = (await holdView(ctx.db, id))!;
+    expect(view.waits.map((w) => w.id)).toEqual([b]);
+    expect(view.ready).toBe(false);
+    expect(ctx.verifies()).toBe(0);
+  });
+
+  // Rows from before BOS-1693: BOS-1641 changed only runner tests and gate scripts but was stored with touchesRunner
+  // true, so it never counted as in force without a runner rebuild. Its kept file list now decides.
+  it("a fix merged before BOS-1693 with a stale runner flag counts as in force once the server runs it", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Main's CI is failing", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    const fixMerge = "e".repeat(40);
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: fixMerge } });
+    await ctx.db.update(runners).set({ imageCommit: "f".repeat(40) }).where(eq(runners.companyId, ctx.company.id));
+    // As stored by the old classifier, with no file list kept: still waits for the runners (the stored flags stand).
+    await ctx.db.update(tickets).set({ mergeCommit: fixMerge, mergedAt: new Date(), touchesRunner: true, deploysNothing: false, systemState: "done" }).where(eq(tickets.id, fix));
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    // The same row with the merge's files kept: today's rules say no runner code, so it is in force.
+    await ctx.db.update(tickets).set({ diffFiles: ["apps/runner/test/check-job-cleanup.test.ts", "apps/runner/vitest.config.ts", "scripts/check-quick.sh"] }).where(eq(tickets.id, fix));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+  });
+});
+
 describe("a reviewer's hold placed only for a gate fault ends by itself (criterion 5)", () => {
   it("releases with no re-check once the marked fix is merged and live; any other reviewer hold still wakes the reviewer", async () => {
     ctx = await setup();
