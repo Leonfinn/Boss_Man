@@ -445,6 +445,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in, checker tags taken out (BOS-1665)
       const stepSources = ask.stepSources;
+      let notLiveLine = "";
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
@@ -455,7 +456,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // ticket merged before the wait existed is covered too.
         const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, blocksTicketId));
         const notLive = m ? await goLiveWaitOf(db, m) : null;
-        if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
+        // Only a card that settles an after-merge criterion is held (it can't pass before the merge runs; the
+        // criterion check below holds it too). Any other card is posted with a server-written "not live" line.
+        if (notLive && criterion !== undefined) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so its after-merge checks can't pass and the owner is not asked. Boss Man wakes you when it is live; don't raise this card before then.`);
+        if (notLive) notLiveLine = `This ticket's code isn't live yet (waiting for ${goLiveWaitWords(notLive)}).`;
       }
       const alsoIds = [...new Set(alsoBlocks ?? [])].filter((id) => id !== blocksTicketId);
       if (alsoIds.length) {
@@ -505,7 +509,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: notLiveLine ? `${question}\n\n${notLiveLine}` : question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
