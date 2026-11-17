@@ -177,8 +177,15 @@ jobs:
       # line into an annotation when it starts with "::", and pnpm -r puts "apps/<pkg> test: " in front. Without the
       # flag no failure in this step ever named its test (52 of 52, BOS-1720); with it the public check-run
       # annotations, and so Boss Man's bounce text, name it (BOS-1721). apps/server/test/ci-names-failing-test.test.ts.
-      - if: ${{ !cancelled() }}
+      - id: unit-tests
+        if: ${{ !cancelled() }}
+        env:
+          BOSSMAN_RUNNER_TEST_REPORT: ${{ runner.temp }}/runner-tests.json
         run: pnpm -r --no-bail --reporter-hide-prefix test
+      # A red test step names its failing runner tests in a public error annotation (BOS-1705).
+      # Guarded on that step's own outcome, so a typecheck-only failure doesn't print a "no report" note.
+      - if: ${{ !cancelled() && steps.unit-tests.outcome == 'failure' }}
+        run: node scripts/annotate-vitest-failures.mjs "$RUNNER_TEMP/runner-tests.json" "runner tests failed"
       - run: pnpm build
       - name: Migrations match the schema
         run: |
