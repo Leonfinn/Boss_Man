@@ -10,7 +10,7 @@ t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/nul
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -68,6 +68,20 @@ logged "pnpm --filter @boss-man/web exec vitest related --run src/a.ts" "web"
 logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
+# BOS-1727: the list guards run first, each only for the files it reads, and a failure names the file and the line to add.
+logged "pnpm --filter @boss-man/web exec vitest run test/screen-inventory.test.ts" "guard: screen inventory for a web change"
+notlogged "test/owner-control-list.test.ts" "guard: owner controls not for a change outside pages and components"
+notlogged "test/wake-classes.test.ts" "guard: wake classes not for a web-only change"
+[ "$(grep -n 'PASS  guard: screen inventory' "$t/out" | cut -d: -f1)" -lt "$(grep -n 'PASS  merge with' "$t/out" | cut -d: -f1)" ] || fail "guards must print before the merge step: $(cat "$t/out")"
+run 1 "screen inventory guard fails" env FAIL_ON=screen-inventory.test
+grep -q "^FAIL  guard: screen inventory" "$t/out" || fail "guard FAIL line: $(cat "$t/out")"
+grep -qF "screen-inventory.txt is out of date" "$t/out" || fail "guard hint names the file: $(cat "$t/out")"
+grep -qF "vitest run test/screen-inventory.test.ts -u" "$t/out" || fail "guard hint gives the command: $(cat "$t/out")"
+commit apps/web/src/pages/P.tsx
+run 0 "a page change" env
+logged "pnpm --filter @boss-man/server exec vitest run test/owner-control-list.test.ts" "guard: owner controls for a page change"
+run 1 "owner controls guard fails" env FAIL_ON=owner-control-list.test
+grep -qF "packages/shared/src/owner-controls.ts" "$t/out" || fail "owner-controls hint names the file: $(cat "$t/out")"
 # BOS-979: the secrets scan runs only when the branch has the script, and a finding fails the check.
 notlogged "scan-added-lines" "no scan script, no scan step"
 mkdir -p "$repo/scripts"; echo "// stub" >"$repo/scripts/scan-added-lines.mjs"; g add -A; g commit -q -m "scan script"
@@ -93,6 +107,9 @@ run 0 "server and migration change" env
 logged "node scripts/lint-migrations.mjs" "migration"
 logged "pnpm --filter @boss-man/server typecheck" "server"
 logged "vitest related --run src/b.ts" "server"
+logged "pnpm --filter @boss-man/server exec vitest run test/wake-classes.test.ts" "guard: wake classes for a server change"
+run 1 "wake classes guard fails" env FAIL_ON=wake-classes.test
+grep -qF "WAKE_CLASS in apps/server/src/services/wake-classes.ts" "$t/out" || fail "wake hint names the file: $(cat "$t/out")"
 
 commit scripts/x.sh
 run 0 "shell change" env
