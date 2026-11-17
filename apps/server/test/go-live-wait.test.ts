@@ -93,6 +93,10 @@ describe("go-live wait: the pure parts", () => {
     expect(RUNNER_CODE_PATHS.source.replace(/\\\//g, "/")).toBe(sh);
     expect(touchesRunnerCode(["apps/server/src/app.ts", "apps/runner/src/main.ts"])).toBe(true);
     expect(touchesRunnerCode(["apps/server/src/app.ts", "apps/web/src/x.tsx"])).toBe(false);
+    // BOS-1693: tests and test config don't ship in the runner image, so they never need a rebuild to be in force.
+    expect(touchesRunnerCode(["apps/runner/test/check-job-slot.test.ts", "apps/runner/test/setup-env.ts", "apps/runner/vitest.config.ts", "packages/shared/test/x.test.ts"])).toBe(false);
+    expect(touchesRunnerCode(["apps/runner/test/setup-env.ts", "packages/shared/src/go-live.ts"])).toBe(true);
+    expect(touchesRunnerCode(["pnpm-lock.yaml"])).toBe(true);
   });
 });
 

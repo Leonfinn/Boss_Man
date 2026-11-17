@@ -38,8 +38,14 @@ export const RUNNER_BUILD_INPUTS: readonly string[] = [
  */
 export const RUNNER_CODE_PATHS = new RegExp(`^(${RUNNER_BUILD_INPUTS.map((p) => (p.endsWith("/") ? p : `${p}$`).replace(/\./g, "\\.")).join("|")})`);
 
-/** True when any of the changed files is runner code. */
-export const touchesRunnerCode = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_CODE_PATHS.test(p));
+/**
+ * True when any of the changed files is runner code that ships in the runner image. Tests and test config under
+ * apps/runner (or packages/shared) are not: the image copies only src, so a rebuild carries nothing from them
+ * (BOS-1693: BOS-1641, a merge-check fix that changed runner tests, held ~35 merges waiting for a rebuild that
+ * would have changed nothing). Deliberately narrower than RUNNER_PATHS in the deploy scripts: those decide whether
+ * to rebuild, where an extra rebuild is harmless; this decides whether to wait for one, where a needless wait hangs.
+ */
+export const touchesRunnerCode = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_CODE_PATHS.test(p) && !NO_DEPLOY_PATHS.test(p));
 
 /**
  * The runner-update path (BOS-1467): the script the "Build and update runners" press runs. Runners are built only from
@@ -55,8 +61,9 @@ export const touchesRunnerUpdate = (paths: readonly string[]): boolean => paths.
  * take effect the moment they are on main (the merge gate and CI read them from the tree they check). Deliberately
  * narrow: scripts, configs and anything else count as needing a deploy. Markdown counts only at the repository root
  * (README.md, CLAUDE.md, ...) and under docs/: a .md inside an app (apps/runner/claude-pack, skills) can ship in an image.
+ * A package's vitest config only steers its tests (BOS-1693).
  */
-export const NO_DEPLOY_PATHS = /(^|\/)(test|tests|__tests__)\/|\.test\.[a-z]+$|^docs\/|^[^/]+\.md$|^\.github\//;
+export const NO_DEPLOY_PATHS = /(^|\/)(test|tests|__tests__)\/|\.test\.[a-z]+$|^docs\/|^[^/]+\.md$|^\.github\/|(^|\/)vitest\.(config|workspace)\.[cm]?[jt]s$/;
 
 /** True when the file list is known, non-empty, and every file is a test, a doc or CI: the merge needs no deploy. */
 export const deploysNothing = (paths: readonly string[]): boolean => paths.length > 0 && paths.every((p) => NO_DEPLOY_PATHS.test(p));
