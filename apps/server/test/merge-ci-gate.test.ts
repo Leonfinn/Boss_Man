@@ -17,6 +17,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, checkJobs, checkResults, decisions, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { holdView } from "../src/services/review-holds.js";
+import { conversationLines } from "../src/services/ticket-chat.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -199,6 +200,13 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(wake!.note).toContain("> … end of the log:");
     expect(wake!.note).not.toContain(fakeToken);
     expect(wake!.note).toContain("The job log couldn't be read: the git token isn't allowed to read job logs");
+    // BOS-1723: the bounce stays readable on the ticket once the wake note is gone: job link and failing lines, redacted.
+    await c.db.delete(wakes);
+    const talk = (await conversationLines(c.db, c.ticket.id)).join("\n");
+    expect(talk).toContain("GitHub CI bounced the merge of this branch");
+    expect(talk).toContain("https://github.com/leon/site/actions/runs/9/job/7");
+    expect(talk).toContain("FAIL host-deployer.test.sh: expected 3 got 4");
+    expect(talk).not.toContain(fakeToken);
   });
 
   it("a workflow run that failed before any job (a broken workflow file) goes back naming the run", async () => {

@@ -33,3 +33,50 @@ test("exits 0 when everything passed, 1 on a skip or an empty run", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a skip passes only when its file is on the skip list with a reason (BOS-1729)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "no-skips-list-"));
+  try {
+    const rep = { numPassedTests: 1, testResults: [{ name: path.join(dir, "test/a.test.ts"), assertionResults: [{ status: "passed", fullName: "ok" }, { status: "skipped", fullName: "needs a browser" }] }] };
+    const rf = path.join(dir, "r.json"); writeFileSync(rf, JSON.stringify(rep));
+    const lf = path.join(dir, "list.txt");
+    const run = (list) => { writeFileSync(lf, list); return spawnSync("node", [script, rf, "--root", dir, "--allow", lf], { encoding: "utf8" }); };
+    assert.equal(run("# none\n").status, 1, "unlisted skip fails");
+    assert.match(run("test/b.test.ts | other file\n").stderr, /test\/a\.test\.ts: needs a browser/);
+    assert.equal(run("test/a.test.ts | needs a browser\n").status, 0, "listed skip passes");
+    const noReason = run("test/a.test.ts\n");
+    assert.equal(noReason.status, 1, "an entry with no reason fails");
+    assert.match(noReason.stderr, /no reason/);
+    assert.equal(spawnSync("node", [script, rf, "--root", dir, "--allow", path.join(dir, "gone.txt")], { encoding: "utf8" }).status, 1, "a missing list fails");
+    // A listed file that ran and did not skip: reported as a note, exit stays 0.
+    writeFileSync(rf, JSON.stringify({ numPassedTests: 1, testResults: [{ name: path.join(dir, "test/a.test.ts"), assertionResults: [{ status: "passed", fullName: "ok" }] }] }));
+    const stale = run("test/a.test.ts | needs a browser\ntest/never-ran.test.ts | other\n");
+    assert.equal(stale.status, 0, "a stale entry does not fail");
+    assert.match(stale.stdout, /listed but did not skip: test\/a\.test\.ts\b(?!,)/);
+    assert.doesNotMatch(stale.stdout, /never-ran/, "a listed file that did not run is not called stale");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("node:test junit report: a skipped file needs a list entry", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "no-skips-junit-"));
+  try {
+    const xf = path.join(dir, "r.xml"); writeFileSync(xf, "<testsuites>\n\t<!-- tests 2 -->\n\t<!-- skipped 1 -->\n\t<!-- todo 0 -->\n</testsuites>");
+    const lf = path.join(dir, "list.txt");
+    const run = (list) => { writeFileSync(lf, list); return spawnSync("node", [script, "--junit", xf, "--file", "x.test.mjs", "--allow", lf], { encoding: "utf8" }); };
+    assert.equal(run("").status, 1);
+    assert.equal(run("x.test.mjs | needs /proc\n").status, 0);
+    writeFileSync(xf, "<!-- skipped 0 -->\n<!-- todo 0 -->");
+    assert.equal(run("").status, 0, "no skip, no entry needed");
+    const stale = run("x.test.mjs | needs /proc\n");
+    assert.equal(stale.status, 0);
+    assert.match(stale.stdout, /listed but did not skip: x\.test\.mjs/);
+    writeFileSync(xf, "");
+    const empty = run("");
+    assert.equal(empty.status, 1, "an empty report is a failure");
+    assert.match(empty.stderr, /is empty/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

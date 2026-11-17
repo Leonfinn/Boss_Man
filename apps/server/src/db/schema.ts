@@ -1571,6 +1571,8 @@ export const feedbackSettings = pgTable("feedback_settings", {
   confirmLinkHours: integer("confirm_link_hours").notNull().default(24),
   /** How long a confirmed browser may post without confirming again, in days. */
   rememberAddressDays: integer("remember_address_days").notNull().default(90),
+  /** BOS-1680: the portal's public address with no secret part (the bare BOSSMAN_PORTAL_URL) opens this company's portal. At most one company; the owner turns it on. */
+  portalAtBareAddress: boolean("portal_at_bare_address").notNull().default(false),
 });
 
 /** BOS-1388: a browser that confirmed an address. Hashes only: the cookie holds the secret, never this table. */

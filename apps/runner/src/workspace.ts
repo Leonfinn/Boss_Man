@@ -1010,6 +1010,24 @@ export class Workspaces {
     }
   }
 
+  /**
+   * `git add -A` into a scratch index while the author may be writing files. A file that shrinks while git reads it fails
+   * with "short read while indexing" (exit 128); that passes once the write finishes, so try again until the deadline.
+   * Any other failure is thrown at once.
+   */
+  private async addAllRetrying(dir: string, repo: string, env: Record<string, string>) {
+    const deadline = Date.now() + this.reviewLockWaitMs;
+    for (;;) {
+      try {
+        return await this.git(["add", "-A"], { cwd: dir, env, repo });
+      } catch (err) {
+        const text = `${(err as { stderr?: string }).stderr ?? ""}\n${(err as Error)?.message ?? ""}`;
+        if (!/short read while indexing|unable to index file|failed to insert into database/.test(text) || Date.now() >= deadline) throw err;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+  }
+
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
   private async snapshot(repo: string, dir: string): Promise<string> {
     // Each index in a folder of its own: a fenced git may write its index's folder, and no other.
@@ -1017,7 +1035,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const who = this.authorEnv();
       return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who, repo });
@@ -1239,7 +1257,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       // No external diff program or textconv driver: the diff is git's own (BOS-332).
       // No rename detection either (BOS-1100): git would fold a move into one `old => new` line, and the
       // owner-approval check matches exact paths, so a branch could move scripts/check-all.sh away (or move
@@ -1254,9 +1272,32 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}) };
+      const mergedInto = tip && head !== recorded ? await this.landedOn(repo, dir, head, tip) : null;
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}), ...(mergedInto ? { mergedInto } : {}) };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * BOS-1647: the commit on `tip` that brought `head` in, or null when head isn't inside tip. A merge commit's own
+   * files come with it; a fast-forward (head is on tip's first-parent line) is head itself. Never throws: a git failure
+   * reads as "not merged", which leaves the ticket to the normal merge path.
+   */
+  private async landedOn(repo: string, dir: string, head: string, tip: string): Promise<{ commit: string; files?: string[] } | null> {
+    try {
+      if ((await this.gitCode(["merge-base", "--is-ancestor", head, tip], { cwd: dir, repo })).code !== 0) return null;
+      if (head === tip) return { commit: head };
+      const line = (await this.git(["rev-list", "--first-parent", "--ancestry-path", `${head}..${tip}`], { cwd: dir, repo })).split("\n").filter(Boolean);
+      const first = line[line.length - 1];
+      if (!first) return { commit: head };
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", first], { cwd: dir, repo })).split(" ").slice(1);
+      // The first commit of the target's own line that holds head: a merge of the branch when head isn't its first parent.
+      if (parents[0] === head || parents.length < 2) return { commit: head };
+      const names = await this.git(["diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", parents[0]!, first], { cwd: dir, repo });
+      return { commit: first, files: names ? names.split("\n") : [] };
+    } catch {
+      return null;
     }
   }
 
@@ -1306,7 +1347,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const list = await this.checkpoints(spec.projectId, spec.ticketId);
       const last = list[list.length - 1];

@@ -1,0 +1,2 @@
+# Test files that may skip at the merge gate, each with the reason (BOS-1729). scripts/check-no-skips.mjs fails the gate when a test
+# skips in a file not listed here. Format: `path relative to apps/site | reason`. Today none skips, so the list is empty.

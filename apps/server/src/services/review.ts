@@ -4,7 +4,7 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { deploysNothing, goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough, REAL_USE_REFUSAL, touchesInstallSurface, touchesRunnerCode, touchesRunnerUpdate, usabilityGated } from "@boss-man/shared";
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
-import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { checkFailureFacts, checkFailureSentence, failingLines, FULL_LOG_RETENTION_DAYS, fullLogPointer, redactForModel,criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, deployTargets, projects, reviewRequests, runners, settings, ticketDependencies, ticketMessages, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
@@ -23,7 +23,7 @@ import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
-import { lineEvent, TRAIN_CLASH_FILES, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
+import { leftLineSince, lineEvent, TRAIN_CLASH_FILES, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
 import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
 import { priorityGroup } from "./priority-group.js";
@@ -178,6 +178,33 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
     default:
       return `Approved, but not merged (${r.outcome.replace(/_/g, " ")}).`;
   }
+}
+
+/**
+ * BOS-1723: a bounce is told to the agent in its wake note, which nobody can read once it is gone; 91 of 171 failed gate
+ * checks left nothing readable. So each check bounce also leaves this record in the ticket's conversation: the job id
+ * first (agents see only the first 1500 characters of a message), then what failed and the failing lines.
+ */
+export const BOUNCE_RECORD_MAX = 4000;
+const fitLines = (head: string, lines: string[], prefix: string) => {
+  let out = head;
+  for (const l of lines) {
+    if (out.length + prefix.length + l.length + 1 > BOUNCE_RECORD_MAX) break;
+    out += `\n${prefix}${l}`;
+  }
+  return out;
+};
+
+export function gateBounceRecord(b: { command: string; why: string; output: string; jobId?: string | null; ticketId: string }): string {
+  const facts = checkFailureFacts(b.output);
+  const where = b.jobId ? `Job ${b.jobId}; the whole log: tickets check_log, ticketId ${b.ticketId}, jobId ${b.jobId} (kept ${FULL_LOG_RETENTION_DAYS} days).` : "No job id: this check ran outside the check queue, so only these lines were kept.";
+  const named = failingLines(b.output);
+  const lines = named.length ? named : b.output.trimEnd().split("\n").slice(-10).map((l) => l.slice(0, 300));
+  return redactForModel(fitLines(`Merge check bounced: \`${b.command.slice(0, 300)}\` ${b.why}. ${where}${facts ? `\nWhat failed: ${facts}.` : ""}\n${named.length ? "Failing lines:" : "Last lines:"}`, lines, "> "));
+}
+
+export function ciBounceRecord(b: { commit: string; target: string; body: string }): string {
+  return redactForModel(fitLines(`GitHub CI bounced the merge of this branch with ${b.target} (merge commit ${b.commit.slice(0, 12)}). Failed jobs, with GitHub's job links and the failing lines:`, b.body.split("\n").map((l) => l.slice(0, 400)), ""));
 }
 
 /** The highest of several risk tiers; unrated tickets are medium (BOS-130). */
@@ -392,6 +419,10 @@ export function reviewService(
   async function landingStale(ticketId: string): Promise<boolean> {
     const [row] = await db.select({ state: tickets.systemState, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(eq(tickets.id, ticketId));
     if (!row || row.state !== "review") return true;
+    // BOS-1769: a landing whose ticket left review after it started is over, even when the ticket is back in review and the
+    // old landing still beats the heartbeat: otherwise its marker refuses every retry and the back-in-review restart.
+    const marker = landings.get(ticketId);
+    if (marker?.state === "running" && (await leftLineSince(db, ticketId, new Date(marker.startedAt)))) return true;
     return Date.now() - row.lastActivityAt.getTime() > MERGE_MISSED_AFTER_MS;
   }
 
@@ -1509,12 +1540,14 @@ export function reviewService(
      * but keeps the running marker for as long as it takes so every page shows the merge in flight.
      */
     async landVisible(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions) {
-      await this.claimLanding(ticketId, reviewer);
+      const startedAt = await this.claimLanding(ticketId, reviewer);
       try {
         return await this.land(ticketId, reviewer, causedByRunId, opts);
       } finally {
         // The ticket page reloads when a running marker goes away; a finished banner comes from startLanding.
-        if (landings.get(ticketId)?.state === "running") landings.delete(ticketId);
+        // Only our own marker (BOS-1769): a landing that outlived its pass through the line must not clear the one that replaced it.
+        const m = landings.get(ticketId);
+        if (m?.state === "running" && m.startedAt === startedAt) landings.delete(ticketId);
       }
     },
 
@@ -1563,7 +1596,8 @@ export function reviewService(
             text = (err as Error).message;
           } else text = `Approved, but not merged: ${(err as Error).message}`;
         }
-        landings.set(ticketId, { state: "finished", outcome, text, url, finishedAt: new Date().toISOString() });
+        // Only over our own marker (BOS-1769): a newer landing that replaced this one keeps showing as running.
+        if (landings.get(ticketId) === running) landings.set(ticketId, { state: "finished", outcome, text, url, finishedAt: new Date().toISOString() });
       })();
       return running;
     },
@@ -1630,6 +1664,8 @@ export function reviewService(
      * uncommitted work sends the ticket back to the agent with what to do.
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal" | "branch_changed"; delivered: string | null; detail?: unknown }> {
+      // BOS-1769: this landing's pass through the line began now; once the ticket leaves review after this, the landing is over.
+      const begun = new Date();
       const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, ticketId));
       // An adopted merge (BOS-1371) carries on a check already running: it is not a new attempt.
       if (lineRow && !opts?.adopt) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
@@ -1646,7 +1682,7 @@ export function reviewService(
         for (let attempt = 1; ; attempt++) {
           let r: Awaited<ReturnType<typeof this.landOnce>> | { outcome: "runner_gone"; delivered: null; detail: { message: string } };
           try {
-            r = await this.landOnce(ticketId, reviewer, causedByRunId, opts);
+            r = await this.landOnce(ticketId, reviewer, causedByRunId, opts, begun);
           } catch (err) {
             if (!(err instanceof RunnerGone)) throw err;
             r = { outcome: "runner_gone", delivered: null, detail: { message: err.message } };
@@ -1678,7 +1714,7 @@ export function reviewService(
               clearInterval(beat);
             }
             const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
-            if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge waited, so it was not retried." } };
+            if (now?.state !== "review" || (await leftLineSince(db, ticketId, begun))) return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge waited, so it was not retried." } };
             if (deps.isLeader && !deps.isLeader()) return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited; the server now in charge restarts it." } };
             attempt--;
             continue;
@@ -1719,7 +1755,7 @@ export function reviewService(
           }
           // Approval can be withdrawn while we wait: don't merge something no longer in review.
           const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
-          if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge check waited, so it was not retried." } };
+          if (now?.state !== "review" || (await leftLineSince(db, ticketId, begun))) return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge check waited, so it was not retried." } };
         }
       } catch (caught) {
         const err = caught instanceof Error ? caught : new Error(String(caught));
@@ -1775,6 +1811,30 @@ export function reviewService(
       const since = Math.max(...rows.map((r) => (r.decidedAt ?? r.createdAt).getTime()));
       const prior = await priorSignoff(db, t, null);
       return prior.current?.head && new Date(prior.current.at).getTime() >= since ? prior.current.head : null;
+    },
+
+    /**
+     * BOS-1647: the push to the default branch landed but the merge was never recorded (the runner or server was cut off
+     * between the two, or the ticket left review before a retry). When the ticket's approved head is already inside the
+     * default branch, records the merge with the commit that brought it in, exactly as a merge that finished would: no new
+     * merge attempt, no push, no bounce. Null when the ticket isn't in that state (head not on main, not approved on this
+     * head, uncommitted work, already done), so the caller carries on as before. `known` is a diff the caller just read.
+     */
+    async recordLanded(ticketId: string, causedByRunId?: string | null, known?: WorkspaceDiff | null): Promise<{ outcome: "merged"; delivered: string | null; detail?: unknown } | null> {
+      const { t, repoUrl, landing } = await ticketWithRepo(ticketId);
+      if (t.systemState === "done" || !repoUrl || !t.branch || t.noCode || landing === "pull_request") return null;
+      const rows = await latestRows(db, ticketId);
+      if (!rows.length || evaluate(rows) !== "passed") return null;
+      const changed = known === undefined ? await this.diff(ticketId).catch(() => null) : known;
+      const into = changed?.mergedInto;
+      if (!changed || !into || changed.files.length) return null;
+      // Only the head the reviews passed: a head that merely sits on main (a branch never worked on) is not this ticket's merge.
+      const passed = await this.passedHead(t, rows);
+      if (passed && passed !== changed.head) return null;
+      // The record a finished merge writes: the commit, when it merged, what it touched. A fast-forward has no file list
+      // here, so it counts as touching the runner (the safe side, as for any merge with an unknown file list).
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_recorded", summary: `The branch head ${changed.head.slice(0, 8)} was already in the default branch (merged as ${into.commit.slice(0, 8)}) but the merge had not been recorded; recorded now, nothing was pushed.` });
+      return closeAfterMerge(t, into.commit, causedByRunId, into.files);
     },
 
     /**
@@ -1900,7 +1960,7 @@ export function reviewService(
       throw new ReviewError(409, `The owner signed off commit ${d.head!.slice(0, 8)}, but ${head!.slice(0, 8)} would merge, so nothing was merged. It needs a new review and sign-off.`);
     },
 
-    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal" | "branch_changed"; delivered: string | null; detail?: unknown }> {
+    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions, begun: Date = new Date()): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal" | "branch_changed"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
@@ -1917,6 +1977,14 @@ export function reviewService(
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
       const touch = () => beatNow(ticketId);
       await touch();
+      // BOS-1769: out of review now, or out and back since this landing began (`begun`, from land()). Either way this pass
+      // through the line is over: a retry or the back-in-review restart starts the next one, so this landing must stop
+      // rather than keep polling (and beating the heartbeat that keeps its marker alive) for hours.
+      const inReview = async () => {
+        const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+        return now?.state === "review";
+      };
+      const leftReview = async () => !(await inReview()) || (await leftLineSince(db, ticketId, begun));
       if (!repoUrl) {
         await lineEvent(db, t, { event: "merged", commit: null });
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
@@ -1951,6 +2019,14 @@ export function reviewService(
         await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true, internal: true });
         return tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
       };
+      // BOS-1723: the bounce's record in the ticket's conversation, kept after the wake note is gone. Never stops the bounce.
+      const keepBounce = async (text: string) => {
+        try {
+          await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "system", text });
+        } catch (err) {
+          console.warn(`bounce record for ticket ${ticketId} not kept: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
       // Checks can run for half an hour and merges can queue behind other work: keep saying the ticket
       // is active while we wait, so the unmerged-approvals sweep never starts a second landing beside it.
       const whileActive = async <T>(work: () => Promise<T>): Promise<T> => {
@@ -1979,6 +2055,10 @@ export function reviewService(
         noCode = false;
         changed = await readDiff();
       }
+      // BOS-1647: a head already inside the default branch is a push that landed whose record was lost: record it, never push
+      // or bounce it ("nothing changed") now that its diff is empty.
+      const alreadyLanded = await this.recordLanded(ticketId, causedByRunId, changed);
+      if (alreadyLanded) return alreadyLanded;
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
       // A diff that touches a file the owner approves (OWNER_APPROVED_PATHS: the merge gate and what it runs, and
@@ -2150,6 +2230,9 @@ export function reviewService(
         // The same failing check again and again means the agent is going round in circles (R50).
         const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });
         const facts = checkFailureFacts(v.output);
+        // The failing lines come from the whole kept log when there is one: the tail often starts after the failure.
+        const whole = v.keptLog ? ((await queue.readLog(t.companyId, ticketId, v.keptLog.jobId).catch(() => null))?.log ?? null) : null;
+        await keepBounce(gateBounceRecord({ command, why, output: whole ?? v.output, jobId: v.keptLog?.jobId, ticketId }));
         const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review. If the failure isn't caused by your branch (the same step fails on main, or the check itself is broken), don't change your code: tell the CEO, who marks the ticket fixing the check (update_ticket fixesMergeCheck), then move this ticket back to review on the same commit; its approvals and sign-off are kept and it waits, held, for that fix.${facts ? `\n\nWhat failed: ${facts}.` : ""}\n\nLast output:\n${v.output.slice(-4000)}${v.keptLog ? `\n\n${fullLogPointer(v.keptLog.jobId, v.keptLog.ticketId, v.keptLog.chars)}` : ""}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
         return { outcome: "verify_failed", delivered, detail: v };
       };
@@ -2292,6 +2375,7 @@ export function reviewService(
             const waiting = await holdForWaits(ticketId);
             if (waiting) throw waiting;
             await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: false, detail: (jobs.join(", ") || "workflow failed").slice(0, 500) });
+            await keepBounce(ciBounceRecord({ commit: prep.commit, target: defaultBranch, body }));
             const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: body, what: "GitHub CI" });
             const delivered = await sendBack(
               `The review was approved, but GitHub CI failed on the merge of your branch with ${defaultBranch} (commit ${prep.commit.slice(0, 12)}), so it can't be merged yet. Failed:\n${body}\n\nFix it on your branch (merge origin/${defaultBranch} in if the failure comes from the two together), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`,
@@ -2470,12 +2554,14 @@ export function reviewService(
               }
               cur = row;
               await started(cur);
-              // Merge train (BOS-1504): the ticket left review (sent back, moved by hand) while its check waited or ran. Its seat
-              // must not stay taken by a check nobody will land, so the job is cancelled and the round ends; trainMerge's
-              // `finally` then gives up the seat and the members behind restack. Only the train passes leftReview: today's path
-              // keeps its behaviour.
-              if ((cur.state === "queued" || cur.state === "running") && o.leftReview && (await o.leftReview())) {
-                await deps.cancelCheck?.(cur.id, "The ticket left review, so its merge check was stopped.").catch(() => undefined);
+              // The ticket left review (sent back, moved by hand) while its check waited or ran (BOS-1504 for the train, BOS-1757
+              // and BOS-1769 for every path: a check for a ticket that can't merge must not hold a slot). The round ends; in the
+              // train, trainMerge's `finally` then gives up the seat and the members behind restack. `leftReview` also counts a
+              // ticket that went out and straight back (BOS-1769). The job is cancelled only while the ticket is still out of
+              // review: one already back in review gets a new landing, which reuses this job on the same tree (enqueue's "live")
+              // and keeps its place, so cancelling it here would fail that landing with "job stuck".
+              if ((cur.state === "queued" || cur.state === "running") && (await (o.leftReview ?? leftReview)())) {
+                if (!(await inReview())) await deps.cancelCheck?.(cur.id, "The ticket left review, so its merge check was stopped.").catch(() => undefined);
                 await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "the ticket left review" });
                 return { status: "left_review" };
               }
@@ -2539,11 +2625,14 @@ export function reviewService(
           adopted = undefined;
           const ref = { prep };
           const r = await alongsideCi(prep, async (stop) => {
-            const end = await runRound(ref, { refresh: retargetOn, stop });
+            const end = await runRound(ref, { refresh: retargetOn, stop, leftReview });
             return end.status === "passed" || end.status === "stopped" ? null : end;
           });
           if (r?.status === "restack") continue; // only the train restacks; kept for the type
           if (r) return r;
+          // BOS-1769: the check (and CI) passed, but the ticket left review meanwhile: a pass that is over never pushes. A landing
+          // started for its next pass reuses the passed job on the same tree.
+          if (await leftReview()) return { status: "left_review" };
           await touch();
           phases.set(ticketId, "merging");
           // The runner may have lost the adopted commit (it restarted too): prepare again rather than fail. A runner that went away stays an error.
@@ -2616,10 +2705,6 @@ export function reviewService(
         // BOS-1403 tiers: urgent/fix 0, ordinary 1, background lane 2; a ticket at the front of the line counts as 0.
         const at = { priority: pl.front ? 0 : checkPrio, place: (pl.at ?? new Date()).getTime() };
         const pause = () => new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
-        const inReview = async () => {
-          const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
-          return now?.state === "review";
-        };
         const seatOf = () => {
           const p = train.place(ticketId);
           return p ? { place: p.place, ahead: p.ahead.length } : undefined;
@@ -2635,7 +2720,7 @@ export function reviewService(
         // A copy that is no longer in charge (blue/green hand-over, BOS-1289) stops: the server in charge rebuilds its own train.
         const gone = async (): Promise<ServerMergeEnd | null> => {
           if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
-          return (await inReview()) ? null : { status: "left_review" };
+          return (await leftReview()) ? { status: "left_review" } : null;
         };
         let headOnly = false;
         let clash: TrainClash | null = null;
@@ -2754,7 +2839,7 @@ export function reviewService(
                   // Only the head retargets, and its refresh prepares on main.
                   onRetarget: (f) => train.retargeted(ticketId, { base: f.targetSha, commit: f.commit, tree: f.tree, onMain: true }),
                   train: seatOf,
-                  leftReview: async () => !(await inReview()),
+                  leftReview,
                 });
               let r = await round();
               if (r.status === "check_failed") {
@@ -2847,8 +2932,8 @@ export function reviewService(
         : await plainOrChecked();
       // The attempt ended inside the split merge (BOS-1070): CI failed or couldn't be read, or the legacy check failed.
       if (m1.status === "early") return m1.result;
-      // Merge train: the ticket left review while it waited in or for the train; nothing was pushed.
-      if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while it waited in the merge train, so it was not merged." } };
+      // The ticket left review while its merge waited (in or for the train, or on its check job: BOS-1757, BOS-1769); nothing was pushed.
+      if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while its merge check waited or ran, so nothing was merged." } };
       if (m1.status === "handed_over") return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited in the merge train; the server now in charge restarts it." } };
       const m0 = m1;
       // BOS-1413: the branch got a commit the reviews never covered. Nothing was pushed; the queued check is dropped, the sign-off

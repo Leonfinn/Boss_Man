@@ -40,6 +40,85 @@ describe("merge queue screen (BOS-587)", () => {
     expect(failingStep("error: something broke")).toBe("error: something broke");
   });
 
+  // R28: approved tickets held by mergeWaits on a fix marked fixesMergeCheck: one line from the function that holds, not "healthy".
+  it("reads held_behind_fix for approved tickets waiting on a marked fix, and stuck fix_stalled when the fix is parked", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+    const fix = await mk("Fix main CI");
+    await c.db.update(tickets).set({ systemState: "in_progress", fixesMergeCheck: true }).where(eq(tickets.id, fix.id));
+    for (const title of ["Held one", "Held two"]) {
+      const t = await mk(title);
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+    }
+    const data = await queue(c);
+    expect(data.line).toMatchObject({ state: "held_behind_fix", held: 2, fixes: [{ ticketId: fix.id, stateText: "being fixed", ownerUpdate: false }] });
+    await c.db.update(tickets).set({ systemState: "ready" }).where(eq(tickets.id, fix.id));
+    expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", others: 2 });
+  });
+
+  describe("held behind a fix: the fix's own state (R28)", () => {
+    async function heldTwoBehind(c: Awaited<ReturnType<typeof setup>>, fixSet: Partial<typeof tickets.$inferInsert>) {
+      const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+      const fix = await mk("Fix main CI");
+      await c.db.update(tickets).set({ fixesMergeCheck: true, ...fixSet }).where(eq(tickets.id, fix.id));
+      for (const title of ["Held one", "Held two"]) {
+        const t = await mk(title);
+        await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+        await approve(c, t.id);
+      }
+      return fix;
+    }
+
+    it("a fix that was sent back is stalled, not 'being fixed'", async () => {
+      const c = (ctx = await setup());
+      const fix = await heldTwoBehind(c, { systemState: "in_progress" });
+      await c.db.insert(reviewRequests).values({ ticketId: fix.id, kind: "code", round: 1, status: "changes_requested" });
+      expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", others: 2, reason: expect.stringMatching(/sent back/) });
+      // A later round that is still pending (back with its reviewers) is not a sent-back fix.
+      await c.db.insert(reviewRequests).values({ ticketId: fix.id, kind: "code", round: 2, status: "pending" });
+      expect((await queue(c)).line).toMatchObject({ state: "held_behind_fix", fixes: [{ stateText: "being fixed" }] });
+    });
+
+    it("an approved fix that has waited over an hour to land is stalled, whoever owns the wait", async () => {
+      const c = (ctx = await setup());
+      const fix = await heldTwoBehind(c, { systemState: "review", lastActivityAt: new Date(Date.now() - 90 * 60_000) });
+      await approve(c, fix.id);
+      // The wait is the owner's (an open sign-off), not Boss Man's: the old "system waits only" rule never flagged this.
+      const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Sign off the fix?", recommendedOption: "Yes", context: { type: "risk_review" } }).returning({ id: decisions.id });
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: fix.id, blockerDecisionId: card!.id });
+      expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", reason: expect.stringMatching(/approved for 9\d minutes and has not landed/) });
+    });
+
+    it("merged in a company that puts work live itself: it waits for the CEO to mark it live, with no update card", async () => {
+      const c = (ctx = await setup());
+      // The first company is the home company (Boss Man's own deploy); this second one puts its own work live.
+      const { company } = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+      const project = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Shop" })).json() as { id: string };
+      const mk = async (title: string) => (await c.req("POST", `/api/projects/${project.id}/tickets`, { title })).json() as { id: string };
+      const fix = await mk("Fix main CI");
+      await c.db.update(tickets).set({ fixesMergeCheck: true, systemState: "review", mergeCommit: "a".repeat(40), mergedAt: new Date() }).where(eq(tickets.id, fix.id));
+      await c.db.insert(settings).values({ key: `live_release:${company.id}`, value: { new: "b".repeat(40) } });
+      const t = await mk("Held one");
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+      const line = (await c.req("GET", `/api/companies/${company.id}/merge-queue`).then((r) => r.json())).line;
+      expect(line).toMatchObject({ state: "held_behind_fix", fixes: [{ stateText: "merged, waiting for the CEO to mark it live", ownerUpdate: false, updateCardId: null }] });
+    });
+
+    it("merged, only the server update left: the line links the open update card and raises none", async () => {
+      const c = (ctx = await setup());
+      await heldTwoBehind(c, { systemState: "review", mergeCommit: "a".repeat(40), mergedAt: new Date() });
+      // The server runs an older commit than the merge, so the merge is not live yet.
+      await c.db.insert(settings).values({ key: `live_release:${c.company.id}`, value: { new: "b".repeat(40) } });
+      const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Put the update live?", recommendedOption: "Yes", context: { type: "deploy", deployId: "d1" } }).returning({ id: decisions.id });
+      const before = (await c.db.select().from(decisions)).length;
+      const line = (await queue(c)).line;
+      expect(line).toMatchObject({ state: "held_behind_fix", fixes: [{ ownerUpdate: true, updateCardId: card!.id }] });
+      expect((await c.db.select().from(decisions)).length).toBe(before);
+    });
+  });
+
   it("lists a ticket in review with a failed check, and flags it as stuck", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the login" })).json() as { id: string; number: number };
@@ -319,6 +398,16 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     const svc = (c: Awaited<ReturnType<typeof setup>>, over: Partial<Parameters<typeof mergeQueueService>[1]>) =>
       mergeQueueService(c.db, { runningMerges: () => [], limit: async () => 2, queueStatus: async () => ({ mode: "server", slots: 2, running: 0, waiting: 0 }), runnerConnected: async () => true, ...over });
     const labelOf = async (c: Awaited<ReturnType<typeof setup>>, id: string, over: Partial<Parameters<typeof mergeQueueService>[1]>) => (await svc(c, over).get(c.company.id)).waiting.find((w) => w.ticketId === id)!;
+
+    // BOS-1757: a running merge check holds a slot even when no landing owns it, so the screen counts the same rows as the Checks panel.
+    it("lists a running merge job that no landing owns, so it counts the same as the Checks panel", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const started = new Date(Date.now() - 15 * 60_000);
+      const view = await svc(c, { runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: started }], queueStatus: async () => ({ mode: "server", slots: 3, running: 1, waiting: 0 }) }).get(c.company.id);
+      expect(view.running.map((r) => r.ticketId)).toEqual([id]);
+      expect(view.running[0]!.minutes).toBeGreaterThanOrEqual(15);
+    });
 
     it("says no runner is connected before anything else, even with every slot busy", async () => {
       const c = (ctx = await setup());
