@@ -2437,6 +2437,10 @@ export function reviewService(
       // "stopped": GitHub CI failed while the round's job ran (BOS-1070); CI's verdict is the attempt's answer.
       type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | CheckFailed;
       const message = `Merge "${t.title}" (${ticketId})`;
+      const stillLeftReview = async () => {
+        const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+        return now?.state !== "review";
+      };
       const retargetOn = async () => {
         // Never while CI gating is on (BOS-1070): CI was published for this commit, and a retargeted tree is one CI never ran on.
         if (ci) return false;
@@ -2502,7 +2506,8 @@ export function reviewService(
               // must not stay taken by a check nobody will land, so the job is cancelled and the round ends; trainMerge's
               // `finally` then gives up the seat and the members behind restack. Only the train passes leftReview: today's path
               // keeps its behaviour.
-              if ((cur.state === "queued" || cur.state === "running") && o.leftReview && (await o.leftReview())) {
+              // BOS-1757: every path now, not only the train: a check for a ticket that can't merge must not hold a slot.
+              if ((cur.state === "queued" || cur.state === "running") && (await (o.leftReview ?? stillLeftReview)())) {
                 await deps.cancelCheck?.(cur.id, "The ticket left review, so its merge check was stopped.").catch(() => undefined);
                 await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "the ticket left review" });
                 return { status: "left_review" };
@@ -2876,7 +2881,7 @@ export function reviewService(
       // The attempt ended inside the split merge (BOS-1070): CI failed or couldn't be read, or the legacy check failed.
       if (m1.status === "early") return m1.result;
       // Merge train: the ticket left review while it waited in or for the train; nothing was pushed.
-      if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while it waited in the merge train, so it was not merged." } };
+      if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while its merge check waited or ran, so the check was stopped and nothing was merged." } };
       if (m1.status === "handed_over") return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited in the merge train; the server now in charge restarts it." } };
       const m0 = m1;
       // BOS-1413: the branch got a commit the reviews never covered. Nothing was pushed; the queued check is dropped, the sign-off

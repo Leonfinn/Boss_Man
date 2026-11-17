@@ -3,10 +3,10 @@
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 // BOS-1435 (DR-060): check workers on other machines take jobs the company runner has no free slot for. The runner is
 // always filled first; each ready worker then claims with its own limit. With no ready worker every path is as before.
-import { and, eq, inArray, isNotNull, lt } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, lt, ne } from "drizzle-orm";
 import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, type RunnerCommand, type WorkerCommand, type WorkerRepos } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { checkJobs, runners } from "../db/schema.js";
+import { checkJobs, runners, tickets } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
 import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, type CheckJob, type MachineView } from "./check-queue.js";
 import type { Eligible } from "./check-workers.js";
@@ -257,6 +257,22 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     await pump();
   }
 
+  /** Cancel one job with its reason, stop it on the machine running it, and start the next in the freed slot. */
+  async function cancelJob(jobId: string, reason: string) {
+    const [before] = await db.select().from(checkJobs).where(eq(checkJobs.id, jobId));
+    const job = await queue.cancel(jobId, reason);
+    if (job) {
+      forgetCode(jobId, true);
+      if (before?.state === "running") stopOn(before);
+      await ended(job);
+      await pump();
+    }
+    return job;
+  }
+
+  /** BOS-1757: the message recorded on a merge check whose ticket is no longer in review. */
+  const LEFT_REVIEW_TEXT = "The ticket left review, so its merge check was stopped.";
+
   return {
     pump,
     capacity,
@@ -400,6 +416,15 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         forgetCode(job.id, true);
         await ended(job);
       }
+      // BOS-1757: a merge check (queued or running) whose ticket is no longer in review can't merge: sent back, GitHub bounce,
+      // cancelled, or moved by hand. The landing that waited on it normally stops it itself; this catches the rest (a landing
+      // lost to a restart, a CI stop that left the job running). Its slot frees at once and the next check starts.
+      const orphans = await db
+        .select({ id: checkJobs.id })
+        .from(checkJobs)
+        .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
+        .where(and(eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]), ne(tickets.systemState, "review")));
+      for (const o of orphans) await cancelJob(o.id, LEFT_REVIEW_TEXT).catch(() => null);
       // BOS-1436: bundles whose job no longer runs on a worker (ended, re-queued, or left by a crash) go.
       if (deps.bundles) {
         const live = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), isNotNull(checkJobs.workerId)));
@@ -415,16 +440,6 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     },
 
     /** Server-side cancel with a recorded reason; also stops it on the machine running it. */
-    async cancel(jobId: string, reason: string) {
-      const [before] = await db.select().from(checkJobs).where(eq(checkJobs.id, jobId));
-      const job = await queue.cancel(jobId, reason);
-      if (job) {
-        forgetCode(jobId, true);
-        if (before?.state === "running") stopOn(before);
-        await ended(job);
-        await pump();
-      }
-      return job;
-    },
+    cancel: cancelJob,
   };
 }
