@@ -2188,6 +2188,9 @@ export function reviewService(
             announce: async (branch) => {
               await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
             },
+            announceRerun: async (commit) => {
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${commit.slice(0, 12)} and no newer run replaced it, so Boss Man asked GitHub to run it once more. Nothing to do.` });
+            },
             onWait: (s) => (s ? ciWaits.set(ticketId, s) : ciWaits.delete(ticketId)),
             touch,
           },
@@ -2251,6 +2254,16 @@ export function reviewService(
             await raiseCheckStuck(db, t, "GitHub CI", `was still running after ${mins} minutes${o.waiting.length ? ` (${o.waiting.join(", ")})` : ""}`, "");
             await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub CI was still running after ${mins} minutes; it's in your Decisions.` });
             return { outcome: "check_stuck", delivered: null, detail: { ci: "timeout", waiting: o.waiting } };
+          }
+          case "superseded":
+            // A newer push to the CI branch replaced this run: not a failure. Start the attempt again on the current main.
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${prep.commit.slice(0, 12)} because a newer run on the same branch (${o.newerSha.slice(0, 12)}) replaced it. No test failed; the merge starts again. Nothing to do.` });
+            return { outcome: "lock_wait", delivered: null, detail: { status: "ci_superseded", newerSha: o.newerSha } };
+          case "cancelled": {
+            const what = o.runs.join(", ") || "the CI run";
+            await raiseCheckStuck(db, t, "GitHub CI", `was cancelled on GitHub (${what})${o.rerunTried ? ", and cancelled again after one re-run" : "; Boss Man's token couldn't re-run it (it needs Actions: Read and write)"}. No test failed. Open the run on GitHub and re-run it, then choose "${CHECK_AGAIN}"`, "");
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub cancelled the run (${what}); no test failed. It's in your Decisions.` });
+            return { outcome: "check_stuck", delivered: null, detail: { ci: "cancelled", runs: o.runs } };
           }
           case "refused":
             return ciCard("access", o.message);
