@@ -35,11 +35,28 @@ export const HOST_STAGING_ENDPOINT = "host-deployer:staging";
 /** What the deploys service needs of the host's staging lane (selfDeployService.stagingLane / writeStagingRequest / stagingStatus). */
 export type StagingLane = {
   on: () => Promise<boolean>;
-  submit: (id: string, commit: string) => Promise<void>;
+  submit: (id: string, commit: string, by: "agent-request") => Promise<void>;
+  /** The repository the staging checkout follows, as the host reports it; null when it didn't say. */
+  origin: () => Promise<string | null>;
   status: () => Promise<{ id: string; result: string; message: string; to_commit: string; smoke?: string; failed_checks?: string; runner_image?: string; [k: string]: string | undefined } | null>;
   /** A request is still waiting in the host's inbox (held, or not taken yet). */
   pending: () => Promise<boolean>;
 };
+/**
+ * Whether two git remote addresses are the same repository: https, ssh:// and git@host:path forms, with or without .git,
+ * any credentials and any capital letters ignored. The staging lane belongs to the company whose project is the repository
+ * the host's staging checkout follows; a fork or any other repository is a different one.
+ */
+export function sameRepo(a: string | null | undefined, b: string | null | undefined): boolean {
+  const norm = (u: string | null | undefined) => {
+    if (!u) return "";
+    let s = u.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "");
+    s = s.replace(/^[a-z+]+:\/\//, "").replace(/^[^@/]*@/, "");
+    return s.replace(/^([^/:]+):(?!\d+\/)/, "$1/");
+  };
+  const x = norm(a);
+  return x !== "" && x === norm(b);
+}
 /** A staging deploy the host never answers (the lane was switched off, the host is down) is failed after this long. */
 const STAGING_GIVE_UP_MS = 3 * 60 * 60_000;
 export type TargetInput = { name: string; kind: Target["kind"]; endpoint: string; isProduction?: boolean; requiresApproval?: boolean; liveTag?: LiveTag | null };
@@ -332,7 +349,7 @@ export function deploysService(
       .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, status: "running", createdAt: now(), commit })
       .returning();
     try {
-      await lane.submit(d!.id, commit);
+      await lane.submit(d!.id, commit, "agent-request");
     } catch (err) {
       const [row] = await db.update(deploys).set({ status: "failed", outcome: `Couldn't hand the request to the host: ${(err as Error).message}`, finishedAt: now() }).where(eq(deploys.id, d!.id)).returning();
       throw new DeployError(502, row!.outcome!);
@@ -393,18 +410,28 @@ export function deploysService(
 
     syncHostStaging,
 
-    /** The poller's pass (main.ts): offers the staging target to companies that have a repo, then records the host's answer. */
+    /**
+     * The poller's pass (main.ts): offers the staging target only to a company with a project that is the repository the host's
+     * staging checkout follows (never to another company, whatever its project is, so a fork can't use the lane) and takes it
+     * away from any other company, then records the host's answer.
+     */
     async syncStaging() {
       if (!deps.staging) return;
-      const rows = await db.selectDistinct({ companyId: projects.companyId }).from(projects).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
-      await this.ensureHostStagingTargets(rows.map((r) => r.companyId));
+      const origin = (await deps.staging.origin()) ?? null;
+      const rows = await db.select({ companyId: projects.companyId, repoUrl: projects.repoUrl }).from(projects).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      const own = [...new Set(rows.filter((r) => sameRepo(r.repoUrl, origin)).map((r) => r.companyId))];
+      await this.ensureHostStagingTargets(own);
+      if (await deps.staging.on()) {
+        const stale = await db.select({ id: deployTargets.id, companyId: deployTargets.companyId }).from(deployTargets).where(sql`${deployTargets.rules}->>'hostStaging' = 'true'`);
+        for (const t of stale) if (!own.includes(t.companyId)) await db.delete(deployTargets).where(eq(deployTargets.id, t.id));
+      }
       await syncHostStaging();
     },
 
     /**
-     * BOS-1472: lists a non-production "staging" target, backed by the host's staging lane, for each company that has a Release
-     * Manager or any project with a repo (`companyIds`), once the host says the lane is on. It is not offered while the lane is
-     * off, and it never replaces a target the owner already made with that name. Returns how many it added.
+     * BOS-1472: lists a non-production "staging" target, backed by the host's staging lane, for each of `companyIds` (the caller
+     * passes only companies that own the repository staging follows), once the host says the lane is on. It is not offered while
+     * the lane is off, and it never replaces a target the owner already made with that name. Returns how many it added.
      */
     async ensureHostStagingTargets(companyIds: string[]) {
       if (!deps.staging || !(await deps.staging.on())) return 0;
@@ -502,9 +529,12 @@ export function deploysService(
       }
       // The commit is fixed now (DR-033): the tag goes to what was approved, never to the ref read again later.
       // A staging request with no ticket reads the ref from the company's oldest project that has a repo.
-      if ((t.rules as TargetRules).hostStaging === true && !ticketProjectId) {
-        const [p] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.companyId, actor.companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt))).orderBy(asc(projects.createdAt)).limit(1);
-        ticketProjectId = p?.id ?? null;
+      // Only a project that is the repository the host's staging checkout follows may use the lane: another company's fork can't.
+      if ((t.rules as TargetRules).hostStaging === true) {
+        const origin = (await deps.staging?.origin()) ?? null;
+        const mine = (await db.select({ id: projects.id, repoUrl: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, actor.companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt))).orderBy(asc(projects.createdAt))).filter((p) => sameRepo(p.repoUrl, origin));
+        if (!mine.length || (ticketProjectId && !mine.some((p) => p.id === ticketProjectId))) throw new DeployError(403, "Staging is for the repository this install deploys from, and this ticket's project isn't it.");
+        ticketProjectId = ticketProjectId ?? mine[0]!.id;
       }
       const resolved = await resolveFor(t, input.ref, ticketProjectId);
       if ((t.rules as TargetRules).hostStaging === true) return requestHostStaging(actor, t, input, resolved.commit);

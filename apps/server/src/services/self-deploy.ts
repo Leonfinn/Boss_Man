@@ -77,7 +77,7 @@ const Status = z.object({
 export type DeployStatus = z.infer<typeof Status>;
 
 /** outbox/staging-lane.json (BOS-1472): whether the host's staging lane is on. The shell writes every value as a string. */
-const StagingLane = z.object({ configured: z.string() });
+const StagingLane = z.object({ configured: z.string(), /** The repository the staging checkout follows (credentials dropped): only a company whose project is this repository may use the lane. */ origin: z.string().optional() });
 /**
  * outbox/staging-status.json: the last staging request's result. Every value is a string; `check_<name>` and `why_<name>`
  * carry each smoke check's result (pass, fail or skipped) and its one line of why, so they come through the catch-all.
@@ -1320,10 +1320,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   const stagingLane = async () => (dir ? ((await readJson(path.join(dir, "outbox", "staging-lane.json"), StagingLane))?.configured === "true") : false);
   const stagingStatus = () => (dir ? readJson(path.join(dir, "outbox", "staging-status.json"), StagingStatus) : Promise.resolve(null));
   /** One staging request for the host: same flat format as production's, target "staging", written beside its name and renamed. */
-  async function writeStagingRequest(id: string, commit: string) {
+  const stagingOrigin = async () => (dir ? ((await readJson(path.join(dir, "outbox", "staging-lane.json"), StagingLane))?.origin || null) : null);
+  /**
+   * `by` says who asked, so the host's record never claims an owner approved something they didn't: "owner" (the Settings button, the
+   * owner's id), "agent-request" (an agent's deploy tool call) or "deploy-card" (Boss Man checking a production card's commit).
+   */
+  async function writeStagingRequest(id: string, commit: string, by: "owner" | "agent-request" | "deploy-card" = "owner") {
     if (!dir) throw new Error("The host deployer folder isn't set up.");
-    const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
-    const body = { id, target: "staging", commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
+    const [o] = by === "owner" ? await db.select({ id: owners.id }).from(owners).limit(1) : [];
+    const body = { id, target: "staging", commit, requestedAt: new Date().toISOString(), approvedBy: by === "owner" ? (o?.id ?? "owner") : by };
     const file = path.join(dir, "inbox", "staging-request.json");
     const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
     await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
@@ -1368,7 +1373,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         const busy = st?.result === "running";
         const done = st?.to_commit === ctx.commit && (st.result === "deployed" || st.result === "failed" || st.result === "rejected");
         if (auto?.commit !== ctx.commit && !busy && !done) {
-          await writeStagingRequest(randomUUID(), ctx.commit);
+          await writeStagingRequest(randomUUID(), ctx.commit, "deploy-card");
           await putSetting(STAGED_AUTO, { commit: ctx.commit });
         }
       }
@@ -1398,6 +1403,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     stagingLane,
     stagingStatus,
     stagingBlock,
+    stagingOrigin,
     stagingTick,
     writeStagingRequest,
     stagingPending,

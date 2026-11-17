@@ -38,7 +38,8 @@
 #                          commit that is on main to staging with scripts/deploy-staging.sh, runs scripts/smoke-staging.sh, and
 #                          writes outbox/staging-status.json and outbox/staging-lane.json. Never touches production's files.
 #   STAGING_RATE_LIMIT_SECONDS  min gap between two staging deploys (300)
-#   STAGING_TIMEOUT_SECONDS     longest a staging deploy may run before it is stopped (1800)
+#   STAGING_TIMEOUT_SECONDS     longest a staging deploy may run before it is stopped (1800). The lane shares the deployer's one lock, so
+#                               a production request that arrives meanwhile waits for it (at most this long, and an urgent one too).
 # The smoke checks sign in with an optional smoke account: a file $BOSSMAN_DEPLOYER/smoke-credentials (same rules as host.conf:
 # plain file, owned by the user running this, mode 600) holding smoke_username=<name> and smoke_password=<password>. Without it those checks are skipped.
 #
@@ -1520,8 +1521,11 @@ write_staging_status() { # result message
 staging_done() { log "staging $1: $2"; write_staging_status "$1" "$2"; return 0; } # result message: record the outcome; the tick goes on
 staging_lane_file() { # tells the server whether the lane is on, so it only offers a staging target when it can be used
   ((DRY)) && return 0
-  local on=false; [[ -z $STAGING_DIR ]] || on=true
-  json configured="$on" >"$OUTBOX/staging-lane.json.tmp"
+  local on=false origin=""; [[ -z $STAGING_DIR ]] || on=true
+  # Which repository the staging checkout follows (credentials, if any, dropped). The server offers the staging target only to a
+  # company whose project is this repository, so another company's fork can never ask this host to deploy (BOS-1472 review).
+  if [[ $on == true ]]; then origin="$(staging_git remote get-url origin 2>/dev/null | sed -E 's#//[^@/]*@#//#' | head -n 1 || true)"; fi
+  json configured="$on" origin="$origin" >"$OUTBOX/staging-lane.json.tmp"
   chmod 644 "$OUTBOX/staging-lane.json.tmp"; mv "$OUTBOX/staging-lane.json.tmp" "$OUTBOX/staging-lane.json"
 }
 staging_git() { (umask 022; git -c safe.directory="$STAGING_DIR" -C "$STAGING_DIR" "$@"); }
@@ -1576,6 +1580,10 @@ staging_tick() {
   if ! staging_git cat-file -e "$commit^{commit}" 2>/dev/null || ! staging_git merge-base --is-ancestor "$commit" origin/main; then
     staging_done rejected "Rejected: ${commit:0:8} is not on main. Staging only takes merged commits, because its launcher holds the host's Docker socket."; return 0
   fi
+  # A commit from before the lane existed has no smoke script: it can't be checked, so it isn't deployed.
+  if ! staging_git cat-file -e "$commit:scripts/smoke-staging.sh" 2>/dev/null; then
+    staging_done rejected "Rejected: ${commit:0:8} is older than the staging lane (it has no scripts/smoke-staging.sh), so it can't be checked. Ask for a newer commit on main."; return 0
+  fi
   local last wait
   last="$(cat "$STATE/last-staging" 2>/dev/null || echo 0)"
   wait=$((last + STAGING_RATE_LIMIT_SECONDS - $(date +%s)))
@@ -1591,7 +1599,7 @@ staging_tick() {
   (cd "$STAGING_DIR" && BOSSMAN_PRODUCTION_DIRS="$REPO" timeout "$STAGING_TIMEOUT_SECONDS" scripts/deploy-staging.sh "$commit") >>"$LOG" 2>&1 || rc=$?
   if ((rc != 0)); then
     S_KV=(smoke=skipped)
-    staging_done failed "The staging deploy of ${commit:0:8} stopped with an error (exit $rc). See $LOG on the host. Staging was not rolled back: scripts/deploy-staging.sh --rollback in the staging folder does that."; return 0
+    staging_done failed "The staging deploy of ${commit:0:8} stopped with an error (exit $rc). The deployer log on the host has the details. Staging was not rolled back: scripts/deploy-staging.sh --rollback in the staging folder does that."; return 0
   fi
   # The smoke checks, from the checkout just deployed (merged code, like the deploy script itself).
   local sm="$STAGING_DIR/scripts/smoke-staging.sh" out="" src=0 name res why img="" failed=""

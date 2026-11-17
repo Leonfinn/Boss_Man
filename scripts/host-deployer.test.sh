@@ -1275,6 +1275,11 @@ has "$D/outbox/staging-status.json" "only one staging deploy"
 rm -f "$D/state/last-staging"; sreq "$side"; host
 has "$D/outbox/staging-status.json" "is not on main"
 [[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "a non-main commit reached deploy-staging.sh"
+# A commit from before the lane (no scripts/smoke-staging.sh) is refused, and the lane file says which repository staging follows.
+rm -f "$D/state/last-staging"; sreq "$c1"; host
+has "$D/outbox/staging-status.json" "older than the staging lane"
+[[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "a pre-lane commit reached deploy-staging.sh"
+has "$D/outbox/staging-lane.json" "\"origin\": \"$T/origin.git\""
 # A malformed request (shell characters in the commit) is refused.
 # shellcheck disable=SC2016 # the command substitution is literal text in the request: it must never be run
 printf '{"id":"%s","target":"staging","commit":"$(touch %s/pwned)","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$sid" "$T" >"$D/inbox/staging-request.json"; host

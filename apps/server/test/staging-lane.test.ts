@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { deploys, projects, runners, wakes } from "../src/db/schema.js";
+import { deploys, deployTargets, projects, runners, wakes } from "../src/db/schema.js";
+import { sameRepo } from "../src/services/deploys.js";
 
 const SHA = "a".repeat(40);
 const DEPLOYER = mkdtempSync(path.join(tmpdir(), "bm-staging-lane-"));
@@ -16,7 +17,8 @@ mkdirSync(path.join(DEPLOYER, "inbox"), { recursive: true });
 mkdirSync(path.join(DEPLOYER, "outbox"), { recursive: true });
 const out = (f: string) => path.join(DEPLOYER, "outbox", f);
 const inbox = (f: string) => path.join(DEPLOYER, "inbox", f);
-const lane = (on: boolean) => writeFileSync(out("staging-lane.json"), JSON.stringify({ configured: String(on) }));
+/** What the host writes: the lane on or off, and the repository its staging checkout follows. */
+const lane = (on: boolean) => writeFileSync(out("staging-lane.json"), JSON.stringify({ configured: String(on), origin: "git@example.com:acme/bossman.git" }));
 /** What the host writes after a staging deploy: flat strings, one check_/why_ pair per smoke check. */
 const hostStatus = (id: string, extra: Record<string, string> = {}) =>
   writeFileSync(
@@ -41,7 +43,7 @@ async function setup() {
   const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "Boss Man Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "bossman" })).json() as { id: string };
-  await db.update(projects).set({ repoUrl: "https://example.com/bossman.git", defaultBranch: "main" }).where(eq(projects.id, project.id));
+  await db.update(projects).set({ repoUrl: "https://example.com/acme/bossman.git", defaultBranch: "main" }).where(eq(projects.id, project.id));
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   built.runners.connect(
     reg.runnerId,
@@ -70,6 +72,27 @@ describe("the staging lane (BOS-1472)", () => {
     expect(await c.deploys.listTargets(c.company.id)).toHaveLength(1);
   });
 
+  it("offers the target only to the company whose project is the repository staging follows, never to a fork's company", async () => {
+    const c = (ctx = await setup());
+    lane(true);
+    const other = (await c.req("POST", "/api/companies", { name: "Fork Co" })).json() as { company: { id: string }; ceo: { id: string } };
+    const forked = (await c.req("POST", `/api/companies/${other.company.id}/projects`, { name: "bossman-fork" })).json() as { id: string };
+    await c.db.update(projects).set({ repoUrl: "https://example.com/someone-else/bossman.git", defaultBranch: "main" }).where(eq(projects.id, forked.id));
+    await c.deploys.syncStaging();
+    expect(await c.deploys.listTargets(c.company.id)).toHaveLength(1); // https and ssh forms of the same repository match
+    expect(await c.deploys.listTargets(other.company.id)).toEqual([]);
+    // A target it already had (an earlier build offered it to everyone) is taken away, so it can't be asked for.
+    await c.db.insert(deployTargets).values({ companyId: other.company.id, name: "staging", kind: "docker", endpoint: "host-deployer:staging", rules: { hostStaging: true } });
+    await c.deploys.syncStaging();
+    expect(await c.deploys.listTargets(other.company.id)).toEqual([]);
+    await expect(c.deploys.request({ companyId: other.company.id, agentId: other.ceo.id }, { target: "staging", ref: "main" })).rejects.toThrow(/No deploy target|no deploy targets/i);
+    expect(existsSync(inbox("staging-request.json"))).toBe(false);
+    // And the matching rule itself.
+    expect(sameRepo("git@Example.com:acme/Bossman.git", "https://token@example.com/acme/bossman")).toBe(true);
+    expect(sameRepo("https://example.com/someone-else/bossman.git", "https://example.com/acme/bossman.git")).toBe(false);
+    expect(sameRepo(null, null)).toBe(false);
+  });
+
   it("writes the host's request with no approval, wakes nobody yet, and refuses a second while one is out", async () => {
     const c = (ctx = await setup());
     lane(true);
@@ -80,6 +103,7 @@ describe("the staging lane (BOS-1472)", () => {
     const body = JSON.parse(readFileSync(inbox("staging-request.json"), "utf8")) as Record<string, string>;
     expect(body).toMatchObject({ id: r.deploy.id, target: "staging", commit: SHA });
     expect(Object.keys(body).sort()).toEqual(["approvedBy", "commit", "id", "requestedAt", "target"]);
+    expect(body.approvedBy).toBe("agent-request"); // never the owner's id: nobody approved it
     await expect(c.deploys.request(c.actor, { target: "staging", ref: "main" })).rejects.toThrow(/already queued or running/);
   });
 
