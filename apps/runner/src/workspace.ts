@@ -1011,6 +1011,24 @@ export class Workspaces {
     }
   }
 
+  /**
+   * `git add -A` into a scratch index while the author may be writing files. A file that shrinks while git reads it fails
+   * with "short read while indexing" (exit 128); that passes once the write finishes, so try again until the deadline.
+   * Any other failure is thrown at once.
+   */
+  private async addAllRetrying(dir: string, repo: string, env: Record<string, string>) {
+    const deadline = Date.now() + this.reviewLockWaitMs;
+    for (;;) {
+      try {
+        return await this.git(["add", "-A"], { cwd: dir, env, repo });
+      } catch (err) {
+        const text = `${(err as { stderr?: string }).stderr ?? ""}\n${(err as Error)?.message ?? ""}`;
+        if (!/short read while indexing|unable to index file|failed to insert into database/.test(text) || Date.now() >= deadline) throw err;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+  }
+
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
   private async snapshot(repo: string, dir: string): Promise<string> {
     // Each index in a folder of its own: a fenced git may write its index's folder, and no other.
@@ -1018,7 +1036,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const who = this.authorEnv();
       return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who, repo });
@@ -1240,7 +1258,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       // No external diff program or textconv driver: the diff is git's own (BOS-332).
       // No rename detection either (BOS-1100): git would fold a move into one `old => new` line, and the
       // owner-approval check matches exact paths, so a branch could move scripts/check-all.sh away (or move
@@ -1330,7 +1348,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const list = await this.checkpoints(spec.projectId, spec.ticketId);
       const last = list[list.length - 1];

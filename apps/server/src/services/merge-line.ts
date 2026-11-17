@@ -41,7 +41,7 @@
 // lookup off the company-wide range), so it survives a server restart. Recording never fails the merge it
 // describes: a write error is swallowed. The rows carry no agent, so the brief and "what did this run do"
 // readers that count an agent's activity never see them; the brief also skips the kind outright.
-import { and, desc, eq, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { activity, companies, settings } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -201,7 +201,21 @@ async function lastEvent(db: Db, ticketId: string, skipPassive = false): Promise
   return row ? { at: row.at, detail: row.detail as unknown as MergeLineEvent } : null;
 }
 
-const sameHold = (a: Extract<MergeLineEvent, { event: "hold_started" }>, b: Extract<MergeLineEvent, { event: "hold_started" }>) =>
+/**
+ * BOS-1769: true when the ticket left review (a "left" row) at or after `since`, even if it is back in review now. A landing
+ * started before that belongs to a pass through the line that is over: asking "is it in review now?" misses a quick
+ * out-and-back, which left BOS-1706's old landing polling for hours and refusing every retry. Through the partial index.
+ */
+export async function leftLineSince(db: Db, ticketId: string, since: Date): Promise<boolean> {
+  const [row] = await db
+    .select({ at: activity.at })
+    .from(activity)
+    .where(and(eq(activity.ticketId, ticketId), eq(activity.kind, MERGE_LINE_KIND), gte(activity.at, since), sql`${activity.detail}->>'event' = 'left'`))
+    .limit(1);
+  return !!row;
+}
+
+const sameHold = (a:Extract<MergeLineEvent, { event: "hold_started" }>, b: Extract<MergeLineEvent, { event: "hold_started" }>) =>
   a.hold === b.hold &&
   (a.carried ?? []).map((c) => c.ticketId).sort().join(",") === (b.carried ?? []).map((c) => c.ticketId).sort().join(",");
 
