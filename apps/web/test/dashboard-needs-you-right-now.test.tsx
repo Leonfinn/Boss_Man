@@ -59,6 +59,14 @@ describe("Right now", () => {
     expect(lines[0]!.text).toBe("2 agents running now.");
   });
 
+  it("R28: merges held behind the main fix read amber with the fix named, never red", () => {
+    const line = { state: "held_behind_fix" as const, held: 6, since: null, fixes: [{ ticketId: "f", ref: "BOS-1641", title: "Fix main", stateText: "in review", ownerUpdate: false }] };
+    const merges = view({ waitingCount: 6, line });
+    const lines = healthLines({ health: ok, merges, stuck: null, running: 2, companyId: "c1" });
+    expect(lines[1]).toMatchObject({ tone: "warn", state: "Merges held behind the main fix" });
+    expect(lines[1]!.text).toBe("Main is red: 6 approved tickets are held behind the fix BOS-1641 (in review). They merge by themselves once it is merged and live.");
+  });
+
   it("says 'not known' in words, never green, for every line that couldn't be read", () => {
     const lines = healthLines({ health: {}, merges: null, stuck: null, running: 0, companyId: "c1" });
     expect(lines.map((l) => l.tone)).toEqual(["unknown", "unknown", "unknown", "unknown"]);

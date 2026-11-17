@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
+import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_SECTIONS, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
 import { checkAsk } from "../src/services/decisions.js";
 import { lintOwnerSteps } from "../src/services/steps.js";
 
@@ -427,6 +427,32 @@ describe("OWNER_CONTROLS matches the web app", () => {
     const settings = all.find((c) => c.file === "pages/Settings.tsx" && c.name === "Settings")!;
     const rendered = [...new Set([...settings.src.matchAll(/<([A-Z]\w*)[\s/>]/g)].map((m) => m[1]!))].filter((n) => !SETTINGS_WRAPPERS.has(n));
     expect(rendered.filter((n) => !SITE_SCREEN[`pages/Settings.tsx>${n}`]), "add each to SITE_SCREEN with its Settings tab").toEqual([]);
+  });
+
+  // BOS-1649: the section headings a card's path may name after a tab (OWNER_SECTIONS), kept in step with the pages.
+  const webFiles = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? webFiles(join(dir, e.name)) : /\.tsx$/.test(e.name) ? [join(dir, e.name)] : []));
+  const pageText = webFiles(join(WEB, "pages")).map((f) => readFileSync(f, "utf8")).join("\n");
+  const listedSections = Object.values(OWNER_SECTIONS).flat() as string[];
+
+  it("lists no section heading the app no longer shows", () => {
+    const stale = listedSections.filter((h) => !pageText.includes(`"${h}"`) && !pageText.includes(`>${h}<`) && !pageText.includes(`>${h}\n`));
+    expect(stale, `remove from OWNER_SECTIONS in packages/shared/src/owner-controls.ts (or fix its spelling): ${stale.join(" | ")}`).toEqual([]);
+  });
+
+  it("lists every section heading the Settings pages show", () => {
+    // Only the pages a Settings tab or a project tab shows; other screens (Skills, Agents) have their own headings.
+    const settingsText = webFiles(join(WEB, "pages/settings")).map((f) => readFileSync(f, "utf8")).join("\n")
+      + ["Settings", "Funding", "Secrets", "Rules", "ProjectBudget"].map((n) => readFileSync(join(WEB, `pages/${n}.tsx`), "utf8")).join("\n");
+    const shown = [
+      ...[...settingsText.matchAll(/<Section\s+id="[^"]+"\s+title="([^"{]+)"/g)].map((m) => m[1]!),
+      ...[...settingsText.matchAll(/<h3[^>]*>([A-Z][^<{]+)<\/h3>/g)].map((m) => m[1]!.trim()),
+    ];
+    expect(shown.length).toBeGreaterThan(20); // the scan found the headings, so an empty pass can't hide a miss
+    // Headings of other screens (a project's brief, an agent's page) are not on a Settings tab: leave those out here.
+    const OTHER = new Set(["New project", "Archive this project", "Archived", "Project brief", "Export", "Your devices"]);
+    const missing = shown.filter((h) => !listedSections.includes(h) && !OTHER.has(h) && !h.startsWith("Export "));
+    expect(missing, `add each to OWNER_SECTIONS under its tab in packages/shared/src/owner-controls.ts: ${missing.join(" | ")}`).toEqual([]);
   });
 
   it("knows every screen a step can name: the side menu, the Settings tabs and the project tabs", () => {

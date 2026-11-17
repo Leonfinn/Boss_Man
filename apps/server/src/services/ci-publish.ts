@@ -26,9 +26,13 @@ export type CiOutcome =
   | { kind: "failed"; status: CiStatus }
   | { kind: "refused"; message: string }
   | { kind: "error"; message: string }
-  | { kind: "timeout"; waiting: string[] };
+  | { kind: "timeout"; waiting: string[] }
+  /** GitHub cancelled this commit's run because a newer run on the same branch replaced it: nothing failed, the attempt starts again. */
+  | { kind: "superseded"; newerSha: string }
+  /** GitHub cancelled the run with no newer run behind it, and one re-run didn't help (or wasn't allowed). Not a test failure. */
+  | { kind: "cancelled"; runs: string[]; rerunTried: boolean };
 /** Outcomes that end a merge attempt without merging: the other side (the gate's own check) need not finish. */
-export const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout";
+export const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout" || o.kind === "superseded" || o.kind === "cancelled";
 /** Shared by the gate's own check and the CI wait running beside it: set by whichever ends the attempt first. */
 export type CiStop = { stopped: boolean };
 
@@ -38,7 +42,7 @@ export class CiPublishError extends Error {}
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export type CiTarget = { cfg: GitHostConfig; token: string };
-type Hosts = Pick<ReturnType<typeof gitHostService>, "ciStatus">;
+type Hosts = Pick<ReturnType<typeof gitHostService>, "ciStatus" | "workflowRuns" | "rerunRun">;
 
 /**
  * One read of CI on a commit; a temporary failure (5xx, timeout) is asked again 3 times with a growing pause.
@@ -65,6 +69,8 @@ export type PublishDeps = {
   publish: (commit: string) => Promise<MergeResult>;
   /** Says in the ticket's activity that the push happened. */
   announce: (branch: string) => Promise<void>;
+  /** Says in the ticket's activity that GitHub was asked to re-run a cancelled run. */
+  announceRerun?: (commit: string) => Promise<void>;
   /** Told when the wait starts (`waiting` empty), each poll, and `null` when it ends. */
   onWait?: (state: { since: number; waiting: string[] } | null) => void;
   /** Called every poll, to keep the caller's own activity beat alive. */
@@ -85,6 +91,9 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
   await deps.announce(pub.branch);
   const since = Date.now();
   deps.onWait?.({ since, waiting: [] });
+  // A cancelled run is never a failure (nothing was tested). One re-run is tried when no newer run replaced it; the
+  // run's state is read as still pending for a few polls after, as GitHub takes a moment to show it queued again.
+  let rerunAt: number | null = null;
   try {
     for (;;) {
       if (stop.stopped) return { kind: "stopped" };
@@ -92,6 +101,19 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
       if ("kind" in s) return s;
       if (s.state === "passed") return { kind: "passed" };
       if (s.state === "failed") return { kind: "failed", status: s };
+      if (s.state === "cancelled" && !(rerunAt !== null && Date.now() - rerunAt < deps.timing.pollMs * 3)) {
+        const mine = s.cancelled![0]!;
+        const branchRuns = await deps.hosts.workflowRuns(deps.target.cfg, deps.target.token, pub.branch).catch(() => []);
+        const own = branchRuns.find((r) => r.id === mine.id);
+        // A run for another commit, started after this one: the branch was pushed again and that push replaced this run.
+        const newer = branchRuns.find((r) => r.headSha !== prep.commit && (!own || r.createdAt > own.createdAt));
+        if (newer) return { kind: "superseded", newerSha: newer.headSha };
+        const runs = s.cancelled!.map((r) => r.name);
+        if (rerunAt !== null) return { kind: "cancelled", runs, rerunTried: true };
+        if (!(await deps.hosts.rerunRun(deps.target.cfg, deps.target.token, mine.id))) return { kind: "cancelled", runs, rerunTried: false };
+        rerunAt = Date.now();
+        await deps.announceRerun?.(prep.commit);
+      }
       const waited = Date.now() - since;
       if (s.state === "none" && waited >= deps.timing.graceMs) return { kind: "none" };
       if (waited >= deps.timing.ceilingMs) return { kind: "timeout", waiting: s.waiting };

@@ -1778,6 +1778,30 @@ export function reviewService(
     },
 
     /**
+     * BOS-1647: the push to the default branch landed but the merge was never recorded (the runner or server was cut off
+     * between the two, or the ticket left review before a retry). When the ticket's approved head is already inside the
+     * default branch, records the merge with the commit that brought it in, exactly as a merge that finished would: no new
+     * merge attempt, no push, no bounce. Null when the ticket isn't in that state (head not on main, not approved on this
+     * head, uncommitted work, already done), so the caller carries on as before. `known` is a diff the caller just read.
+     */
+    async recordLanded(ticketId: string, causedByRunId?: string | null, known?: WorkspaceDiff | null): Promise<{ outcome: "merged"; delivered: string | null; detail?: unknown } | null> {
+      const { t, repoUrl, landing } = await ticketWithRepo(ticketId);
+      if (t.systemState === "done" || !repoUrl || !t.branch || t.noCode || landing === "pull_request") return null;
+      const rows = await latestRows(db, ticketId);
+      if (!rows.length || evaluate(rows) !== "passed") return null;
+      const changed = known === undefined ? await this.diff(ticketId).catch(() => null) : known;
+      const into = changed?.mergedInto;
+      if (!changed || !into || changed.files.length) return null;
+      // Only the head the reviews passed: a head that merely sits on main (a branch never worked on) is not this ticket's merge.
+      const passed = await this.passedHead(t, rows);
+      if (passed && passed !== changed.head) return null;
+      // The record a finished merge writes: the commit, when it merged, what it touched. A fast-forward has no file list
+      // here, so it counts as touching the runner (the safe side, as for any merge with an unknown file list).
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_recorded", summary: `The branch head ${changed.head.slice(0, 8)} was already in the default branch (merged as ${into.commit.slice(0, 8)}) but the merge had not been recorded; recorded now, nothing was pushed.` });
+      return closeAfterMerge(t, into.commit, causedByRunId, into.files);
+    },
+
+    /**
      * Whether a round already passed this branch head as it is now (BOS-1173): the same commit, or one that only took
      * clean merges of main since (DR-038). Null when it can't be told (no passed head, the runner didn't answer).
      */
@@ -1979,6 +2003,10 @@ export function reviewService(
         noCode = false;
         changed = await readDiff();
       }
+      // BOS-1647: a head already inside the default branch is a push that landed whose record was lost: record it, never push
+      // or bounce it ("nothing changed") now that its diff is empty.
+      const alreadyLanded = await this.recordLanded(ticketId, causedByRunId, changed);
+      if (alreadyLanded) return alreadyLanded;
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
       // A diff that touches a file the owner approves (OWNER_APPROVED_PATHS: the merge gate and what it runs, and
@@ -2188,6 +2216,9 @@ export function reviewService(
             announce: async (branch) => {
               await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
             },
+            announceRerun: async (commit) => {
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${commit.slice(0, 12)} and no newer run replaced it, so Boss Man asked GitHub to run it once more. Nothing to do.` });
+            },
             onWait: (s) => (s ? ciWaits.set(ticketId, s) : ciWaits.delete(ticketId)),
             touch,
           },
@@ -2251,6 +2282,16 @@ export function reviewService(
             await raiseCheckStuck(db, t, "GitHub CI", `was still running after ${mins} minutes${o.waiting.length ? ` (${o.waiting.join(", ")})` : ""}`, "");
             await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub CI was still running after ${mins} minutes; it's in your Decisions.` });
             return { outcome: "check_stuck", delivered: null, detail: { ci: "timeout", waiting: o.waiting } };
+          }
+          case "superseded":
+            // A newer push to the CI branch replaced this run: not a failure. Start the attempt again on the current main.
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${prep.commit.slice(0, 12)} because a newer run on the same branch (${o.newerSha.slice(0, 12)}) replaced it. No test failed; the merge starts again. Nothing to do.` });
+            return { outcome: "lock_wait", delivered: null, detail: { status: "ci_superseded", newerSha: o.newerSha } };
+          case "cancelled": {
+            const what = o.runs.join(", ") || "the CI run";
+            await raiseCheckStuck(db, t, "GitHub CI", `was cancelled on GitHub (${what})${o.rerunTried ? ", and cancelled again after one re-run" : "; Boss Man's token couldn't re-run it (it needs Actions: Read and write)"}. No test failed. Open the run on GitHub and re-run it, then choose "${CHECK_AGAIN}"`, "");
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub cancelled the run (${what}); no test failed. It's in your Decisions.` });
+            return { outcome: "check_stuck", delivered: null, detail: { ci: "cancelled", runs: o.runs } };
           }
           case "refused":
             return ciCard("access", o.message);

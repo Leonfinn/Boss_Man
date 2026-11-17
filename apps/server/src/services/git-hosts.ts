@@ -20,7 +20,7 @@ export type CiRun = { id: number; name: string; url: string; step?: string; unst
  * What the merge gate reads before it merges (BOS-1070). `waiting`: jobs not finished yet. `billing`: a job didn't start
  * because of the account's spending limit or payments, which isn't the agent's to fix.
  */
-export type CiStatus = { state: "passed" | "failed" | "pending" | "none"; failed: CiRun[]; waiting: string[]; billing: boolean };
+export type CiStatus = { state: "passed" | "failed" | "pending" | "none" | "cancelled"; failed: CiRun[]; waiting: string[]; billing: boolean; cancelled?: CiRun[] };
 const FAILED_CONCLUSIONS = ["failure", "timed_out", "cancelled", "startup_failure", "action_required", "stale"];
 const BILLING_TEXT = /spending limit|billing|account payments|payment (?:has )?failed/i;
 /**
@@ -246,9 +246,16 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const nameOf = (r: Record<string, unknown>) => String(r.name ?? r.display_title ?? "CI");
       const waiting = runs.filter((r) => r.status !== "completed").map(nameOf);
       const failed: CiRun[] = [];
+      const cancelled: CiRun[] = [];
       for (const r of runs.filter((x) => x.status === "completed" && FAILED_CONCLUSIONS.includes(String(x.conclusion)))) {
         const jobs = await this.runJobs(cfg, token, Number(r.id));
         const bad = jobs.filter((j) => FAILED_CONCLUSIONS.includes(String(j.conclusion)));
+        // A run GitHub cancelled (a newer run replaced it, or someone stopped it) tested nothing: it's no failure unless a
+        // job in it really failed. The gate decides what a cancelled run means (it knows the branch's other runs).
+        if (r.conclusion === "cancelled" && !bad.some((j) => j.conclusion !== "cancelled")) {
+          cancelled.push({ id: Number(r.id), name: nameOf(r), url: String(r.html_url ?? "") });
+          continue;
+        }
         // A run that failed before any job (a broken workflow file) is named by the run itself.
         if (!bad.length) failed.push({ id: 0, name: nameOf(r), url: String(r.html_url ?? "") });
         for (const j of bad) {
@@ -256,8 +263,15 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           failed.push({ id: j.id, name: j.name, url: j.url, ...(step ? { step: step.name } : {}), ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}) });
         }
       }
-      const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : "passed";
-      return { state, failed, waiting, billing: false };
+      const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : cancelled.length ? "cancelled" : "passed";
+      return { state, failed, waiting, billing: false, ...(cancelled.length ? { cancelled } : {}) };
+    },
+
+    /** Ask GitHub to run a workflow run again (needs Actions: Write). False when it refuses, which the caller reports plainly. */
+    async rerunRun(cfg: GitHostConfig, token: string, runId: number): Promise<boolean> {
+      if (cfg.kind !== "github") return false;
+      const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun`).catch(() => null);
+      return !!res?.ok;
     },
 
     /**

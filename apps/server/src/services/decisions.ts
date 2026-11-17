@@ -901,7 +901,7 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
   if (a.hostValues) {
     const filled = fillHostTokens(steps, a.hostValues);
     if (filled.missing.length) {
-      return { error: `These steps use host facts Boss Man doesn't have: ${filled.missing.map((k) => `{{host.${k}}}`).join(", ")}. The host deployer hasn't reported them (it may not be applied yet, or the fact can't be detected). Ask the owner to confirm it in Settings → This host, or wait for the host's report, then raise the card again.` };
+      return { error: `These steps use host facts Boss Man doesn't have: ${filled.missing.map((k) => `{{host.${k}}}`).join(", ")}. The host deployer hasn't reported them (it may not be applied yet, or the fact can't be detected). Ask the owner to confirm it in Settings → Server and runner → This server, or wait for the host's report, then raise the card again.` };
     }
     steps = filled.steps;
   }
