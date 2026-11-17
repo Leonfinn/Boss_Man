@@ -19,7 +19,7 @@ export type OwnerRecordFacts = {
   };
   /** This company's runner: whether one is registered and whether it has ever connected. */
   runner: { registered: boolean; everConnected: boolean };
-  /** Whether the owner has saved a public address for Boss Man (Settings → Notifications, publicUrl). */
+  /** Whether the owner has saved a public address for Boss Man (Notifications, publicUrl). */
   publicAddress: { set: boolean };
 };
 
@@ -90,7 +90,7 @@ const FACT_TABLE: FactRow[] = [
     ],
     contradicted: (f) => !f.publicAddress.set,
     live: () => "Public address: not set",
-    why: "This text asks the owner to reach Boss Man from outside their network, but no public address is set, so they cannot. Say how to set one first (Settings → Notifications), or drop the step; it passes once one is set.",
+    why: "This text asks the owner to reach Boss Man from outside their network, but no public address is set, so they cannot. Say how to set one first (Notifications), or drop the step; it passes once one is set.",
   },
 ];
 
