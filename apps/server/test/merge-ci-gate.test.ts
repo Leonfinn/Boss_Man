@@ -49,6 +49,8 @@ const red = (jobs: Job[]): Ci => ({ runs: [run("completed", "failure", jobs)] })
  * A fake GitHub: `ci(sha, nth)` says what CI looks like on the nth read of a commit; `status` forces an HTTP error on every
  * read; `checks` (off by default) lets the token read the Checks API, which only the annotations come from.
  */
+/** A made-up 40-hex commit id for a branch name. */
+const fakeSha = (name: string) => Buffer.from(name).toString("hex").padEnd(40, "0").slice(0, 40);
 function fakeGitHub() {
   const calls: string[] = [];
   const reads = new Map<string, number>();
@@ -63,12 +65,24 @@ function fakeGitHub() {
     branchRuns: [] as Array<{ id: number; head_sha: string; created_at: string; status: string; conclusion: string | null }>,
     reruns: [] as string[],
     rerunStatus: 201,
+    ciBranches: new Map<string, number>(),
   };
   const last = new Map<number, WorkflowRun>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-  const fetch = (async (input: string | URL | Request) => {
+  const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     calls.push(url);
+    // BOS-1749: the CI branches on the repo (name -> commit time), listed and deleted by the sweep.
+    if (/\/git\/matching-refs\/heads\/bossman-ci\//.test(url)) return json(200, [...state.ciBranches].map(([name]) => ({ ref: `refs/heads/${name}`, object: { sha: fakeSha(name) } })));
+    const commit = /\/git\/commits\/([0-9a-f]{40})/.exec(url);
+    if (commit) {
+      const hit = [...state.ciBranches].find(([name]) => fakeSha(name) === commit[1]);
+      return hit ? json(200, { committer: { date: new Date(hit[1]).toISOString() } }) : json(404, {});
+    }
+    if (init?.method === "DELETE" && /\/git\/refs\/heads\//.test(url)) {
+      state.ciBranches.delete(decodeURIComponent(url.split("/git/refs/heads/")[1]!));
+      return new Response(null, { status: 204 });
+    }
     if (state.status) return json(state.status, { message: "Resource not accessible by personal access token" });
     if (/\/check-runs|\/check-suites/.test(url) && !state.checks) return json(403, { message: "Resource not accessible by personal access token" });
     const runs = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(url);
@@ -150,6 +164,22 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; workflow
   return { ...built, db, close, req, company, worker, project, ticket, sent, gh, state, merges, events, release, held };
 }
 
+describe("the sweep of leftover CI branches (BOS-1749)", () => {
+  it("deletes old bossman-ci branches (a restart mid-check left them) and keeps recent ones; no other branch is ever read or deleted", async () => {
+    const c = (ctx = await setup());
+    const now = Date.now();
+    c.gh.state.ciBranches.set("bossman-ci/old-one", now - 7 * 3_600_000);
+    c.gh.state.ciBranches.set("bossman-ci/old-two", now - 30 * 3_600_000);
+    c.gh.state.ciBranches.set("bossman-ci/recent", now - 30 * 60_000);
+    const r = await c.review.sweepCiBranches();
+    expect(r.deleted.sort()).toEqual(["bossman-ci/old-one", "bossman-ci/old-two"]);
+    expect([...c.gh.state.ciBranches.keys()]).toEqual(["bossman-ci/recent"]);
+    expect(c.gh.calls.every((u) => !/heads\/(main|bossman\/)/.test(u))).toBe(true);
+    // Run twice: nothing more to delete.
+    expect((await c.review.sweepCiBranches()).deleted).toEqual([]);
+  });
+});
+
 describe("merge gate waits for GitHub CI (BOS-1070)", () => {
   it("publishes the merge commit, merges once CI passes on it, records the pass and deletes the CI branch", async () => {
     const c = (ctx = await setup());
@@ -173,7 +203,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(res).toMatchObject({ outcome: "verify_failed" });
     expect(res.message).toMatch(/GitHub CI failed .*images \(arm64\)/);
     expect(res.message).not.toMatch(/- check\b/);
-    expect(c.merges()).toEqual(["prepare", "publish"]);
+    // BOS-1749: a red CI deletes the CI branch at once.
+    expect(c.merges()).toEqual(["prepare", "publish", "unpublish"]);
     const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
     expect(wake!.note).toContain("images (arm64) (https://github.com/leon/site/actions/runs/9/job/7)");
     expect(wake!.note).toContain('failed at step "Build image"');
@@ -228,7 +259,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     const res = (await approveAndWait(c.req, c.ticket.id)).json();
     expect(res).toMatchObject({ outcome: "verify_failed" });
     expect(res.message).toMatch(/GitHub CI failed .*images \(arm64\)/);
-    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect(c.merges()).toEqual(["prepare", "publish", "unpublish"]);
     expect(await c.state()).toMatchObject({ systemState: "in_progress", mergeCommit: null });
     const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
     expect(wake!.note).toContain("images (arm64) (https://github.com/leon/site/actions/runs/9/job/7)");
@@ -250,7 +281,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     marked = true;
     const res = (await approved).json();
     expect(res).toMatchObject({ outcome: "held", message: expect.stringMatching(/^This ticket's merge waits on .*"Passed, held"/) });
-    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect(c.merges()).toEqual(["prepare", "publish", "unpublish"]);
     expect(await c.state()).toMatchObject({ systemState: "review", mergeCommit: null });
     expect(await holdView(c.db, c.ticket.id)).toMatchObject({ system: true });
     // Not sent back: no wake for the author, no loop failure, no CI failure recorded against the ticket.
@@ -387,7 +418,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     c.gh.state.ci = (sha) => (sha === MERGE ? cancelledRun() : green());
     c.gh.state.rerunStatus = 403;
     expect(await landingEnds(c)).toMatchObject({ state: "finished", outcome: "check_stuck" });
-    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect(c.merges()).toEqual(["prepare", "publish", "unpublish"]);
     expect((await c.events()).some((e) => /GitHub cancelled the run/.test(e))).toBe(true);
     expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
     expect(await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `merge-stuck:${c.ticket.id}` }]);
@@ -432,7 +463,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
     }
     expect(landing).toMatchObject({ state: "finished", outcome: "check_stuck" });
-    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect(c.merges()).toEqual(["prepare", "publish", "unpublish"]);
     expect(await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `merge-stuck:${c.ticket.id}` }]);
   });
 
@@ -465,7 +496,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       c.gh.state.ci = (sha) => (sha === MERGE ? red([job("check", "failure", 4, "Run tests")]) : green());
       // The queued job is never finished here: CI's failure alone ends the attempt.
       expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
-      expect(c.merges()).toEqual(["prepare", "publish"]);
+      expect(c.merges()).toEqual(["prepare", "publish", "unpublish"]);
       expect(await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).toHaveLength(1);
       expect((await c.state()).systemState).toBe("in_progress");
     });
