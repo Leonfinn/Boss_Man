@@ -694,7 +694,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const answeredQueue = answeredHere.filter((d) => !d.waiting).length;
   const answeredWaiting = answeredHere.filter((d) => !!d.waiting).length;
   // Until the first tally arrives, the cards themselves stand in, so the heading is never blank.
-  const counted = projectFilter ? { open: queueCards.length, waiting: waitingCards.length } : tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
+  // With a project chosen the server's tally (all projects) no longer fits, so the count comes from the visible cards.
+  const counted = projectFilter ?{ open: queueCards.length, waiting: waitingCards.length } : tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
   const counts = {
     open: Math.max(counted.open - answeredQueue, 0),
     waiting: Math.max(counted.waiting - answeredWaiting, 0),
