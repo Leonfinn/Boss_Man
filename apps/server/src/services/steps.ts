@@ -10,7 +10,7 @@
 import { HOST_NAME, OWNER_CONTROLS, parseStep, recurringDutyHits, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
 import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
-import { norm, screenFindings, type Pressed } from "./owner-screens.js";
+import { hasWalkingSettingsPath, norm, screenFindings, type Pressed } from "./owner-screens.js";
 import { WHEN_MARKER } from "./owner-setup-when.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
@@ -449,7 +449,7 @@ const HOST_REMOVE = /\b(?:delete|remove)\b[^.;\n]{1,80}?\bfrom\s+(?:[\w-]+\s+){0
 /** A Boss Man button path: the owner does it in the app, so no command is needed. */
 const SETTINGS_PATH = /\bSettings\s*(?:→|->)\s*\S/;
 /** The pointer the go-live card writes in place of a host fact Boss Man hasn't been told yet (DR-052 point 5). */
-export const THIS_HOST_POINTER = "Settings → Server and runner → This host";
+export const THIS_HOST_POINTER = "Settings → Server and runner → This server";
 
 /**
  * R17: refuse a step that names a host file with no location, or asks for a host action with neither a command
@@ -473,7 +473,7 @@ function vagueHostFindings(step: number, prose: string, blocks: string[], refuse
   }
   const action = HOST_ACTION.exec(words) ?? HOST_REMOVE.exec(words);
   // One finding a step is enough: "delete X from .env" is already refused for the file.
-  if (action && refuse.length === before && !commands.length && !SETTINGS_PATH.test(words)) {
+  if (action && refuse.length === before && !commands.length && !(SETTINGS_PATH.test(words) && hasWalkingSettingsPath(words))) {
     refuse.push({ step, rule: "R17", problem: `says "${action[0]}" with no command and no Settings → path, so the owner can't tell how. Give the command (for a service in the stack: \`{{host.compose.cmd}} restart <service>\`, with the service's name from the compose file) or the button path in the app` });
   }
 }
@@ -1499,15 +1499,15 @@ function updateCardHint(facts: SelfDeployFacts): string {
 }
 
 /** The "Build and update runners" button, as a step names it (DR-046 part 2). Matched on the button's words in the
- * whole step, so a sentence that opens the path to it ("Settings → Server and runner → Updates → Build and update
- * runners") counts, not only one that says "press". */
+ * whole step, so a sentence that opens the path to it (Settings, Server and runner, Updates, then the button) counts,
+ * not only one that says "press". */
 const REBUILD_BUTTON = /\bbuild and update runners\b/i;
 /** A command that only looks at what Boss Man already shows (DR-046 part 4): it reads containers or images and prints them. */
 const LOOK_ONLY_DOCKER = /\bdocker\s+(?:ps|images|inspect)\b/;
 
 /**
- * R16 (DR-046 part 2): refuse a step that asks the owner to press Settings → Server and runner → Updates → Build and
- * update runners while a runner image update is already under way. Boss Man raised that update itself and swaps each
+ * R16 (DR-046 part 2): refuse a step that asks the owner to press "Build and update runners" (Settings, then Server and runner, then Updates)
+ * while a runner image update is already under way. Boss Man raised that update itself and swaps each
  * runner onto the new image as its company goes idle; asking the owner to press it again does nothing useful, and the
  * second ask is what Brian's card d8983eb1 did. A pending setting change (`kind: "settings"`) is not an image update,
  * so it doesn't refuse the button (the button only builds and swaps an image). A CEO can let it through with a reason

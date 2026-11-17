@@ -448,7 +448,7 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}}", at: new Date("2026-11-03T12:00:00Z") });
     await live(c, companyId);
     const [card] = await setupCards(c);
-    expect(card!.question).toContain("1. Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This host shows it)");
+    expect(card!.question).toContain("1. Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This server shows it)");
     expect(card!.question).toContain("Boss Man doesn't know this server's folders yet");
   });
 
@@ -459,7 +459,7 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}}", at: new Date("2026-11-03T12:00:00Z") });
     await live(c, companyId);
     const [card] = await setupCards(c);
-    expect(card!.question).toContain("the .env file the stack starts with (Settings → Server and runner → This host shows it)");
+    expect(card!.question).toContain("the .env file the stack starts with (Settings → Server and runner → This server shows it)");
     expect(card!.question).not.toContain("/opt/example/src/.env");
   });
 
