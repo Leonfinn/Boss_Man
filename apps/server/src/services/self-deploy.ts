@@ -21,6 +21,7 @@ import { allMergeOrder, commitIsLive, liveServerCommit, serverContains } from ".
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
+import { runnerUpdateNeed, wakeCeoIfRunnerNeedUnknown, type CeoWake, type RunnerNeed } from "./runner-update-need.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -125,7 +126,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** BOS-990: the deployer script fingerprints from the host's report; null = no report. */ deployerScript?: () => Promise<{ scriptSha: string; repoSha: string } | null>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** BOS-990: the deployer script fingerprints from the host's report; null = no report. */ deployerScript?: () => Promise<{ scriptSha: string; repoSha: string } | null>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; /** Wakes an agent (the CEO) when Boss Man can't tell whether a runner update is needed (BOS-1648). */ wake?: CeoWake; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -415,6 +416,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       deps.log?.(`self-deploy: runner update for ${short(commit)} held; ${blocker}`);
       return { blocked: blocker };
     }
+    // BOS-1648: Boss Man never offers a runner update by itself that the one answer says isn't needed. The owner's own
+    // press (requested) still raises its card, which says so.
+    if (!opts.requested) {
+      const need = await runnerNeed(a);
+      if (need?.state === "not_needed") {
+        deps.log?.(`self-deploy: runner update for ${short(commit)} not offered; ${need.words}`);
+        return null;
+      }
+    }
     const row = await raise("runner", commit, fromCommit, a, opts.again ?? false, opts.requested ?? false);
     if (!row) return null;
     // Rule 1 (the owner's rule of 9 Nov): the new card replaces every earlier open runner card, in the same step.
@@ -511,9 +521,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (!companyId) return null;
     // DR-042 point 5: the runner card names the live tickets whose only step is the runner update, kept as a list.
     const runnerTickets = target === "runner" ? (await runnerOnlyTickets(db, companyId, commit)).map((t) => ({ ticketId: t.ticketId, title: t.title })) : [];
-    // The button still raises its card when the runners already have the commit (the owner may know of a runner fault), but says so.
-    const image = target === "runner" && requested ? await runnerImageCommit(db, companyId) : null;
-    const alreadyRun = image && (await commitIsLive(db, companyId, commit, "runner")) ? `The runners already run ${short(image)}, which includes this. Nothing to do.\n\n` : "";
+    // The button still raises its card when no runner update is needed (the owner may know of a runner fault), but says
+    // so in the one answer's words (BOS-1648), and says "can't tell" with its reason when that is the answer.
+    const need = target === "runner" && requested ? await runnerNeed(a) : null;
+    const alreadyRun = need?.state === "not_needed" ? `${need.words} Nothing to do, unless you know of a fault in the runners.\n\n` : need?.state === "unknown" ? `${need.words}\n\n` : "";
     const infra = target === "server" && (a?.infraPaths.length ?? 0) > 0;
     // Merge commits only repeat the ticket's title; the commits under them say what changed.
     const changes = (a?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
@@ -843,25 +854,47 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
 
   /**
+   * BOS-1648: the one answer to "is a runner update needed?" for Boss Man's own runners (runner-update-need.ts), which
+   * the Settings line, the button's card and the automatic card all read. A "can't tell" wakes the CEO once per cause,
+   * but only from the background pass (`wake: true`): reading the status page must not queue a run as a side effect.
+   */
+  async function runnerNeed(a: Available | null, opts: { wake?: boolean } = {}): Promise<RunnerNeed | null> {
+    const companyId = await homeCompany();
+    if (!companyId) return null;
+    const need = await runnerUpdateNeed(db, companyId, { liveFallback: a?.deployed ?? null });
+    if (opts.wake) await wakeCeoIfRunnerNeedUnknown(db, companyId, need, deps.wake).catch((err: Error) => deps.log?.(`self-deploy: waking the CEO about the runner answer failed: ${err.message}`));
+    return need;
+  }
+
+  /**
    * Closes every open "Build and update runners" card the live runner image already has the change for
    * (BOS-764), e.g. after the owner rebuilt by hand or from another card: asking again would be a click
    * that changes nothing. The card is withdrawn with a note saying so, and the held offer is dropped when the
    * image has the commit that carried the runner change.
    */
-  async function closeBuiltRunnerCards() {
+  async function closeBuiltRunnerCards(need: RunnerNeed | null) {
     const open = await openFor("runner");
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
     if (!open.length && !due?.needs) return;
     const companyId = await homeCompany();
     const image = companyId ? await runnerImageCommit(db, companyId) : null;
     if (!companyId || !image) return;
+    const order = need?.state === "not_needed" ? await allMergeOrder(db, companyId) : [];
     for (const o of open) {
       const c = o.context as SelfDeployContext;
       // A rebuild the owner asked for with the button (its key carries a random suffix) is never closed under them.
       if (c.requested || /^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(o.dedupeKey ?? "")) continue;
-      if (!c.commit || !(await commitIsLive(db, companyId, c.commit, "runner"))) continue;
+      if (!c.commit) continue;
+      const built = await commitIsLive(db, companyId, c.commit, "runner");
+      // BOS-1648: also closed when the one answer says no runner update is needed for what the server runs, and the
+      // card's version is inside that (the changes since the image was built are server-only).
+      const notNeeded = !built && need?.state === "not_needed" && serverContains(need.live, c.commit, order);
+      if (!built && !notNeeded) continue;
       const now = new Date();
-      const withdrawal = { by: "system" as const, note: `The runners were already rebuilt from commit ${short(image)}, which has this change, so there is nothing left to build. You don't need to do anything.`, at: now.toISOString() };
+      const note = built
+        ? `The runners were already rebuilt from commit ${short(image)}, which has this change, so there is nothing left to build. You don't need to do anything.`
+        : `${need!.words} So there is nothing to build. You don't need to do anything.`;
+      const withdrawal = { by: "system" as const, note, at: now.toISOString() };
       // The shared withdraw path (BOS-788): it frees the key, marks the notification read and, for a card the owner had
       // opened, leaves the DR-039 closed notice. The withdrawal note is kept on the card's context as before.
       await db.update(decisions).set({ context: { ...(o.context as object), withdrawn: withdrawal } }).where(and(eq(decisions.id, o.id), eq(decisions.status, "open")));
@@ -1312,7 +1345,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (a) await this.clearDoneOwnerTodos(a, s).catch((err) => deps.log?.(`self-deploy: clearing done to-dos failed: ${(err as Error).message}`));
       await syncDeployerScript().catch((err) => deps.log?.(`self-deploy: deployer script check failed: ${(err as Error).message}`));
       // Close any runner card, and drop any held offer, that the live image already has the change for (BOS-764).
-      await closeBuiltRunnerCards().catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
+      const need = await runnerNeed(a, { wake: true }).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null));
+      await closeBuiltRunnerCards(need).catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
       // BOS-1010 rule 7: never more than one open runner card; clears any duplicate a release left on the queue.
       await dedupeRunnerCards(a).catch((err) => deps.log?.(`self-deploy: de-duplicating runner cards failed: ${(err as Error).message}`));
       // BOS-1086: an open runner card stays open while a server update waits, is approved or runs (it used to be
@@ -1476,6 +1510,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         // The last real run when a refusal is the newest word: the refusal never replaced it (BOS-1469).
         previousRun: real && s && refused && s.id === refused.id && s.ended === refused.ended && real.result !== "running" ? real : null,
         runnerImage: { running: runnerImage, needed: a?.deployed ?? null },
+        // BOS-1648: needed / not needed / can't tell, with the words the panel shows (never "may be needed").
+        runnerUpdate: await runnerNeed(a).then((n) => (n ? { state: n.state, words: n.words, tickets: n.state === "unknown" ? [] : n.tickets } : null)).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null)),
         available: a,
         pending: await pending(),
         deployer: await deployerSeen(a, s),

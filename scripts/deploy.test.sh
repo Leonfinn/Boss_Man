@@ -20,9 +20,14 @@ check docs/x no
 check apps/runner/Dockerfile yes
 check apps/launcher/src/m.ts yes
 check apps/netguard/netguard.sh yes
-check packages/shared/i.ts yes
+check packages/shared/src/i.ts yes
 check pnpm-lock.yaml yes
 check apps/runner-extra/y no
+# BOS-1648: only what the image builds COPY in counts; tests beside the code don't, a script the runner image copies does.
+check packages/shared/test/i.test.ts no
+check apps/runner/test/r.test.ts no
+check scripts/check-slot.sh yes
+check apps/server/package.json no
 
 # --commit deploys exactly that commit even when main has moved on, using a fake docker.
 cd /; t="$(mktemp -d)"; trap 'rm -rf "$d" "$t"' EXIT

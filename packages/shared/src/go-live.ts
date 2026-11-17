@@ -2,10 +2,41 @@
 // server and, for runner code, once the runners are on an image built from it.
 
 /**
- * Files whose change needs the runners rebuilt. The same rule as RUNNER_PATHS in scripts/host-deployer.sh and
- * needs_runner in scripts/deploy.sh (a test keeps the three equal).
+ * What "Build and update runners" builds from (BOS-1648): the Dockerfiles of the three images it builds (runner,
+ * launcher, netguard) and every repository path their COPY lines take in. A path ending in "/" is a folder. Read from
+ * the build, not chosen by hand: apps/server/test/runner-build-inputs.test.ts parses the Dockerfiles and fails when
+ * this list and their COPY lines differ, so a new COPY can't be missed. Tests, docs and anything else in those
+ * folders that no COPY takes in can't change an image, so they don't count.
  */
-export const RUNNER_CODE_PATHS = /^(apps\/runner\/|apps\/launcher\/|apps\/netguard\/|packages\/shared\/|pnpm-lock\.yaml$)/;
+export const RUNNER_BUILD_INPUTS: readonly string[] = [
+  "apps/runner/Dockerfile",
+  "apps/runner/package.json",
+  "apps/runner/src/",
+  "apps/runner/claude-pack/",
+  "apps/launcher/Dockerfile",
+  "apps/launcher/package.json",
+  "apps/launcher/tsconfig.json",
+  "apps/launcher/tsconfig.build.json",
+  "apps/launcher/src/",
+  "apps/netguard/Dockerfile",
+  "apps/netguard/netguard.sh",
+  "packages/shared/package.json",
+  "packages/shared/src/",
+  "scripts/check-slot.sh",
+  "scripts/scan-added-lines.mjs",
+  "scripts/scan-allow.txt",
+  "package.json",
+  "pnpm-workspace.yaml",
+  "pnpm-lock.yaml",
+  "tsconfig.base.json",
+  "NOTICE",
+];
+
+/**
+ * Files whose change needs the runners rebuilt: RUNNER_BUILD_INPUTS as one pattern. The same rule as RUNNER_PATHS in
+ * scripts/host-deployer.sh and needs_runner in scripts/deploy.sh (tests keep the three equal).
+ */
+export const RUNNER_CODE_PATHS = new RegExp(`^(${RUNNER_BUILD_INPUTS.map((p) => (p.endsWith("/") ? p : `${p}$`).replace(/\./g, "\\.")).join("|")})`);
 
 /** True when any of the changed files is runner code. */
 export const touchesRunnerCode = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_CODE_PATHS.test(p));
