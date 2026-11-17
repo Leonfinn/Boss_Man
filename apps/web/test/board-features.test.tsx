@@ -187,6 +187,34 @@ describe("board lanes", () => {
     columns.pop();
   });
 
+  // BOS-1636: merged work in Blocked that only waits for its live check has its own lane and says what it waits for.
+  it("puts merged tickets waiting for a live check in their own Blocked sub-lane", async () => {
+    columns.push({
+      id: "c4",
+      name: "Blocked",
+      systemState: "blocked",
+      wipLimit: null,
+      tickets: [
+        card({ id: "t20", title: "Really stuck", systemState: "blocked" }),
+        card({ id: "t21", title: "Waits for server", systemState: "blocked", mergeCommit: "a".repeat(40), goLiveNote: { text: "Merged. Waiting to go live: the server update.", cardId: "d1" } }),
+        card({ id: "t22", title: "Waits for report", systemState: "blocked", mergeCommit: "b".repeat(40) }),
+        card({ id: "t23", title: "Waits for owner", systemState: "blocked", mergeCommit: "c".repeat(40), ownerQuestionId: "d9" }),
+      ],
+    });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const lane = await screen.findByRole("region", { name: "Merged, waiting for a live check" });
+    expect(within(lane).getByText("Waits for server")).toBeTruthy();
+    expect(within(lane).getByText("Merged. Waiting to go live: the server update.")).toBeTruthy();
+    expect(within(lane).getByText(/Waiting for the agent to report the after-merge check/)).toBeTruthy();
+    expect(within(lane).getAllByRole("link", { name: "Open the card" }).map((a) => a.getAttribute("href")).sort()).toEqual(["#/decisions/d1", "#/decisions/d9"]);
+    expect(within(lane).queryByText("Really stuck")).toBeNull();
+    const blocked = screen.getByRole("region", { name: "Blocked" });
+    expect(within(blocked).getByText("Really stuck")).toBeTruthy();
+    expect(within(blocked).queryByText("Waits for report")).toBeNull();
+    columns.pop();
+  });
+
   it("keeps the plain empty text when nothing is held or merging", async () => {
     columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [] });
     withColumns([]);
