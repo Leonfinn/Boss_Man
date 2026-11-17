@@ -474,6 +474,12 @@ if command -v flock >/dev/null; then
   ( lock env CHECK_ALL_AGE_AFTER=1 >"$t/cap.out" 2>&1 ) & a=$!
   waitq 1; sleep 2
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
+  # Free slot 2 only once the waiting check has counted the merge entry ("of 2"): a pass that read the line just before the
+  # entry was written and tried the slot just after it was freed would take it, as a real check would (BOS-1697). The cap
+  # is what this case tests, so it must start from a line where the merge check is already seen; with the cap broken the
+  # check still takes slot 2 below and the case fails.
+  for _ in $(seq 300); do grep -Eq "place [0-9]+ of 2," "$t/cap.out" 2>/dev/null && break; sleep 0.2; done
+  grep -Eq "place [0-9]+ of 2," "$t/cap.out" || fail "BOS-613 (b): the waiting check never counted the merge entry: $(cat "$t/cap.out")"
   kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
   sleep 2
   mproc_alive "BOS-613 (b)"
