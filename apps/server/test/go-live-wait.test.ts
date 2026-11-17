@@ -146,6 +146,17 @@ describe("after-merge checks wait for go-live", () => {
     expect(await afterMergeWakes(id)).toHaveLength(1);
   });
 
+  it("a merge that changes only tests is live once merged (BOS-1711): no wait, the assignee is woken at once", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    const { id, r } = await mergeOne(NEW, "apps/web/test/settings-walk.test.ts");
+    expect(r.outcome).toBe("merged");
+    const row = await ctx.row(id);
+    expect(row.goLiveWait).toBeNull();
+    expect(row.deploysNothing).toBe(true);
+    expect(row.systemState).toBe("in_progress");
+    expect(await afterMergeWakes(id)).toHaveLength(1);
+  });
+
   it("runner code waits for the runners as well as the server", { timeout: 120_000 }, async () => {
     await serverRuns(OLD);
     await ctx.db.update(runners).set({ imageCommit: OLD }).where(eq(runners.id, ctx.reg.runnerId));

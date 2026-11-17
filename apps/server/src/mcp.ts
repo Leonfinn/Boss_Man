@@ -445,7 +445,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (reviewWrite) return fail(reviewWrite);
         // BOS-1021: no owner card on a merged ticket until the merge is running. Judged from merge order, so a
         // ticket merged before the wait existed is covered too.
-        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, blocksTicketId));
+        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, deploysNothing: tickets.deploysNothing }).from(tickets).where(eq(tickets.id, blocksTicketId));
         const notLive = m ? await goLiveWaitOf(db, m) : null;
         if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
       }

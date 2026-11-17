@@ -92,7 +92,7 @@ export async function commitIsLive(
 }
 
 /** The go-live facts of a merged ticket that every reader needs (liveMarkedAt is required so no caller can forget it). */
-export type GoLiveTicket = { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null; liveMarkedAt: Date | null; liveEvidence?: string | null };
+export type GoLiveTicket = { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null; liveMarkedAt: Date | null; liveEvidence?: string | null; deploysNothing?: boolean | null };
 
 /**
  * BOS-1345: whether Boss Man's own server (its deploy and its runner image) is how this company's merges go live.
@@ -115,6 +115,9 @@ export async function serverIsGoLive(db: Db, companyId: string): Promise<boolean
  */
 export async function goLiveWaitOf(db: Db, t: GoLiveTicket): Promise<GoLiveWait | null> {
   if (!t.mergeCommit) return null;
+  // BOS-1711: a merge that changed only tests, docs or CI (deploysNothing, the fixesMergeCheck rule) has nothing to
+  // deploy: it is live once merged. An unknown file list (null) still waits.
+  if (t.deploysNothing === true) return null;
   const merge = t.mergeCommit.toLowerCase();
   const [rec, order] = [await liveServerRecord(db, t.companyId), await allMergeOrder(db, t.companyId)];
   const live = rec.live;
