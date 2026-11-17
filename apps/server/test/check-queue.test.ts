@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
 import { DEPLOY_WAIT_KEY } from "../src/services/deploy-wait-hold.js";
 import { FULL_LOG_MAX } from "@boss-man/shared";
@@ -41,6 +41,28 @@ describe("check queue", () => {
     expect(still!.state).toBe("queued");
     await s.db.delete(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
     expect((await s.q.claimNext(null, T(2)))[0]!.id).toBe(m1.id);
+  });
+
+  it("BOS-1748: during the hold a check worker still takes a quick check behind many merges; merges and the company runner wait", async () => {
+    const s = await setup();
+    const [w] = await s.db.insert(checkWorkers).values({ name: "box", tokenHash: `h-${Math.random()}`, companyIds: [s.companyId] }).returning();
+    const merges = [] as string[];
+    for (let i = 0; i < 5; i++) merges.push((await s.req({ tree: `m${i}` })).job.id);
+    const quick = (await s.req({ tree: "q", kind: "pre_review", scope: "quick" })).job;
+    const full = (await s.req({ tree: "f", kind: "pre_review", scope: "full" })).job;
+    await s.db.insert(settings).values({ key: DEPLOY_WAIT_KEY, value: { phase: "waiting", approvedAt: T(0).toISOString() } });
+    // The company runner takes nothing, as before.
+    expect(await s.q.claimNext(null, T(1))).toEqual([]);
+    // The worker (2 free slots) takes the quick check only: not the merges, not the full check.
+    const got = await s.q.claimOn({ workerId: w!.id }, 2, T(1), s.companyId);
+    expect(got.map((j) => j.id)).toEqual([quick.id]);
+    expect(got[0]!.workerId).toBe(w!.id);
+    const [stillFull] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, full.id));
+    expect(stillFull!.state).toBe("queued");
+    // Once the hold lifts, the worker takes the rest as usual.
+    await s.db.delete(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
+    expect((await s.q.claimOn({ workerId: w!.id }, 2, T(2), s.companyId)).length).toBe(1);
+    await s.close();
   });
 
   it("serves merge jobs first, then fixes of main, urgent, oldest; one slot by default", async () => {
