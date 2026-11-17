@@ -133,9 +133,14 @@ fix_env() {
   ((have_dep)) || new+="BOSSMAN_DEPLOYER=$D"$'\n'
   ((have_cf)) || new+="COMPOSE_FILE=docker-compose.yml:deploy/truenas-deployer.yml"$'\n'
   if [[ $new == "$(cat "$env")"$'\n' ]]; then ok ".env (BOSSMAN_DEPLOYER, COMPOSE_FILE)"; return; fi
-  did ".env (BOSSMAN_DEPLOYER and COMPOSE_FILE; the old file is kept as .env.bak-$(date +%Y%m%d%H%M))"
+  # Never overwrite an earlier backup: add -2, -3 ... when the name is taken.
+  local bak base n=1
+  base="$env.bak-$(date +%Y%m%d%H%M%S)"
+  bak="$base"
+  while [[ -e $bak ]]; do n=$((n + 1)); bak="$base-$n"; done
+  did ".env (BOSSMAN_DEPLOYER and COMPOSE_FILE; the old file is kept as ${bak##*/})"
   env_changes=1
-  if ! ((DRY)); then cp -p "$env" "$env.bak-$(date +%Y%m%d%H%M)"; printf '%s' "$new" >"$env"; fi
+  if ! ((DRY)); then cp -p "$env" "$bak"; printf '%s' "$new" >"$env"; fi
 }
 
 # timer: run the copy every minute (an hourly job makes an approved deploy wait up to an hour).
