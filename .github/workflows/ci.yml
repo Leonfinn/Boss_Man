@@ -174,7 +174,12 @@ jobs:
       - run: pnpm -r --no-bail typecheck
       # Runs even when typecheck failed, so one run reports every fault (BOS-1661).
       - if: ${{ !cancelled() }}
+        env:
+          BOSSMAN_RUNNER_TEST_REPORT: ${{ runner.temp }}/runner-tests.json
         run: pnpm -r --no-bail test
+      # A red runner test run names its failing tests in a public error annotation (BOS-1705).
+      - if: ${{ failure() }}
+        run: node scripts/annotate-vitest-failures.mjs "$RUNNER_TEMP/runner-tests.json" "runner tests failed"
       - run: pnpm build
       - name: Migrations match the schema
         run: |
