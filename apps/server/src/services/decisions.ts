@@ -66,7 +66,7 @@ import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
-import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
+import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import { type OwnerRecordFacts, fillOwnerSetupTokens, usesOwnerSetupToken } from "./owner-record.js";
 import type { Addon, AddonFacts } from "./addons.js";
@@ -258,7 +258,7 @@ export type DecisionContext =
    * `tickets` lists every ticket going live with identical steps that share this one card (BOS-741); it
    * always starts with `ticketId`, and a card with one ticket is the same card DR-011 raised before.
    */
-  | { type: "owner_setup"; ticketId: string; tickets?: { ticketId: string; title: string }[]; steps: string[]; commit: string }
+  | { type: "owner_setup"; ticketId: string; tickets?: { ticketId: string; title: string; why?: string | null; ifSkipped?: string | null }[]; steps: string[]; commit: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
@@ -633,7 +633,7 @@ export const ownerSetupKey = (ticketId: string) => `owner-setup:${ticketId}`;
  * the same key DR-011 used when a ticket was alone, so a repeat go-live pass can't stack a second card.
  * Returns the row, or null when a card is already open for the first ticket.
  */
-export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string }[]; steps: string[]; commit: string; facts?: OwnerSetupFacts; override?: string | null }) {
+export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string; why?: string | null; ifSkipped?: string | null }[]; steps: string[]; commit: string; facts?: OwnerSetupFacts; override?: string | null }) {
   const [first, ...others] = t.tickets;
   if (!first) return null;
   // DR-052: the same fill and card check every owner card gets, on the text the owner will read: host tokens are
@@ -648,6 +648,12 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
     await raiseOwnerSetupFix(db, { companyId: t.companyId, tickets: t.tickets, findings: [...check.hard, ...check.soft], commit: t.commit });
     return null;
   }
+  // BOS-1650: every step was a `[when <fact>]` step whose fact is false, so there is nothing for the owner to do.
+  // No card; the ticket says why. (The pass runs again at the next go-live, which settles the facts afresh.)
+  if (!check.steps.length && check.dropped.length) {
+    await record(db, { companyId: t.companyId, ticketId: first.ticketId, kind: "decision_raised", summary: `No setup card for "${first.title}": Boss Man checked its record at go-live and ${[...new Set(check.dropped.map((d) => d.fact))].map((f) => `"${f}" is not true`).join(", ")}, so there is nothing for the owner to do.`, at: new Date() });
+    return null;
+  }
   const unknownHost = check.generic ? `\n\nBoss Man doesn't know this server's folders yet, so where a step needs one it says where to look it up (${THIS_HOST_POINTER}).` : "";
   const overridden = check.soft.length && override ? `\n\nThe CEO let these steps past Boss Man's card check: ${override}` : "";
   const heading =
@@ -656,12 +662,18 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
       : others.length === 1
         ? `"${first.title}" and "${others[0]!.title}" are live.` // two read better than a list of two
         : `${t.tickets.length} tickets are live: ${t.tickets.map((x) => `"${x.title}"`).join(", ")}.`;
+  // BOS-1650: the card opens with why it matters and what skipping costs. A ticket written before these existed is
+  // still raised, saying "not given", so nothing is dropped.
+  const given = (v: string | null | undefined) => v?.trim() || NOT_GIVEN;
+  const whyLines = t.tickets.length === 1
+    ? `Why: ${given(first.why)}\nIf you skip it: ${given(first.ifSkipped)}`
+    : t.tickets.map((x) => `"${x.title}"\nWhy: ${given(x.why)}\nIf you skip it: ${given(x.ifSkipped)}`).join("\n\n");
   const [row] = await db
     .insert(decisions)
     .values({
       companyId: t.companyId,
       kind: "question",
-      question: `${heading}${others.length ? " To start using them all:" : " To start using it:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
+      question: `${heading}\n\n${whyLines}\n\n${others.length ? "Steps for them all:" : "Steps:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
       options: [TODO_DONE],
       recommendedOption: TODO_DONE,
       tier: "owner",
