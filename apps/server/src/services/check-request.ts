@@ -9,6 +9,7 @@ import { checkQueue, type CheckScope } from "./check-queue.js";
 import { checkPriority } from "./check-gate.js";
 import { checkPlace } from "./check-wording.js";
 import { record } from "./activity.js";
+import type { CiPreflight } from "./ci-preflight.js";
 
 export class CheckRequestError extends Error {}
 
@@ -20,12 +21,14 @@ export type CheckRequestDeps = {
   diff: (runnerId: string, projectId: string, ticketId: string) => Promise<WorkspaceDiff>;
   /** Commands per scope, from the project's settings; a missing one falls back to the runner's default. */
   command?: (scope: CheckScope, projectId: string) => Promise<string | null>;
+  /** GitHub's CI jobs before review for a branch that changes CI or image files (BOS-1664). */
+  preflight?: CiPreflight;
 };
 
 export function checkRequestService(db: Db, deps: CheckRequestDeps) {
   const queue = checkQueue(db);
   return {
-    async request(input: { companyId: string; agentId: string; ticketId: string; scope?: CheckScope }): Promise<string> {
+    async request(input: { companyId: string; agentId: string; ticketId: string; scope?: CheckScope; ciNotApplicable?: string }): Promise<string> {
       const scope = input.scope ?? "quick";
       if ((await queue.mode()) !== "server") {
         throw new CheckRequestError("The check queue is not switched on yet, so run scripts/check-quick.sh yourself, from the repo root, as before.");
@@ -46,6 +49,9 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
       if (d.files.length && !d.commits.length) throw new CheckRequestError("Nothing is committed yet: commit your work first, then ask again. A check runs on a commit.");
       // BOS-1544: the job would fail to start ("invalid reference"); say why now and queue nothing.
       if (d.unsynced) throw new CheckRequestError(`The runner couldn't copy your branch into its shared repo, so a check of it can't start, and nothing was queued (${d.unsynced}). Your code isn't at fault. If the reason says how to fix it, do that and ask again; if it's a runner error, don't requeue: tell the CEO with this message.`);
+      // BOS-1664: a branch that changes CI or image files also gets GitHub's own jobs run on it, merged with main.
+      const pre = await deps.preflight?.start(t, input.agentId, d, input.ciNotApplicable).catch((err: Error) => `GitHub's CI jobs could not be started (${err.message}); the move to review will say what is still needed.`);
+      const extra = pre ? `\n\n${pre}` : "";
       const { job, reused } = await queue.enqueue({
         companyId: input.companyId,
         projectId: t.projectId,
@@ -70,14 +76,24 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
         }).catch(() => {});
       }
       const uncommitted = d.files.length && d.head ? " Anything you have not committed is not in this check." : "";
-      if (reused === "passed") return `Already answered: the same code (commit ${job.commit.slice(0, 8)}) passed a ${job.scope} check, so nothing was queued.${uncommitted}`;
+      if (reused === "passed") return `Already answered: the same code (commit ${job.commit.slice(0, 8)}) passed a ${job.scope} check, so nothing was queued.${uncommitted}${extra}`;
       // BOS-1412: the same code already waits (or runs). Hand back that job and where it stands; it is not re-queued,
       // so the agent reading its place never sends it to the back of the line.
-      if (reused === "live") return `Nothing new was queued: your ${job.scope} check of commit ${job.commit.slice(0, 8)} is already ${await checkPlace(queue, input.companyId, job)}, and its result will wake you. End your turn or carry on with other work; do not poll or start your own background loop.${uncommitted}`;
+      if (reused === "live") return `Nothing new was queued: your ${job.scope} check of commit ${job.commit.slice(0, 8)} is already ${await checkPlace(queue, input.companyId, job)}, and its result will wake you. End your turn or carry on with other work; do not poll or start your own background loop.${uncommitted}${extra}`;
       const st = await queue.status(input.companyId);
       const place = st.queued.find((q) => q.id === job.id)?.place;
       const where = job.state === "running" ? "It is running now." : place ? `It is number ${place} in line.` : "It is waiting (a red main holds back some checks).";
-      return `A ${job.scope} check of commit ${job.commit.slice(0, 8)} is queued. ${where} You will be woken with the result, so end your turn or carry on with other work; do not poll or start your own background loop.${uncommitted}`;
+      return `A ${job.scope} check of commit ${job.commit.slice(0, 8)} is queued. ${where} You will be woken with the result, so end your turn or carry on with other work; do not poll or start your own background loop.${uncommitted}${extra}`;
+    },
+
+    /** BOS-1664: the move to review is refused while GitHub's CI jobs for a CI or image change haven't passed (or been marked not applicable). */
+    async reviewRefusal(companyId: string, ticketId: string): Promise<string | null> {
+      if (!deps.preflight) return null;
+      // With the queue off, request_check refuses, so a hold on it could never be lifted: no hold.
+      if ((await queue.mode()) !== "server") return null;
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
+      if (!runner) return null;
+      return deps.preflight.reviewRefusal(ticketId, (t) => deps.diff(runner.id, t.projectId, t.id));
     },
   };
 }

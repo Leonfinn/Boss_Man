@@ -213,7 +213,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   if (retroAgent) registerRetro(server, services.retro, scope);
   registerRunTools(server, db, services, scope, hooks, undefined, withServerStatus);
   registerRoadmap(server, db, services.work, scope);
-  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals, hostFacts: services.hostFacts }, scope, hooks, false);
+  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals, hostFacts: services.hostFacts, checkRequests: services.checkRequests }, scope, hooks, false);
   registerSharedTools(server, db, { notes: services.notes, wiki: services.wiki, skills: services.skills, skillProposals: services.skillProposals, review: services.review, agents: services.agents }, scope);
   registerViewImage(server, services.images, scope);
   registerNotes(server, db, scope, false, { ticketChat: services.ticketChat });
@@ -286,13 +286,13 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     {
       description:
         "Ask for a check of your ticket to be run for you by the runner, outside your session, so it survives the end of your run and nobody can stop it. ticketId; scope quick (default: the 2-5 minute check of what your branch changed) or full (only after the merge gate has bounced the ticket twice, or for a change to check-all.sh or the test setup). Commit first: the check runs on your latest commit. It queues behind merge checks. You are woken with the result: end your turn or do other work, and do not poll or run your own loop. Only the ticket's assignee can use it while the ticket is in progress or in review. The merge gate runs the one full check itself.",
-      inputSchema: { ticketId: z.string().uuid(), scope: z.enum(["quick", "full"]).optional() },
+      inputSchema: { ticketId: z.string().uuid(), scope: z.enum(["quick", "full"]).optional(), ciNotApplicable: z.string().max(500).optional().describe("Only when your branch changes .github/workflows/ or image files: GitHub's own CI jobs then run before review and the move to review waits for them to pass. If they truly don't apply, give the reason here instead (it is shown on the ticket).") },
     },
-    async ({ ticketId, scope: checkScope }) => {
+    async ({ ticketId, scope: checkScope, ciNotApplicable }) => {
       if (!scope.agentId) return fail("Only an agent can ask for a check.");
       if (!checkRequests) return fail("The check queue is not available on this server.");
       try {
-        const msg = await checkRequests.request({ companyId: scope.companyId, agentId: scope.agentId, ticketId, scope: checkScope });
+        const msg = await checkRequests.request({ companyId: scope.companyId, agentId: scope.agentId, ticketId, scope: checkScope, ciNotApplicable });
         await noteRunTicket(ticketId);
         return text(msg);
       } catch (err) {
@@ -435,7 +435,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
       const ask = checkAsk({ ...(steps?.length && usesOwnerSetupToken(steps) ? { ownerSetup: await ownerSetupFacts(db, scope.companyId) } : {}), triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined, ...(await seenImageDates(db, scope.companyId, steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
       if (ask.error) return fail(ask.error);
-      steps = ask.steps ?? steps; // {{host.…}} filled in
+      steps = ask.steps ?? steps; // {{host.…}} filled in, checker tags taken out (BOS-1665)
+      const stepSources = ask.stepSources;
       let notLiveLine = "";
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
@@ -500,7 +501,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: notLiveLine ? `${question}\n\n${notLiveLine}` : question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: notLiveLine ? `${question}\n\n${notLiveLine}` : question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -1437,7 +1438,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
 
   registerBoard(server, db, scope);
   registerRoadmap(server, db, work, scope);
-  registerTicketMoves(server, db, { review, work, feedback, skillProposals, hostFacts: services.hostFacts }, scope, hooks, true);
+  registerTicketMoves(server, db, { review, work, feedback, skillProposals, hostFacts: services.hostFacts, checkRequests: services.checkRequests }, scope, hooks, true);
   registerNotes(server, db, scope, true, { ticketChat });
 
   // So an agent asked in chat for something it can't do here asks the colleague who can, instead of the owner.

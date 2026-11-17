@@ -113,6 +113,8 @@ jobs:
         env:
           # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
           BOSSMAN_SCRATCH: ${{ runner.temp }}
+          # This job supplies a browser, so a browser test that can't launch one fails instead of skipping.
+          BOSSMAN_REQUIRE_BROWSER: "1"
         run: |
           # The failing test names are repeated as an error annotation, which anyone can read through the public
           # check-runs API (the raw job log needs a login). Without it a red run said only "exit code 1" (BOS-1590).
@@ -169,8 +171,10 @@ jobs:
           node --test scripts/*.test.mjs
           node scripts/lint-migrations.mjs
           node scripts/check-in-memory-state.mjs
-      - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm -r --no-bail typecheck
+      # Runs even when typecheck failed, so one run reports every fault (BOS-1661).
+      - if: ${{ !cancelled() }}
+        run: pnpm -r --no-bail test
       - run: pnpm build
       - name: Migrations match the schema
         run: |
@@ -394,10 +398,16 @@ jobs:
           # The log is kept in a file and its tail is repeated as an error annotation, which anyone can read through the
           # public check-runs API (the raw job log needs a login). BOS-1553: the first failure here left no trace.
           set +e
+          # The image sets NODE_ENV=production for the runner; React's production build has no act(), so the web
+          # component tests fail under it ("React.act is not a function"). Tests run as tests, as in the other jobs.
+          # GITHUB_ACTIONS is passed in too: the server's hot-path budget test gives GitHub's slow runners 300 ms, and
+          # without it the container (still on a GitHub runner) held the dev-machine 100 ms limit and failed.
           docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
-            -e CI=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
+            -e CI=1 -e GITHUB_ACTIONS=true -e NODE_ENV=test -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
               pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
-              pnpm typecheck && pnpm test' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
+              pnpm -r --no-bail typecheck; tc=$?;
+              pnpm -r --no-bail test; ts=$?;
+              [ "$tc" = 0 ] && [ "$ts" = 0 ]' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
           rc=${PIPESTATUS[0]}
           if [ "$rc" != 0 ]; then
             # Colour codes stripped first: they ate most of the 1500 characters and hid the error text itself (BOS-1595).
