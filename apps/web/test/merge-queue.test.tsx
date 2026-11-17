@@ -261,6 +261,21 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/2 checks are held/);
   });
 
+  // R28: only a GitHub-CI hold (no queued check is held by main) still shows the one "main is red" banner, naming the fix.
+  it("main red from a hold behind a fix: the banner shows with no held check, naming the fix and linking the update card", async () => {
+    const line = { state: "held_behind_fix", held: 3, since: null, fixes: [{ ticketId: "fx", ref: "APP-9", title: "Fix main", stateText: "merged, waiting for the server update", ownerUpdate: true, updateCardId: "card-1" }] };
+    serve({ ...calm, line }, noChecks);
+    goTo("#/merge-queue/c1/checks");
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText(/Main is red\./);
+    expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/3 approved tickets are held until the fix \(APP-9, merged, waiting for the server update\)/);
+    goTo("#/merge-queue/c1");
+    cleanup();
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    const link = await screen.findByRole("link", { name: "Open the update card" });
+    expect(link.getAttribute("href")).toBe("#/decisions/card-1");
+  });
+
   it("a pill on the Merges tab moves focus to its target", async () => {
     serve({ ...data, waitingCount: 1, waiting: [{ ...base, ticketId: "a", ref: "APP-1", title: "Sign me", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: "d1" }] }, noChecks);
     render(<MergeQueue companies={[company]} companyId="c1" />);

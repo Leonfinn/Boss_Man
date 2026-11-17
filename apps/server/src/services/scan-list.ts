@@ -36,7 +36,7 @@ export function scanListReader(deps: ScanListWarning & { read: () => Promise<str
           deps.notify?.({
             level: "note",
             title: "The private-details list couldn't be read",
-            body: "Your home details couldn't be checked on merges: the list is saved but the server couldn't read it, so only secret scanning ran. This usually means the server's master key doesn't match the one the list was saved with. Saving the list again in Settings > Server and runner > Private details fixes it. You'll hear again if it breaks after working.",
+            body: "Your home details couldn't be checked on merges: the list is saved but the server couldn't read it, so only secret scanning ran. This usually means the server's master key doesn't match the one the list was saved with. Saving the list again in Settings → Server and runner → Devices and privacy → Private details to block fixes it. You'll hear again if it breaks after working.",
             link: "#/settings",
           }),
         ).catch(() => {});

@@ -5,7 +5,7 @@
 // Nothing is stored: every figure is read from existing tables and the live socket count.
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { checkWorkers, runners } from "../db/schema.js";
+import { checkWorkers, runners, settings } from "../db/schema.js";
 import { onlineWorkerCount } from "./check-workers.js";
 
 export type OwnerRecordFacts = {
@@ -19,15 +19,20 @@ export type OwnerRecordFacts = {
   };
   /** This company's runner: whether one is registered and whether it has ever connected. */
   runner: { registered: boolean; everConnected: boolean };
+  /** Whether the owner has saved a public address for Boss Man (Notifications, publicUrl). */
+  publicAddress: { set: boolean };
 };
 
 export async function ownerSetupFacts(db: Db, companyId: string): Promise<OwnerRecordFacts> {
   // Only workers granted to this company count as its setup; a worker with no companies runs nobody's checks.
   const workers = (await db.select({ lastSeenAt: checkWorkers.lastSeenAt, companyIds: checkWorkers.companyIds }).from(checkWorkers)).filter((w) => w.companyIds.includes(companyId));
   const [runner] = await db.select({ lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
+  const [notify] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "notifications"));
+  const publicUrl = (notify?.value as { publicUrl?: string | null } | undefined)?.publicUrl;
   return {
     checkWorkers: { added: workers.length, everConnected: workers.filter((w) => w.lastSeenAt).length, online: onlineWorkerCount() },
     runner: { registered: !!runner, everConnected: !!runner?.lastSeenAt },
+    publicAddress: { set: !!publicUrl },
   };
 }
 
@@ -39,6 +44,7 @@ export function ownerSetupLines(f: OwnerRecordFacts): string[] {
   return [
     `- ${workersLine(f)}. A worker is installed only once it has connected; with 0 ever connected, never call one set up, existing or idle.`,
     `- Runner: ${!f.runner.registered ? "none registered" : f.runner.everConnected ? "has connected" : "registered, never connected"}.`,
+    `- Public address: ${f.publicAddress.set ? "set" : "not set; never ask the owner to open Boss Man from outside their network"}.`,
   ];
 }
 
@@ -63,7 +69,7 @@ export const usesOwnerSetupToken = (steps: readonly string[]) => steps.some((s) 
 // One row per fact: the phrases that claim it and when the record contradicts the claim. A claim in an instruction
 // ("add your worker", "install the worker") is not a claim about what exists, so those verbs before it are skipped.
 const NOT_AN_INSTRUCTION = String.raw`(?<!\b(?:add|create|install|start|connect|register|build|download|set up|setting up|new|first|another|a)\s)`;
-type FactRow = { key: string; claims: RegExp[]; contradicted: (f: OwnerRecordFacts) => boolean; live: (f: OwnerRecordFacts) => string };
+type FactRow = { key: string; claims: RegExp[]; contradicted: (f: OwnerRecordFacts) => boolean; live: (f: OwnerRecordFacts) => string; why?: string };
 const FACT_TABLE: FactRow[] = [
   {
     key: "checkWorkers.installed",
@@ -74,6 +80,17 @@ const FACT_TABLE: FactRow[] = [
     ],
     contradicted: (f) => f.checkWorkers.everConnected === 0,
     live: (f) => workersLine(f),
+  },
+  {
+    // A step that needs Boss Man reachable from outside the owner's network cannot be done with no public address.
+    key: "publicAddress.outside",
+    claims: [
+      /\b(?:open|reach|use|visit|log ?in to|sign in to|connect to|get to)\b[^.\n]{0,60}\b(?:from outside|outside (?:of )?(?:your|the|their)|away from (?:your|the) (?:home )?(?:network|wifi))\b/i,
+      /\b(?:open|reach|use|visit|log ?in to|connect to)\b[^.\n]{0,40}\bon (?:mobile data|cellular|4g|5g|your phone'?s data)\b/i,
+    ],
+    contradicted: (f) => !f.publicAddress.set,
+    live: () => "Public address: not set",
+    why: "This text asks the owner to reach Boss Man from outside their network, but no public address is set, so they cannot. Say how to set one first (Notifications), or drop the step; it passes once one is set.",
   },
 ];
 
@@ -90,5 +107,7 @@ export async function ownerFactHeld(db: Db, companyId: string, ...texts: Array<s
   const facts = await ownerSetupFacts(db, companyId);
   const bad = hits.filter((r) => r.contradicted(facts));
   if (!bad.length) return null;
+  const [first, ...rest] = bad;
+  if (first!.why && !rest.length) return `Not sent. ${first!.why} The record says: ${first!.live(facts)}. Source: server_status ownerSetup.`;
   return `Not sent. This text says the owner has a check worker installed, existing, set up or idle (or a second machine), but the record says: ${bad.map((r) => r.live(facts)).join("; ")}. A worker counts as installed only once it has connected, and none ever has. Say what the record says. If the record itself is wrong (for example a worker that connected but was never recorded), fix the record first. Source: server_status ownerSetup.`;
 }

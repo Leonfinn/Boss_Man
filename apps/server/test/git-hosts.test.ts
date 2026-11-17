@@ -74,6 +74,16 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     expect((await github([]).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("none");
   });
 
+  it("a cancelled run is no failure: its own state, unless a job in it really failed", async () => {
+    const cancelledJob = { id: 5, name: "check", status: "completed", conclusion: "cancelled", runner_name: "GitHub Actions 2", steps: [] };
+    const s = await github([run(9, "completed", "cancelled")], { 9: [cancelledJob] }).host.ciStatus(cfg("github"), "t", SHA);
+    expect(s).toEqual({ state: "cancelled", failed: [], waiting: [], billing: false, cancelled: [{ id: 9, name: "CI", url: "https://github.com/leon/site/actions/runs/9" }] });
+    const real = await github([run(9, "completed", "cancelled")], { 9: [cancelledJob, job(6, "lint", "failure")] }).host.ciStatus(cfg("github"), "t", SHA);
+    expect(real.state).toBe("failed");
+    // Another workflow still running: wait for it before saying anything about the cancelled one.
+    expect((await github([run(9, "completed", "cancelled"), run(8, "in_progress", null, { workflow_id: 2 })], { 9: [cancelledJob] }).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("pending");
+  });
+
   it("a run that failed before any job is named by the run", async () => {
     const { host } = github([run(9, "completed", "startup_failure")]);
     expect((await host.ciStatus(cfg("github"), "t", SHA)).failed).toEqual([{ id: 0, name: "CI", url: "https://github.com/leon/site/actions/runs/9" }]);
