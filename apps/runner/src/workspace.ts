@@ -1254,9 +1254,32 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}) };
+      const mergedInto = tip && head !== recorded ? await this.landedOn(repo, dir, head, tip) : null;
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}), ...(mergedInto ? { mergedInto } : {}) };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * BOS-1647: the commit on `tip` that brought `head` in, or null when head isn't inside tip. A merge commit's own
+   * files come with it; a fast-forward (head is on tip's first-parent line) is head itself. Never throws: a git failure
+   * reads as "not merged", which leaves the ticket to the normal merge path.
+   */
+  private async landedOn(repo: string, dir: string, head: string, tip: string): Promise<{ commit: string; files?: string[] } | null> {
+    try {
+      if ((await this.gitCode(["merge-base", "--is-ancestor", head, tip], { cwd: dir, repo })).code !== 0) return null;
+      if (head === tip) return { commit: head };
+      const line = (await this.git(["rev-list", "--first-parent", "--ancestry-path", `${head}..${tip}`], { cwd: dir, repo })).split("\n").filter(Boolean);
+      const first = line[line.length - 1];
+      if (!first) return { commit: head };
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", first], { cwd: dir, repo })).split(" ").slice(1);
+      // The first commit of the target's own line that holds head: a merge of the branch when head isn't its first parent.
+      if (parents[0] === head || parents.length < 2) return { commit: head };
+      const names = await this.git(["diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", parents[0]!, first], { cwd: dir, repo });
+      return { commit: first, files: names ? names.split("\n") : [] };
+    } catch {
+      return null;
     }
   }
 
