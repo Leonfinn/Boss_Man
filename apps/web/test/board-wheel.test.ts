@@ -150,7 +150,16 @@ async function wheel(page: Page, x: number, y: number, deltaY: number, deltaX = 
     return e ? `${e.tagName}.${String((e as HTMLElement).className)}` : "nothing";
   }, [x, y]);
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX, deltaY, pointerType: "mouse" });
-  await page.waitForTimeout(120);
+  // Wait for the page to actually move (smooth scrolling on a slow GitHub runner can still be at 0
+  // after a fixed sleep). A sideways wheel moves the board instead, so wait for that: once the
+  // board has scrolled, the wheel has been handled, and a stray page scroll would have shown by
+  // now. A timeout is not an error here: the caller's assertion reports a wheel that did nothing.
+  try {
+    if (deltaY !== 0) await page.waitForFunction(() => window.scrollY > 0, undefined, { timeout: 10_000 });
+    else await page.waitForFunction(() => (document.querySelector(".board-scroll") as HTMLElement).scrollLeft > 0, undefined, { timeout: 10_000 });
+  } catch {
+    /* fall through to the read below */
+  }
   const scrollY = await page.evaluate(() => window.scrollY);
   await cdp.detach();
   return { scrollY, under };
