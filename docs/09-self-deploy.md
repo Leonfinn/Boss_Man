@@ -193,6 +193,8 @@ The same panel counts a rate-limit refusal from the host ("Rejected: only one se
 - **Build steps in a Dockerfile** run agent-written commands, which is why Dockerfile changes are infra. `pnpm install` lifecycle scripts in app code do run in the build; that is the same trust as running the code. Builds must stay on the default bridge, never `--privileged`.
 - The host trusts the checkout's `scripts/` at HEAD. That is safe only because every deploy that moved HEAD was either run by the owner by hand or had no `scripts/` change.
 
+**The staging lane (BOS-1472, [docs/22-staging.md](22-staging.md)).** With `STAGING_DIR` set in `host.conf`, a compromised **server** can also write `inbox/staging-request.json`. That asks root to run `scripts/deploy-staging.sh <commit>` and `scripts/smoke-staging.sh` from the staging checkout, nothing else: the commit must be 40 hex characters and an ancestor of `origin/main` (fetched by the host), the request is parsed with the same strict pattern as production's and never executed, ids can't be replayed, and there is one deploy per `STAGING_RATE_LIMIT_SECONDS`. Impact: a redeploy of already-merged code onto staging, which holds the host's Docker socket by design and is only as trusted as merged code already is. Off by default; remove `STAGING_DIR` to close it. The smoke account password lives only in `smoke-credentials` in the deployer folder (root-only), and is sent only to staging's own address.
+
 ## Compatibility with phase 2 (drain) and phase 3 (blue/green)
 
 - **Drain (phase 2):** built behind `do_update_runner`, without changing the request file (see the next section).

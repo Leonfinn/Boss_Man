@@ -99,6 +99,8 @@ wait_healthy() {
 # Builds and starts the stack at the checked-out commit.
 rebuild_and_start() { # old-commit new-commit
   local svcs=(server) built=(server) profiles
+  # The commit the server image is built from, so /api/health and the smoke checks can say what staging runs (BOS-1472).
+  export BOSSMAN_COMMIT="$2"
   profiles="${COMPOSE_PROFILES:-$(env_get .env COMPOSE_PROFILES)}" # the same precedence docker compose uses
   if [[ ,$profiles, == *,launcher,* ]]; then svcs+=(launcher); built+=(launcher netguard); fi
   # A failed build must die, not fall through: callers run this inside "if !", where bash switches set -e off for

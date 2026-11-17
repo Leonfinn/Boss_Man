@@ -85,7 +85,33 @@ puts the last commit that came up healthy back (code only; the staging database 
 
 ## Boss Man's staging target
 
-**Not supported yet.** A host deployer runs `scripts/deploy.sh` and `scripts/update-runner.sh`, which are production's and now refuse in a staging folder, so do not point one at the staging checkout. Until a staging-aware deployer exists, deploy to staging with `scripts/deploy-staging.sh` and record the result on the release ticket by hand. A deploy target named `staging` in Settings is follow-up work.
+Staging has its own lane in the host deployer (BOS-1472), so nobody has to run scripts on the host. It is off until the host's `host.conf` (in the deployer folder) has one line, `STAGING_DIR=<the staging folder from the first-time setup>`. With it set:
+
+- A request names a commit. The deployer takes it from `inbox/staging-request.json` (the same five-field format as production's request, `"target": "staging"`), runs `scripts/deploy-staging.sh <commit>` in `STAGING_DIR`, then `scripts/smoke-staging.sh`, and writes `outbox/staging-status.json` (the commit, `deployed` or `failed`, `smoke` as `passed`, `failed` or `skipped`, and a `check_<name>` and `why_<name>` line for each check). It also keeps `outbox/staging-history.jsonl`, and `outbox/staging-lane.json` says whether the lane is on.
+- Only commits that are on `main` are taken ("Rejected: ... is not on main"). Staging's launcher holds the host's Docker socket (see below), so a commit nobody reviewed must not go there on a request nobody approved.
+- It uses the deployer's one lock, so it never runs at the same time as a production update, and it waits behind a production request that is already there. It is held while free memory is below what an update needs, like production's update. `STAGING_RATE_LIMIT_SECONDS` (default 300) is the gap between two staging deploys and `STAGING_TIMEOUT_SECONDS` (default 1800) stops one that hangs.
+- In Boss Man the deploy tool then lists a `staging` target that needs no approval (it is not production), and Settings → Server and runner has a **Deploy to staging** button. The status, the commit staging runs and each smoke check are shown in `server_status` and on that page.
+
+To turn it off, remove the `STAGING_DIR` line; nothing else changes. Roll staging back with `scripts/deploy-staging.sh --rollback` in the staging folder as before.
+
+### The scripted smoke checks
+
+`scripts/smoke-staging.sh <staging folder> <commit>` runs on the host (not in a runner, so the runner's network guard does not apply) and prints `name`, `pass|fail|skipped` and one line of why for each check. It reads the staging address from the staging `.env` (`BOSSMAN_BIND`, `BOSSMAN_HOST_PORT`). It covers items 1, 2, 3, 4, 6 and 7 of the checklist below, and the runner connection of item 5:
+
+| Check | What it does |
+|---|---|
+| `address` | `/api/health` answers |
+| `version` | the commit it reports is the commit deployed |
+| `board` | the web page loads |
+| `signin`, `ticket`, `runner` | sign in as the smoke account, create a ticket and close it, and see the staging runner connected (with its image) |
+| `agent_run` | always `skipped`: a real run costs model tokens, so check it by hand |
+| `production` | production's containers are the same ones that ran before the deploy |
+
+The sign-in checks need a smoke account: an owner on staging with a made-up name and password, and a file `smoke-credentials` in the deployer folder (mode 600, owned by the user the deployer runs as) holding two lines, `smoke_username=<name>` and `smoke_password=<password>`. Without the file those three checks are `skipped: not set up`, never a failure. The password is only sent to staging's own address and is never printed or written to the status file.
+
+## What an after-merge check on staging can and cannot cover
+
+Staging runs a merged commit with an empty database, its own runner and no real integrations. A criterion that needs only the code can be checked there: an API answer, a page, a migration, the runner image, a setting. An agent makes a ticket on staging's own board (staging has no link to production's agents, so a production ticket cannot be run on it). Anything that needs the owner's real accounts, production data, the edge (HTTPS, Tailscale), or real timing and load is checked on the live system after go-live, and a criterion should say "check live" for those.
 
 ## Smoke checklist (QA, about 10 minutes)
 

@@ -1134,6 +1134,108 @@ mv "$T/bin/docker.real" "$T/bin/docker"
 [[ $(status result) == rolled_back ]] || fail "db restarted during the swap: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "whole-stack check found"; live_is blue
 
+# --- The staging lane (BOS-1472): its own request/status files, main-only commits, smoke checks, memory hold ---
+cat >"$T/w/scripts/deploy-staging.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "deploy-staging.sh $* production_dirs=${BOSSMAN_PRODUCTION_DIRS:-}" >>"$STUB_LOG"
+[[ -z ${STUB_STAGING_RC:-} ]] || exit "$STUB_STAGING_RC"
+git checkout --quiet "$1"
+STUB
+cat >"$T/w/scripts/smoke-staging.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "smoke-staging.sh $2 before=${SMOKE_PRODUCTION_BEFORE-unset}" >>"$STUB_LOG"
+printf 'address\tpass\tanswers\n'
+if [[ -n ${SMOKE_CREDENTIALS:-} && -f $SMOKE_CREDENTIALS ]]; then printf 'signin\tpass\tsigned in\n'; else printf 'signin\tskipped\tnot set up\n'; fi
+printf 'runner\tpass\trunner connected, image abc123\n'
+if [[ -n ${STUB_SMOKE_FAIL:-} ]]; then printf 'board\tfail\tHTTP 500\n'; exit 1; fi
+STUB
+chmod +x "$T"/w/scripts/*.sh
+git -C "$T/w" add -A; git -C "$T/w" commit -qm "staging stubs"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+s1="$(git -C "$T/w" rev-parse HEAD)"
+git clone -q "$T/origin.git" "$T/stg" 2>/dev/null
+# A commit that is on a side branch only, never on main.
+git -C "$T/w" checkout -q -b side; echo side >"$T/w/side.txt"; git -C "$T/w" add -A; git -C "$T/w" commit -qm side
+side="$(git -C "$T/w" rev-parse HEAD)"; git -C "$T/w" push -q origin HEAD:refs/heads/staging-offmain || fail "could not push the side branch"; git -C "$T/w" checkout -q -
+git -C "$T/w" reset -q --hard "$s1"
+sreq() { # commit [id]
+  printf '{"id":"%s","target":"staging","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${2:-$(node -e 'console.log(crypto.randomUUID())')}" "$1" >"$D/inbox/staging-request.json"
+}
+sstatus() { jget "$D/outbox/staging-status.json" "$1"; }
+: >"$STUB_LOG"; rm -f "$D/outbox/status.json" "$D/outbox/history.jsonl"
+
+# Lane off (no STAGING_DIR): the lane file says so and a request is answered, not left waiting.
+conf 0; host
+has "$D/outbox/staging-lane.json" '"configured": "false"'
+sreq "$s1"; host
+[[ $(sstatus result) == rejected ]] || fail "lane off: $(cat "$D/outbox/staging-status.json")"
+has "$D/outbox/staging-status.json" "not configured"
+[[ ! -e $D/inbox/staging-request.json ]] || fail "lane off left the request in the inbox"
+hasnt "$STUB_LOG" "deploy-staging.sh"
+
+# Lane on: a main commit deploys, then the smoke checks run, with production's folder passed for the isolation checks.
+conf 0; printf 'STAGING_DIR=%s\nSTAGING_RATE_LIMIT_SECONDS=3600\n' "$T/stg" >>"$D/host.conf"
+host
+has "$D/outbox/staging-lane.json" '"configured": "true"'
+sid="$(node -e 'console.log(crypto.randomUUID())')"
+sreq "$s1" "$sid"; host
+[[ $(sstatus result) == deployed && $(sstatus smoke) == passed && $(sstatus check_address) == pass && $(sstatus check_signin) == skipped ]] || fail "staging deploy: $(cat "$D/outbox/staging-status.json")"
+[[ $(sstatus to_commit) == "$s1" && $(sstatus id) == "$sid" && $(sstatus runner_image) == abc123 ]] || fail "staging status fields: $(cat "$D/outbox/staging-status.json")"
+[[ $(git -C "$T/stg" rev-parse HEAD) == "$s1" ]] || fail "the stub did not check out the commit"
+has "$STUB_LOG" "deploy-staging.sh $s1 production_dirs=$(cd "$T/src" && pwd)"
+has "$STUB_LOG" "smoke-staging.sh $s1 before="
+has "$D/outbox/staging-history.jsonl" "$sid"
+[[ ! -e $D/outbox/status.json ]] || fail "a staging deploy wrote production's status.json"
+hasnt "$D/outbox/history.jsonl" "$sid"
+[[ ! -e $D/inbox/staging-request.json ]] || fail "the staging request was not taken"
+
+# Replay: the same id is refused. Rate limit: a new id within the window is refused.
+sreq "$s1" "$sid"; host
+has "$D/outbox/staging-status.json" "already handled"
+sreq "$s1"; host
+has "$D/outbox/staging-status.json" "only one staging deploy"
+[[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "staging deployed more than once: $(cat "$STUB_LOG")"
+
+# Only main: a commit on a side branch is refused before anything runs.
+rm -f "$D/state/last-staging"; sreq "$side"; host
+has "$D/outbox/staging-status.json" "is not on main"
+[[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "a non-main commit reached deploy-staging.sh"
+# A malformed request (shell characters in the commit) is refused.
+# shellcheck disable=SC2016 # the command substitution is literal text in the request: it must never be run
+printf '{"id":"%s","target":"staging","commit":"$(touch %s/pwned)","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$sid" "$T" >"$D/inbox/staging-request.json"; host
+has "$D/outbox/staging-status.json" "expected format"; [[ ! -e $T/pwned ]] || fail "request text was executed"
+# A production request target is not accepted in the staging file.
+printf '{"id":"%s","target":"server","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$(node -e 'console.log(crypto.randomUUID())')" "$s1" >"$D/inbox/staging-request.json"; host
+has "$D/outbox/staging-status.json" "expected format"
+
+# Memory: held (left in the inbox) while an update would not have room; taken when memory frees up.
+rm -f "$D/state/last-staging"; meminfo 33554432 100; sreq "$s1"; host
+[[ $(sstatus result) == held && -e $D/inbox/staging-request.json ]] || fail "low memory did not hold staging: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-history.jsonl" '"held"'
+meminfo; host
+[[ $(sstatus result) == deployed && ! -e $D/inbox/staging-request.json ]] || fail "held staging request not taken after memory freed: $(cat "$D/outbox/staging-status.json")"
+
+# Smoke account file: used only when it is a plain file with mode 600 of ours; its values are never in the outbox.
+printf 'smoke_username=s\nsmoke_password=hunter2\n' >"$D/smoke-credentials"; chmod 600 "$D/smoke-credentials"
+rm -f "$D/state/last-staging"; sreq "$s1"; host
+[[ $(sstatus check_signin) == pass ]] || fail "smoke account not used: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-status.json" hunter2
+chmod 644 "$D/smoke-credentials"; rm -f "$D/state/last-staging"; sreq "$s1"; host
+[[ $(sstatus check_signin) == skipped ]] || fail "a world-readable smoke account file was used"
+rm -f "$D/smoke-credentials"
+
+# A failing smoke check is reported with its name; a failing deploy is "failed" and smoke is not run.
+rm -f "$D/state/last-staging"; sreq "$s1"; STUB_SMOKE_FAIL=1 host
+[[ $(sstatus smoke) == failed && $(sstatus failed_checks) == board && $(sstatus check_board) == fail ]] || fail "smoke failure: $(cat "$D/outbox/staging-status.json")"
+rm -f "$D/state/last-staging"; : >"$STUB_LOG"; sreq "$s1"; STUB_STAGING_RC=1 host
+[[ $(sstatus result) == failed && $(sstatus smoke) == skipped ]] || fail "deploy failure: $(cat "$D/outbox/staging-status.json")"
+hasnt "$STUB_LOG" "smoke-staging.sh"
+
+# A production request waiting is handled first; the staging request waits for the next tick.
+rm -f "$D/state/last-staging" "$D/state/last-server"; sreq "$s1"; : >"$STUB_LOG"
+c2="$(push apps/server/b)"; (cd "$T/src" && git fetch -q origin main); req server "$c2"; host
+[[ -e $D/inbox/staging-request.json ]] || fail "staging ran ahead of a waiting production request"
+rm -f "$D/inbox/staging-request.json"
+
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"
 out="$( (unset BOSSMAN_DEPLOYER; bash "$own/deployer/host-deployer.sh" --dry-run 2>&1) || true)"
