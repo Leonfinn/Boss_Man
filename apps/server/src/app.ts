@@ -471,7 +471,12 @@ export async function buildApp(opts: AppOptions) {
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const trace = chatTraceService();
-  const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces", trace });
+  const chat = chatService(db, {
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces",
+    trace,
+    flag: (n) => notes.notify({ ...n, level: "flag" }),
+  });
   const pa = paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     now: opts.now,
