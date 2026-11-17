@@ -539,7 +539,7 @@ export function RunLimits({ updatesHref }: { updatesHref?: string } = {}) {
       </div>
       {d.inForce?.mergeChecks.paused && d.inForce.mergeChecks.because ? (
         <p role="status" data-testid="run-limits-merge-checks" style={{ fontSize: 14 }}>
-          New merge checks wait too, because {d.inForce.mergeChecks.because}; they start by themselves once it is done.
+          New merge checks wait too, because {d.inForce.mergeChecks.because}; they start by themselves once it is done. Quick checks on a separate check worker keep going; on the company's own runner they wait too.
         </p>
       ) : null}
       <p className="muted" style={{ fontSize: 14 }}>

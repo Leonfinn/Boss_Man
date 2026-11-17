@@ -13,7 +13,14 @@ import { openPglite } from "../src/db/client.js";
 import { decisions, engagements, policyRules, projects, runners, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
-async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 15_000): Promise<T> {
+// Each test here makes up to six waits through a real socket and an in-process database. The file-wide 30 s test limit
+// ended one such test on a gate check running thousands of tests at once (BOS-1492's quick check, 15 Nov, "1 failed")
+// without saying which wait was slow. A wait now gets 40 s and the test 90 s, so a stall fails inside waitFor with the
+// last value it saw ("timed out; last ..."), never in vitest's silent test timeout. Nothing is skipped or loosened: a
+// wait that never sees its event still fails.
+const WAIT_MS = 40_000;
+const TEST_MS = 90_000;
+async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = WAIT_MS): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = await fn();
@@ -46,7 +53,7 @@ afterEach(async () => {
   await ctx.close();
 });
 
-describe("permission requests through the policy engine", () => {
+describe("permission requests through the policy engine", { timeout: TEST_MS }, () => {
   it("re-sends verdicts lost in a dropped connection, for requests the runner is still waiting on", async () => {
     const reg = (await ctx.app.inject({ method: "POST", url: `/api/companies/${ctx.homelab.company.id}/runner`, headers: { cookie: ctx.cookie } })).json();
     const runId = randomUUID();

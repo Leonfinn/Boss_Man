@@ -130,11 +130,14 @@ const saveShot = (name: string, page: Page) => {
 };
 
 describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
-  it("is inside the Updates box, above the update buttons, with the bottom panel gone, at desktop and foldable", async () => {
+  // One test per size (BOS-1708 pattern): each keeps the 60 s limit (not raised) but now covers 4 page loads, not 16.
+  // The limit still catches a page that never draws the mode's data (the wait above has a 20 s deadline).
+  const sizes = [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "brave1667", width: 1667, height: 724, touch: true, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }];
+  it.each(sizes)("is inside the Updates box, above the update buttons, with the bottom panel gone, at $name", async (vp) => {
     const browser = await launch();
     if (!browser) return; // no browser here: skipped, not passed
     try {
-      for (const vp of [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "brave1667", width: 1667, height: 724, touch: true, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }]) {
+      {
         for (const m of ["waiting", "asked", "late", "none"]) {
           mode = m;
           const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.dsf, hasTouch: vp.touch });
@@ -144,7 +147,17 @@ describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
           await page.goto(`${base}/#/settings/${company.id}/updates`);
           await page.waitForSelector("body", { timeout: 4000 });
           await page.waitForSelector("section.card:has(h2#deploy-h)", { timeout: 8000 });
-          await new Promise((r) => setTimeout(r, 1200));
+          // Wait for the data of this mode to be drawn (an event, with a deadline), not a fixed sleep: a cold GitHub
+          // runner is several times slower than a dev machine. The page-error check below still sees late errors
+          // because the elements waited on only exist once the maintenance answer has been rendered.
+          const sec0 = "section.card:has(h2#deploy-h)";
+          const ready: Record<string, string> = {
+            none: `${sec0} [data-testid='update-tag']:has-text('Up to date')`,
+            waiting: `${sec0} [data-testid='update-tag']:has-text('Waiting for agents')`,
+            asked: `${sec0} [data-testid='wrapup-runs']`,
+            late: `${sec0} [data-testid='update-main']:has-text('Stop 4 and carry on')`,
+          };
+          await page.waitForSelector(ready[m]!, { timeout: 20000 });
           expect(JSON.stringify(errors), `${vp.name}/${m} page errors`).toBe("[]");
           const updates = page.locator("section.card:has(h2#deploy-h)");
           const box = await updates.boundingBox();

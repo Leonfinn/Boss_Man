@@ -65,6 +65,7 @@ import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
+import { composeFactsFrom } from "./compose-steps.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillHostTokensIn, fillServerHost, lintLines, ownerWhere, unfilledTokens, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
@@ -89,6 +90,7 @@ import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
 import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
+import { heldTicketIds } from "./review-holds.js";
 import { runCapabilities } from "./run-capabilities.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -930,7 +932,8 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
     return { error: "These steps use {{host}} to name the server Boss Man runs on, but the host deployer hasn't reported a name yet (it may not be set up). Write the server's name yourself, or wait for the host's report, then raise the card again." };
   }
   steps = fillServerHost(steps, a.serverHost);
-  const lint0 = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}), ...(a.images ? { images: a.images } : {}), ...(a.mismatchedSites ? { mismatchedSites: a.mismatchedSites } : {}) }, proof);
+  const compose = composeFactsFrom(a.hostValues);
+  const lint0 = lintOwnerSteps(steps, { ...(compose ? { compose } : {}), ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}), ...(a.images ? { images: a.images } : {}), ...(a.mismatchedSites ? { mismatchedSites: a.mismatchedSites } : {}) }, proof);
   const refuse = [...company.findings, ...lint0.refuse];
   const warn = lint0.warn;
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
@@ -3752,7 +3755,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         kept = [];
       }
+      // BOS-1717: a ticket held in review on a waits-on link or system hold isn't woken by an answer on another ticket's card.
+      const heldKept = kept.length ? await heldTicketIds(db, kept.map((t) => t.id)) : new Set<string>();
+      // A card with no ticket of its own (cardTicketId null) still wakes: nothing says it is someone else's.
+      const cardTicketId = (ctx as { ticketId?: string | null }).ticketId ?? null;
       for (const t of kept) {
+        if (heldKept.has(t.id) && cardTicketId && cardTicketId !== t.id) continue;
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
       }
       // BOS-1591 (R21): the owner's answer to a question may be what other parked tickets wait for in a note only. Tell the CEO once.

@@ -34,6 +34,21 @@ run 3 3 "spawnSync form retried" 'echo x >>"$COUNT"; echo "Error: spawnSync git 
 run 3 1 "real failure not retried" 'echo x >>"$COUNT"; echo "AssertionError: nope"; exit 3'
 run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2 ]; then echo "fork: retry"; exit 1; fi'
 run 3 1 "no retry when another run would blow the budget" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
+# The same case with a clock that jumps 10 s at every `date +%s` (BOS-1702). The budget test used to read the clock twice
+# ("now - slot time", with "now" read again to stand in for a slot time that was never set); when a second ticked between
+# the two reads that came out -1, so a 2 s attempt counted as 1 s and was retried. GitHub's slower forks made the tick
+# common. The 10 s jump outweighs however long the attempt took on any machine, so code that reads the clock more than
+# once for one decision fails here every time, not one run in many; with one read the jump cancels out.
+mkdir -p "$t/fakebin"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "$*" = "+%s" ]; then n=$(( $(cat "$FAKE_DATE_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$FAKE_DATE_COUNT"; echo $(( $("$REAL_DATE" +%s) + 10 * n )); exit 0; fi' \
+  'exec "$REAL_DATE" "$@"' >"$t/fakebin/date"
+chmod +x "$t/fakebin/date"
+(
+  export REAL_DATE; REAL_DATE=$(command -v date); export FAKE_DATE_COUNT="$t/datecount" PATH="$t/fakebin:$PATH"
+  run 3 1 "no retry past the budget while the clock ticks between reads" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
+  [ -s "$t/datecount" ] || fail "fake clock: check-all.sh never read it, so the case above proved nothing"
+)
 run 0 1 "relative path from scripts/" 'echo x >>"$COUNT"' "$here" ./check-all.sh
 run 0 1 "bash check-all.sh from scripts/" 'echo x >>"$COUNT"' "$here" "bash check-all.sh"
 
