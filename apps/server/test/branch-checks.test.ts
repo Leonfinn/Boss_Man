@@ -121,7 +121,7 @@ describe.each(["github", "gitea"] as const)("build result on %s", (kind) => {
     expect(res.json()).toEqual({ ci: null });
     const line = await x.review.branchChecksLine(x.ticketId, x.companyId);
     expect(line).toContain(`CI on branch head: not available (Couldn't read the ${kind === "github" ? "Actions runs" : "checks"} on ${at}: Resource not accessible`);
-    expect(line).toContain("Repository permissions → Actions: Read-only (and Metadata: Read-only).");
+    expect(line).not.toContain("Actions: Read-only");
     expect(line).not.toContain("Checks:");
   });
 

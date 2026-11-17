@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { leftoverCheckerTag } from "@boss-man/shared";
 import { checkAsk } from "../src/services/decisions.js";
 import { lintOwnerSteps, outsideSiteKeys, SCREEN_DIFFERENT_OPTION, siteKey } from "../src/services/steps.js";
 
@@ -68,6 +69,16 @@ describe("R19: steps on outside websites", () => {
     expect(bad.error).toContain("doesn't say where its clicks came from");
     const ok = checkAsk({ ...base, steps: [`Open https://dash.cloudflare.com ${NOT_SEEN}. You should see "holidayhours" listed.`, `Open https://dash.cloudflare.com/profile/api-tokens ${NOT_SEEN} and press Create Token.`], options: ["Done", SCREEN_DIFFERENT_OPTION] });
     expect(ok.error).toBeNull();
+  });
+
+  // BOS-1665: the owner's steps leave checkAsk without any checker tag, and the source of each step is kept beside them.
+  it("takes every checker tag out of the owner's steps once, and keeps the source of each step", () => {
+    const base = { triedFirst: "Checked the docs; an agent has no login to the owner's Cloudflare account.", ownerMustDo: true, serverHost: SERVER, options: ["Done", SCREEN_DIFFERENT_OPTION], images: { [IMG]: "2026-11-10T08:00:00Z" } };
+    const ok = checkAsk({ ...base, steps: [`Open https://dash.cloudflare.com (seen: ${IMG}). You should see "holidayhours" listed.`, `Open https://dash.cloudflare.com/profile/api-tokens ${NOT_SEEN} and press Create Token.`, "Open Settings → Secrets and press Save."] });
+    expect(ok.error).toBeNull();
+    for (const s of ok.steps!) expect(leftoverCheckerTag(s), s).toBeUndefined();
+    expect(ok.steps![0]).toContain('You should see "holidayhours" listed.');
+    expect(ok.stepSources).toEqual([{ kind: "seen", imageId: IMG, takenAt: "2026-11-10" }, { kind: "notSeen", url: DOC, date: "2026-11-10" }, null]);
   });
 });
 
