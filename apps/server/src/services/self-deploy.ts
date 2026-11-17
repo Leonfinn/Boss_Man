@@ -641,7 +641,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       .values({
         companyId,
         kind: "approval",
-        question,
+        question: question + (target === "server" && !infra ? await stagingLine(commit, !!urgent) : ""),
         options,
         recommendedOption: options[0]!,
         dedupeKey: `self-deploy:${target}:${commit}${again ? `:${randomBytes(3).toString("hex")}` : ""}`,
@@ -1183,6 +1183,54 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     await rename(tmp, file);
   }
 
+  /**
+   * BOS-1472: the line a production deploy card carries about staging, from what the host last recorded. A fixesLive/urgent card
+   * says it skipped staging and is never held for it; otherwise it says what staging showed for this exact commit, or "not checked".
+   */
+  async function stagingLine(commit: string, urgent: boolean): Promise<string> {
+    if (urgent) return "\n\nStaging skipped: this is an urgent fix, so it isn't held for a staging pass.";
+    const st = await stagingStatus();
+    if (st?.result === "deployed" && st.to_commit === commit) {
+      if (st.smoke === "passed") return `\n\nStaging: passed on ${short(commit)}.`;
+      if (st.smoke === "failed") return `\n\nStaging: failed on ${short(commit)} (${st.failed_checks ?? "a smoke check"}). Look at it before you approve.`;
+      return `\n\nStaging: deployed ${short(commit)}, smoke checks not run.`;
+    }
+    if (st && st.to_commit === commit && (st.result === "failed" || st.result === "rejected")) return `\n\nStaging: the deploy of ${short(commit)} did not finish (${st.message.slice(0, 160)}). Not checked.`;
+    const auto = await getSetting<{ commit: string }>(STAGED_AUTO);
+    if (auto?.commit === commit || (st && st.to_commit === commit && (st.result === "running" || st.result === "held"))) return "\n\nStaging: being checked now; this line updates when it finishes.";
+    return `\n\nStaging: not checked${st?.result === "deployed" ? ` on this commit (staging runs ${short(st.to_commit)})` : ""}.`;
+  }
+  /** The commit Boss Man last asked staging to check for a deploy card, so it asks once per commit and the card can say so. */
+  const STAGED_AUTO = "self_deploy_staged_auto";
+  const STAGING_LINE = /\n\nStaging[^\n]*$/;
+  /**
+   * BOS-1472: before a production deploy, staging checks the same commit. When the host's staging lane is on and a plain (not urgent,
+   * not hand-applied) server deploy card is open, this asks staging to deploy that commit, once, with no agent and no owner step,
+   * then keeps the card's staging line true to what the host recorded. An urgent card is never held for it and never triggers it.
+   * Nothing here blocks the card: the owner can approve at any time, and the line says "not checked" until there is a result.
+   */
+  async function stagingTick() {
+    if (!dir || !(await stagingLane())) return;
+    const cards = (await openFor("server")).filter((d) => !(d.context as SelfDeployContext).infra);
+    for (const d of cards) {
+      const ctx = d.context as SelfDeployContext;
+      const urgent = !!ctx.urgent;
+      if (!urgent && !(await stagingPending())) {
+        const auto = await getSetting<{ commit: string }>(STAGED_AUTO);
+        const st = await stagingStatus();
+        const busy = st?.result === "running";
+        const done = st?.to_commit === ctx.commit && (st.result === "deployed" || st.result === "failed" || st.result === "rejected");
+        if (auto?.commit !== ctx.commit && !busy && !done) {
+          await writeStagingRequest(randomUUID(), ctx.commit);
+          await putSetting(STAGED_AUTO, { commit: ctx.commit });
+        }
+      }
+      const line = await stagingLine(ctx.commit, urgent);
+      if (STAGING_LINE.test(d.question) && d.question.replace(STAGING_LINE, "") + line !== d.question) {
+        await db.update(decisions).set({ question: d.question.replace(STAGING_LINE, "") + line }).where(eq(decisions.id, d.id));
+      }
+    }
+  }
   /** Whether a staging request is waiting in the inbox (a held one stays there until memory frees up). */
   const stagingPending = async () => !!dir && (await stat(path.join(dir, "inbox", "staging-request.json")).then(() => true, () => false));
   /** What agents (server_status) and Settings see of staging: the lane, and the last result with each smoke check. */
@@ -1203,6 +1251,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     stagingLane,
     stagingStatus,
     stagingBlock,
+    stagingTick,
     writeStagingRequest,
     stagingPending,
     /** Settings → Deploy to staging (owner): main's newest commit, as the host last saw it. No card: staging isn't production. */

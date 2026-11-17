@@ -67,6 +67,55 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.db.select().from(notifications))[0]).toMatchObject({ level: "note", title: expect.stringContaining("Runner update not started") });
   });
 
+  describe("the staging line on a deploy card (BOS-1472)", () => {
+    const stagingResult = (over: Record<string, unknown>) => ({ id: randomUUID(), target: "staging", result: "deployed", message: "Staging runs it.", to_commit: B, started: "2026-10-20T12:00:00Z", ended: "2026-10-20T12:05:00Z", at: "2026-10-20T12:05:00Z", smoke: "passed", ...over });
+    const cardFor = async (c: Awaited<ReturnType<typeof setup>>) => {
+      await c.available();
+      await c.selfDeploy.sync();
+      const [d] = await c.open();
+      return d!.question;
+    };
+
+    it("says not checked when staging has nothing for this commit", async () => {
+      const c = (ctx = await setup());
+      expect(await cardFor(c)).toContain("Staging: not checked.");
+    });
+
+    it("says passed on the commit when staging deployed exactly it and every smoke check passed", async () => {
+      const c = (ctx = await setup());
+      await writeFile(path.join(c.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({})));
+      expect(await cardFor(c)).toContain(`Staging: passed on ${B.slice(0, 8)}.`);
+    });
+
+    it("asks staging to check the commit once when a card is open, and keeps the card's line true to the result", async () => {
+      const c = (ctx = await setup());
+      const request = path.join(c.dir, "inbox", "staging-request.json");
+      await c.selfDeploy.stagingTick(); // lane off: nothing is asked
+      await writeFile(path.join(c.dir, "outbox", "staging-lane.json"), JSON.stringify({ configured: "true" }));
+      await cardFor(c);
+      await c.selfDeploy.stagingTick();
+      expect(JSON.parse(await readFile(request, "utf8"))).toMatchObject({ target: "staging", commit: B });
+      expect((await c.open())[0]!.question).toMatch(/Staging: being checked now/);
+      await rm(request); // the host took it
+      await c.selfDeploy.stagingTick(); // asked once per commit
+      await expect(readFile(request, "utf8")).rejects.toThrow();
+      await writeFile(path.join(c.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({})));
+      await c.selfDeploy.stagingTick();
+      const q = (await c.open())[0]!.question;
+      expect(q).toContain(`Staging: passed on ${B.slice(0, 8)}.`);
+      expect(q.match(/Staging:/g)).toHaveLength(1);
+    });
+
+    it("names the failed checks, and says not checked on this commit when staging runs another one", async () => {
+      const c = (ctx = await setup());
+      await writeFile(path.join(c.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({ smoke: "failed", failed_checks: "board, signin" })));
+      expect(await cardFor(c)).toContain(`Staging: failed on ${B.slice(0, 8)} (board, signin).`);
+      const d = (ctx = await setup());
+      await writeFile(path.join(d.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({ to_commit: A })));
+      expect(await cardFor(d)).toContain(`not checked on this commit (staging runs ${A.slice(0, 8)})`);
+    });
+  });
+
   it("does not offer again a commit the host just refused as no longer the tip, until the host rewrites the offer", async () => {
     const c = (ctx = await setup());
     await c.status({ id: randomUUID(), result: "rejected", message: "Rejected: not the tip of main.", to_commit: B, ended: "2026-10-20T12:03:00Z" });

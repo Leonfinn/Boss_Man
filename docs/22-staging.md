@@ -92,6 +92,8 @@ Staging has its own lane in the host deployer (BOS-1472), so nobody has to run s
 - It uses the deployer's one lock, so it never runs at the same time as a production update, and it waits behind a production request that is already there. It is held while free memory is below what an update needs, like production's update. `STAGING_RATE_LIMIT_SECONDS` (default 300) is the gap between two staging deploys and `STAGING_TIMEOUT_SECONDS` (default 1800) stops one that hangs.
 - In Boss Man the deploy tool then lists a `staging` target that needs no approval (it is not production), and Settings → Server and runner has a **Deploy to staging** button. The status, the commit staging runs and each smoke check are shown in `server_status` and on that page.
 
+- **Before a production deploy.** When Boss Man raises a "Deploy Boss Man X → Y?" card and the lane is on, it asks staging to deploy Y itself (once per commit, no agent and no owner step) and the card ends with one line that follows the result: `Staging: being checked now`, `Staging: passed on <sha>`, `Staging: failed on <sha> (<checks>)`, or `Staging: not checked` (lane off, held for memory, or no result yet). It never blocks the card: the owner can approve at any time, and a card that fixes a live problem says `Staging skipped: this is an urgent fix` and does not trigger a staging deploy. Work rated high or critical is still held by the existing rule that its ref must have deployed to a non-production target first, which the staging target now satisfies.
+
 To turn it off, remove the `STAGING_DIR` line; nothing else changes. Roll staging back with `scripts/deploy-staging.sh --rollback` in the staging folder as before.
 
 ### The scripted smoke checks

@@ -81,7 +81,7 @@ const bg = createBackground(
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
     // Deploy tag moves (DR-033) that a restart or a leader change cut off: picked up again; the runner's lease makes a repeat harmless. // leader-only
     // BOS-1472: the host's staging lane: offers the staging target and records each staging deploy's result. // leader-only
-    { name: "staging sync", everyMs: Number(env.BOSSMAN_STAGING_SYNC_MS ?? 30_000), run: () => deploys.syncStaging() },
+    { name: "staging sync", everyMs: Number(env.BOSSMAN_STAGING_SYNC_MS ?? 30_000), run: async () => { await deploys.syncStaging(); await selfDeploy.stagingTick(); } },
     { name: "deploy tags", everyMs: Number(env.BOSSMAN_DEPLOY_TAGS_MS ?? 60_000), run: () => deploys.resumeTags() },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
     { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: async () => { await notes.markAnsweredRead(); await notes.clearSettledPushes(); } },
