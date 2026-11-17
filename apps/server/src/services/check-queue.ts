@@ -11,7 +11,7 @@ import type { Db } from "../db/client.js";
 import { agents, checkJobLogs, checkJobs, checkWorkers, companies, projects, settings, tickets } from "../db/schema.js";
 import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
-import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
+import { checkFailureFacts, firstFailingLine, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 import { softHold } from "./deploy-wait-hold.js";
 import { retierWaiting, trainView } from "./merge-train.js";
 
@@ -539,11 +539,30 @@ export function checkQueue(db: Db) {
       .returning();
     // BOS-1228: a failed job keeps its whole log. The runner already cut and redacted it; the server does both again, because it
     // does not trust what arrives (a runner older than this change sends none, and then only the tail exists).
-    if (row && !ok && result.fullLog) {
-      const { log } = prepareFullLog(result.fullLog);
+    // BOS-1723: a check that failed before its first step (the copy of the code couldn't be made, the runner couldn't
+    // start it) sends no whole log, and those were the checks nobody could read afterwards. The tail is then all
+    // there is, and it is short: keep it as the log, saying so, so check_log can still show what went wrong.
+    const kept = result.fullLog || (result.logTail.trim() ? `[Only the end of the log reached the server; this is all of it that was kept.]\n${result.logTail}` : "");
+    if (row && !ok && kept) {
+      const { log } = prepareFullLog(kept);
       await db.insert(checkJobLogs).values({ jobId, log, chars: log.length, createdAt: now }).onConflictDoNothing();
     }
     return row ?? null;
+  }
+
+  /**
+   * BOS-1723: the ticket's failed check jobs, newest first, for check_log without a jobId: which job, what kind, when, the
+   * first failing line and whether its log is kept. Failed and stuck jobs both count (a stuck one never reported).
+   */
+  async function failedJobs(companyId: string, ticketId: string, limit = 20): Promise<Array<{ jobId: string; kind: string; scope: string; commit: string; state: string; endedAt: Date | null; firstLine: string | null; logChars: number | null }>> {
+    const rows = await db
+      .select({ jobId: checkJobs.id, kind: checkJobs.kind, scope: checkJobs.scope, commit: checkJobs.commit, state: checkJobs.state, endedAt: checkJobs.endedAt, queuedAt: checkJobs.queuedAt, reason: checkJobs.reason, logTail: checkJobs.logTail, logChars: checkJobLogs.chars })
+      .from(checkJobs)
+      .leftJoin(checkJobLogs, eq(checkJobLogs.jobId, checkJobs.id))
+      .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.ticketId, ticketId), inArray(checkJobs.state, ["failed", "stuck"])))
+      .orderBy(desc(sql`coalesce(${checkJobs.endedAt}, ${checkJobs.queuedAt})`))
+      .limit(limit);
+    return rows.map((r) => ({ jobId: r.jobId, kind: r.kind, scope: r.scope, commit: r.commit, state: r.state, endedAt: r.endedAt, firstLine: firstFailingLine(r.logTail ?? "") ?? r.reason ?? null, logChars: r.logChars ?? null }));
   }
 
   /** A kept log, if it belongs to a job of this company's ticket. */
@@ -729,5 +748,5 @@ export function checkQueue(db: Db) {
 
   const place = (ticketId: string) => mergePlace(db, ticketId);
 
-  return { list, mode, slots, setMode, setSlots, runnerPolicy, setRunnerPolicy, train, setTrain, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, runnerPolicy, setRunnerPolicy, train, setTrain, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, failedJobs, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
 }
