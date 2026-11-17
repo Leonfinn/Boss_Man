@@ -1,0 +1,1 @@
+ALTER TABLE "feedback_settings" ADD COLUMN "portal_at_bare_address" boolean DEFAULT false NOT NULL;

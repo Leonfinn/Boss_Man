@@ -34,6 +34,21 @@ run 3 3 "spawnSync form retried" 'echo x >>"$COUNT"; echo "Error: spawnSync git 
 run 3 1 "real failure not retried" 'echo x >>"$COUNT"; echo "AssertionError: nope"; exit 3'
 run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2 ]; then echo "fork: retry"; exit 1; fi'
 run 3 1 "no retry when another run would blow the budget" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
+# The same case with a clock that jumps 10 s at every `date +%s` (BOS-1702). The budget test used to read the clock twice
+# ("now - slot time", with "now" read again to stand in for a slot time that was never set); when a second ticked between
+# the two reads that came out -1, so a 2 s attempt counted as 1 s and was retried. GitHub's slower forks made the tick
+# common. The 10 s jump outweighs however long the attempt took on any machine, so code that reads the clock more than
+# once for one decision fails here every time, not one run in many; with one read the jump cancels out.
+mkdir -p "$t/fakebin"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "$*" = "+%s" ]; then n=$(( $(cat "$FAKE_DATE_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$FAKE_DATE_COUNT"; echo $(( $("$REAL_DATE" +%s) + 10 * n )); exit 0; fi' \
+  'exec "$REAL_DATE" "$@"' >"$t/fakebin/date"
+chmod +x "$t/fakebin/date"
+(
+  export REAL_DATE; REAL_DATE=$(command -v date); export FAKE_DATE_COUNT="$t/datecount" PATH="$t/fakebin:$PATH"
+  run 3 1 "no retry past the budget while the clock ticks between reads" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
+  [ -s "$t/datecount" ] || fail "fake clock: check-all.sh never read it, so the case above proved nothing"
+)
 run 0 1 "relative path from scripts/" 'echo x >>"$COUNT"' "$here" ./check-all.sh
 run 0 1 "bash check-all.sh from scripts/" 'echo x >>"$COUNT"' "$here" "bash check-all.sh"
 
@@ -64,36 +79,38 @@ grep -q "the failure" "$t/scratch.own/check-all.log" || fail "scratch: a failure
 grep -q "(exit 3)" "$t/scratch.own/check-all.log" || fail "scratch: a failure's log is not marked with its exit"
 grep -q "a step of output" "$t/scratch.own/check-all.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$t"/scratch.own)"
 # A fenced run can't write the scratch, but can write /tmp: the log waits there under a kept name, for the runner to move in.
-mkdir -p "$t/scratch.denied"; chmod 555 "$t/scratch.denied"
-# A ticket id of its own for this run, so no leftover or parallel run shares the /tmp file name.
-tid="$(printf '%08x-%04x-4%03x-8%03x-%012x' "$RANDOM$RANDOM" "$(( $$ & 65535 ))" "$(( RANDOM % 4096 ))" "$(( RANDOM % 4096 ))" "$RANDOM$RANDOM$RANDOM" | cut -c1-36)"
-keep="/tmp/bossman-scratch-$tid.log"
-# -w says yes for a fenced /tmp that still refuses a write, so probe with a real write.
-if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && rm -f "/tmp/bossman-probe-$tid"; then
+# BOSSMAN_SCRATCH_TMP_DIR stands in for /tmp with a folder of this test's own (BOS-1690): a fenced or shared /tmp no
+# longer skips these cases, so they run in agent sessions, at the merge gate and on GitHub alike, and the exit trap's
+# rm -rf "$t" clears the read-only file below with the rest.
+mkdir -p "$t/scratch.denied" "$t/tmpdir"; chmod 555 "$t/scratch.denied"
+export BOSSMAN_SCRATCH_TMP_DIR="$t/tmpdir"
+tid=22222222-2222-4222-8222-222222222222
+keep="$t/tmpdir/bossman-scratch-$tid.log"
+# Root writes through a 555 folder and a 444 file, so neither case can be set up there; say so instead of passing quietly.
+if [ ! -w "$t/scratch.denied" ]; then
   BOSSMAN_TICKET_FOR_CASE=$tid
   scratch_case "scratch: a run that can't write it" "$t/scratch.denied" 'echo through the temp folder' 0
-  grep -q "through the temp folder" "$keep" || fail "scratch: no /tmp log for a fenced run: $(cat "$t/out")"
-  grep -q "check-all: finished .* (exit 0)" "$keep" || fail "scratch: the /tmp log is not marked finished"
+  grep -q "through the temp folder" "$keep" || fail "scratch: no temp-folder log for a fenced run: $(cat "$t/out")"
+  grep -q "check-all: finished .* (exit 0)" "$keep" || fail "scratch: the temp-folder log is not marked finished"
   rm -f "$keep"
-  # The kept name already holds a file the run can't write (another user's, or read-only): the run still passes and its log is kept under another name.
+  # The kept name already holds a file the run can't write (another user's, or read-only): the run still passes and its
+  # log is kept under another name. Before BOS-1641 this read `if ! { …; } >"$tmp"`, which never took the fallback
+  # (BOS-1689); this case fails on that line.
   : >"$keep"; chmod 444 "$keep"
-  # -w can say "not writable" for a read-only file that a bypassing runner (root, or a fenced /tmp) still writes, so probe with a real (empty) append.
   if ! : 2>/dev/null >>"$keep"; then
     scratch_case "scratch: kept /tmp name not writable" "$t/scratch.denied" 'echo beside the taken name' 0
-    # shellcheck disable=SC2144
-    # The failure names what GitHub's step log hides: this user, what sits in /tmp under the name, and the script's own output.
-    if ! grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log 2>/dev/null; then
-      # Run the same case again under bash -x and keep the trace of scratch_log, so a failure on GitHub shows which line gave up.
-      trace="$(cd "$here/.." && env CHECK_ALL_LOCK="$t/scl" CHECK_ALL_PAIR_PROOF="$t/scp" BOSSMAN_CHECK_STORE=off BOSSMAN_SCRATCH="$t/scratch.denied" BOSSMAN_TICKET="$tid" BOSSMAN_CHECK_BODY='echo beside the taken name' bash -x ./scripts/check-all.sh 2>&1 | grep -A40 'scratch_log' | tail -40 | tr '\n' '|')"
-      fail "scratch: trace: $trace :: no fallback log beside a taken name (uid $(id -u), kept name: $(stat -c '%U %a' "$keep" 2>&1), siblings: $(echo /tmp/bossman-scratch-"$tid"*), protected_regular: $(cat /proc/sys/fs/protected_regular 2>&1), kept file holds $(wc -c <"$keep" 2>&1) bytes): $(tr '\n' ' ' <"$t/out")"
-    fi
-    rm -f /tmp/bossman-scratch-"$tid".*.log
+    grep -lq "beside the taken name" "$t/tmpdir/bossman-scratch-$tid".*.log 2>/dev/null \
+      || fail "scratch: no fallback log beside a taken name (uid $(id -u), temp folder holds: $(echo "$t/tmpdir"/*)): $(tr '\n' ' ' <"$t/out")"
+    grep -q "log kept at $t/tmpdir/bossman-scratch-$tid\." "$t/out" || fail "scratch: the fallback log's name is not reported: $(cat "$t/out")"
+    [ ! -s "$keep" ] || fail "scratch: the read-only kept file was written"
   else
-    echo "SKIP scratch: kept /tmp name not writable (this runner writes through a read-only file, so no fallback name is needed)"
+    echo "SKIP scratch: kept /tmp name not writable (running as uid $(id -u), which writes through a read-only file)"
   fi
-  rm -f "$keep"
+else
+  echo "SKIP scratch: a run that can't write it (running as uid $(id -u), which writes through a read-only folder)"
 fi
 chmod 755 "$t/scratch.denied"
+unset BOSSMAN_SCRATCH_TMP_DIR
 
 # The result store: a pass is kept and reused on identical content, the merge gate never reuses it, failures are not reused.
 # Needs a clean git checkout, so test in a scratch repo holding a copy of the script.
@@ -305,18 +322,22 @@ if command -v flock >/dev/null; then
   kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
 
   # Queue order: a merge check that arrives later goes ahead of a hand-run check; hand-run checks keep their order.
-  rm -rf "$t/lock.queue"; hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
-  ( lock env >"$t/hand1.out"; date +%s%N >"$t/hand1.at" ) & hand1=$!
+  # The order is read from the slot log's start lines, each written while its check holds the slot (BOS-1697: the old
+  # "<name>.at" stamps were taken when each check had exited, so on a busy machine a later check could exit first).
+  # Only slot 1 is freed and slot 2 stays held, so the three take turns in one slot and the log order is the serving order.
+  rm -rf "$t/lock.queue" "$t/lock.slotlog" "$t"/lock.holder.*; hold 1 3600; h1=$!; hold 2 3600; h2=$!; sleep 0.3
+  ( lock env >"$t/hand1.out" ) & hand1=$!
   waitq 1   # each check is in the queue before the next starts, so the order is the one asserted
-  ( lock env CHECK_ALL_FOLDER=other >"$t/hand2.out"; date +%s%N >"$t/hand2.at" ) & hand2=$!
+  ( lock env CHECK_ALL_FOLDER=other >"$t/hand2.out" ) & hand2=$!
   waitq 2
-  ( lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=20 >"$t/merge.out"; date +%s%N >"$t/merge.at" ) & merge=$!
-  waitq 3; kill "$h1" "$h2" 2>/dev/null || true
-  wait "$h1" "$h2" "$hand1" "$hand2" "$merge"
+  ( lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=20 >"$t/merge.out" ) & merge=$!
+  waitq 3; kill "$h1" 2>/dev/null || true
+  wait "$h1" "$hand1" "$hand2" "$merge" 2>/dev/null || true
+  kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
   for f in hand1 hand2 merge; do grep -q "lock held" "$t/$f.out" || fail "queue: $f did not get a slot: $(cat "$t/$f.out")"; done
   grep -q "place [23] of [23]" "$t/hand2.out" || fail "queue: no place shown: $(cat "$t/hand2.out")"
-  [ "$(cat "$t/merge.at")" -le "$(cat "$t/hand1.at")" ] || fail "hand-run check got in ahead of the merge check"
-  [ "$(cat "$t/hand1.at")" -le "$(cat "$t/hand2.at")" ] || fail "hand-run checks got in out of order"
+  order=$(grep ' start ' "$t/lock.slotlog" | sed -n 's/.* kind=\([a-z]*\) .* folder=\(.*\)$/\1:\2/p' | sed 's/^hand:other$/hand2/; s/^hand:.*/hand1/; s/^merge:.*/merge/' | tr '\n' ' ')
+  [ "$order" = "merge hand1 hand2 " ] || fail "queue: want slots taken in the order merge, hand1, hand2, got '$order': $(cat "$t/lock.slotlog")"
   [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "queue entries left behind"
 
   # A waiter that died drops out of the queue instead of blocking those behind it.
@@ -397,7 +418,10 @@ if command -v flock >/dev/null; then
   # Ageing: a hand-run check that has waited CHECK_ALL_AGE_AFTER is served before merge checks queued after it. A merge
   # check (a live process that never takes the slot, standing for a steady stream of them) sits ahead of it in the name order.
   rm -rf "$t/lock.queue" "$t/lock.slotlog"; mkdir -p "$t/lock.queue"
-  sleep 120 & mproc=$!
+  # It lives until killed at the end of these cases (BOS-1697): a timed "sleep 120" ran out on GitHub's slower runners before
+  # BOS-613 (b), and check-slot.sh rightly drops a queue entry whose process is gone, so nothing was left to wait behind.
+  sleep 3600 & mproc=$!
+  mproc_alive() { [ -d "/proc/$mproc" ] || fail "$1: the stand-in merge check (pid $mproc) ended early, so the case proves nothing"; }
   hold 1 3600; h1=$!; sleep 0.3
   # Young hand-run check, merge check queued: the merge check goes first, so the hand-run check gives up without a slot.
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
@@ -456,6 +480,7 @@ if command -v flock >/dev/null; then
   waitq 2; sleep 2
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   sleep 2
+  mproc_alive "BOS-613 (a)"
   ! grep -q "lock held" "$t/older.out" || fail "BOS-613 (a): an aged hand-run check went ahead of an older merge check: $(cat "$t/older.out")"
   wait "$a" || true
   # BOS-613 (b): two slots, a merge check waiting, one hand-run check running: a second hand-run check waits, even aged and
@@ -466,8 +491,15 @@ if command -v flock >/dev/null; then
   ( lock env CHECK_ALL_AGE_AFTER=1 >"$t/cap.out" 2>&1 ) & a=$!
   waitq 1; sleep 2
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
+  # Free slot 2 only once the waiting check has counted the merge entry ("of 2"): a pass that read the line just before the
+  # entry was written and tried the slot just after it was freed would take it, as a real check would (BOS-1697). The cap
+  # is what this case tests, so it must start from a line where the merge check is already seen; with the cap broken the
+  # check still takes slot 2 below and the case fails.
+  for _ in $(seq 300); do grep -Eq "place [0-9]+ of 2," "$t/cap.out" 2>/dev/null && break; sleep 0.2; done
+  grep -Eq "place [0-9]+ of 2," "$t/cap.out" || fail "BOS-613 (b): the waiting check never counted the merge entry: $(cat "$t/cap.out")"
   kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
   sleep 2
+  mproc_alive "BOS-613 (b)"
   ! grep -q "lock held" "$t/cap.out" || fail "BOS-613 (b): a second hand-run check took a slot while a merge check waited: $(cat "$t/cap.out")"
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   for _ in $(seq 300); do grep -q "lock held" "$t/cap.out" 2>/dev/null && break; sleep 0.2; done

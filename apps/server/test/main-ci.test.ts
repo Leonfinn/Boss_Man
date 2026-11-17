@@ -4,8 +4,8 @@ import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, projects, ticketMessages, tickets } from "../src/db/schema.js";
-import { errorLines, mainCiService, NEVER_WEAKEN } from "../src/services/main-ci.js";
-import { GitHostError, type WorkflowJob, type WorkflowRun } from "../src/services/git-hosts.js";
+import { errorLines, mainCiService, namedFiles, NEVER_WEAKEN } from "../src/services/main-ci.js";
+import { GitHostError, type CompareDetail, type WorkflowJob, type WorkflowRun } from "../src/services/git-hosts.js";
 
 const sha = (c: string) => c.repeat(40);
 const run = (id: number, conclusion: string | null, head: string, extra: Partial<WorkflowRun> = {}): WorkflowRun => ({
@@ -55,8 +55,14 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
   const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, company.id), eq(agents.role, "ceo")));
 
   // A fake GitHub: the runs, jobs and logs the test sets.
-  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", logError: null as Error | null, runsError: null as Error | null, calls: 0 };
+  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", logError: null as Error | null, runsError: null as Error | null, calls: 0, compare: {} as Record<string, CompareDetail> };
   const gitHosts = {
+    // Keyed "from...to"; an unset pair answers like a token without Contents read.
+    compareDetail: async (_c: unknown, _t: unknown, from: string, to: string) => {
+      const d = gh.compare[`${from}...${to}`];
+      if (!d) throw new GitHostError(403, "Resource not accessible by personal access token");
+      return d;
+    },
     workflowRuns: async () => {
       gh.calls++;
       if (gh.runsError) throw gh.runsError;
@@ -98,7 +104,99 @@ describe("errorLines", () => {
   });
 });
 
+describe("namedFiles (BOS-1688)", () => {
+  it("finds the paths and test files a log names, not URLs, node_modules or a bare source name", () => {
+    const lines = [
+      "FAIL test/a.test.ts > adds",
+      "  at run (apps/server/src/services/x.ts:12:3)",
+      "see https://github.com/leon/site/blob/main/apps/web/y.ts",
+      "  at node_modules/vitest/dist/index.js:1:1",
+      "error in index.ts",
+      "✗ b.spec.tsx",
+    ];
+    expect(namedFiles(lines).sort()).toEqual(["apps/server/src/services/x.ts", "b.spec.tsx", "test/a.test.ts"]);
+  });
+});
+
 describe("the main-CI watcher", () => {
+  it("BOS-1641's case: says where main was and the last green commit, and 'no suspect' when no commit since touched the failing test", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const colId = (await c.work.board(c.project.id)).columns.at(-1)!.id;
+    await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "Unrelated merge", systemState: "done", columnId: colId, assigneeAgentId: c.dev.id, mergeCommit: sha("d") });
+    c.gh.runs = [run(31, "failure", sha("d"), { event: "schedule" }), run(30, "success", sha("c"))];
+    c.gh.jobs[31] = [job("test", [["Run tests", "failure"]])];
+    c.gh.log = "FAIL test/a.test.ts > adds\nError: expected 1 to be 2";
+    c.gh.compare[`${sha("c")}...${sha("d")}`] = { commits: [{ sha: sha("d"), message: "Merge unrelated", parents: [sha("c")] }], files: ["apps/web/src/page.tsx"] };
+    await c.service.run();
+    const [made] = await c.failingTickets();
+    expect(made!.body).not.toContain("First failing commit");
+    expect(made!.body).toContain(`Main was at ${sha("d").slice(0, 8)}`);
+    expect(made!.body).toContain(`Last green run of "CI": main at ${sha("c").slice(0, 8)}`);
+    expect(made!.body).toContain("No suspect");
+    expect(made!.body).toContain("Don't undo a commit");
+    expect(made!.body).toContain("doesn't make it the cause");
+    expect(await c.service.suspectsFor(c.project.id, made!.id)).toEqual([]);
+  });
+
+  it("ranks the commits since the last green run by the failing job's files, lists only main's own commits, and gives the ticket to the top suspect's author", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const colId = (await c.work.board(c.project.id)).columns.at(-1)!.id;
+    const base = { companyId: c.company.id, projectId: c.project.id, systemState: "done" as const, columnId: colId };
+    const [other] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Omar", role: "worker", agentKind: "claude" }).returning();
+    await c.db.insert(tickets).values({ ...base, title: "Changed the test", assigneeAgentId: c.dev.id, mergeCommit: sha("c") });
+    await c.db.insert(tickets).values({ ...base, title: "Newest, CI file only", assigneeAgentId: other!.id, mergeCommit: sha("d") });
+    const wf = { path: ".github/workflows/ci.yml" };
+    c.gh.runs = [run(41, "failure", sha("d"), wf), run(40, "success", sha("a"), wf)];
+    c.gh.jobs[41] = [job("test", [["Run tests", "failure"]])];
+    c.gh.log = "FAIL test/a.test.ts > adds\nError: expected 1 to be 2";
+    // Main: a (green) ← b ← c ← d (failed). e is an inner branch commit of c's merge: never listed apart.
+    c.gh.compare[`${sha("a")}...${sha("d")}`] = {
+      commits: [
+        { sha: sha("b"), message: "Merge web change", parents: [sha("a")] },
+        { sha: sha("e"), message: "wip", parents: [sha("b")] },
+        { sha: sha("c"), message: "Merge test change", parents: [sha("b"), sha("e")] },
+        { sha: sha("d"), message: "Merge CI change", parents: [sha("c")] },
+      ],
+      files: [],
+    };
+    c.gh.compare[`${sha("a")}...${sha("b")}`] = { commits: [], files: ["apps/web/src/page.tsx"] };
+    c.gh.compare[`${sha("b")}...${sha("c")}`] = { commits: [], files: ["apps/server/test/a.test.ts"] };
+    c.gh.compare[`${sha("c")}...${sha("d")}`] = { commits: [], files: [".github/workflows/ci.yml"] };
+    await c.service.run();
+    const [made] = await c.failingTickets();
+    const suspects = await c.service.suspectsFor(c.project.id, made!.id);
+    expect(suspects!.map((s) => s.sha)).toEqual([sha("c"), sha("d")]);
+    expect(suspects![0]!.reason).toContain("test/a.test.ts");
+    expect(suspects![1]!.reason).toContain("workflow file");
+    expect(made!.body).toContain(`1. ${sha("c").slice(0, 8)} "Merge test change"`);
+    expect(made!.body).toContain('(ticket "Changed the test")');
+    expect(made!.body).toMatch(new RegExp(`Also since the last green run.*${sha("b").slice(0, 8)}`));
+    expect(made!.body).not.toContain(sha("e").slice(0, 8));
+    expect(made!.body).not.toContain("No suspect");
+    expect(made!.assigneeAgentId).toBe(c.dev.id);
+  });
+
+  it("says no commit broke it when main didn't move since the last green run, and says so when the token can't read commits", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(51, "failure", sha("d"), { event: "schedule" }), run(50, "success", sha("d"))];
+    c.gh.jobs[51] = [job("test", [["Run tests", "failure"]])];
+    await c.service.run();
+    const [same] = await c.failingTickets();
+    expect(same!.body).toContain("Main didn't change between the last green run and the first failure");
+    expect(same!.body).toContain("No suspect");
+
+    c.gh.runs = [run(53, "failure", sha("f"), { name: "Nightly" }), run(52, "success", sha("e"), { name: "Nightly" })];
+    c.gh.jobs[53] = [job("e2e", [["Run e2e", "failure"]])];
+    await c.service.run();
+    const blind = (await c.failingTickets()).find((t) => t.title.includes("Nightly"));
+    expect(blind!.body).toContain("Contents: Read-only");
+    expect(blind!.body).toContain("No suspect");
+    expect(await c.service.suspectsFor(c.project.id, blind!.id)).toEqual([]);
+  });
+
   it("opens one ticket for a failing step, assigned to the ticket whose merge broke it, with the run link and the rule", async () => {
     ctx = await setup();
     const c = ctx;
@@ -131,7 +229,7 @@ describe("the main-CI watcher", () => {
     expect(made).toHaveLength(1);
     expect(made[0]!.body).toContain("https://github.com/leon/site/actions/runs/40");
     expect(made[0]!.body).toContain("Run tests");
-    expect(made[0]!.body).toContain("Error lines weren't readable with this token");
+    expect(made[0]!.body).toContain("The job log couldn't be read");
     const [s] = await c.service.statuses();
     expect(s!.status.state).toBe("failing");
     expect("detail" in s!.status ? s!.status.detail : "").not.toMatch(/can't read/);

@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { RUNNER_CODE_PATHS, touchesRunnerCode } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, companies, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, companies, decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { INFRA_RETRY_BASE_MS, setInfraRetryBase } from "../src/services/review.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
@@ -93,6 +93,10 @@ describe("go-live wait: the pure parts", () => {
     expect(RUNNER_CODE_PATHS.source.replace(/\\\//g, "/")).toBe(sh);
     expect(touchesRunnerCode(["apps/server/src/app.ts", "apps/runner/src/main.ts"])).toBe(true);
     expect(touchesRunnerCode(["apps/server/src/app.ts", "apps/web/src/x.tsx"])).toBe(false);
+    // BOS-1693: tests and test config don't ship in the runner image, so they never need a rebuild to be in force.
+    expect(touchesRunnerCode(["apps/runner/test/check-job-slot.test.ts", "apps/runner/test/setup-env.ts", "apps/runner/vitest.config.ts", "packages/shared/test/x.test.ts"])).toBe(false);
+    expect(touchesRunnerCode(["apps/runner/test/setup-env.ts", "packages/shared/src/go-live.ts"])).toBe(true);
+    expect(touchesRunnerCode(["pnpm-lock.yaml"])).toBe(true);
   });
 });
 
@@ -169,9 +173,19 @@ describe("after-merge checks wait for go-live", () => {
     await serverRuns(OLD);
     const c = await ctx.agent(ctx.dev.id);
     const ask = { question: "Is the new thing live?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: old, triedFirst: "Looked at it myself; only the owner sees their server.", ownerMustDo: false };
-    expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).toContain("isn't live yet");
+    // F2: a card that settles no after-merge criterion is posted, with a server-written "not live" line (BOS-1654).
+    const posted = textOf(await c.callTool({ name: "raise_decision", arguments: ask }));
+    expect(posted).toMatch(/Decision .* (is in the owner's queue|went to the CEO first)/);
+    const [row] = await ctx.db.select({ question: decisions.question }).from(decisions);
+    expect(row!.question).toContain("This ticket's code isn't live yet (waiting for");
+    // A card that names a criterion is still held.
+    const held = textOf(await c.callTool({ name: "raise_decision", arguments: { ...ask, question: "Does it show?", criterion: 1, optionVerdicts: { Yes: "pass", No: "fail" } } }));
+    expect(held).toContain("isn't live yet");
     await serverRuns(NEW);
-    expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).not.toContain("isn't live yet");
+    const live = textOf(await c.callTool({ name: "raise_decision", arguments: { ...ask, question: "Is it live now?" } }));
+    const rows = await ctx.db.select({ question: decisions.question }).from(decisions);
+    expect(rows.some((r) => r.question.startsWith("Is it live now?") && !r.question.includes("isn't live yet"))).toBe(true);
+    expect(live).not.toContain("isn't live yet");
   });
 
   // BOS-1094: a branch ticket whose changed files can't be read is not merged (it might change scripts/check-all.sh,

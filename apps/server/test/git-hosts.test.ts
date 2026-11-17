@@ -5,6 +5,21 @@ import { GitHostError, gitHostService, MAX_LOG_CHARS } from "../src/services/git
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 const cfg = (kind: "github" | "gitea") => ({ kind, apiBase: "https://host/api", owner: "leon", repo: "site" });
 
+describe("jobLogBlock: a failed job's log for a ticket message (BOS-1667)", () => {
+  const withLog = (res: () => Response) => gitHostService({ fetch: (async () => res()) as unknown as typeof fetch });
+  it("never throws and never gives an empty block: each failure says what is wrong", async () => {
+    expect((await withLog(() => json(403, {})).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/isn't allowed to read job logs/);
+    expect((await withLog(() => json(404, {})).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/no longer has it/);
+    expect((await withLog(() => new Response("x", { headers: { "content-length": "99000000" } })).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/too large/);
+    expect((await withLog(() => new Response("")).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/was empty/);
+    expect((await withLog(() => json(200, {})).jobLogBlock(cfg("gitea"), "t", 7)).join(" ")).toMatch(/isn't available from this git host/);
+  });
+  it("gives the error lines then the end of the log", async () => {
+    const block = await withLog(() => new Response("setup\nFAIL a.test.ts\nmore\nlast line")).jobLogBlock(cfg("github"), "t", 7);
+    expect(block).toEqual(["FAIL a.test.ts", "… end of the log:", "setup", "more", "last line"]);
+  });
+});
+
 describe("CI on a commit for the merge gate (BOS-1070, read through Actions since BOS-1630)", () => {
   const SHA = "e".repeat(40);
   /**
@@ -57,6 +72,16 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     });
     expect(await host.ciStatus(cfg("github"), "t", SHA)).toEqual({ state: "failed", failed: [{ id: 5, name: "check", url: "https://github.com/leon/site/actions/runs/9/job/5", step: "Run tests" }], waiting: [], billing: false });
     expect((await github([]).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("none");
+  });
+
+  it("a cancelled run is no failure: its own state, unless a job in it really failed", async () => {
+    const cancelledJob = { id: 5, name: "check", status: "completed", conclusion: "cancelled", runner_name: "GitHub Actions 2", steps: [] };
+    const s = await github([run(9, "completed", "cancelled")], { 9: [cancelledJob] }).host.ciStatus(cfg("github"), "t", SHA);
+    expect(s).toEqual({ state: "cancelled", failed: [], waiting: [], billing: false, cancelled: [{ id: 9, name: "CI", url: "https://github.com/leon/site/actions/runs/9" }] });
+    const real = await github([run(9, "completed", "cancelled")], { 9: [cancelledJob, job(6, "lint", "failure")] }).host.ciStatus(cfg("github"), "t", SHA);
+    expect(real.state).toBe("failed");
+    // Another workflow still running: wait for it before saying anything about the cancelled one.
+    expect((await github([run(9, "completed", "cancelled"), run(8, "in_progress", null, { workflow_id: 2 })], { 9: [cancelledJob] }).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("pending");
   });
 
   it("a run that failed before any job is named by the run", async () => {
@@ -234,6 +259,23 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
     const [job] = await h.runJobs(cfg("github"), "t", 5);
     expect(job).toMatchObject({ id: 9, name: "test", steps: [{ name: "Run tests", conclusion: "failure" }] });
     expect(await h.workflowRuns(cfg("gitea"), "t", "main")).toEqual([]);
+  });
+
+  it("reads the workflow file of a run, and a compare's commits with parents and every changed file (BOS-1688)", async () => {
+    const h = host((p) =>
+      p.startsWith("/actions/runs?")
+        ? json(200, { workflow_runs: [{ id: 5, name: "CI", event: "push", status: "completed", conclusion: "failure", head_sha: "a".repeat(40), path: ".github/workflows/ci.yml@refs/heads/main" }] })
+        : json(200, {
+            commits: [{ sha: "b".repeat(40), commit: { message: "Merge y\n\nbody" }, parents: [{ sha: "a".repeat(40) }, { sha: "e".repeat(40) }] }],
+            files: [{ filename: "apps/server/test/a.test.ts" }, { filename: "new.ts", previous_filename: "old.ts" }],
+          }),
+    );
+    expect((await h.workflowRuns(cfg("github"), "t", "main"))[0]!.path).toBe(".github/workflows/ci.yml");
+    expect(await h.compareDetail(cfg("github"), "t", "a".repeat(40), "b".repeat(40))).toEqual({
+      commits: [{ sha: "b".repeat(40), message: "Merge y", parents: ["a".repeat(40), "e".repeat(40)] }],
+      files: ["apps/server/test/a.test.ts", "new.ts", "old.ts"],
+    });
+    await expect(host(() => json(403, { message: "Resource not accessible" })).compareDetail(cfg("github"), "t", "a", "b")).rejects.toMatchObject({ status: 403 });
   });
 
   it("throws a GitHostError when the token can't read the runs", async () => {

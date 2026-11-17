@@ -4,7 +4,7 @@
 // merge_message_field, head_commit_id}; merge answers 200, or 405 (not allowed yet: approvals,
 // status checks, permissions) and 409 (conflicts, head out of date) with a message.
 import { strFromU8, unzipSync } from "fflate";
-import { apiBaseFor, parseRepoUrl, type GitHostKind } from "@boss-man/shared";
+import { apiBaseFor, parseRepoUrl, redactForModel, type GitHostKind } from "@boss-man/shared";
 
 export type GitHostConfig = { kind: GitHostKind; apiBase: string; owner: string; repo: string };
 export type PullRequest = { number: number; url: string; merged: boolean; closed: boolean; mergeCommit: string | null };
@@ -20,7 +20,7 @@ export type CiRun = { id: number; name: string; url: string; step?: string; unst
  * What the merge gate reads before it merges (BOS-1070). `waiting`: jobs not finished yet. `billing`: a job didn't start
  * because of the account's spending limit or payments, which isn't the agent's to fix.
  */
-export type CiStatus = { state: "passed" | "failed" | "pending" | "none"; failed: CiRun[]; waiting: string[]; billing: boolean };
+export type CiStatus = { state: "passed" | "failed" | "pending" | "none" | "cancelled"; failed: CiRun[]; waiting: string[]; billing: boolean; cancelled?: CiRun[] };
 const FAILED_CONCLUSIONS = ["failure", "timed_out", "cancelled", "startup_failure", "action_required", "stale"];
 const BILLING_TEXT = /spending limit|billing|account payments|payment (?:has )?failed/i;
 /**
@@ -39,6 +39,8 @@ export type WorkflowRun = {
   conclusion: string | null;
   headSha: string;
   headMessage: string;
+  /** The workflow's file, e.g. .github/workflows/ci.yml (BOS-1688: a commit that changed it is a suspect). */
+  path?: string;
   url: string;
   createdAt: string;
   updatedAt: string;
@@ -51,6 +53,8 @@ export type CommitAnnotations = { name: string; lines: string[] };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
+/** A compare between two commits (BOS-1688): its commits, oldest first, and every file the range changed (old names of renames too). */
+export type CompareDetail = { commits: Array<{ sha: string; message: string; parents: string[] }>; files: string[] };
 
 export class GitHostError extends Error {
   constructor(
@@ -58,6 +62,55 @@ export class GitHostError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+export const MAX_LINES = 15;
+export const MAX_LINE = 300;
+const TAIL_LINES = 10;
+
+const cleanLogLines = (log: string): string[] =>
+  log
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, "").replace(/\u001b\[[0-9;]*m/g, "").replace(/^##\[(error|warning|group|endgroup)\]/, "$1: ").trim())
+    .filter(Boolean);
+const shorten = (l: string) => redactForModel(l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)}…` : l);
+
+/** The lines of a log that most likely say what went wrong: error-looking ones, timestamps and colour codes removed, secrets redacted. */
+export function errorLines(log: string, max = MAX_LINES): string[] {
+  const clean = cleanLogLines(log);
+  const hits = clean.filter((l) => /(^error\b|\berror[: ]|\bfail(ed|ure|ing)?\b|✗|✕|×|assert|exception|\bFAIL\b|exit code|cannot find|not found|expected)/i.test(l));
+  // The last ones are nearest the failure.
+  return (hits.length ? hits : clean).slice(-max).map(shorten);
+}
+
+/** The error lines plus the last few lines of the log (redacted), for a ticket message. Tail lines already among the error lines are dropped. */
+export function logExcerpt(log: string): { errors: string[]; tail: string[] } {
+  const errors = errorLines(log);
+  const tail = cleanLogLines(log).slice(-TAIL_LINES).map(shorten).filter((l) => !errors.includes(l));
+  return { errors, tail };
+}
+
+/**
+ * The one reader of a failed job's log, shared by the main-CI watcher and the merge gate's CI send-back (BOS-1667).
+ * `lines` is never empty: the error lines, then the end of the log (secrets redacted), or one line saying why the
+ * log can't be had. `readable` is true only when real log lines came back. `read` fetches the raw log.
+ */
+export async function readFailureLog(cfg: GitHostConfig, jobId: number, read: () => Promise<string>): Promise<{ lines: string[]; readable: boolean }> {
+  if (cfg.kind !== "github") return { lines: ["(The job log isn't available from this git host; Boss Man can only read job logs on GitHub.)"], readable: false };
+  if (!jobId) return { lines: ["(No job ran, so there is no job log.)"], readable: false };
+  try {
+    const { errors, tail } = logExcerpt(await read());
+    if (!errors.length && !tail.length) return { lines: ["(The job log was empty.)"], readable: false };
+    return { lines: [...errors, ...(tail.length ? ["… end of the log:", ...tail] : [])], readable: true };
+  } catch (e) {
+    const status = e instanceof GitHostError ? e.status : 0;
+    const why =
+      status === 401 || status === 403 ? "the git token isn't allowed to read job logs"
+      : status === 404 || status === 410 ? "GitHub no longer has it (logs expire, or the job was deleted)"
+      : status === 413 ? "it is too large to read"
+      : `GitHub's answer couldn't be read (${(e instanceof Error ? e.message : String(e)).slice(0, 150)})`;
+    return { lines: [`(The job log couldn't be read: ${why}. Open the job link above.)`], readable: false };
   }
 }
 
@@ -197,9 +250,16 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const nameOf = (r: Record<string, unknown>) => String(r.name ?? r.display_title ?? "CI");
       const waiting = runs.filter((r) => r.status !== "completed").map(nameOf);
       const failed: CiRun[] = [];
+      const cancelled: CiRun[] = [];
       for (const r of runs.filter((x) => x.status === "completed" && FAILED_CONCLUSIONS.includes(String(x.conclusion)))) {
         const jobs = await this.runJobs(cfg, token, Number(r.id));
         const bad = jobs.filter((j) => FAILED_CONCLUSIONS.includes(String(j.conclusion)));
+        // A run GitHub cancelled (a newer run replaced it, or someone stopped it) tested nothing: it's no failure unless a
+        // job in it really failed. The gate decides what a cancelled run means (it knows the branch's other runs).
+        if (r.conclusion === "cancelled" && !bad.some((j) => j.conclusion !== "cancelled")) {
+          cancelled.push({ id: Number(r.id), name: nameOf(r), url: String(r.html_url ?? "") });
+          continue;
+        }
         // A run that failed before any job (a broken workflow file) is named by the run itself.
         if (!bad.length) failed.push({ id: 0, name: nameOf(r), url: String(r.html_url ?? "") });
         for (const j of bad) {
@@ -207,8 +267,15 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           failed.push({ id: j.id, name: j.name, url: j.url, ...(step ? { step: step.name } : {}), ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}) });
         }
       }
-      const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : "passed";
-      return { state, failed, waiting, billing: false };
+      const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : cancelled.length ? "cancelled" : "passed";
+      return { state, failed, waiting, billing: false, ...(cancelled.length ? { cancelled } : {}) };
+    },
+
+    /** Ask GitHub to run a workflow run again (needs Actions: Write). False when it refuses, which the caller reports plainly. */
+    async rerunRun(cfg: GitHostConfig, token: string, runId: number): Promise<boolean> {
+      if (cfg.kind !== "github") return false;
+      const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun`).catch(() => null);
+      return !!res?.ok;
     },
 
     /**
@@ -291,6 +358,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           conclusion: typeof r.conclusion === "string" ? r.conclusion : null,
           headSha: String(r.head_sha ?? ""),
           headMessage: typeof head.message === "string" ? head.message : "",
+          ...(typeof r.path === "string" && r.path ? { path: r.path.split("@")[0]! } : {}),
           url: String(r.html_url ?? ""),
           createdAt: String(r.created_at ?? ""),
           updatedAt: String(r.updated_at ?? r.created_at ?? ""),
@@ -349,6 +417,14 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         text = new TextDecoder().decode(bytes);
       }
       return text.length > MAX_LOG_CHARS ? text.slice(-MAX_LOG_CHARS) : text;
+    },
+
+    /**
+     * What a failed job's log says, as lines for a ticket message (BOS-1667): its error lines, then the end of the log,
+     * secrets redacted. Never empty and never throws: when the log can't be had the one line says why.
+     */
+    async jobLogBlock(cfg: GitHostConfig, token: string, jobId: number): Promise<string[]> {
+      return readFailureLog(cfg, jobId, () => this.jobLog(cfg, token, jobId)).then((r) => r.lines);
     },
 
     /**
@@ -420,6 +496,32 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       // this only answers for GitHub; elsewhere it fails and the check is left to the runner.
       const rows = Array.isArray(res.json.commits) ? (res.json.commits as Array<Record<string, unknown>>) : [];
       return rows.map((c) => (typeof c.sha === "string" ? c.sha.slice(0, 40) : "")).filter(Boolean);
+    },
+
+    /**
+     * GitHub's compare with what the main-CI watcher needs to rank suspects (BOS-1688): every commit
+     * from..to with its parents and first message line, and the files the whole range changed. Needs
+     * the token's Contents read; with Actions read only it throws and the caller says so.
+     */
+    async compareDetail(cfg: GitHostConfig, token: string, from: string, to: string): Promise<CompareDetail> {
+      const res = await call(cfg, token, "GET", `/compare/${encodeURIComponent(from)}...${encodeURIComponent(to)}?per_page=250`);
+      if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't compare ${from.slice(0, 8)} with ${to.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
+      const rows = Array.isArray(res.json.commits) ? (res.json.commits as Array<Record<string, unknown>>) : [];
+      const files = Array.isArray(res.json.files) ? (res.json.files as Array<Record<string, unknown>>) : [];
+      return {
+        commits: rows
+          .filter((c) => typeof c.sha === "string" && c.sha)
+          .map((c) => {
+            const commit = (c.commit ?? {}) as Record<string, unknown>;
+            const parents = Array.isArray(c.parents) ? (c.parents as Array<Record<string, unknown>>) : [];
+            return {
+              sha: String(c.sha),
+              message: typeof commit.message === "string" ? commit.message.split("\n")[0]! : "",
+              parents: parents.map((p) => String(p.sha ?? "")).filter(Boolean),
+            };
+          }),
+        files: files.flatMap((f) => [f.filename, f.previous_filename]).filter((n): n is string => typeof n === "string" && !!n),
+      };
     },
 
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {

@@ -427,6 +427,10 @@ export const tickets = pgTable(
     /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
      * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
     ownerSetupOverride: text("owner_setup_override"),
+    /** BOS-1650: one line on what the setup changes for the owner; the go-live card opens with it. Null on tickets written before it existed (the card says "not given"). */
+    ownerSetupWhy: text("owner_setup_why"),
+    /** BOS-1650: one line on what happens if the owner skips the setup ("nothing breaks" is an answer). */
+    ownerSetupIfSkipped: text("owner_setup_if_skipped"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
@@ -1567,6 +1571,8 @@ export const feedbackSettings = pgTable("feedback_settings", {
   confirmLinkHours: integer("confirm_link_hours").notNull().default(24),
   /** How long a confirmed browser may post without confirming again, in days. */
   rememberAddressDays: integer("remember_address_days").notNull().default(90),
+  /** BOS-1680: the portal's public address with no secret part (the bare BOSSMAN_PORTAL_URL) opens this company's portal. At most one company; the owner turns it on. */
+  portalAtBareAddress: boolean("portal_at_bare_address").notNull().default(false),
 });
 
 /** BOS-1388: a browser that confirmed an address. Hashes only: the cookie holds the secret, never this table. */

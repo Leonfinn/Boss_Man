@@ -14,7 +14,7 @@
 // reason, it parks on the CEO's rung with its clock stopped and is offered again when the reason
 // is gone. Only a kind allowed to reach the owner goes past the CEO.
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { readWatchdogSettings, sinceHours, untrusted } from "@boss-man/shared";
+import { readWatchdogSettings, sinceHours, splitOwnerSteps, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -648,7 +648,7 @@ export function alertLadder(
       }
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
       // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.
-      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.urgentWhy ? { urgentPush: { by: ceo.name, at: now().toISOString(), why: input.urgentWhy } } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(ask.lint ? { lint: ask.lint } : {}), ...(advice ? { advice } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
+      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.urgentWhy ? { urgentPush: { by: ceo.name, at: now().toISOString(), why: input.urgentWhy } } : {}), ...(input.steps?.length ? splitOwnerSteps(input.steps) : {}), ...(ask.lint ? { lint: ask.lint } : {}), ...(advice ? { advice } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
       return { id: d.id };
     },
   };

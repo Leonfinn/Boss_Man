@@ -231,10 +231,11 @@ export function PortalApp() {
   const [stage, setStage] = useState<Stage>("considering");
   const logo = useLogo(data?.hasLogo);
   const load = useCallback(() => {
-    if (!token()) return setError("This link is incomplete. Ask for the full portal link.");
+    // BOS-1680: with no secret in the link the server decides: it opens the portal the owner chose for the bare
+    // address, or answers 404, which is when "incomplete" is the true thing to say.
     void call<Portal>("/api/portal").then(
       (d) => (setData(d), setError(null), (document.title = d.title)),
-      (err: Error) => setError(err.message),
+      (err: Error) => setError(token() ? err.message : "This link is incomplete. Ask for the full portal link."),
     );
   }, []);
   useEffect(() => {
