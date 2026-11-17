@@ -554,6 +554,11 @@ code { font-family: var(--mono); font-size: 0.92em; }
   .app > main:has(> .plan-page) { padding-top: 12px; }
   .plan-page .pl-causes-toggle { min-height: 36px; }
 }
+/* On a touch screen Refresh and the fold bar keep their normal tap size (32 and 40 px, BOS-1657). */
+@media (max-width: 900px) and (pointer: coarse), (max-height: 800px) and (pointer: coarse) {
+  .plan-page .pl-refresh { min-height: 32px; padding: 4px 12px; }
+  .plan-page .pl-causes-toggle { min-height: 40px; }
+}
 
 /* ---------- CEO chapters ---------- */
 .chapter-text { margin: 8px 0 0; padding: 12px; max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--sans); font-size: 13.5px; background: var(--ground); border-radius: 8px; }
