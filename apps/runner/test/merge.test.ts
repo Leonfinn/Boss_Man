@@ -17,10 +17,23 @@ const tmp = (prefix: string) => {
   dirs.push(d);
   return d;
 };
-afterEach(() => {
-  // Retries cover ENOTEMPTY: git 2.47+ runs its automatic maintenance detached, so it can still be writing in a repo here.
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
+afterEach(async () => {
+  // ENOTEMPTY: git 2.47+ runs its automatic maintenance detached, so it can still be writing in a repo here. A slow
+  // GitHub runner kept it going past the old ~1 s of retries, so wait with a deadline instead; any other error is thrown
+  // at once, and ENOTEMPTY still fails the test once the deadline passes.
+  const deadline = Date.now() + 30_000;
+  for (const d of dirs.splice(0)) {
+    for (;;) {
+      try {
+        rmSync(d, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY" || Date.now() >= deadline) throw err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+  }
+}, 40_000);
 
 /** A bare origin plus a scratch clone for pushing "other people's" commits to it. */
 function origin() {
