@@ -157,6 +157,8 @@ export const OWNER_CONTROLS = {
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
     // BOS-1550: copy the ready-filled compose file shown after adding.
     "Copy compose file",
+    // Checks → the landing turn's own save (BOS-1762).
+    "Save landing turn",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": [
@@ -285,6 +287,8 @@ export const OWNER_FIELDS = {
     "Wait for GitHub CI before merging",
     // Settings → Checks: the merge train switch (BOS-1366).
     "Merge approved work in the order it was approved",
+    // Settings → Checks: carry a passed merge across file-disjoint main moves, and the landing turn (BOS-1762).
+    "Land passed merges when main moved elsewhere", "Landing turn",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
     "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Settings → Checks: each machine's split between merge checks and quick checks (BOS-1602).
