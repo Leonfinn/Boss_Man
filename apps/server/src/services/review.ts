@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
-import { MAIN_LOG_MAX, mergeSubjectTicket, wakeCeoIfLiveUnplaced } from "./missed-merges.js";
+import { gateMergeMessage, isGateMergeOf, MAIN_LOG_MAX, mergeMessageTicket, wakeCeoIfLiveUnplaced } from "./missed-merges.js";
 import { deploysNothing, goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough, REAL_USE_REFUSAL, touchesInstallSurface, touchesRunnerCode, touchesRunnerUpdate, usabilityGated } from "@boss-man/shared";
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MainLogResult, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
@@ -1420,7 +1420,7 @@ export function reviewService(
           .select({ id: projects.id, companyId: projects.companyId, repoUrl: projects.repoUrl, target: projects.defaultBranch })
           .from(projects)
           .where(projectId ? eq(projects.id, projectId) : isNotNull(projects.repoUrl));
-        const read = new Map<string, Array<{ sha: string; subject: string }>>();
+        const read = new Map<string, Array<{ sha: string; subject: string; message: string }>>();
         for (const p of rows) {
           if (!p.repoUrl) continue;
           try {
@@ -1433,14 +1433,18 @@ export function reviewService(
             // Newest first, so a ticket merged twice keeps its newest merge.
             const named = new Map<string, (typeof log)[number]>();
             for (const c of log) {
-              const id = mergeSubjectTicket(c.subject);
+              const id = typeof c.message === "string" ? mergeMessageTicket(c.message) : null;
               if (id && !named.has(id)) named.set(id, c);
             }
             if (!named.size) continue;
-            const missing = await db
-              .select({ id: tickets.id })
-              .from(tickets)
-              .where(and(inArray(tickets.id, [...named.keys()]), eq(tickets.projectId, p.id), isNull(tickets.mergeCommit)));
+            // Only a commit whose whole message is exactly this ticket's gate merge message counts (Jane, BOS-1645): a
+            // ticket title is agent-written, so a message merely naming an id must never close another ticket.
+            const missing = (
+              await db
+                .select({ id: tickets.id, title: tickets.title })
+                .from(tickets)
+                .where(and(inArray(tickets.id, [...named.keys()]), eq(tickets.projectId, p.id), isNull(tickets.mergeCommit)))
+            ).filter((t) => isGateMergeOf(named.get(t.id)!.message, t));
             if (!missing.length) continue;
             // A second read for the changed files of just these, so touchesRunner is known (BOS-1021) rather than assumed.
             const shas = missing.slice(0, 20).map((m) => named.get(m.id)!.sha);
@@ -2528,7 +2532,7 @@ export function reviewService(
       type CheckFailed = Extract<MergeResult, { status: "check_failed" }>;
       // "stopped": GitHub CI failed while the round's job ran (BOS-1070); CI's verdict is the attempt's answer.
       type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | CheckFailed;
-      const message = `Merge "${t.title}" (${ticketId})`;
+      const message = gateMergeMessage(t.title, ticketId);
       const retargetOn = async () => {
         // Never while CI gating is on (BOS-1070): CI was published for this commit, and a retargeted tree is one CI never ran on.
         if (ci) return false;
@@ -2706,7 +2710,7 @@ export function reviewService(
             ? (w: () => Promise<MergeResult>) =>
                 timedCheck(checks.map(named).join(" && "), "merged", (x) => gate.run(checkPrio, false, x), (r) => (r.status === "merged" ? true : r.status === "check_failed" ? checkVerdict(r.result) : null), w)
             : (w: () => Promise<MergeResult>) => w())(() => askMerge(
-            (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})`, ...(checkMerged ? { checks } : {}), ...(expectTree ? { expectTree } : {}) }),
+            (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: gateMergeMessage(t.title, ticketId), ...(checkMerged ? { checks } : {}), ...(expectTree ? { expectTree } : {}) }),
             // The runner may check up to three merged results, one after another.
             checkMerged ? MERGE_WAIT_MS + 3 * checks.length * VERIFY_ASK_TIMEOUT_MS : MERGE_WAIT_MS,
           )),

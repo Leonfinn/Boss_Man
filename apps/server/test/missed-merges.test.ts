@@ -15,7 +15,7 @@ import type { MainLogResult, RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, projects, runners, settings, tickets, wakes } from "../src/db/schema.js";
-import { LIVE_UNPLACED_REASON, mergeSubjectTicket } from "../src/services/missed-merges.js";
+import { gateMergeMessage, isGateMergeOf, LIVE_UNPLACED_REASON, mergeMessageTicket } from "../src/services/missed-merges.js";
 
 const KEY = "k".repeat(43);
 const sha = (c: string) => c.repeat(40);
@@ -74,7 +74,7 @@ async function setup() {
   // The launcher's PUT named it by the company; the fake fleet holds "app-co" only.
 
   /** What main's newest first-parent commits are, as the runner reads them; filesFor adds each commit's files. */
-  const main: Array<{ sha: string; subject: string; at: string; files: string[] }> = [];
+  const main: Array<{ sha: string; subject: string; message?: string; at: string; files: string[] }> = [];
   const mainLogAsks: Array<Extract<RunnerCommand, { type: "workspace.mainLog" }>> = [];
   /** When set, the runner holds its answer to the merge push until released (a push in flight). */
   let holdPush = false;
@@ -94,7 +94,7 @@ async function setup() {
       if (c.type === "workspace.mainLog") {
         mainLogAsks.push(c);
         const want = new Set(c.filesFor ?? []);
-        const data: MainLogResult = { commits: main.slice(0, c.max).map((m) => ({ sha: m.sha, subject: m.subject, at: m.at, ...(want.has(m.sha) ? { files: m.files } : {}) })) };
+        const data: MainLogResult = { commits: main.slice(0, c.max).map((m) => ({ sha: m.sha, subject: m.subject, message: m.message ?? m.subject, at: m.at, ...(want.has(m.sha) ? { files: m.files } : {}) })) };
         ok(data);
       }
       return true;
@@ -111,14 +111,30 @@ async function setup() {
   return { ...built, db, close, dir, req, company, ceo, worker, project, row, ticket, main, mainLogAsks, recreated, wakesOf, setHoldPush: (v: boolean) => (holdPush = v), heldPush };
 }
 
-describe("reading a gate merge subject (BOS-1645)", () => {
+describe("reading a gate merge message (BOS-1645)", () => {
+  const id = "a8ae3af1-edea-42d0-83bb-73b810e8ca30";
+  const other = "0c5917c5-0000-4000-8000-000000000000";
   it("names the ticket id of the gate's own merge message, and nothing else", () => {
-    const id = "a8ae3af1-edea-42d0-83bb-73b810e8ca30";
-    expect(mergeSubjectTicket(`Merge "Go-live line says "not live" (BOS-1601: 0c5917c5)" (${id})`)).toBe(id);
-    expect(mergeSubjectTicket(`Merge "x" (${id.toUpperCase()})`)).toBe(id);
-    expect(mergeSubjectTicket("Merge branch 'main' into bossman/x")).toBeNull();
-    expect(mergeSubjectTicket(`Hotfix by hand (${id})`)).toBeNull();
-    expect(mergeSubjectTicket(`Merge "x" (${id}) and more`)).toBeNull();
+    expect(mergeMessageTicket(`Merge "Go-live line says "not live" (BOS-1601: 0c5917c5)" (${id})`)).toBe(id);
+    expect(mergeMessageTicket(`Merge "x" (${id.toUpperCase()})`)).toBe(id);
+    expect(mergeMessageTicket("Merge branch 'main' into bossman/x")).toBeNull();
+    expect(mergeMessageTicket(`Hotfix by hand (${id})`)).toBeNull();
+    expect(mergeMessageTicket(`Merge "x" (${id}) and more`)).toBeNull();
+    // The whole message: a first paragraph naming another id is not what the message names.
+    expect(mergeMessageTicket(`Merge "x" (${other})\n\nbar" (${id})`)).toBe(id);
+  });
+
+  it("the gate's message is one line, and only the exact message for a ticket's own row counts as its merge", () => {
+    const evil = `x" (${other})\n\nbar`;
+    expect(gateMergeMessage(evil, id)).toBe(`Merge "x" (${other}) bar" (${id})`);
+    expect(isGateMergeOf(gateMergeMessage("Fix it", id), { id, title: "Fix it" })).toBe(true);
+    // A merge made before the flattening, title line breaks and all, still counts for its own ticket.
+    expect(isGateMergeOf(`Merge "${evil}" (${id})`, { id, title: evil })).toBe(true);
+    // Neither form of the crafted title's merge is ever the other ticket's merge.
+    expect(isGateMergeOf(`Merge "${evil}" (${id})`, { id: other, title: "x" })).toBe(false);
+    expect(isGateMergeOf(gateMergeMessage(evil, id), { id: other, title: "x" })).toBe(false);
+    // A message naming the right id but a different title (a hand-made look-alike) is not recorded either.
+    expect(isGateMergeOf(`Merge "Something else" (${id})`, { id, title: "Fix it" })).toBe(false);
   });
 });
 
@@ -206,6 +222,34 @@ describe("a merge on main that was never recorded (BOS-1645)", () => {
     expect(r.mergeCommit).toBe(sha("6"));
     expect(r.touchesRunner).toBe(true);
     expect(await c.wakesOf(c.worker.id, "merge recorded late")).toHaveLength(0);
+  });
+
+  it("a title holding a blank line and another ticket's id never closes that other ticket (Jane, BOS-1645)", async () => {
+    const c = (ctx = await setup());
+    const victim = await c.ticket("Victim, still in review");
+    // A's title, as an agent could set it: its merge's first paragraph (git's %s) would read as the victim's merge.
+    const title = `x" (${victim.id})\n\nbar`;
+    const a = await c.ticket("placeholder");
+    await c.db.update(tickets).set({ title }).where(eq(tickets.id, a.id));
+    const old = `Merge "${title}" (${a.id})`;
+    c.main.push({ sha: sha("9"), subject: `Merge "x" (${victim.id})`, message: old, at: "2026-11-16T11:30:00Z", files: [] });
+
+    // The sweep reads the whole message: it is A's merge (A is recorded), never the victim's.
+    expect((await c.review.recordMissedMerges()).recorded).toEqual([a.id]);
+    const v = await c.row(victim.id);
+    expect(v.mergeCommit).toBeNull();
+    expect(v.systemState).toBe("review");
+    expect((await c.row(a.id)).mergeCommit).toBe(sha("9"));
+    // And the gate now writes that title on one line, so even git's %s ends in A's own id.
+    expect(gateMergeMessage(title, a.id).split("\n")).toHaveLength(1);
+  });
+
+  it("a message naming a ticket that isn't exactly its gate merge message records nothing", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Real title");
+    c.main.push({ sha: sha("e"), subject: `Merge "Look-alike" (${t.id})`, at: "2026-11-16T11:40:00Z", files: [] });
+    expect((await c.review.recordMissedMerges()).recorded).toEqual([]);
+    expect((await c.row(t.id)).mergeCommit).toBeNull();
   });
 
   it("a project with no repo is never asked about", async () => {

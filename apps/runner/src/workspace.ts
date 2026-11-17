@@ -2192,15 +2192,19 @@ export class Workspaces {
       await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       const ref = `refs/remotes/origin/${target}`;
       if ((await this.gitCode(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })).code !== 0) return { commits: [] };
-      // NUL-separated records of unit-separated fields: a subject can hold any other character.
-      const out = await this.git(["log", "--first-parent", `--max-count=${Math.max(1, Math.min(200, Math.floor(max)))}`, "--format=%H%x1f%cI%x1f%s%x00", ref], { cwd: repo });
+      // NUL-separated records of unit-separated fields: a message can hold any other character. The full message (%B), not
+      // just %s: %s is only the first paragraph, so a title holding a blank line could make it name another ticket (Jane, BOS-1645).
+      const out = await this.git(["log", "--first-parent", `--max-count=${Math.max(1, Math.min(200, Math.floor(max)))}`, "--format=%H%x1f%cI%x1f%B%x00", ref], { cwd: repo });
       const wanted = new Set(filesFor.map((s) => s.toLowerCase()));
       const commits: MainLogResult["commits"] = [];
       for (const rec of out.split("\0")) {
-        // The subject is the last field, so a unit separator inside it stays part of it.
-        const [sha, at, ...subject] = rec.replace(/^\n/, "").split("\x1f");
+        // The message is the last field, so a unit separator inside it stays part of it.
+        const [sha, at, ...body] = rec.replace(/^\n/, "").split("\x1f");
         if (!sha || !/^[0-9a-f]{40}$/.test(sha) || !at) continue;
-        const c: MainLogResult["commits"][number] = { sha, at, subject: subject.join("\x1f") };
+        const message = body.join("\x1f").trim();
+        // The subject as git's %s gives it (the first paragraph, its lines joined by spaces), for display only.
+        const subject = (message.split(/\n[ \t]*\n/)[0] ?? "").split("\n").map((l) => l.trim()).join(" ");
+        const c: MainLogResult["commits"][number] = { sha, at, subject, message };
         if (wanted.has(sha)) {
           // A root commit has no first parent: then nothing to compare it with, and no files are claimed.
           const d = await this.gitCode(["diff", "--name-only", `${sha}^1`, sha], { cwd: repo });

@@ -588,8 +588,9 @@ export type MergeLineConflictsResult = { conflicts: MergeLineConflict[] };
 /**
  * The answer to workspace.mainLog (BOS-1645): newest first. `at` is the committer time (ISO 8601); `files` only for the
  * commits named in filesFor (against the first parent). Empty when the runner has no copy of the repo or no such target.
+ * `message`: the full message, trimmed; only it says which ticket a merge is (`subject` is the first paragraph, for display).
  */
-export type MainLogResult = { commits: Array<{ sha: string; subject: string; at: string; files?: string[] }> };
+export type MainLogResult = { commits: Array<{ sha: string; subject: string; message: string; at: string; files?: string[] }> };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
 export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "branch_moved"; head: string; pinned: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;

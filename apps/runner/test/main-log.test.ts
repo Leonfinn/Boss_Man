@@ -57,6 +57,16 @@ describe("main's first-parent log on the runner (BOS-1645)", () => {
     const withFiles = await ws.mainLog(project, "main", 1, [merge]);
     expect(withFiles.commits).toHaveLength(1);
     expect(withFiles.commits[0]!.files).toEqual(["apps.txt"]);
+    expect(r.commits[0]!.message).toBe(subject);
+
+    // A message with a blank line: the subject is only its first paragraph, so the whole message comes back too (Jane, BOS-1645).
+    const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const twoPart = `Merge "x" (${B})\n\nbar" (${A})`;
+    git(seed, "commit", "-q", "--allow-empty", "-m", twoPart);
+    git(seed, "push", "-q", "origin", "main");
+    const top = (await ws.mainLog(project, "main", 1)).commits[0]!;
+    expect(top.subject).toBe(`Merge "x" (${B})`);
+    expect(top.message).toBe(twoPart);
 
     // No copy of the repo, or no such branch: nothing to list, and no error.
     expect(await ws.mainLog("22222222-2222-4222-8222-222222222222", "main", 5)).toEqual({ commits: [] });
