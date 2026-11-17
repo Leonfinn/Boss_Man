@@ -196,6 +196,8 @@ done
   step "docs numbers are unique" node scripts/check-doc-numbers.mjs "$base"
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
+  # BOS-1728: the ratchet for bare sleeps, elapsed-time limits, fresh Date.now() sums and fixed-length reads in test files (CLAUDE.md "Writing tests").
+  if has '(^|/)test/|\.(test|spec)\.(ts|tsx|mjs|js)$|^scripts/(check-test-lines|test-lines-baseline)'; then step "test-lines ratchet" node scripts/check-test-lines.mjs; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
   # Compose files and CI workflows (BOS-1036): validated by the Docker CLI's compose plugin (no daemon, no socket) and actionlint.
   # A runner image built before they were added has neither tool: that is a SKIP naming the fix, not a failure.

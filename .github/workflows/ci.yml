@@ -171,6 +171,7 @@ jobs:
           node --test scripts/*.test.mjs
           node scripts/lint-migrations.mjs
           node scripts/check-in-memory-state.mjs
+          node scripts/check-test-lines.mjs
       - run: pnpm -r --no-bail typecheck
       # Runs even when typecheck failed, so one run reports every fault (BOS-1661).
       - if: ${{ !cancelled() }}
