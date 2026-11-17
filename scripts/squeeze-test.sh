@@ -23,7 +23,7 @@
 set -uo pipefail
 
 usage() { echo "usage: scripts/squeeze-test.sh <test file> [busy loops] [runs]" >&2; exit 2; }
-[ $# -ge 1 ] && [ $# -le 3 ] || usage
+if [ $# -lt 1 ] || [ $# -gt 3 ]; then usage; fi
 FILE=$1
 LOOPS_ARG=${2:-}
 RUNS=${3:-2}
@@ -37,7 +37,7 @@ command -v taskset >/dev/null 2>&1 || {
 for n in "$RUNS" "$STOP" ${LOOPS_ARG:+"$LOOPS_ARG"}; do
   case "$n" in '' | *[!0-9]*) echo "squeeze-test: '$n' is not a whole number" >&2; usage ;; esac
 done
-[ "$RUNS" -ge 1 ] && [ "$STOP" -ge 1 ] || usage
+if [ "$RUNS" -lt 1 ] || [ "$STOP" -lt 1 ]; then usage; fi
 
 ROOT=$(cd "${SQUEEZE_ROOT:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd -P)
 case "$FILE" in /*) abs=$FILE ;; *) abs=$PWD/$FILE ;; esac
@@ -64,6 +64,7 @@ LOGDIR=$(mktemp -d "$OUT/squeeze-test.XXXXXX") || exit 2
 # Each loop and the test run in their own process group (setsid), so one kill of the group takes everything under it.
 pids=()
 testpid=
+# shellcheck disable=SC2317  # runs from the traps below
 stop_all() {
   local p
   for p in ${pids[@]+"${pids[@]}"} ${testpid:+"$testpid"}; do kill -KILL -- "-$p" 2>/dev/null || true; done

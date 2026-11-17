@@ -35,7 +35,8 @@ alive() { pgrep -f "$1" >/dev/null 2>&1; }
 
 # Pass, fail and mixed runs: a line per run and the right exit code.
 FAKE_MODE=pass SQUEEZE_MARK=sqz-t1-$$ scripts/squeeze-test.sh "$FILE" 2 2 >"$T/out" || fail "passing runs exited non-zero"
-grep -q "run 1/2: pass" "$T/out" && grep -q "run 2/2: pass" "$T/out" || fail "no pass line per run"
+grep -q "run 1/2: pass" "$T/out" || fail "no pass line for run 1"
+grep -q "run 2/2: pass" "$T/out" || fail "no pass line for run 2"
 grep -q "2 pass, 0 fail, 0 no answer" "$T/out" || fail "wrong summary for passing runs"
 alive "sqz-t1-$$" && fail "busy loops left after a normal finish"
 
@@ -47,7 +48,8 @@ grep -q "AssertionError" "$T/out" || fail "failed run's output not shown"
 rm -f "$FAKE_STATE"
 rc=0; FAKE_MODE=flaky SQUEEZE_MARK=sqz-t3-$$ scripts/squeeze-test.sh "$FILE" 1 2 >"$T/out" || rc=$?
 [ "$rc" -eq 1 ] || fail "one failing run gave exit $rc, want 1"
-grep -q "run 1/2: FAIL" "$T/out" && grep -q "run 2/2: pass" "$T/out" || fail "flaky run lines wrong"
+grep -q "run 1/2: FAIL" "$T/out" || fail "flaky: no FAIL line for run 1"
+grep -q "run 2/2: pass" "$T/out" || fail "flaky: no pass line for run 2"
 
 # A file whose tests were all skipped proves nothing: an error, not a pass.
 rc=0; FAKE_MODE=skipped SQUEEZE_MARK=sqz-t3b-$$ scripts/squeeze-test.sh "$FILE" 1 1 >"$T/out" || rc=$?
