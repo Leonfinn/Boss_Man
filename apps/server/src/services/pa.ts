@@ -12,6 +12,8 @@ import { CHAT_REASON } from "./chat.js";
 export const JUDGEMENT = [/\bwhy\b/, /\bshould/, /\brecommend/, /\bwhat('s| is)? next\b/, /\bplan/, /\bprioriti[sz]/, /\bapprov/, /\bbudget/, /\bcost/, /\bmoney\b/, /\bspen[dt]/, /\bhir(e|ing)\b/, /\bfir(e|ing)\b/, /\bdeploy/, /\brisk/, /\bmerg(e|ing)/];
 export const REASK_MS = 10 * 60_000;
 export const HOLDING = "Passing this to the CEO.";
+/** First line of the escalation brief copied into the CEO's thread as an owner line; owner-answer search leaves these out. */
+export const PA_BRIEF_START = "Your PA is passing this on from the owner.";
 export const ASK_CEO = "[Ask the CEO]";
 /** BOS-1392: how much of the owner's recent conversation an escalation brief carries. */
 export const BATCH_MESSAGES = 5;
@@ -99,7 +101,7 @@ export function paService(
     const owners = await batch(msg);
     const asked = owners.length > 1 ? ["The owner's messages, oldest first:", ...(await Promise.all(owners.map(async (m) => `- ${await clock(m.createdAt)}${m.id === msg.id ? " (latest)" : ""}: ${m.text}`)))] : [`The owner asked: ${msg.text}`];
     const brief = [
-      "Your PA is passing this on from the owner.",
+      PA_BRIEF_START,
       ...(open ? [`Follow-up to the owner's message at ${await clock(open.at)} that you haven't answered yet; read them together: this may be the answer to that question or more detail on it.`] : []),
       ...asked,
       `What the PA found: ${found || "nothing it could stand behind"}${cites.length ? ` (cites: ${cites.map((c) => `${c.kind} ${c.id}`).join(", ")})` : ""}`,

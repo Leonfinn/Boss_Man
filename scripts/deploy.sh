@@ -78,7 +78,7 @@ require_readable() {
 
 # True when the files changed between two commits mean the runners need a new image.
 needs_runner() { # old new
-  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
+  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 }
 
 DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0 RECREATE=0 COMMIT=
@@ -247,6 +247,8 @@ main() {
   run git merge --ff-only --quiet "$new"
   rebuild_and_start || { RESULT=failed; MESSAGE="server not healthy after ${HEALTH_TIMEOUT}s"; write_status; print_rollback_help; exit 1; }
   say "The server is healthy."
+  # BOS-1588: keep the host's own copy of the deployer script current; a failure here never fails the deploy.
+  if ((! DRY)) && [[ -x scripts/install-deployer.sh ]]; then scripts/install-deployer.sh || say "Warning: the deployer copy was not refreshed (see above); the deploy itself is fine."; fi
 
   local do_runner=0
   case $RUNNER in

@@ -33,7 +33,7 @@ async function setup() {
     return true;
   });
   const ticket = async (patch: Partial<typeof tickets.$inferInsert> = {}) =>
-    (await db.insert(tickets).values({ companyId: co.company.id, projectId: project.id, title: "Second Claude account", systemState: "in_progress", assigneeAgentId: dev.id, branch: "bossman/x", ...patch }).returning())[0]!;
+    (await db.insert(tickets).values({ companyId: co.company.id, projectId: project.id, title: "Second Claude account", systemState: "in_progress", assigneeAgentId: dev.id, branch: "bossman/x", ownerSetupWhy: "The second account is used when the first runs out.", ownerSetupIfSkipped: "Nothing breaks; the second account just isn't used.", ...patch }).returning())[0]!;
   return { ...built, db, close, base, req, co, dev, project, ticket };
 }
 
@@ -61,7 +61,7 @@ describe("a ticket carries the owner's setup steps (DR-011)", () => {
     const c = await agentFor(ctx.dev.id);
     const tool = (await c.listTools()).tools.find((x) => x.name === "create_ticket")!;
     expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toContain("ownerSetup");
-    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Second account", ownerSetup: "Settings → Funding → Add funding source" } }));
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Second account", ownerSetup: "Settings → Funding → Add funding source", ownerSetupWhy: "Lets the team switch to a second account.", ownerSetupIfSkipped: "Nothing breaks." } }));
     const id = /([0-9a-f-]{36})/.exec(out)![1]!;
     expect((await row(id)).ownerSetup).toBe("Settings → Funding → Add funding source");
   });
@@ -74,7 +74,8 @@ describe("a ticket carries the owner's setup steps (DR-011)", () => {
     expect((await row(t.id)).ownerSetup).toBeNull();
     // Another move can carry the steps; the field is theirs to write.
     await ctx.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, t.id));
-    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it.", ownerSetup: "Settings → Funding → Add funding source\nSign in to the second plan" } }));
+    // Steps for the owner bring the usability gate (BOS-1571), which the author reports like any criterion.
+    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it. 1 pass: one-time setup, nothing to repeat.", ownerSetup: "Settings → Funding → Add funding source\nSign in to the second plan" } }));
     expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add funding source\nSign in to the second plan");
   });
 
@@ -153,13 +154,47 @@ describe("setup steps are checked like an owner card when they are written (DR-0
 
   it("create_ticket refuses vague steps, naming the step and the token to use, and takes good ones", async () => {
     const c = await agentFor(ctx.dev.id);
-    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Fewer check slots", ownerSetup: VAGUE } }));
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Fewer check slots", ownerSetup: VAGUE, ownerSetupWhy: "Frees check slots.", ownerSetupIfSkipped: "Nothing breaks." } }));
     expect(out).toMatch(/Step 1: names \.env without saying where it is/);
     expect(out).toMatch(/Step 2: says "Restart the notifications add-on"/);
     expect(out).toContain("{{host.env.file}}");
     expect(await ctx.db.select().from(tickets).where(eq(tickets.title, "Fewer check slots"))).toHaveLength(0);
-    const ok = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Fewer check slots", ownerSetup: GOOD } }));
+    const ok = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Fewer check slots", ownerSetup: GOOD, ownerSetupWhy: "Frees check slots.", ownerSetupIfSkipped: "Nothing breaks." } }));
     expect((await row(/([0-9a-f-]{36})/.exec(ok)![1]!)).ownerSetup).toBe(GOOD);
+  });
+
+  // BOS-1650: steps need their "why" and "if skipped" lines.
+  it("create_ticket and set_ticket_state refuse steps without why or if-skipped, and store them when given", async () => {
+    const c = await agentFor(ctx.dev.id);
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "No reason", ownerSetup: GOOD } }));
+    expect(out).toMatch(/ownerSetupWhy is missing/);
+    expect(out).toMatch(/ownerSetupIfSkipped is missing/);
+    expect(await ctx.db.select().from(tickets).where(eq(tickets.title, "No reason"))).toEqual([]);
+    const t = await ctx.ticket({ ownerSetupWhy: null, ownerSetupIfSkipped: null });
+    const noWhy = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Working.", ownerSetup: GOOD } }));
+    expect(noWhy).toMatch(/ownerSetupWhy is missing/);
+    expect((await row(t.id)).ownerSetup).toBeNull();
+    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Working.", ownerSetup: GOOD, ownerSetupWhy: "Frees slots.", ownerSetupIfSkipped: "Nothing breaks." } }));
+    expect(await row(t.id)).toMatchObject({ ownerSetup: GOOD, ownerSetupWhy: "Frees slots.", ownerSetupIfSkipped: "Nothing breaks." });
+  });
+
+  it("the move to review refuses stored steps that have no why (a ticket written before the fields existed)", async () => {
+    const c = await agentFor(ctx.dev.id);
+    const t = await ctx.ticket({ ownerSetup: GOOD, ownerSetupWhy: null, ownerSetupIfSkipped: null });
+    const out = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it. 1 pass: ok." } }));
+    expect(out).toMatch(/ownerSetupWhy is missing/);
+    expect((await row(t.id)).systemState).toBe("in_progress");
+    // The fields alone can be set, with no steps resent.
+    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Added the lines.", ownerSetupWhy: "Frees slots.", ownerSetupIfSkipped: "Nothing breaks." } }));
+    expect(await row(t.id)).toMatchObject({ ownerSetupWhy: "Frees slots.", ownerSetupIfSkipped: "Nothing breaks." });
+  });
+
+  it("update_ticket refuses new steps without why when the ticket has none stored", async () => {
+    const c = await ceoAgent();
+    const t = await ctx.ticket({ ownerSetupWhy: null, ownerSetupIfSkipped: null });
+    expect(textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: GOOD, reason: "Steps." } }))).toMatch(/ownerSetupWhy is missing/);
+    textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: GOOD, ownerSetupWhy: "Frees slots.", ownerSetupIfSkipped: "Nothing breaks.", reason: "Steps." } }));
+    expect(await row(t.id)).toMatchObject({ ownerSetup: GOOD, ownerSetupWhy: "Frees slots." });
   });
 
   it("set_ticket_state ownerSetup refuses vague steps and stores nothing", async () => {

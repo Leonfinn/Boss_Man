@@ -121,8 +121,8 @@ Staging runs a merged commit with an empty database, its own runner and no real 
 2. Sign in as the staging owner. The first time, create the account with a made-up email and password, never your live login. If sign-in returns to the login page with no error, `.env` lacks `BOSSMAN_INSECURE_COOKIES=1` (step 4).
 3. The board loads with no errors, and the side menu opens.
 4. Create a ticket and see it on the board.
-5. Create or open a staging company, check Settings → Runner shows its runner connected, assign the ticket and see the run start and finish.
-6. Open Settings → Server and runner → Updates: the version shown is the commit you deployed.
+5. Create or open a staging company, check Settings → Server and runner → Runner shows its runner connected, assign the ticket and see the run start and finish.
+6. Open Settings → Server and runner → This server: the version shown is the commit you deployed.
 7. Production check: `docker ps` shows production's containers unchanged, and production's runners are not listed in staging's Settings.
 
 ## What staging does not cover

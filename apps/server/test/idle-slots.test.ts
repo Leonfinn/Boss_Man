@@ -7,6 +7,7 @@ import type { RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, deploys, deployTargets, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { HELD_AGENT } from "../src/services/fair-share.js";
 import type { Limits } from "../src/services/scheduler.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
 import { WIP_REFUSED_REASON } from "../src/services/agent-wip.js";
@@ -135,13 +136,17 @@ describe("re-waking runs a restart cut off (BOS-574)", () => {
 
     await c.maintenance.cancel();
     const resumes = await c.wakesOf("resume");
-    expect(resumes.map((w) => w.ticketId).sort()).toEqual([annT, danT].sort());
+    // Bob booked a check, and still gets woken (BOS-1480): a restart no longer brings his booking forward.
+    expect(resumes.map((w) => w.ticketId).sort()).toEqual([annT, bobT, danT].sort());
+    // Dan has exactly one resume: the one recovery.onInterrupted queued, not a second from the sweep.
+    expect(resumes.filter((w) => w.ticketId === danT)).toHaveLength(1);
     const annWake = resumes.find((w) => w.ticketId === annT)!;
     expect(annWake).toMatchObject({ agentId: ann.id, resumeRunId: null });
     expect(annWake.note).toMatch(/runner update asked every agent to stop/);
     // Ann's carry-on is replaced by the wake; Bob keeps the check he booked.
     expect((await c.db.select().from(tickets).where(eq(tickets.id, annT)))[0]!.monitorAt).toBeNull();
     expect((await c.db.select().from(tickets).where(eq(tickets.id, bobT)))[0]!.monitorNote).toBe("quick check in the queue");
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, bobT)))[0]!.monitorAt).not.toBeNull();
   });
 });
 
@@ -405,11 +410,29 @@ describe("idle agents with startable Ready work (BOS-1180)", () => {
     await c.sweeps.run();
     const [ask] = await c.wakesOf(IDLE_AGENTS_REASON);
     expect(ask!.note).toContain("- Ann (worker)");
-    expect(ask!.note).toContain("held behind the assignee's cap for over 30 minutes");
+    expect(ask!.note).toContain("held by a WIP limit for over 30 minutes");
+    expect(ask!.note).toContain("held behind Zippy's own limit");
     expect(ask!.note).toContain("Held behind Zippy");
     expect(ask!.note).not.toContain("Only just held");
     const [h] = await c.db.select().from(tickets).where(eq(tickets.id, held));
     expect(h).toMatchObject({ assigneeAgentId: zippy.id, systemState: "ready" });
+  });
+
+  it("the held list uses the wake's own held age: a Ready ticket whose wake waits behind a busy agent shows after 30 minutes, with no wipHeldAt (BOS-1635)", async () => {
+    const c = (ctx = await setup());
+    await c.hire("Ann");
+    const zippy = await c.hire("Zippy");
+    const busyOn = await c.working("Zippy's long job", zippy.id, 0);
+    const waits = await c.working("Waits behind the run", zippy.id, 0, { systemState: "ready" });
+    const fresh = await c.working("Waited only a little", zippy.id, 0, { systemState: "ready" });
+    await c.run(zippy.id, busyOn, { lastEventAgoMs: MIN });
+    const held = (ticketId: string, ageMs: number) => ({ companyId: c.company.id, agentId: zippy.id, ticketId, reason: "assigned", status: "queued" as const, statusReason: HELD_AGENT, createdAt: new Date(Date.now() - ageMs) });
+    await c.db.insert(wakes).values([held(waits, 40 * MIN), held(fresh, 5 * MIN)]);
+    await c.sweeps.run();
+    const [ask] = await c.wakesOf(IDLE_AGENTS_REASON);
+    expect(ask!.note).toContain("Waits behind the run");
+    expect(ask!.note).toContain("its wake waits behind Zippy's live run");
+    expect(ask!.note).not.toContain("Waited only a little");
   });
 
   it("an idle agent whose only ticket waits on an unmerged fix is listed for the CEO", async () => {

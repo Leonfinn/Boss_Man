@@ -2,13 +2,14 @@ import { Fragment, useState } from "react";
 import { api } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
-import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
+import { isFailingCheck, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
 import { Section, useAction } from "./shared";
 
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
 type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; commit: string | null; startedAt: string | null };
 type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
-const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
+/** The server's role in plain words (BOS-1494); the technical name follows in small boxed text. */
+const ROLE_LABEL = { leader: "In charge", standby: "Standing by: another copy is in charge, so changes here are refused", single: "The only server" };
 
 /** Kept in the browser (BOS-924): the owner folds the reported facts away, and the choice stays as they left it. */
 const HOST_FACTS_OPEN_KEY = "bossman.hostFacts.open";
@@ -37,15 +38,7 @@ function reportedProblems(d: HostFactsView): { missing: string[]; failing: strin
     const v = f.value.trim();
     if (!v) { if (!missing.includes(k)) missing.push(k); }
     else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
-    else if (k.startsWith("check.")) {
-      const last = k.slice(k.lastIndexOf(".") + 1);
-      const wrong = CHECK_TROUBLE.test(last)
-        ? v !== "0"
-        : CHECK_OK.test(k)
-          ? !/^(ok|pass|passed|healthy)$/i.test(v)
-          : false;
-      if (wrong) failing.push(k);
-    }
+    else if (isFailingCheck(k, v)) failing.push(k);
   }
   for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim() && !missing.includes(k)) missing.push(k);
   return { missing, failing, addonsDown };
@@ -177,7 +170,7 @@ export function ThisHost() {
 
 type AutomaticEntryView = {
   address: string;
-  kind: "tool server" | "git host";
+  kind: "tool server" | "git host" | "Penpot";
   name: string;
   company: string | null;
   trusted: boolean;
@@ -197,6 +190,7 @@ type NetguardAllowView = {
 
 /** What an address the guard opens by itself is, in plain words. */
 function automaticLabel(e: AutomaticEntryView): string {
+  if (e.kind === "Penpot") return "Penpot (Settings → Tools)";
   return e.kind === "git host" ? `git host for the project "${e.name}"` : `tool server "${e.name}"`;
 }
 
@@ -221,12 +215,12 @@ export function NetguardAllow() {
       {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so these lists aren't used.</p>}
       <h3 style={{ fontSize: 15, fontWeight: 600 }}>Allowed automatically</h3>
       <p className="muted" style={{ fontSize: 14 }}>
-        Addresses Boss Man opens itself: each company's tool servers and its projects' git hosts. A company's entries are only reachable from that company's own runners.
+        Addresses Boss Man opens itself: each company's tool servers, its projects' git hosts and its Penpot. A company's entries are only reachable from that company's own runners.
       </p>
       {r.automatic === null ? (
         <p className="muted" data-testid="netguard-automatic-unknown">Boss Man couldn't work out the addresses it opens by itself just now.</p>
       ) : automatic.length === 0 ? (
-        <p data-testid="netguard-automatic-empty">Boss Man opens no extra addresses by itself: no tool servers, no project git addresses.</p>
+        <p data-testid="netguard-automatic-empty">Boss Man opens no extra addresses by itself: no tool servers, no project git addresses, no Penpot.</p>
       ) : (
         <ul data-testid="netguard-automatic" style={{ fontSize: 14 }}>
           {automatic.map((e) => (
@@ -298,8 +292,7 @@ export function ServerPanel() {
       <dl className="facts" data-testid="server-role">
         <dt>Role</dt>
         <dd>
-          <strong>{role}</strong>
-          {ROLE_NOTE[role]}
+          <strong>{ROLE_LABEL[role]}</strong> <code className="mono">role: {role}</code>
         </dd>
         <dt>Version</dt>
         <dd>

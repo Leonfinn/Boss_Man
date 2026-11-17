@@ -5,14 +5,14 @@ import { CompanyReviews } from "../components/ReviewPolicy";
 import { Section, useAction } from "./settings/shared";
 import { Runner } from "./settings/Runner";
 import { Credentials } from "./settings/Credentials";
-import { ToolServers, DeployTargets } from "./settings/Tools";
+import { ToolServers, DeployTargets, PenpotSettings } from "./settings/Tools";
 import { Funding, ProjectBudgets } from "./settings/Funding";
 import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
-import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
+import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-import { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy, WrapUpAction } from "./settings/System";
+import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
 import { ExportCompany, ImportCompany } from "./settings/Transfer";
@@ -24,16 +24,16 @@ export { ToolServers, DeployTargets } from "./settings/Tools";
 export { Funding, ProjectBudgets } from "./settings/Funding";
 export { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 export { Watchdog } from "./settings/Watchdog";
-export { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
+export { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 export { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-export { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy, WrapUpAction, TrialLines, useNow } from "./settings/System";
+export { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy, TrialLines, useNow } from "./settings/System";
 export { ServerPanel, ThisHost, NetguardAllow, deployerScriptLine } from "./settings/ThisHost";
 export { Devices } from "./settings/Devices";
 export { ExportCompany, ImportCompany } from "./settings/Transfer";
 
 // The Settings menu (BOS-1019, from the approved structure in BOS-1018): 9 pages in 3 groups, each a URL of its own.
 // "On wide screens it is a sticky menu column; on a phone #/settings opens on the menu itself.
-export type SettingsPage = "funding" | "secrets" | "tools" | "reviews" | "team" | "watchdog" | "permissions" | "system" | "transfer";
+export type SettingsPage = "funding" | "secrets" | "tools" | "reviews" | "team" | "watchdog" | "permissions" | "updates" | "limits" | "runner" | "email" | "server" | "devices" | "transfer";
 type SettingsEntry = { id: SettingsPage; label: string; hint: string; help: string; allCompanies?: boolean; jump?: Array<{ id: string; label: string }> };
 export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly SettingsEntry[] }> = [
   {
@@ -79,27 +79,16 @@ export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly Set
     ],
   },
   {
-    label: "Boss Man",
+    // BOS-1492 (from BOS-1491): the old one-page "Server and runner" is split into six pages; the group takes its name,
+    // so "Settings → Server and runner → Updates" and "→ Runner" stay true word for word.
+    label: "Server and runner",
     items: [
-      {
-        id: "system",
-        label: "Server and runner",
-        hint: "Updates, the runner, stop all work",
-        help: "This install's server and updates, and the company's runner.",
-        allCompanies: true,
-        jump: [
-          { id: "stop-all-h", label: "Stop all work" },
-          { id: "deploy-h", label: "Updates" },
-          { id: "runner-h", label: "Runner" },
-          { id: "run-limits-h", label: "Agents at once" },
-          { id: "check-queue-h", label: "Checks" },
-          { id: "email-h", label: "Outgoing email" },
-          { id: "server-h", label: "Server" },
-          { id: "this-host-h", label: "This host" },
-          { id: "netguard-allow-h", label: "Network guard" },
-          { id: "devices-h", label: "Your devices" },
-        ],
-      },
+      { id: "updates", label: "Updates", hint: "Stop all work, updates, the runner's update", help: "Stop all work, update this Boss Man and update the runners.", allCompanies: true },
+      { id: "limits", label: "Limits and checks", hint: "Agents at once, tickets in progress, checks", help: "How many agents and tickets run at once, and who runs the checks.", allCompanies: true },
+      { id: "runner", label: "Runner", hint: "The runner, and the disk for agents' work", help: "The company's runner: its state, its token and add-ons, and the disk for agents' work." },
+      { id: "email", label: "Email", hint: "The server that sends Boss Man's email", help: "The outgoing mail server Boss Man sends its email through.", allCompanies: true },
+      { id: "server", label: "This server", hint: "Version, this host, the network guard", help: "This server's version and role, the facts only you can give about its host, and the network guard.", allCompanies: true },
+      { id: "devices", label: "Devices and privacy", hint: "Your screens, and private details to block", help: "The screens you use Boss Man on, and details agents must never put in public text.", allCompanies: true },
       { id: "transfer", label: "Import and export", hint: "Move a company in or out as one file", help: "Move a company in or out of Boss Man as one file: a backup, a copy for another Boss Man, or a template.", allCompanies: true },
     ],
   },
@@ -120,6 +109,9 @@ export function settingsRedirect(route: readonly string[], companyId: string | u
     if (rest.length <= 1) return null;
     const [company, tab] = [rest[0], rest[1]];
     if (settingsEntry(tab)) return null;
+    // "Server and runner" was one page (`system`, BOS-1492): it is now a group of six. The old address opens the first
+    // of them, Updates, which keeps the company; the other five are one click away in the side list.
+    if (tab === "system") return `settings/${company}/updates`;
     // The two tabs that were split up (BOS-1018's old → new map): their links land on the page that took each part.
     if (tab === "access") return `settings/${company}/tools`;
     if (tab === "workflow") return `settings/${company}/reviews`;
@@ -202,10 +194,17 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
   const menu = (
     <nav aria-label="Settings" className={current ? "set-nav" : "set-nav set-nav-index"}>
       {SETTINGS_GROUPS.map((g) => (
-        <div key={g.label} className="set-group">
+        <div key={g.label} className={g.items.some((p) => p.id === current?.id) ? "set-group set-group-current" : current ? "set-group set-group-other" : "set-group"}>
           <h2 id={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`} className="set-group-label">
             {g.label}
           </h2>
+          {/* BOS-1655: on a short window the groups you are not in fold to this one row (CSS only); it opens the group's first page. */}
+          {current && !g.items.some((p) => p.id === current.id) ? (
+            <a className="set-group-fold" href={`#/${settingsPath(company?.id, g.items[0]!.id)}`}>
+              <span>{g.label}</span>
+              <span className="set-item-chevron" aria-hidden="true">›</span>
+            </a>
+          ) : null}
           <ul aria-labelledby={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`}>
             {g.items.map((p) => (
               <li key={p.id}>
@@ -253,6 +252,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     tools: company ? (
       <div key={company.id} style={{ display: "contents" }}>
         <ToolServers company={company} />
+        <PenpotSettings company={company} />
         <DeployTargets company={company} />
       </div>
     ) : (
@@ -289,35 +289,49 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
       <div key={company.id} style={{ display: "contents" }}>
         <div className="embedded-page">{children}</div>
         <PermissionJudgeSetting company={company} onChanged={onChanged} />
+        <AutoTempCleanupSetting company={company} onChanged={onChanged} />
         <SecondOpinionSetting company={company} />
         <FenceSetting company={company} onChanged={onChanged} />
       </div>
     ) : (
       line
     ),
-    system: (
+    updates: (
       <>
-        <StopAllWork />
         <SelfDeploy go={go} />
-        {company ? (
-          <div key={company.id} style={{ display: "contents" }}>
-            <RunnerUpdate />
-            <Runner company={company} />
-            <WorkspaceDisk company={company} onChanged={onChanged} />
-          </div>
-        ) : (
-          <div style={{ display: "contents" }}>
-            <RunnerUpdate />
-            {line}
-          </div>
-        )}
-        <RunLimits />
-        <WipLimits />
+        <StopAllWork />
+      </>
+    ),
+    limits: (
+      <>
+        <RunLimits updatesHref={companyId ? `#/${settingsPath(companyId, "updates")}` : undefined} />
+        <WipLimits company={company ?? undefined} onChanged={onChanged} />
         <CheckQueueSetting />
+      </>
+    ),
+    runner: company ? (
+      <div key={company.id} style={{ display: "contents" }}>
+        <Runner company={company} />
+        <WorkspaceDisk company={company} onChanged={onChanged} />
+      </div>
+    ) : (
+      line
+    ),
+    email: (
+      <>
         <EmailSetting />
+        <MainCiSetting />
+      </>
+    ),
+    server: (
+      <>
         <ServerPanel />
         <ThisHost />
         <NetguardAllow />
+      </>
+    ),
+    devices: (
+      <>
         <Devices />
         <PrivateDetails />
       </>

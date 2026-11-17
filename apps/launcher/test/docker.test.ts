@@ -98,6 +98,15 @@ describe("docker network hold calls (BOS-576)", () => {
   });
 });
 
+/** Waits for the other side to be ready (not a fixed sleep: GitHub's runners are slower), failing after a deadline. */
+async function until(ready: () => boolean, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for the fake Docker socket");
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+
 /** A Docker socket whose /events answers the given lines, then holds the stream open until told to end it. */
 function fakeEvents(lines: string[], status = 200) {
   const dir = mkdtempSync(path.join(tmpdir(), "bm-dock-ev-"));
@@ -125,7 +134,7 @@ describe("docker events (BOS-335)", () => {
     const f = fakeEvents([]);
     const abort = new AbortController();
     const done = dockerClient(f.sock).events({ type: "container", action: ["start", "restart", "die"], label: "boss-man.launcher=1" }, 1_700_000_000, () => undefined, () => undefined, abort.signal);
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => f.seen.length > 0);
     const filters = decodeURIComponent(f.seen[0]!);
     expect(filters).toContain("since=1700000000");
     expect(filters).toContain('"type":["container"]');
@@ -140,7 +149,7 @@ describe("docker events (BOS-335)", () => {
     const abort = new AbortController();
     const got: string[] = [];
     const done = dockerClient(f.sock).events({ type: "container" }, 0, (e) => got.push(e.Action ?? "?"), () => undefined, abort.signal);
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => got.length >= 2);
     expect(got).toEqual(["restart", "start"]);
     abort.abort();
     await done;
@@ -168,5 +177,55 @@ describe("docker events (BOS-335)", () => {
     const errors: string[] = [];
     await dockerClient(f.sock).events({ type: "container" }, 0, () => undefined, (e) => errors.push(e.message), abort.signal);
     expect(errors.join(" ")).toContain("HTTP 500");
+  });
+});
+
+/** A Docker socket whose container reports running for `runningFor` polls, then stops with `exitCode`. */
+function waitingSocket(opts: { runningFor: number; exitCode: number }) {
+  const dir = mkdtempSync(path.join(tmpdir(), "bm-dock-wait-"));
+  const sock = path.join(dir, "d.sock");
+  const seen: string[] = [];
+  let polls = 0;
+  const server = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    const send = (st: number, b?: unknown) => {
+      res.statusCode = st;
+      res.end(b === undefined ? "" : JSON.stringify(b));
+    };
+    // A `POST /wait` would block here (the bug): fail the test's expectation by answering it.
+    if (req.method === "POST") return send(200, { StatusCode: opts.exitCode });
+    polls++;
+    const running = polls <= opts.runningFor;
+    return send(200, { Id: "c1", State: { Running: running, ExitCode: running ? 0 : opts.exitCode } });
+  });
+  server.listen(sock);
+  cleanup.push(() => {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return { sock, seen, polls: () => polls };
+}
+
+describe("docker wait for the Claude pack installer (BOS-972)", () => {
+  it("polls the container state (never POST /wait, whose 60 s socket timeout would kill a minutes-long npm ci)", async () => {
+    const f = waitingSocket({ runningFor: 3, exitCode: 0 });
+    const res = await dockerClient(f.sock, { pollMs: 1, maxMs: 5000 }).wait("c1", 5000);
+    expect(res).toEqual({ stopped: true, exitCode: 0 });
+    // Several looks, not one blocking call: it polled until the container stopped.
+    expect(f.polls()).toBe(4);
+    expect(f.seen.some((s) => s === "POST /containers/c1/wait?condition=not-running")).toBe(false);
+  });
+
+  it("returns the installer's non-zero exit code", async () => {
+    const f = waitingSocket({ runningFor: 1, exitCode: 1 });
+    expect((await dockerClient(f.sock, { pollMs: 1, maxMs: 5000 }).wait("c1", 5000)).exitCode).toBe(1);
+  });
+
+  it("gives up at the caller's own deadline and reports not-stopped", async () => {
+    const f = waitingSocket({ runningFor: 1_000_000, exitCode: 0 });
+    const res = await dockerClient(f.sock, { pollMs: 2, maxMs: 5000 }).wait("c1", 30);
+    expect(res).toEqual({ stopped: false, exitCode: null });
+    // It waited the whole budget (roughly), never a tight loop.
+    expect(f.polls()).toBeGreaterThan(1);
   });
 });

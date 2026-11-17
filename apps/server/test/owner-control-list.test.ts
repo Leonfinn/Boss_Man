@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
+import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_SECTIONS, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
 import { checkAsk } from "../src/services/decisions.js";
 import { lintOwnerSteps } from "../src/services/steps.js";
 
@@ -39,7 +39,7 @@ describe("R7: a card names a button that doesn't exist", () => {
       "Open the ticket and press Approve and merge.",
       'Click "Request changes" and write what is wrong.',
       "Click Settings, then click Server and runner.",
-      "Press the Deploy latest button.",
+      "Press the Review and deploy button.",
       "Press Save again, then press Enter.",
       "Click Open Acme's Kanban.",
       "Press Update runners (finish runs first).",
@@ -103,6 +103,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Agents.tsx": "Agents",
   "pages/Auth.tsx": "Log in",
   "pages/Board.tsx": "Board",
+  // A project's Budget tab (also shown on Settings → Funding).
+  "pages/ProjectBudget.tsx": "Board",
   "pages/Chat.tsx": "Chat",
   "pages/Decisions.tsx": "Decisions",
   "pages/Features.tsx": "Features",
@@ -131,6 +133,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Projects.tsx": "Projects",
   "pages/settings/Runner.tsx": "Server and runner",
   "pages/settings/System.tsx": "Server and runner",
+  "pages/settings/CheckWorkers.tsx": "Server and runner",
+  "pages/settings/SlotSplit.tsx": "Server and runner",
   "pages/settings/Team.tsx": "Team and CEO",
   "pages/settings/ThisHost.tsx": "Server and runner",
   "pages/settings/Tools.tsx": "Tools and deploys",
@@ -138,6 +142,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
+  "pages/SetupClaude.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
   "pages/Ticket.tsx": "Ticket",
   "pages/Wiki.tsx": "Wiki",
@@ -164,16 +169,16 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>RunLimits": "Server and runner",
   "pages/Settings.tsx>WipLimits": "Server and runner",
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
+  "pages/Settings.tsx>MainCiSetting": "Server and runner",
   "pages/Settings.tsx>PrivateDetails": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
-  "pages/Settings.tsx>RunnerUpdate": "Server and runner",
-  "pages/settings/System.tsx>WrapUpAction": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
   "pages/Settings.tsx>EmailSetting": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
   "pages/Settings.tsx>ToolServers": "Tools and deploys",
   "pages/Settings.tsx>DeployTargets": "Tools and deploys",
+  "pages/Settings.tsx>PenpotSettings": "Tools and deploys",
   "pages/Settings.tsx>Funding": "Funding",
   "pages/Settings.tsx>ProjectBudgets": "Funding",
   "pages/Settings.tsx>FundingCards": "Funding",
@@ -187,6 +192,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>AdviceTimeout": "Team and CEO",
   "pages/Settings.tsx>StandingRules": "Team and CEO",
   "pages/Settings.tsx>PermissionJudgeSetting": "Permissions",
+  "pages/Settings.tsx>AutoTempCleanupSetting": "Permissions",
   "pages/Settings.tsx>FenceSetting": "Permissions",
   "pages/Settings.tsx>SecondOpinionSetting": "Permissions",
   "pages/Settings.tsx>Watchdog": "Watchdog",
@@ -212,11 +218,16 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   "Merge queue": ["Merges", "Queued checks"],
   // Retire is an item in the row's ⋯ menu (RowMenu), whose label is built from the agent's name (BOS-1256).
   Agents: ["Retire"],
+  // The heading of the last Settings group (BOS-1492): cards still say "Click Settings, then click Server and runner".
+  Settings: ["Server and runner"],
   // The Board's filters panel (BOS-1194): Working now is the panel's switch, labelled by a heading span, so its
   // text is not a <button>'s. The test checks the switch is still in FilterPanel.tsx instead.
   Board: ["Working now"],
   // The Unread and Read filter chips are drawn by one helper (chip) that adds the count, so their text is a variable (BOS-1277).
   Notifications: ["Unread", "Read"],
+  // The Updates card's buttons come from updateStatus() in settings/updates.tsx as `label:` values and are drawn by
+  // one loop in System.tsx, so no <button> holds their text (BOS-1238). The tests in updates.test.tsx check the labels.
+  "Server and runner": ["Review and deploy", "Check for updates now", "Cancel queued runner update", "Cancel the update", "Stop making room", "Lift the hold now"],
 };
 
 function skipString(s: string, i: number): number {
@@ -418,6 +429,32 @@ describe("OWNER_CONTROLS matches the web app", () => {
     expect(rendered.filter((n) => !SITE_SCREEN[`pages/Settings.tsx>${n}`]), "add each to SITE_SCREEN with its Settings tab").toEqual([]);
   });
 
+  // BOS-1649: the section headings a card's path may name after a tab (OWNER_SECTIONS), kept in step with the pages.
+  const webFiles = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? webFiles(join(dir, e.name)) : /\.tsx$/.test(e.name) ? [join(dir, e.name)] : []));
+  const pageText = webFiles(join(WEB, "pages")).map((f) => readFileSync(f, "utf8")).join("\n");
+  const listedSections = Object.values(OWNER_SECTIONS).flat() as string[];
+
+  it("lists no section heading the app no longer shows", () => {
+    const stale = listedSections.filter((h) => !pageText.includes(`"${h}"`) && !pageText.includes(`>${h}<`) && !pageText.includes(`>${h}\n`));
+    expect(stale, `remove from OWNER_SECTIONS in packages/shared/src/owner-controls.ts (or fix its spelling): ${stale.join(" | ")}`).toEqual([]);
+  });
+
+  it("lists every section heading the Settings pages show", () => {
+    // Only the pages a Settings tab or a project tab shows; other screens (Skills, Agents) have their own headings.
+    const settingsText = webFiles(join(WEB, "pages/settings")).map((f) => readFileSync(f, "utf8")).join("\n")
+      + ["Settings", "Funding", "Secrets", "Rules", "ProjectBudget"].map((n) => readFileSync(join(WEB, `pages/${n}.tsx`), "utf8")).join("\n");
+    const shown = [
+      ...[...settingsText.matchAll(/<Section\s+id="[^"]+"\s+title="([^"{]+)"/g)].map((m) => m[1]!),
+      ...[...settingsText.matchAll(/<h3[^>]*>([A-Z][^<{]+)<\/h3>/g)].map((m) => m[1]!.trim()),
+    ];
+    expect(shown.length).toBeGreaterThan(20); // the scan found the headings, so an empty pass can't hide a miss
+    // Headings of other screens (a project's brief, an agent's page) are not on a Settings tab: leave those out here.
+    const OTHER = new Set(["New project", "Archive this project", "Archived", "Project brief", "Export", "Your devices"]);
+    const missing = shown.filter((h) => !listedSections.includes(h) && !OTHER.has(h) && !h.startsWith("Export "));
+    expect(missing, `add each to OWNER_SECTIONS under its tab in packages/shared/src/owner-controls.ts: ${missing.join(" | ")}`).toEqual([]);
+  });
+
   it("knows every screen a step can name: the side menu, the Settings tabs and the project tabs", () => {
     expect([...OWNER_MENU]).toEqual(sidebar);
     expect([...OWNER_TABS.Settings]).toEqual(tabs);
@@ -442,7 +479,7 @@ describe("OWNER_CONTROLS matches the web app", () => {
 
   it("puts a component on the screens it's shown on, not its file's", () => {
     expect([...screensOf("pages/settings/Projects.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
-    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner", "Setup"]);
+    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner"]);
     expect([...screensOf("pages/Funding.tsx#Funding")]).toEqual(["Funding"]);
     // A funding source is added on Funding (and in Setup), the place for it since BOS-1019.
     expect([...screensOf("pages/settings/Funding.tsx#Funding")].sort()).toEqual(["Funding", "Setup"]);
@@ -466,5 +503,26 @@ describe("OWNER_CONTROLS matches the web app", () => {
       listed(s).filter((l) => !found.get(s)?.has(l) && !NOT_FROM_BUTTONS[s]?.includes(l)).map((l) => `${s}: ${l}`),
     );
     expect(stale, `remove from packages/shared/src/owner-controls.ts, or fix FILE_SCREEN, PAGE_SCREEN or SITE_SCREEN: ${stale.join(" | ")}`).toEqual([]);
+  });
+});
+
+// BOS-1494 (Morph's review, item 10): developer words may stay in help text or boxed technical names, never in a label.
+describe("owner labels use plain words", () => {
+  const DEVELOPER_WORDS = /\blegacy\b|merge train|leader lock|worktrees?\b|quota hold|no funding set|RUNNER_ADDONS|server queue/i;
+
+  it("no button, field label, menu entry or tab uses a developer word", () => {
+    const labels = [
+      ...tsx.flatMap((f) => {
+        const src = readFileSync(f, "utf8");
+        return [...buttonLabels(src), ...fieldLabels(src)].map((l) => `${rel(f)}: ${l}`);
+      }),
+      ...Object.values(OWNER_CONTROLS).flat(),
+      ...Object.values(OWNER_FIELDS).flat(),
+      ...OWNER_MENU,
+      ...Object.values(OWNER_TABS).flat(),
+    ];
+    expect(labels.length).toBeGreaterThan(500); // the scan found the app's labels, so an empty pass can't hide a miss
+    const bad = labels.filter((l) => DEVELOPER_WORDS.test(l.replace(/^[^:]+\.tsx: /, "")));
+    expect(bad).toEqual([]);
   });
 });

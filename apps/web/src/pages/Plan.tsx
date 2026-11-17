@@ -172,8 +172,9 @@ export function Causes({ plan }: { plan: PlanData }) {
   const byId = new Map(plan.nodes.map((n) => [n.id, n]));
   const [showAll, setShowAll] = useState(() => readChoice(CAUSES_OPEN_KEY));
   const [rolled, setRolled] = useState(() => readChoice(CAUSES_ROLLED_KEY));
-  if (!causes.length) return null;
-  const total = causes.length;
+  const hold = plan.startHold ?? null;
+  if (!causes.length && !hold) return null;
+  const total = causes.length + (hold ? 1 : 0);
   const shown = showAll ? causes : causes.slice(0, CAUSES_SHOWN);
   const toggleAll = () => {
     const next = !showAll;
@@ -199,6 +200,16 @@ export function Causes({ plan }: { plan: PlanData }) {
       </div>
       <div id="causes-body" hidden={rolled} style={rolled ? { display: "none" } : { display: "flex", flexDirection: "column", gap: 10 }}>
       <ul className="pl-causes" id="causes-list">
+        {hold && (
+          <li>
+            <span className="tag amber">New starts held</span> {hold.reason}{" "}
+            <span className="muted">
+              ({hold.tickets.length} Ready ticket{hold.tickets.length === 1 ? "" : "s"} wait: {hold.tickets.map((h, i) => (
+                <span key={h.id}>{i ? ", " : ""}<a href={h.link}>{h.title}</a></span>
+              ))}); they start by themselves when the line is shorter
+            </span>
+          </li>
+        )}
         {shown.map((c) => {
           const waiting = plan.nodes.filter((n) => n.causes.includes(c.id));
           return (
@@ -241,7 +252,7 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
     ? `Last updated ${new Date(updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (${ageLabel(now - updatedAt)})`
     : "";
   return (
-    <>
+    <div className="plan-page">
       <header className="page-head">
         <div>
           <h1>Plan</h1>
@@ -255,10 +266,10 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
         <p className="muted">No open task waits on anything. Add what a task waits on from its page.</p>
       ) : p ? (
         <>
-          <p className="muted" style={{ fontSize: 14 }}>
-            {blocked} blocked task{blocked === 1 ? "" : "s"} across {p.nodes.length} items.
-          </p>
           <div className="pl-meta">
+            <span className="muted pl-count" style={{ fontSize: 14 }}>
+              {blocked} blocked task{blocked === 1 ? "" : "s"} across {p.nodes.length} items.
+            </span>
             <span className="muted pl-updated" style={{ fontSize: 13 }}>{updated}</span>
             <button type="button" className="btn pl-refresh" onClick={() => plan.reload()}>
               Refresh
@@ -268,6 +279,6 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
           <Graph plan={p} />
         </>
       ) : null}
-    </>
+    </div>
   );
 }

@@ -3,12 +3,12 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
-import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type WorkspaceDiff } from "@boss-man/shared";
+import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, parseRepoUrl, ticketRef, type MergeResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { OWNER_MESSAGE_MAX, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
@@ -26,13 +26,16 @@ import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
-import { AnswerError, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
+import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
+import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
-import { getHold, maintenanceService } from "./services/maintenance.js";
+import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
+import { runnerBusy } from "./services/runner-busy.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { failuresForStatus } from "./services/merge-failures.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
@@ -57,13 +60,16 @@ import { deploysService } from "./services/deploys.js";
 import { runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { holdView } from "./services/review-holds.js";
-import { isSignoffPending, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
+import { type CI_TIMING, isSignoffPending, MERGE_WAIT_MS, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
+import { CI_TIMING as CI_PUBLISH_TIMING } from "./services/ci-publish.js";
+import { ciPreflightService } from "./services/ci-preflight.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
+import { limitRequeue } from "./services/limit-requeue.js";
 import { record } from "./services/activity.js";
-import { closeFenceCard, closeFenceUnavailableCard } from "./services/fence-default.js";
+import { chooseFence, chooseGuard, closeFenceCard, closeFenceUnavailableCard, featureStates } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
 import { refreshBriefs } from "./services/project-brief.js";
 import { planningService } from "./services/planning.js";
@@ -77,7 +83,11 @@ import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
+import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
+import { mainCiService } from "./services/main-ci.js";
+import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
+import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
@@ -87,22 +97,32 @@ import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { ownerRepliesService } from "./services/owner-replies.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
+import { ownerAnswerEmbedLoop } from "./services/owner-answers.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
+import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { PrivateDetailsRejected, privateDetailsService } from "./services/private-details.js";
-import type { ScanListWarning } from "./services/scan-list.js";
+import { scanListReader, type ScanListWarning } from "./services/scan-list.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
+import { checkWorkersService } from "./services/check-workers.js";
+import { checkWorkerSocketRoutes } from "./routes/check-worker-socket.js";
+import { checkBundleRoutes } from "./routes/check-bundles.js";
+import { checkBundleStore } from "./services/check-bundles.js";
+import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
+import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
+import { retierWaiting } from "./services/merge-train.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
+import { PENPOT_ENV, penpotRoutes } from "./routes/penpot.js";
 import { mailerService } from "./services/mailer.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
@@ -110,7 +130,7 @@ import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
 import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
-import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, phoneApproveRoutes } from "./routes/devices-notifications.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -121,6 +141,7 @@ import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
+import { phoneLoginService } from "./services/phone-login.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
@@ -149,10 +170,14 @@ export type AppOptions = {
   semanticDebounceMs?: number;
   /** Runner heartbeat interval; tests shorten it. */
   heartbeatMs?: number;
+  /** BOS-1436: where check bundles wait for their worker (else BOSSMAN_CHECK_BUNDLE_DIR, else under the OS temp folder); tests give their own. */
+  checkBundleDir?: string;
   /** Launch-safety limits (R30); defaults in DEFAULT_LIMITS. */
   limits?: Partial<Limits>;
   /** Start a scheduler pass as soon as a wake is queued; on unless a test turns it off (R85). */
   tickOnWake?: boolean;
+  /** Hold every run until its runner's report proves the fence and the network guard (DR-049 point 1). main.ts sets it; most tests build without a runner report. */
+  requireRunnerProof?: boolean;
   /** Where runners put each ticket's workspace. */
   workspaceRoot?: string;
   /** Stale-blocker and stalled-run thresholds (R21, R32). */
@@ -169,6 +194,8 @@ export type AppOptions = {
   diskLimits?: Partial<DiskLimits>;
   /** Outbound HTTP, e.g. phone pushes; tests replace it. */
   fetch?: typeof fetch;
+  /** BOS-1070: shorter waits for GitHub CI at the merge gate; tests only. */
+  ciTiming?: Partial<typeof CI_TIMING>;
   /** The portal's own address for share links, e.g. http://192.0.2.10:3111; without it links use the owner's address. */
   portalUrl?: string;
   /** Rate limits on the public feedback portal; tests lower them. */
@@ -290,13 +317,17 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   const models = modelsService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
-  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch, lookup: opts.lookup });
+  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch, lookup: opts.lookup, penpotUrl: (companyId) => secretsSvc.grantedValue(companyId, PENPOT_ENV.url) });
+  // BOS-1582: the guard opens the company's Penpot from its PENPOT_URL grant, so a change to that grant re-sends the list.
+  secretsSvc.onGrantChange(({ companyId, envName }) => {
+    if (envName === PENPOT_ENV.url) void launch.syncAllow(companyId);
+  });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
   // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
-  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
+  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), phoneTest: () => notes.testStatus(), now: opts.now });
   // The host deployer's add-on report (BOS-419) is merged in; the worse state wins when the two disagree.
   const addonFacts = async () => {
     const own = await addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
@@ -316,7 +347,8 @@ export async function buildApp(opts: AppOptions) {
     if (leader.isLeader()) return;
     const path = req.url.split("?")[0]!;
     const write = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-    const blocked = path.startsWith("/api/runner/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
+    // Check bundles (BOS-1436) live in the leader's folder only, so a standby refuses their downloads too.
+    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path.startsWith("/api/check-bundles/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
@@ -327,7 +359,35 @@ export async function buildApp(opts: AppOptions) {
     notify: (n) => notes.notify({ companyId: null, agentId: null, level: n.level, title: n.title, body: n.body, link: n.link }),
     isSet: () => privateDetails.isSet(),
   };
-  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+  // Check workers on other machines (DR-060, BOS-1435): their own table, token and socket; they take checks the runner has no slot for.
+  const checkWorkersSvc = checkWorkersService(db);
+  // BOS-1436: a worker's code comes as a git bundle the company runner packs and uploads here. Nothing in the folder
+  // outlives a restart usefully (a worker asks again), so it starts empty.
+  const bundleStore = checkBundleStore(opts.checkBundleDir ? { dir: opts.checkBundleDir } : {});
+  bundleStore.clear();
+  const checks = checkDispatcher(db, {
+    // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
+    drainPending: async () => {
+      const h = runnerCardHold(await getHold(db));
+      return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
+    },
+    scanList: () => privateDetails.forRunner(),
+    scanListWarning,
+    send: (id, c) => runners.send(id, c),
+    isConnected: (id) => runners.isConnected(id),
+    can: (id) => runners.can(id, "check-jobs"),
+    wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
+    workers: checkWorkersSvc,
+    bundles: {
+      store: bundleStore,
+      canPack: (id) => runners.can(id, "check-bundle"),
+      // A first (full) bundle of a large repo takes a minute or two to pack and upload.
+      pack: async (runnerId, cmd) => CheckBundleInfo.parse(await runners.request<unknown>(runnerId, (requestId) => ({ type: "check.bundle", requestId, ...cmd }), 10 * 60_000)),
+    },
+    isLeader: () => leader.isLeader(),
+  });
+  await checkWorkerSocketRoutes(app, checkWorkersSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
+  await checkBundleRoutes(app, db, { store: bundleStore, runners, workers: checkWorkersSvc, checks });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -347,13 +407,16 @@ export async function buildApp(opts: AppOptions) {
     afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
     // DR-052: go-live setup cards are filled and checked with the host's facts, like every other owner card.
     // hostFacts is created just below; this only runs on a later release pass.
-    ownerSetupFacts: () => ownerSetupFacts(hostFacts),
+    // BOS-1650: the values behind `[when <fact>]` steps come from the same record server_status shows; null when it can't be read.
+    ownerSetupFacts: async () => ({ ...(await ownerSetupFacts(hostFacts)), when: { "network guard allow line can go": await netguardAllow().then((r) => (r ? r.lineCanGo : null)).catch(() => null) } }),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
   const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
   const deviceProfiles = deviceProfilesService(db);
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
+    // BOS-1648: the CEO is woken once when Boss Man can't tell whether a runner update is needed.
+    wake: (agentId, input) => scheduler.notify(agentId, input),
     // Both colours, the same probe Settings shows: the runner trial ends as soon as the standby is stopped (BOS-953). `build` is defined further down; this only runs per request.
     colours: () => probeColours(colour(), build),
     // Quiet = no agent run in flight (an owner chat doesn't count) and no merge landing: a few seconds' outage of the database or proxy would cut them short (BOS-487).
@@ -430,6 +493,7 @@ export async function buildApp(opts: AppOptions) {
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
+    requireRunnerProof: opts.requireRunnerProof,
     log: (m, companyId) => (companyId ? app.log.error({ companyId }, m) : app.log.error(m)),
     // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
     alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
@@ -442,7 +506,7 @@ export async function buildApp(opts: AppOptions) {
     rollback: (slug) => launch.rollback(slug),
     // BOS-993: the launcher is told "Checks at once" first, so a recreate always uses the current setting (it also covers a launcher that lost it).
     recreate: async (slug) => {
-      await launch.setChecks(await checkQueueSvc.slots()).catch(() => undefined); // an older launcher has no such call: the recreate still goes ahead
+      await launch.setChecks(await checkQueueSvc.slots(), await readRunnerAgents(db, scheduler.limits)).catch(() => undefined); // an older launcher has no such call: the recreate still goes ahead
       return launch.recreate(slug);
     },
     connected: async (companyId) => {
@@ -452,6 +516,8 @@ export async function buildApp(opts: AppOptions) {
     settled: () => scheduler.settled(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
+    cancelRun: (runId) => runsSvc.cancel(runId, undefined, undefined),
     tellRunning: async (text) => {
       const live = await db.select({ id: runsTable.id, companyId: runsTable.companyId }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
       for (const r of live) {
@@ -499,6 +565,7 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     connectedSince: (id) => runners.connectedSince(id),
     launcher: (companyId) => launch.status(companyId),
+    launcherOn: () => launch.enabled,
   });
   const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
   decisionsSvc.setPermissionLog(permLog);
@@ -536,6 +603,8 @@ export async function buildApp(opts: AppOptions) {
     memory,
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
+    mergeFailures: (id) => failuresForStatus(db, id),
+    mergeTrain: (id) => mergeTrainStatus(db, id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -577,9 +646,12 @@ export async function buildApp(opts: AppOptions) {
   const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replyLane: (agentId, w) => scheduler.replyLaneFor(agentId, { reason: "message", ...w }), replies: ownerReplies });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
   app.addHook("onClose", async () => semantic.stop());
+  // Owner-answer meaning search (BOS-1593): embeds new owner answers every two minutes for companies that switched it on.
+  const ownerAnswerEmbeds = ownerAnswerEmbedLoop(db, { companies: () => semantic.ownerAnswerCompanies(), embedder: (companyId) => semantic.ownerAnswerEmbedder(companyId), log: (m) => app.log.warn(m) });
+  app.addHook("onClose", async () => (ownerAnswerEmbeds.stop(), await ownerAnswerEmbeds.drain()));
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
-  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc });
+  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status(), runLimit: async () => (await scheduler.limitsInForce()).allCompanies });
   const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -685,7 +757,21 @@ export async function buildApp(opts: AppOptions) {
           if (!event.error || event.interrupted) return;
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
+          // A run the account refused for a usage limit goes back in the queue, held to the real reset, once per window (BOS-1438).
+          // A second refusal in the same window is the account card instead.
+          const requeued = await limitRequeues.afterRun(event.runId);
+          if (run && requeued.outcome === "second_refusal") {
+            await alerts.raise({
+              companyId: run.companyId,
+              kind: "account_limit",
+              question: `${requeued.account}: a run was refused again on ${requeued.window} after its work was already put back to wait for the reset.`,
+              ticketId: run.ticketId,
+              about: [run.agentId],
+              cause: { account: { fundingSourceId: requeued.fundingSourceId, name: requeued.account, window: requeued.window }, agents: [run.agentId] },
+            });
+          }
         })
+        .then(() => limitRequeues.releaseReady())
         // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
         .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
@@ -733,6 +819,8 @@ export async function buildApp(opts: AppOptions) {
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
+    priorityWatch: () => priorityWatch.run(),
+    mergeStall: () => mergeStall.run(),
     // Also flags a card whose own ticket changed state since it was raised (BOS-1161); that never closes it.
     clearAlerts: async () => {
       const wakeAgent = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number });
@@ -749,6 +837,8 @@ export async function buildApp(opts: AppOptions) {
     featuresWithoutTickets: async () => {
       let raised = 0;
       for (const companyId of [...new Set((await db.select({ id: featuresTable.companyId }).from(featuresTable)).map((r) => r.id))]) {
+        // BOS-1388: the same pass deletes unconfirmed portal posts whose emailed link ran out.
+        await feedback.purgeUnconfirmed().catch((err) => app.log.error({ err }, "deleting expired unconfirmed portal posts failed"));
         raised += await feedback.raiseFeatureNoTicket(companyId, async (f) => {
           const column = featureHorizon(f);
           const where = column === "now" ? "on the roadmap's Now column" : column === "next" ? "on the roadmap's Next column" : "in progress";
@@ -784,6 +874,8 @@ export async function buildApp(opts: AppOptions) {
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // The run time limit stops a run through the Stop button's own cancel (BOS-846).
     cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
+    // BOS-1647: a push that landed but was never recorded is recorded, wherever the ticket sits now.
+    recordLanded: (ticketId) => review.recordLanded(ticketId).then((r) => !!r),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId, adopt) => review.startLanding(ticketId, adopt ? "Boss Man (the server restarted; carrying on with the merge check that is still running)" : "Boss Man (the server restarted during this merge; starting it again)", undefined, adopt ? { adopt } : undefined),
@@ -830,6 +922,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
   // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
   // funding source, or the one the run used when it says so.
+  const limitRequeues = limitRequeue(db, { now: opts.now ?? (() => new Date()) });
   const loops = loopGuards(db, {
     limits: opts.loopLimits,
     now: opts.now,
@@ -858,6 +951,7 @@ export async function buildApp(opts: AppOptions) {
     },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
+    ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId),
     serverHost: () => hostFacts.serverHost(),
     localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),
     now: opts.now,
@@ -881,6 +975,17 @@ export async function buildApp(opts: AppOptions) {
       return n;
     },
     now: opts.now,
+  });
+  // The GitHub watcher (BOS-1393): main.ts runs runDue() on the leader's timer; the owner's routes save the setting and check now.
+  const githubWatch = githubWatchService(db, {
+    fetch: opts.fetch,
+    now: opts.now,
+    token: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "github_watch"))[WATCH_TOKEN_ENV],
+    feedback,
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    alert: (input) => alerts.raise(input),
+    clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
+    log: (m) => app.log.warn(m),
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
   const runnerWatch = runnerWatchService(db, { isConnected: (id) => runners.isConnected(id), holdOn: async () => !!(await getHold(db)), wantedCompanies: () => launch.wantedCompanies(), guardFault: async (companyId) => ((await launch.status(companyId))?.container?.guardReason ?? null), notify: (n) => notes.notify(n), alert: (input) => alerts.raise(input), now: opts.now, log: (m) => app.log.warn(m) });
@@ -921,9 +1026,21 @@ export async function buildApp(opts: AppOptions) {
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
     isLeader: () => leader.isLeader(),
+    ciTiming: opts.ciTiming,
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
+    // BOS-1602: train seats count only slots that can run a merge check.
+    checkCapacity: (companyId) => checks.mergeCapacity(companyId),
+    alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
+  // The main-CI watcher (BOS-1072): a ticket for each distinct failing step of GitHub CI on main.
+  const mainCi = mainCiService(db, {
+    gitHosts,
+    gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    log: (m) => app.log.warn(m),
+  });
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
@@ -937,7 +1054,7 @@ export async function buildApp(opts: AppOptions) {
     limit: () => checkGate(db).limit(),
     runningChecks: (companyId) =>
       db
-        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind })
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt })
         .from(checkJobs)
         .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
         .orderBy(asc(checkJobs.startedAt)),
@@ -951,18 +1068,56 @@ export async function buildApp(opts: AppOptions) {
         })
         .from(checkJobs)
         .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, ["queued", "running"])))) as [{ running: number; waiting: number }];
-      return { mode: mode as CheckQueueMode, slots: await checkQueueSvc.slots(), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
+      // BOS-1435: slots across the runner and ready check workers (the slots setting when there are none).
+      return { mode: mode as CheckQueueMode, slots: await checks.capacity(companyId), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
     },
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
+    // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
+    runnerConnected: async (companyId) => {
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+      return !!r && runners.isConnected(r.id);
+    },
+    runnerUpdateOn: async () => {
+      const h = await getHold(db);
+      return !!h && h.kind !== "wrapup";
+    },
+    launcherOn: () => launch.enabled,
+    // BOS-1594: the stuck/over-capacity verdict's two live facts: an empty train seat (the restart seed wait excluded), and a check worker.
+    emptySeatSince: async (companyId) => {
+      const since = (await mergeTrainStatus(db, companyId).catch(() => [])).filter((p) => !p.seeding && p.emptySeatSince).map((p) => new Date(p.emptySeatSince!).getTime());
+      return since.length ? Math.min(...since) : null;
+    },
+    workerReady: async (companyId) => (await checkWorkersSvc.list()).some((w) => w.enabled && w.connected && w.companies.some((c) => c.id === companyId && c.ready)),
+    queueDetail: async (companyId) => {
+      const q = await checkQueueSvc.list(companyId);
+      const fix = q.rows.find((r) => r.fixesMain);
+      return {
+        slots: q.slots,
+        busy: q.rows.filter((r) => r.state === "running").map((r) => ({ ref: r.ref, title: r.title, kind: r.kind === "merge" ? "merge check" : r.kind === "full" ? "full check" : "quick check" })),
+        mainRed: q.rows.some((r) => r.heldByMain),
+        fixRef: fix ? (fix.ref ?? fix.title) : null,
+        seatWait: q.rows.filter((r) => r.heldBySeat).map((r) => r.ticketId),
+        // BOS-1515: tickets the train holds to land on main alone, with the clash.
+        heldAlone: (await mergeTrainStatus(db, companyId).catch(() => [])).flatMap((p) => p.heldAlone),
+      };
+    },
     now: opts.now,
+  });
+  // BOS-1489: the start hold's two counts. Merges: the Merge queue page's own figure. Quick checks: queued jobs that aren't a
+  // merge or a full check, through check_jobs_state_queued (state first), counted for the company.
+  setStartHoldCounts(async (companyId) => {
+    const [q] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(checkJobs)
+      .where(and(eq(checkJobs.state, "queued"), eq(checkJobs.companyId, companyId), eq(checkJobs.scope, "quick"), ne(checkJobs.kind, "merge")));
+    return { merges: await mergeQueue.waitingCount(companyId), quickChecks: q?.n ?? 0 };
   });
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
   // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
   const deployWait = deployWaitService(db, {
     headroom: () => selfDeploy.headroom(),
     checksRunning: async () => {
-      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(eq(checkJobs.state, "running"))) as [{ n: number }];
-      return review.gateState().running + n;
+      return review.gateState().running + (await runnerBusy(db)).checksTotal; // the same busy count the runner drain waits on (BOS-1471)
     },
     openRuns: async () => {
       const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`))) as [{ n: number }];
@@ -996,6 +1151,24 @@ export async function buildApp(opts: AppOptions) {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (ceo) await scheduler.notify(ceo.id, { reason: "merge held by a stale card", ticketId, priority: 2, note });
     },
+    now: opts.now,
+  });
+  // Priority watch (BOS-1514): the CEO is woken on a wake that is never dropped; the owner gets one notification per stop.
+  const priorityWatch = priorityWatchService(db, {
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: PRIORITY_WATCH_REASON, ticketId, priority: 2, note });
+    },
+    notify: (input) => notes.notify(input),
+    now: opts.now,
+  });
+  // Merge stall alarm (BOS-1515): an empty train seat or no landing while tickets wait; the CEO first, the owner as in fix A.
+  const mergeStall = mergeStallService(db, {
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: MERGE_STALL_REASON, ticketId, priority: 2, note });
+    },
+    notify: (input) => notes.notify(input),
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
@@ -1042,10 +1215,45 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  // BOS-1664: GitHub's own jobs before review, for a branch that changes CI or image files (GitHub projects with a readable token only).
+  const preflightScanList = scanListReader({ read: () => privateDetails.forRunner(), ...scanListWarning });
+  const ciPreflight = ciPreflightService(db, {
+    hosts: gitHosts,
+    timing: { ...CI_PUBLISH_TIMING, ...opts.ciTiming },
+    wake: (agentId, w) => scheduler.notify(agentId, w),
+    context: async (t) => {
+      const [p] = await db.select({ repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase, defaultBranch: projects.defaultBranch }).from(projects).where(eq(projects.id, t.projectId));
+      const repo = p?.repoUrl ? parseRepoUrl(p.repoUrl) : null;
+      if (!p || p.gitHost !== "github" || !p.gitApiBase || !repo) return null;
+      const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, t.companyId));
+      // "ci-publish-scan": only a runner that applies the owner's private-details list before the push gets the early run;
+      // an older one pushes unscanned (or without the list), and the push can't be undone (the sha stays readable).
+      if (!runner || !runners.can(runner.id, "ci-publish") || !runners.can(runner.id, "ci-publish-scan")) return null;
+      const token = (await secretsSvc.resolveCompanyEnv(t.companyId, "pull_request")).GIT_TOKEN;
+      if (!token) return null;
+      const merge = (phase: "prepare" | "publish" | "unpublish", extra: Record<string, unknown> = {}) =>
+        runners.request<MergeResult>(runner.id, (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId: t.id, target: p.defaultBranch, message: phase === "prepare" ? "GitHub CI before review" : phase === "publish" ? "publish for CI" : "unpublish", phase, ...extra }) as never, MERGE_WAIT_MS);
+      return {
+        target: { cfg: { kind: "github" as const, apiBase: p.gitApiBase, owner: repo.owner, repo: repo.repo }, token },
+        prepare: () => merge("prepare"),
+        publish: async (commit) => {
+          const scanList = await preflightScanList.forScan();
+          // A list that is set but can't be read is not skipped: the push can't be taken back.
+          if (!scanList && (await privateDetails.isSet().catch(() => true))) throw new Error("Not pushed to GitHub: the owner's private-details list couldn't be read, so the scan before the push couldn't run in full. Saving the list again in Settings fixes it.");
+          return merge("publish", { commit, ...(scanList ? { scanList } : {}) });
+        },
+        unpublish: () => merge("unpublish"),
+      };
+    },
+  });
+  const checkRequests = checkRequestService(db, { preflight: ciPreflight, command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
+  // A restart loses the in-memory GitHub-CI pre-flight runs; start those again once runners have had time to reconnect.
+  const preflightRecover = setTimeout(() => void ciPreflight.recover().catch(() => undefined), 60_000);
+  preflightRecover.unref();
+  app.addHook("onClose", async () => clearTimeout(preflightRecover));
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId) }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
-  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
+  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
 
   app.setErrorHandler((err, _req, reply) => {
     // `message` is what the web app shows, so it names the first problem and its field.
@@ -1213,7 +1421,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), holdStartsMergesWaiting: z.number().int().min(1).max(1000).nullable(), holdStartsQuickChecksQueued: z.number().int().min(1).max(1000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
       if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
@@ -1227,7 +1435,7 @@ export async function buildApp(opts: AppOptions) {
       }
       // A fence mode sent from Settings is the owner's choice (BOS-940): Boss Man never changes it, and its card goes.
       const chosenAt = b.fenceMode ? new Date() : null;
-      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt } : {}) };
+      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt, fenceOffFingerprint: null } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       if (!c) return reply.code(404).send({ error: "not_found" });
       if (chosenAt) await closeFenceCard(db, id, chosenAt);
@@ -1238,6 +1446,9 @@ export async function buildApp(opts: AppOptions) {
         const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
         await record(db, { companyId: id, kind: "settings", summary: diskCapGb === null ? "Owner reset the workspace disk cap to the server default (20 GB)" : `Owner set the workspace disk cap to ${gb(Math.round(diskCapGb * 1024 ** 3))}`, detail: { diskCapGb } });
       }
+      // The start hold's limits (BOS-1489) change what starts, so keep a record of who set them and to what.
+      for (const [key, label] of [["holdStartsMergesWaiting", "merges waiting"], ["holdStartsQuickChecksQueued", "quick checks queued"]] as const)
+        if (b[key] !== undefined) await record(db, { companyId: id, kind: "settings", summary: b[key] === null ? `Owner turned off holding new starts on ${label}` : `Owner set new starts to be held while ${b[key]} or more ${label}`, detail: { [key]: b[key] } });
       return c;
     });
 
@@ -1335,7 +1546,7 @@ export async function buildApp(opts: AppOptions) {
         throw err;
       }
     });
-    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners });
+    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, mainCi, checkWorkers: checkWorkersSvc });
 
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
     owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })) }));
@@ -1350,9 +1561,11 @@ export async function buildApp(opts: AppOptions) {
       }
     });
     // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
-    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts });
+    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin: phoneLoginService({ dir: opts.deployerDir, fact: (k) => hostFacts.value(k), now: () => (opts.now ? opts.now().getTime() : Date.now()), saveSetup: ntfySetupSaver({ notes, secretsSvc }) }) });
     // BOS-1387: Settings → Outgoing email.
     emailSettingsRoutes(owner, { mailer, secretsSvc });
+    // BOS-1582: Settings → Tools → Penpot, one form for the four Penpot secrets.
+    penpotRoutes(owner, { db, secretsSvc });
 
     /** Issues the company's runner token. It is shown once; issuing again replaces it. */
     owner.post("/api/companies/:id/runner", async (req, reply) => {
@@ -1365,9 +1578,27 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
-      if (!r) return { registered: false, launcher };
+      // BOS-1498: what this company's runner is given and why, for the wizard's runner step.
+      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug) : null;
+      if (!r) return { registered: false, launcher, memoryLine: memory };
       const report = await runnerReport.companyPanel(id);
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, launcher, report };
+      // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
+      const [co] = await db.select().from(companies).where(eq(companies.id, id));
+      const safety = co ? featureStates(co, r.sandbox) : null;
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
+    });
+
+    // Settings → Server and runner: the two buttons on a safety-feature card (DR-049 point 1). "run" is "Run agents without ...";
+    // false is "Keep agents stopped". The choice is kept with this runner's platform.
+    owner.post("/api/companies/:id/safety-choice", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ feature: z.enum(["guard", "fence"]), run: z.boolean() }).parse(req.body);
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, id));
+      if (!r) return reply.code(404).send({ error: "no_runner" });
+      const at = new Date();
+      if (b.feature === "guard") await chooseGuard(db, id, b.run, at);
+      else await chooseFence(db, id, b.run, at);
+      return { ok: true };
     });
 
     // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.
@@ -1584,6 +1815,8 @@ export async function buildApp(opts: AppOptions) {
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
       ownerSetup: z.string().max(4000).nullable(),
+      ownerSetupWhy: z.string().max(240).nullable(),
+      ownerSetupIfSkipped: z.string().max(240).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
@@ -1607,7 +1840,7 @@ export async function buildApp(opts: AppOptions) {
     };
 
     // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
-    projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, now: opts.now });
+    projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch, now: opts.now });
 
     owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
 
@@ -1669,7 +1902,8 @@ export async function buildApp(opts: AppOptions) {
       const signoffNow = (await signoffState(db, row.t)).state;
       // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
       const signoff = !!(await openSignoffCard(db, row.t.id));
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
+      const liveNote = row.t.systemState !== "done" && row.t.goLiveWait ? goLiveNote(row.t.goLiveWait as GoLiveWait, await openUpdateCards(db, row.t.companyId)) : null;
+      return { ...row.t, goLiveNote: liveNote, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1782,12 +2016,23 @@ export async function buildApp(opts: AppOptions) {
     // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
     owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
-    owner.get("/api/companies/:id/check-queue", async (req) => checkQueueSvc.list(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/check-queue", async (req) => {
+      const id = IdParam.parse(req.params).id;
+      return checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
+    });
+    // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
+    owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
+      const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
+      return { statusLine: await mergeQueue.statusLineFor(id, ticketId) };
+    });
     // BOS-1384: the owner puts a waiting merge next in line. Only the order changes: the merge still runs its whole check.
     owner.post("/api/companies/:id/merge-queue/:ticketId/front", async (req, reply) => {
       const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
-      const job = await checkQueueSvc.moveToFront(id, ticketId, await ownerName(req), "owner chose Move to front");
-      if (!job) return reply.code(409).send({ error: "That merge isn't waiting for a check slot, so there is nothing to move." });
+      const by = await ownerName(req);
+      const job = await checkQueueSvc.moveToFront(id, ticketId, by, "owner chose Move to front");
+      // BOS-1516: a ticket still waiting for a train seat has no job to mark: move it on the train instead.
+      const seat = await checkQueueSvc.moveSeatWaiter(id, ticketId, by, "owner chose Move to front");
+      if (!job && !seat) return reply.code(409).send({ error: "That merge isn't waiting for a check slot or a place in the merge train, so there is nothing to move." });
       return { ok: true };
     });
 
@@ -1821,7 +2066,7 @@ export async function buildApp(opts: AppOptions) {
       return { markdown: await buildBrief(db, { companyId: id, agentId: null, role: "ceo", since: null, now: opts.now?.() ?? new Date(), plain: true }) };
     });
     // The company wiki, semantic search settings and what each ticket produced (R69): routes/wiki.ts.
-    wikiRoutes(owner, { wiki, semantic });
+    wikiRoutes(owner, { wiki, semantic, ownerAnswersNow: () => ownerAnswerEmbeds.run() });
     // The model second opinion on permission cards (BOS-338). The key is picked from Secrets, never sent back.
     owner.get("/api/companies/:id/second-opinion", async (req) => secondOpinion.settings(IdParam.parse(req.params).id));
     owner.put("/api/companies/:id/second-opinion", async (req, reply) => {
@@ -1871,7 +2116,27 @@ export async function buildApp(opts: AppOptions) {
       const { costCapUsd, ...fields } = TicketFields.extend({ costCapUsd: z.number().positive().nullable() }).partial().parse(req.body);
       // A per-ticket spend ceiling across all its runs (R53); null falls back to the project's default.
       if (costCapUsd !== undefined) await db.update(tickets).set({ costCapMicros: costCapUsd === null ? null : usdToMicros(costCapUsd) }).where(eq(tickets.id, id));
-      return work.updateTicket(id, fields);
+      // BOS-1516: the owner's urgent switch is "Priority 1": it records that the owner set it, and a ticket already waiting for a
+      // merge train seat moves up now (the landing's wait loop would also notice within a poll).
+      const updated = await work.updateTicket(id, fields.urgent === undefined ? fields : { ...fields, urgentByOwner: fields.urgent });
+      if (fields.urgent) retierWaiting(updated.projectId, id, 0);
+      return updated;
+    });
+
+    // BOS-1516: the owner's "Priority 1" switch on a feature: every open ticket of it carries the owner's urgent mark (new ones
+    // too, see createTicket). Turning it off clears only the marks the owner set; done and cancelled tickets are left alone.
+    owner.put("/api/features/:id/priority-one", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { on } = z.object({ on: z.boolean() }).parse(req.body);
+      const [f] = await db.select({ id: featuresTable.id }).from(featuresTable).where(eq(featuresTable.id, id));
+      if (!f) return reply.code(404).send({ error: "not_found" });
+      await db.update(featuresTable).set({ priorityOne: on }).where(eq(featuresTable.id, id));
+      const open = and(eq(tickets.featureId, id), ne(tickets.systemState, "done"));
+      const changed = on
+        ? await db.update(tickets).set({ urgent: true, urgentByOwner: true, version: sql`${tickets.version} + 1` }).where(and(open, or(eq(tickets.urgent, false), eq(tickets.urgentByOwner, false)))).returning({ id: tickets.id, projectId: tickets.projectId })
+        : await db.update(tickets).set({ urgent: false, urgentByOwner: false, version: sql`${tickets.version} + 1` }).where(and(open, eq(tickets.urgentByOwner, true))).returning({ id: tickets.id, projectId: tickets.projectId });
+      if (on) for (const c of changed) retierWaiting(c.projectId, c.id, 0);
+      return { ok: true, priorityOne: on, tickets: changed.length };
     });
 
     // The owner moves a ticket by hand (e.g. to unstick it). Done skips the merge: it is the owner's call.
@@ -1917,7 +2182,7 @@ export async function buildApp(opts: AppOptions) {
     objectiveRoutes(owner, db, { work, teamCheck });
 
     // Feature requests, feedback and the portal's owner settings: routes/features.ts, on this owner scope.
-    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl });
+    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl, mailer });
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
@@ -2036,7 +2301,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2273,5 +2538,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

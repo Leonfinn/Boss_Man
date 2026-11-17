@@ -26,7 +26,7 @@ function stub(patched: unknown[] = [], posted: string[] = []) {
       if (init?.method === "PATCH") return patched.push(JSON.parse(String(init.body))), json({ ...project, starred: true });
       if (url.endsWith("/projects")) return json([project]);
       if (url.endsWith("/board")) return json({ project, columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [] }] });
-      if (url.endsWith("/spend")) return json({ tokens: { month: { input: 1_200_000, output: 45_000 }, total: { input: 3_400_000, output: 98_000 } }, monthMicros: 3_500_000, totalMicros: 4_500_000, ticketCostCapMicros: 5_000_000, monthlyCapMicros: 10_000_000, monthStart: "", topTickets: [{ id: "t1", title: "Big job", micros: 4_000_000 }] });
+      if (url.endsWith("/spend")) return json({ tokens: { month: { input: 1_200_000, output: 45_000 }, total: { input: 3_400_000, output: 98_000 } }, monthMicros: 3_500_000, totalMicros: 4_500_000, ticketCostCapMicros: 5_000_000, monthlyCapMicros: 10_000_000, monthStart: "", plan: [{ provider: "anthropic", monthRuns: 12, totalRuns: 40, monthMicros: 21_000_000, totalMicros: 60_000_000 }, { provider: "synthetic", monthRuns: 1, totalRuns: 3, monthMicros: 0, totalMicros: 0 }], topTickets: [{ id: "t1", title: "Big job", micros: 4_000_000, planMicros: 2_000_000 }] });
       if (url.endsWith("/check-presets")) return json({ detected: [], standard: [], none: { id: "none", label: "Nothing", command: null, plain: "", needs: [] }, tools: null, error: null });
       return json([]);
     }),
@@ -52,8 +52,13 @@ describe("project page tabs", () => {
     show("budget");
     expect(await screen.findByText("$3.50")).toBeTruthy();
     expect(screen.getByText("$4.50")).toBeTruthy();
-    expect(screen.getByLabelText("$3.50 of the $10.00 monthly cap").getAttribute("max")).toBe("10000000");
+    expect(screen.getByLabelText("$3.50 of the $10.00 monthly cap (API and credit runs only)").getAttribute("max")).toBe("10000000");
     expect(screen.getByRole("link", { name: "Big job" }).getAttribute("href")).toBe("#/tickets/t1");
+    // Plan use beside it: an estimate where the tool reported a price, a plain "no price" line (never $0.00) where it didn't.
+    expect(screen.getByText("On your subscriptions")).toBeTruthy();
+    expect(screen.getByText("$21.00")).toBeTruthy();
+    expect(screen.getByText(/no price reported by this agent tool/)).toBeTruthy();
+    expect(screen.getByText("$2.00")).toBeTruthy();
     expect(screen.getByText("Tokens")).toBeTruthy();
     expect(screen.getByText(/1\.2M \/ 45K/)).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Budget" }).getAttribute("aria-selected")).toBe("true");

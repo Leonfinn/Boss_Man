@@ -5,10 +5,13 @@
 sections: 
   - Agents
   - Dashboard
-  - Recent activity
+  - Needs you Checking…
+  - Needs you …
   - Recent tasks
+  - Right now …
 reads: 
   - /api/companies/:id/dashboard
+  - /api/companies/:id/merge-queue
 
 ## #/agents
 sections: 
@@ -29,14 +32,18 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Costliest tasks
   - Filter tasks
-  - Most expensive tasks
+  - On your subscriptions
   - Passed, held
+  - Pay-as-you-go spend
   - Project brief
+  - Spending limit
   - Tokens
   - Your review
 reads: 
   - /api/companies/:id/features
+  - /api/companies/:id/merge-queue
   - /api/companies/:id/objectives
   - /api/companies/:id/projects
   - /api/companies/:id/review-policy
@@ -59,10 +66,13 @@ sections:
   - Dashboard
   - Decisions
   - Finish setting up
-  - Recent activity
+  - Needs you Checking…
+  - Needs you …
   - Recent tasks
+  - Right now …
 reads: 
   - /api/companies/:id/dashboard
+  - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
   - /api/decisions/tally
@@ -107,6 +117,7 @@ reads:
   - /api/companies/:id/feedback-settings
   - /api/feedback/:id
   - /api/feedback/unprocessed
+  - /api/host-facts
 
 ## #/merge-queue
 sections: 
@@ -122,7 +133,9 @@ sections:
   - Notifications
   - Set up your phone
 reads: 
+  - /api/host-facts
   - /api/notification-settings
+  - /api/notification-settings/phone-login/:id
   - /api/notifications
   - /api/notifications/pushes
 
@@ -162,7 +175,7 @@ reads:
 ## #/scrum-master
 sections: 
   - Open now…
-  - Scrum Master
+  - Scrum Master log
 reads: 
   - /api/companies/:id/watchdog
   - /api/companies/:id/watchdog/actions
@@ -173,11 +186,30 @@ sections:
   - Settings
 reads: (none)
 
+## #/settings/<company>/devices
+sections: 
+  - Private details to block
+  - Your devices
+reads: 
+  - /api/devices
+  - /api/private-details
+
+## #/settings/<company>/email
+sections: 
+  - Main's CI
+  - Outgoing email
+reads: 
+  - /api/settings/email
+  - /api/settings/main-ci
+
 ## #/settings/<company>/funding
 sections: 
   - Budgets
+  - Costliest tasks
   - Funding sources
-  - Most expensive tasks
+  - On your subscriptions
+  - Pay-as-you-go spend
+  - Spending limit
   - Spending limits
   - Tokens
 reads: 
@@ -188,12 +220,27 @@ reads:
   - /api/projects/:id/spend
   - /api/secrets
 
+## #/settings/<company>/limits
+sections: 
+  - Agents at once
+  - Check workers
+  - Checks
+  - Tickets in progress
+reads: 
+  - /api/companies
+  - /api/host-facts
+  - /api/run-limits
+  - /api/settings/check-queue
+  - /api/settings/wait-for-ci
+  - /api/wip-limits
+
 ## #/settings/<company>/permissions
 sections: 
   - Add a rule
   - Advice on permission cards
   - Agent fence
   - Built-in defaults
+  - Cleaning up temp files
   - Decision rules
   - Second opinion from a model (optional)
   - Try a command
@@ -210,6 +257,16 @@ sections:
   - Reviews
 reads: (none)
 
+## #/settings/<company>/runner
+sections: 
+  - Add-ons
+  - Runner
+  - Workspace disk
+reads: 
+  - /api/companies/:id/runner
+  - /api/companies/:id/runner/:id
+  - /api/self-deploy/runner-addons
+
 ## #/settings/<company>/secrets
 sections: 
   - All stored secrets
@@ -220,45 +277,19 @@ reads:
   - /api/secrets/:id/access-log
   - /api/secrets/:id/grants
 
-## #/settings/<company>/system
+## #/settings/<company>/server
 sections: 
-  - Add-ons
-  - Agents at once
   - Allowed automatically
-  - Checks
   - Extra lines from your.env
   - Facts only you can give
   - Network guard
-  - Now
-  - Outgoing email
-  - Private details to block
-  - Runner
-  - Runner update
   - Server
-  - Stop all work
   - This host
-  - Tickets in progress
-  - Updates
-  - Workspace disk
-  - Your devices
 reads: 
   - /api/bluegreen
-  - /api/companies/:id/runner
-  - /api/companies/:id/runner/:id
-  - /api/devices
   - /api/health
   - /api/host-facts
-  - /api/kill-switch
-  - /api/maintenance
   - /api/netguard-allow
-  - /api/private-details
-  - /api/run-limits
-  - /api/runner-report
-  - /api/self-deploy
-  - /api/self-deploy/wait
-  - /api/settings/check-queue
-  - /api/settings/email
-  - /api/wip-limits
 
 ## #/settings/<company>/team
 sections: 
@@ -277,10 +308,12 @@ reads:
 ## #/settings/<company>/tools
 sections: 
   - Deploy targets
+  - Penpot
   - Tool servers (MCP)
 reads: 
   - /api/companies/:id/deploy-targets
   - /api/companies/:id/mcp-servers
+  - /api/companies/:id/penpot
   - /api/companies/:id/projects
 
 ## #/settings/<company>/transfer
@@ -289,6 +322,21 @@ sections:
   - Import a company
 reads: 
   - /api/funding-sources
+
+## #/settings/<company>/updates
+sections: 
+  - Now running
+  - Other actions
+  - Recent updates
+  - Stop all work
+  - Updates
+reads: 
+  - /api/kill-switch
+  - /api/maintenance
+  - /api/runner-report
+  - /api/self-deploy
+  - /api/self-deploy/history
+  - /api/self-deploy/wait
 
 ## #/settings/<company>/watchdog
 sections: 
@@ -299,17 +347,14 @@ reads:
 
 ## #/setup
 sections: 
-  - Add-ons
   - Funding sources
   - GitHub (fine-grained personal access token)
   - Gitea (self-hosted, e.g. http://192.0.2.10:3003)
-  - Runner
 reads: 
   - /api/companies/:id/grants
   - /api/companies/:id/projects
   - /api/companies/:id/review-policy
   - /api/companies/:id/runner
-  - /api/companies/:id/runner/:id
   - /api/companies/:id/setup-checklist
   - /api/funding-sources
   - /api/secrets
@@ -338,6 +383,7 @@ sections:
   - Work
 reads: 
   - /api/companies/:id/features
+  - /api/companies/:id/merge-queue/:id/status
   - /api/companies/:id/objectives
   - /api/companies/:id/open-tickets
   - /api/companies/:id/watchdog/actions
@@ -375,7 +421,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
-  - Workflow
+  - Workflow report
 reads: 
   - /api/companies/:id/retros/latest
   - /api/companies/:id/workflow

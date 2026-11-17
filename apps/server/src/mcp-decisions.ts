@@ -3,14 +3,16 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ageWords, isAfterMerge, REVIEW_KINDS, untrusted, type Criterion } from "@boss-man/shared";
+import { ageWords, isAfterMerge, REAL_USE_ASK, REAL_USE_LABEL, recurringDutyHits, recurringDutyInDiff, REVIEW_KINDS, touchesInstallSurface, untrusted, usabilityGated, type Criterion } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { AnswerError, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
+import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { ReviewError, type HoldInput } from "./services/review.js";
 import { checkQueue } from "./services/check-queue.js";
+import { pageDiff } from "./services/review-diff-page.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { activeRows, latestRows } from "./services/review-kinds.js";
 import { signoffLine, signoffState } from "./services/signoff.js";
@@ -18,6 +20,7 @@ import { WatchdogError } from "./services/watchdog.js";
 import { RetroError } from "./services/retro.js";
 import { ADDONS } from "./services/addons.js";
 import { seenImageDates } from "./services/ticket-images.js";
+import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { criterionLines, fail, FIXES_LIVE_HELP, REF, text, type Scope } from "./mcp-common.js";
 import type { Services } from "./mcp.js";
 
@@ -45,7 +48,7 @@ export function registerDecisionTools(
         options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
         recommended: z.string().max(200).optional(),
         summary: z.string().max(1000).optional(),
-        id: z.string().uuid().optional(),
+        id: cardIdInput().optional(),
         answer: z.string().max(200).optional(),
         assigneeAgentId: z.string().uuid().optional(),
         note: z.string().max(2000).optional(),
@@ -76,6 +79,17 @@ export function registerDecisionTools(
       const isCeo = me?.role === "ceo";
       // A plan approver answers only plans put to them, never permission requests.
       const mine = (d: typeof decisionsTable.$inferSelect) => isCeo || (!!scope.agentId && d.forAgentId === scope.agentId && (d.context as { plan?: boolean }).plan === true);
+      // BOS-1695: the 8-character short id agents are shown works as well as the full one (a unique prefix in this company).
+      if (input.id) {
+        const r = await resolveCardId(db, scope.companyId, input.id);
+        if (!r.ok) return fail(r.error);
+        input.id = r.id;
+      }
+      if (input.replacedBy) {
+        const r = await resolveReplacedBy(db, scope.companyId, input.replacedBy);
+        if (!r.ok) return fail(r.error);
+        input.replacedBy = r.value;
+      }
       if (input.action === "changes") {
         if (!isCeo) return fail("Only the CEO reads workflow-retro changes.");
         const { changes } = await retro.latest(scope.companyId);
@@ -150,6 +164,7 @@ export function registerDecisionTools(
                     steps?: string[];
                     lastFailure?: { note: string };
                     lint?: CardLint;
+                    conflictsBecause?: string;
                   };
                   const tickets = [...new Set([...(r.about ?? []).map((a) => (a.ref ? `${a.ref} "${a.title}"` : a.title)), ...(r.blocks ?? []).map((b) => b.ref ?? "")].filter((x): x is string => !!x))];
                   const advice = adviceOf(r.context);
@@ -173,6 +188,7 @@ export function registerDecisionTools(
                     ...(ctx.triedFirst ? ["What was tried first:", untrusted("decision card", ctx.triedFirst)] : []),
                     ...(ctx.steps?.length ? [`Steps for the owner: ${untrusted("decision card steps", ctx.steps.join(" / "))}`] : []),
                     ...(ctx.lastFailure ? [`Last failure: ${ctx.lastFailure.note}`] : []),
+                    ...(ctx.conflictsBecause ? [`Merge line: ${ctx.conflictsBecause}`] : []),
                     // Findings quote the agent's own step text, so they are untrusted like the steps (BOS-417).
                     ...(ctx.lint?.warn.length ? [`Boss Man flagged its steps: ${untrusted("decision card lint", lintLines(ctx.lint.warn))}`] : []),
                     ...(ctx.lint?.override ? [`Lint overridden by the CEO: ${untrusted("decision card lint", `${ctx.lint.override.reason}\n${lintLines(ctx.lint.override.findings)}`)}`] : []),
@@ -239,11 +255,11 @@ export function registerDecisionTools(
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(input.newHost ? { newHost: input.newHost } : {}), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), ...(await seenImageDates(db, scope.companyId, input.steps).then((images) => (images ? { images } : {}))) });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(input.newHost ? { newHost: input.newHost } : {}), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), ...(await seenImageDates(db, scope.companyId, input.steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, input.steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
             if (ask.error) return fail(ask.error);
             if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent reissue needs urgentWhy: one short sentence (10 to 200 characters) on what the owner must act on now (it is shown on their phone list).");
             const reissueSteps = ask.steps ?? input.steps;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";
@@ -302,7 +318,7 @@ export function registerDecisionTools(
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. Also check the follow-up exists: when the summary, the description or a reply says someone else will do something next (\"the CEO will attach them\"), that work must be a ticket (set_ticket_state followUps), or the ticket must say why none is needed. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and prioritise_merge (ticketId, reason: puts a waiting merge next in line, below a fix for a broken main; logged; the whole check still runs) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base, about 60,000 characters at a time: a long diff ends with a cut note saying how many files and lines are left and which, so call diff again with the offset it gives, or with path for one file, until you have read it all, and never approve on a part; an approval is refused if the branch moved since your last diff, so read it again), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. Usability gate: on a feature's ticket, one with owner setup steps, or one that changes what the owner installs, a code or infra approval must carry a \"Real use:\" walk-through in the summary (day 1, after routine updates and restarts, a week on, the owner away; every step the owner repeats and how often), or it is refused; a step the owner must repeat routinely fails the review. Also check the follow-up exists: when the summary, the description or a reply says someone else will do something next (\"the CEO will attach them\"), that work must be a ticket (set_ticket_state followUps), or the ticket must say why none is needed. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and prioritise_merge (ticketId, reason: puts a ticket's waiting merge or quick check next in line, below a fix for a broken main; logged; the whole check still runs) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you.",
       inputSchema: {
         action: z.enum(["diff", "submit", "sequence", "overrule", "retry_merge", "release_hold", "cancel_hold", "prioritise_merge"]),
         ticketId: z.string().uuid(),
@@ -316,6 +332,8 @@ export function registerDecisionTools(
         kind: z.enum(["code", ...REVIEW_KINDS]).optional(),
         order: z.array(z.enum(["code", ...REVIEW_KINDS])).max(4).optional(),
         reason: z.string().max(2000).optional(),
+        path: z.string().max(500).optional().describe("With diff: read only this file's changes (a path from the file list)."),
+        offset: z.number().int().min(0).optional().describe("With diff: character to continue from, as the cut note at the end of a long diff says. Keep going until no cut note is left."),
         fixesLive: z.string().max(FIXES_LIVE_MAX).optional().describe(`With submit, to add or correct the marker: ${FIXES_LIVE_HELP}`),
       },
     },
@@ -344,7 +362,11 @@ export function registerDecisionTools(
           const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
           if (!t) return fail("No such ticket in your company.");
           const job = await checkQueue(db).moveToFront(scope.companyId, input.ticketId, me.name, input.reason.trim());
-          return job ? text("This merge is next in line, below a fix for a broken main. It still runs its whole check; nothing was skipped, and a merge already running is not stopped.") : fail("That merge isn't waiting for a check slot (it may be running, held, or not approved yet), so there is nothing to move.");
+          // BOS-1516: a ticket still waiting for a merge train seat has no job yet: it moves on the train.
+          const seat = await checkQueue(db).moveSeatWaiter(scope.companyId, input.ticketId, me.name, input.reason.trim());
+          if (!job && !seat) return fail("That ticket has no merge or quick check waiting for a check slot, and isn't waiting for a merge train seat (it may be running, held, or not queued yet), so there is nothing to move.");
+          const what = job ? (job.kind === "merge" ? "merge" : "quick check") : "merge (it waits for a train seat)";
+          return text(`This ${what} is next in line, below a fix for a broken main. It still runs its whole check; nothing was skipped, and a check already running is not stopped.`);
         }
         if (input.action === "release_hold" || input.action === "cancel_hold") {
           const by = { name: me.name, agentId: scope.agentId, isCeo: me.role === "ceo" };
@@ -370,9 +392,15 @@ export function registerDecisionTools(
           // starts on none, and gets shown with the one it is on (BOS-268). Never blocks the tool.
           await noteRunTicket(input.ticketId);
           const d = await review.diff(input.ticketId, scope.companyId);
+          // BOS-1567: remember the head this diff showed, so submit can refuse an approval if the branch moved since.
+          // A later page on another head than the stored one means the diff was read across two heads: start again.
+          const readBefore = await review.noteRead(input.ticketId, scope.agentId, d.head);
+          const movedMidRead = !!input.offset && !!readBefore && !!d.head && readBefore !== d.head;
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
-          const patch = d.diff.length > 60_000 ? `${d.diff.slice(0, 60_000)}\n[diff truncated]` : d.diff;
+          const paged = pageDiff({ diff: d.diff, path: input.path, offset: input.offset });
+          if (paged.error) return fail(paged.error);
+          const patch = paged.text;
           const checklist = criteriaChecklist(rt.acceptanceCriteria, rt.stateNote);
           // The owner's setup steps are judged like code (DR-011 point 2): seen next to the criteria, and
           // sent back if they are wrong, missing, or not in plain words by button path.
@@ -383,7 +411,9 @@ export function registerDecisionTools(
           const live = rt.fixesLive?.trim()
             ? `Fixes live: ${rt.fixesLive.trim()}\nWhen this merges the deploy card is headed "Urgent: contains the fix for" these words and pages the owner. Check it names a real live symptom this change fixes; correct it with submit fixesLive, or request changes.\n\n`
             : "";
-          return text(`${checklist}${setup}${live}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+          const gate = usabilityGateBlock(rt, d.files.map((f) => f.path), d.diff);
+          const moved = movedMidRead ? "The branch moved since your first page; start again from offset 0 so you read one head throughout.\n\n" : "";
+          return text(`${moved}${checklist}${setup}${live}${gate}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
         // A verdict on a ticket is touching it, like any other hook (BOS-268).
@@ -434,6 +464,14 @@ export function registerDecisionTools(
       }
     },
   );
+}
+
+/** BOS-1571: on a gated ticket the reviewer is told what an approval must carry, and shown any wording that hands the owner a routine duty. */
+export function usabilityGateBlock(t: { featureId?: string | null; ownerSetup?: string | null; noCode?: boolean | null; acceptanceCriteria?: readonly Criterion[] | null }, files: readonly string[], diff: string): string {
+  if (!usabilityGated(t) && !touchesInstallSurface(files)) return "";
+  const hits = [...recurringDutyHits(t.ownerSetup).map((l) => `owner setup: "${l}"`), ...recurringDutyInDiff(diff).map((h) => `${h.path}:${h.line}: "${h.text}"`)].slice(0, 12);
+  const dutyLines = hits.length ? `\nWording that reads as a routine owner duty; say in your walk-through how often the owner must do each, or request changes to automate it:\n${hits.map((h) => `- ${h}`).join("\n")}` : "";
+  return `Usability gate: approving needs "${REAL_USE_LABEL} ..." in your summary: ${REAL_USE_ASK}${dutyLines}\n\n`;
 }
 
 /** The reviewer's checklist, split so only the before-merge criteria can hold the review up (DR-024 #5). */

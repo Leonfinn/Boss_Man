@@ -10,7 +10,7 @@ import { DraftTextarea } from "../components/DraftTextarea";
 import { Credentials } from "./settings/Credentials";
 import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
-import { Runner } from "./settings/Runner";
+import { ClaudeStep, RunnerStep } from "./SetupClaude";
 
 type Progress = { dismissed: boolean; step: number; companyId: string | null };
 export type ChecklistItem = { id: string; label: string; done: boolean };
@@ -18,8 +18,8 @@ export type ChecklistItem = { id: string; label: string; done: boolean };
 const STEPS = [
   { id: "company", title: "Your company", why: "Name it and say what it's for. The CEO plans the work from this." },
   { id: "project", title: "A project", why: "A project is a repo the agents work in, on GitHub or your Gitea. The checks that run before work merges come after the runner and git token." },
-  { id: "runner", title: "The runner", why: "The runner is the container the company's agents work in. It connects out to this server, so it needs no open ports." },
-  { id: "credential", title: "Claude", why: "Agents need something to run on: a Claude setup-token (your Pro or Max subscription) or an API key." },
+  { id: "runner", title: "The runner", why: "The runner is the container the company's agents work in. It connects out to this server, so it needs no open ports. The full panel is in Settings." },
+  { id: "credential", title: "Claude", why: "Agents need something to run on. Paste the setup token from your Claude Pro or Max subscription: it also pays for the CEO. Or use an API key instead." },
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
   { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
   { id: "funding", title: "What pays for the CEO", why: "Funding sources track cost and quota. Choose the one the CEO runs on; the Agents page sets the rest." },
@@ -152,7 +152,7 @@ function TokenHelp({ projects }: { projects: Project[] }) {
             <li>GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.</li>
             <li>Name it (e.g. boss-man) and pick an expiry. 90 days is a sensible default.</li>
             <li>Repository access: Only select repositories, then pick {repo}'s repo.</li>
-            <li>Repository permissions: Contents read and write; Pull requests read and write; Workflows read and write (so agents can change the repo's CI files); Checks read (so Boss Man can read CI results); Metadata read-only (added automatically).</li>
+            <li>Repository permissions: Contents read and write; Pull requests read and write; Workflows read and write (so agents can change the repo's CI files); Actions read-only (so Boss Man can read CI runs); Metadata read-only (added automatically).</li>
             <li>Generate, copy it once, paste it here, then use "Check the token against {repo}".</li>
           </ol>
           <p style={{ margin: "4px 0" }}>
@@ -285,17 +285,26 @@ function TicketStep({ company }: { company: Company }) {
 }
 
 /** "Finish setting up" (R56): what's still undone, on Decisions, until it's done or dismissed. */
-export function SetupChecklist({ companyId, go }: { companyId: string | undefined; go: (to: string) => void }) {
+export function SetupChecklist({ companyId, go, folded = false }: { companyId: string | undefined; go: (to: string) => void; folded?: boolean }) {
   const progress = usePoll((signal) => api<Progress>("/api/setup-progress", { signal }), 60_000, "setup-progress");
   const list = usePoll((signal) => (companyId ? api<ChecklistItem[]>(`/api/companies/${companyId}/setup-checklist`, { signal }) : Promise.resolve([])), 30_000, `setup-checklist-${companyId ?? "none"}`);
   const items = list.data ?? [];
   if (!companyId || !progress.data || progress.data.dismissed || !items.length || items.every((i) => i.done)) return null;
+  const doneCount = items.filter((i) => i.done).length;
+  const Wrap = folded ? "details" : "section";
   return (
-    <section className="card" aria-labelledby="finish-setup-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <h2 id="finish-setup-h" style={{ fontSize: 16, fontWeight: 600 }}>
-          Finish setting up
-        </h2>
+    <Wrap className="card" aria-labelledby={folded ? undefined : "finish-setup-h"} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {folded && (
+        <summary style={{ fontSize: 16, fontWeight: 600, cursor: "pointer" }}>
+          Finish setting up: {doneCount} of {items.length} done
+        </summary>
+      )}
+      <div style={{ display: "flex", justifyContent: folded ? "flex-end" : "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {!folded && (
+          <h2 id="finish-setup-h" style={{ fontSize: 16, fontWeight: 600 }}>
+            Finish setting up
+          </h2>
+        )}
         <span style={{ display: "flex", gap: 8 }}>
           <button type="button" className="btn primary" onClick={() => go("setup")}>
             Continue
@@ -313,7 +322,7 @@ export function SetupChecklist({ companyId, go }: { companyId: string | undefine
           </li>
         ))}
       </ul>
-    </section>
+    </Wrap>
   );
 }
 
@@ -321,6 +330,8 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   const progress = usePoll((signal) => api<Progress>("/api/setup-progress", { signal }), 0x7fffffff, "setup-progress-page");
   const [step, setStep] = useState<number | null>(null);
   const [companyId, setCompanyId] = useState<string | null>(null);
+  // Saving the Claude setup token also made the funding source, so "What pays for the CEO" is skipped (BOS-1495).
+  const [tokenPath, setTokenPath] = useState(false);
   useEffect(() => {
     if (progress.data && step === null) {
       setStep(Math.min(progress.data.step, STEPS.length - 1));
@@ -344,6 +355,9 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
   };
   const s = STEPS[step]!;
   const done = (id: string) => list.data?.find((i) => i.id === id)?.done ?? false;
+  const FUNDING = STEPS.findIndex((x) => x.id === "funding");
+  // Going forward steps over the funding step when the token path already did it; Back and the stepper still reach it.
+  const next = step + 1 === FUNDING && tokenPath && done("funding") ? step + 2 : step + 1;
   return (
     <>
       <header className="page-head">
@@ -375,8 +389,8 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           />
         )}
         {step === 1 && company && <ProjectStep company={company} onChanged={refresh} />}
-        {step === 2 && company && <Runner company={company} onChanged={refresh} />}
-        {step === 3 && company && <Credentials company={company} onChanged={refresh} />}
+        {step === 2 && company && <RunnerStep company={company} onChanged={refresh} />}
+        {step === 3 && company && <ClaudeStep company={company} onChanged={refresh} onTokenSaved={() => setTokenPath(true)} />}
         {step === 4 && company && <GitStep company={company} onChanged={refresh} />}
         {step === 5 && company && <ChecksStep company={company} onChanged={refresh} />}
         {step === 6 && company && <FundingStep company={company} onChanged={refresh} />}
@@ -389,7 +403,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           )}
           {step < STEPS.length - 1 ? (
             <>
-              <button type="button" className={done(s.id) ? "btn primary" : "btn"} disabled={!company} onClick={() => move(step + 1)}>
+              <button type="button" className={done(s.id) ? "btn primary" : "btn"} disabled={!company} onClick={() => move(next)}>
                 {done(s.id) ? "Next" : "Skip for now"}
               </button>
             </>

@@ -108,9 +108,10 @@ rebuild_and_start() { # old-commit new-commit
   local built_fail="An image build failed (see above), so nothing was started; the running staging, if any, is unchanged. Fix the cause and run this again."
   step "Building (${built[*]})"
   run dc build "${built[@]}" || die "$built_fail"
-  # The runner image the launcher starts: built when it is missing or the runner's code changed.
+  # The runner image the launcher starts: built when it is missing or the runner's code changed (the same rule as
+  # needs_runner in deploy.sh: what the image builds COPY in, BOS-1648).
   if [[ ,$profiles, == *,launcher,* ]]; then
-    if ((DRY)) || ! docker image inspect boss-man-staging-runner:current >/dev/null 2>&1 || { [[ -n ${1:-} ]] && git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'; }; then
+    if ((DRY)) || ! docker image inspect boss-man-staging-runner:current >/dev/null 2>&1 || { [[ -n ${1:-} ]] && git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'; }; then
       step "Building the staging runner image"
       run dc --profile runners build runner-app-co || die "$built_fail"
       RUNNER_NEW=1

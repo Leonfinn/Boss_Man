@@ -24,7 +24,7 @@ describe("Checks in Settings", () => {
       }),
     );
     render(<CheckQueueSetting />);
-    const legacy = (await screen.findByRole("radio", { name: /Agents run their own/ })) as HTMLInputElement;
+    const legacy = (await screen.findByRole("radio", { name: /Each agent runs its own/ })) as HTMLInputElement;
     const server = screen.getByRole("radio", { name: /Boss Man runs them/ }) as HTMLInputElement;
     expect(legacy.checked).toBe(true);
     expect(server.parentElement!.textContent).toContain("woken with the result");
@@ -44,5 +44,42 @@ describe("Checks in Settings", () => {
     expect((await screen.findByTestId("check-queue-old-runner")).textContent).toContain("App Co");
     fireEvent.change(screen.getByLabelText(/Checks at once/), { target: { value: "9" } });
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("BOS-1602: the owner sets the company runner's split (2 of 3 kept for merges), and each worker row says what it takes", async () => {
+    const calls: Array<{ method: string; body: unknown }> = [];
+    const worker = { id: "w1", name: "NAS", enabled: true, connected: true, slots: 2, reportedSlots: null, limit: 2, takes: "checks", mergeKept: 0, checkThreads: null, checkMemoryMb: null, imageCommit: null, toolchain: null, lastSeenAt: null, companies: [], reason: null };
+    const v = { ...view, mode: "server", slots: 3, runnerPolicy: { takes: "both", mergeKept: 0 }, workers: [worker] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : null });
+        return json(String(url).includes("/api/companies") ? [] : v);
+      }),
+    );
+    render(<CheckQueueSetting />);
+    expect((await screen.findByTestId("check-runner-split")).textContent).toContain("Merge checks and quick checks");
+    expect(screen.getByTestId("check-worker-split").textContent).toContain("Quick checks only");
+    const kept = screen.getByLabelText(/Kept for merge checks/);
+    fireEvent.change(kept, { target: { value: "4" } });
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true); // more than the 3 slots
+    fireEvent.change(kept, { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ mode: "server", slots: 3, train: false, runnerPolicy: { takes: "both", mergeKept: 2 } });
+  });
+
+  it("BOS-1498: shows what memory the runners are given and why", async () => {
+    const memoryLine = "11 GB: 6 agents at once and 1 check, on a 16 GB machine.";
+    const runner = { slots: 1, memoryBytes: 11 * 1024 ** 3, reason: null, pending: 0, applying: false, runnerCount: 1 };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...view, runner: { ...runner, memoryLine } })));
+    render(<CheckQueueSetting />);
+    expect((await screen.findByTestId("runner-memory-line")).textContent).toBe(memoryLine);
+    cleanup();
+    // An older launcher sends no line: the panel shows the limit alone.
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...view, runner })));
+    render(<CheckQueueSetting />);
+    expect((await screen.findByTestId("check-runner-limit")).textContent).toContain("11 GB memory limit");
+    expect(screen.queryByTestId("runner-memory-line")).toBeNull();
   });
 });

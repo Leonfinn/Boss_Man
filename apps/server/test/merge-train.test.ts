@@ -1,7 +1,7 @@
 // The merge train coordinator (BOS-1366, DR-059): pure rules, no database or runner. Who gets a seat and in what order, where each
 // member prepares, when it is stale, and when a failed check counts against it.
 import { describe, expect, it } from "vitest";
-import { MergeTrain, TRAIN_RESTACK_CAP } from "../src/services/merge-train.js";
+import { MergeTrain, TRAIN_QUICK_RESTACK_MS, TRAIN_RESTACK_BACKOFF_MAX_MS, TRAIN_RESTACK_BACKOFF_MS, TRAIN_RESTACK_CAP } from "../src/services/merge-train.js";
 
 const train = (seats = 3, clock = { t: 0 }) => new MergeTrain({ seats: () => seats, now: () => clock.t });
 const prep = (tr: MergeTrain, id: string, base: string, commit: string) => tr.prepared(id, { base, commit, tree: `tree-${commit}` });
@@ -202,5 +202,143 @@ describe("merge train: restart (BOS-1289)", () => {
     tr2.join("y", { priority: 1, place: 5 });
     tr2.leave("x"); // x left review while the server was down
     expect(tr2.seated("y")).toBe(true);
+  });
+});
+
+describe("merge train: what the check queue holds back (BOS-1504)", () => {
+  it("withholds a ticket waiting for a seat, and a seeded one not seated yet; never a member, a leaver or a stranger", () => {
+    const clock = { t: 0 };
+    const tr = train(1, clock);
+    tr.seedOrder(["x", "y"], 1000);
+    expect(tr.withheld("x")).toBe(true); // seeded, its landing hasn't re-joined yet
+    expect(tr.withheld("stranger")).toBe(false); // never joined: the queue serves it as before
+    tr.join("x", { priority: 1, place: 1 });
+    tr.join("y", { priority: 1, place: 2 });
+    expect(tr.seated("x")).toBe(true);
+    expect(tr.seated("y")).toBe(false); // one seat
+    expect(tr.withheld("x")).toBe(false);
+    expect(tr.withheld("y")).toBe(true);
+    expect(tr.seatedIds()).toEqual(["x"]);
+    tr.leave("y");
+    expect(tr.withheld("y")).toBe(false);
+
+    // The seed stops holding back once its deadline has passed.
+    const tr2 = train(3, clock);
+    tr2.seedOrder(["a"], 1000);
+    expect(tr2.withheld("a")).toBe(true);
+    clock.t = 1000;
+    expect(tr2.withheld("a")).toBe(false);
+  });
+
+  it("lists seated tickets head first", () => {
+    const tr = train(3);
+    tr.join("b", { priority: 1, place: 20 });
+    tr.join("a", { priority: 1, place: 10 });
+    tr.join("c", { priority: 2, place: 0 });
+    tr.seated("a");
+    expect(tr.seatedIds()).toEqual(["a", "b", "c"]);
+    tr.landed("a");
+    expect(tr.seatedIds()).toEqual(["b", "c"]);
+  });
+});
+
+describe("merge train: re-tier (BOS-1516)", () => {
+  it("moves a waiting ticket up, never a seated one, and never down", () => {
+    const tr = train(1);
+    tr.join("a", { priority: 1, place: 1 });
+    tr.join("b", { priority: 1, place: 2 });
+    tr.join("c", { priority: 1, place: 3 });
+    expect(tr.seated("a")).toBe(true);
+    expect(tr.queue()).toEqual(["b", "c"]);
+    expect(tr.retier("c", 0)).toBe(true); // Priority 1 set after joining
+    expect(tr.queue()).toEqual(["c", "b"]);
+    expect(tr.retier("a", 0)).toBe(false); // seated: untouched
+    expect(tr.retier("b", 2)).toBe(false); // lower tier never pushes down
+    expect(tr.retier("nobody", 0)).toBe(false);
+    expect(tr.list().map((m) => m.ticketId)).toEqual(["a"]);
+    tr.landed("a");
+    expect(tr.seated("c")).toBe(true);
+  });
+});
+
+describe("merge train: a landing cut off after its push (BOS-1604, 15 Nov)", () => {
+  it("a commit that is main's tip is never lost: the next head is not stale", () => {
+    const tr = train(2);
+    tr.join("a", { priority: 1, place: 1 });
+    tr.join("b", { priority: 1, place: 2 });
+    tr.seated("b");
+    tr.prepared("a", { base: "m0", commit: "A", tree: "tA", onMain: true });
+    prep(tr, "b", "A", "B");
+    // a's push reached main (main = A), but the runner update cut off the answer: its landing ends as a failure and leaves.
+    tr.leave("a");
+    // b was stacked on A: it is now the head on a lost base, so it restacks once...
+    expect(tr.stale("b")).toBe("ahead_left");
+    tr.restack("b");
+    // ...and prepares on main, whose tip is A. Before the fix it was "ahead_left" again at every poll, for over an hour.
+    tr.prepared("b", { base: "A", commit: "B2", tree: "tB", onMain: true });
+    expect(tr.stale("b")).toBeNull();
+    // A new ticket stacked behind b is fine too.
+    tr.join("c", { priority: 1, place: 3 });
+    tr.seated("c");
+    prep(tr, "c", "B2", "C");
+    expect(tr.stale("c")).toBeNull();
+  });
+
+  it("a member leaving whose commit is already seen as main's tip doesn't mark it lost", () => {
+    const tr = train(2);
+    tr.join("a", { priority: 1, place: 1 });
+    tr.join("b", { priority: 1, place: 2 });
+    tr.seated("b");
+    tr.prepared("a", { base: "m0", commit: "A", tree: "tA", onMain: true });
+    tr.onMain("A"); // seen on main (another prepare on main fetched it) before a's landing gave up
+    tr.leave("a");
+    tr.prepared("b", { base: "A", commit: "B", tree: "tB", onMain: true });
+    expect(tr.stale("b")).toBeNull();
+  });
+
+  it("a landed commit is main's tip: a later prepare can't be stale on it", () => {
+    const tr = train(2);
+    tr.join("a", { priority: 1, place: 1 });
+    tr.seated("a");
+    tr.prepared("a", { base: "m0", commit: "A", tree: "tA", onMain: true });
+    tr.restack("a"); // A lost
+    tr.prepared("a", { base: "m0", commit: "A", tree: "tA", onMain: true }); // the same commit again (same tree, same parents)
+    tr.landed("a");
+    tr.join("b", { priority: 1, place: 2 });
+    tr.seated("b");
+    tr.prepared("b", { base: "A", commit: "B", tree: "tB" });
+    expect(tr.stale("b")).toBeNull();
+  });
+
+  it("a member restacking faster than a check can run backs off, and the train reports thrash once; a landing clears it", () => {
+    const clock = { t: 0 };
+    const tr = train(2, clock);
+    tr.join("a", { priority: 1, place: 1 });
+    tr.seated("a");
+    const loop = () => {
+      tr.prepared("a", { base: "m", commit: `c${clock.t}`, tree: `t${clock.t}`, onMain: true });
+      clock.t += 3_000; // stale at the first poll
+      tr.restack("a");
+    };
+    loop();
+    expect(tr.backoffMs("a")).toBe(0); // one quick restack: the member ahead really changed
+    expect(tr.facts().thrashSince).toBeNull();
+    loop();
+    expect(tr.backoffMs("a")).toBe(TRAIN_RESTACK_BACKOFF_MS);
+    loop();
+    expect(tr.backoffMs("a")).toBe(TRAIN_RESTACK_BACKOFF_MS * 2);
+    const since = tr.facts().thrashSince;
+    expect(since).not.toBeNull();
+    for (let i = 0; i < 5; i++) loop();
+    expect(tr.backoffMs("a")).toBe(TRAIN_RESTACK_BACKOFF_MAX_MS); // capped
+    expect(tr.facts().thrashSince).toBe(since); // one episode, not one per restack
+    // A restack after a check had time to run is not quick: no back-off.
+    tr.prepared("a", { base: "m", commit: "slow", tree: "tslow", onMain: true });
+    clock.t += TRAIN_QUICK_RESTACK_MS;
+    tr.restack("a");
+    expect(tr.backoffMs("a")).toBe(0);
+    tr.prepared("a", { base: "m", commit: "L", tree: "tL", onMain: true });
+    tr.landed("a");
+    expect(tr.facts().thrashSince).toBeNull();
   });
 });

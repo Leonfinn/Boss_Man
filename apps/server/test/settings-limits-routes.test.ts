@@ -29,6 +29,9 @@ const MOVED = [
   { method: "PUT", url: "/api/settings/check-queue" },
   { method: "GET", url: "/api/settings/check-merged-result" },
   { method: "PUT", url: "/api/settings/check-merged-result" },
+  // BOS-1070: the owner's "Wait for GitHub CI" switch.
+  { method: "GET", url: "/api/settings/wait-for-ci" },
+  { method: "PUT", url: "/api/settings/wait-for-ci" },
 ] as const;
 
 describe("the moved settings and limits routes are still owner only (BOS-1051)", () => {

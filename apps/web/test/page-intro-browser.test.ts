@@ -124,7 +124,7 @@ const PLACES = [
   },
   {
     name: "server",
-    hash: "#/settings/c1/system",
+    hash: "#/settings/c1/updates",
     ready: "#stop-all-h",
     lead: "Stops every company from starting new agent runs until you press Resume.",
     held: "Runs already going are not cut off",

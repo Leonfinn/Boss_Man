@@ -10,39 +10,61 @@
 // list puts only on other screens. Words the list doesn't know (a section heading such as "Updates") are passed
 // over, and a button that is on every screen (Save) is never refused for its place.
 
-import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
+import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_SECTIONS, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
 
 /** A label as compared: lower case, words only ("Saved ✓" is "saved", "Done: mark processed" is "done mark processed"). */
 export const norm = (s: string) => s.toLowerCase().replace(/’/g, "'").replace(/[^\p{L}\p{N}']+/gu, " ").trim();
 
 /** A place in the app a step can send the owner to. `tabs` are the places under it; `projects` means any project name follows. */
-type Place = { route: string; screen: OwnerScreen | null; tabs: readonly string[]; projects?: boolean };
+type Place = { route: string; screen: OwnerScreen | null; tabs: readonly string[]; projects?: boolean; sections?: readonly string[] };
 
 const isScreen = (s: string): s is OwnerScreen => Object.hasOwn(OWNER_CONTROLS, s);
+const sectionsOf = (tabs: readonly string[]): string[] => tabs.flatMap((t) => (OWNER_SECTIONS as Record<string, readonly string[]>)[t] ?? []);
+/** Every part after a place that lists its pages must be one of them (BOS-1649); places with `sections` list them, tabs, headings, buttons and fields. */
+const pagesOf = (p: Place) => [...p.tabs, ...(p.sections ?? [])];
+/** Menu entries whose label is longer than their screen's name (BOS-1494: plain words on the menu). */
+const MENU_SCREEN: Record<string, OwnerScreen> = { "Scrum Master log": "Scrum Master", "Workflow report": "Workflow" };
 const top = (name: string): Place => ({
   route: name,
-  screen: isScreen(name) ? name : null,
+  screen: MENU_SCREEN[name] ?? (isScreen(name) ? name : null),
   tabs: name === "Settings" ? OWNER_TABS.Settings : [],
+  ...(name === "Settings" ? { sections: sectionsOf(OWNER_TABS.Settings) } : {}),
   ...(name === "Projects" ? { projects: true } : {}),
 });
 /** A project's page: the project's name is a path part of its own ("Projects → Development → Config"). */
-const PROJECT: Place = { route: "Projects → (the project)", screen: "Board", tabs: OWNER_TABS.Board };
+const PROJECT: Place = { route: "Projects → (the project)", screen: "Board", tabs: OWNER_TABS.Board, sections: [] };
 const BOARD_TAB_SCREEN: Record<string, OwnerScreen> = { Kanban: "Board", Config: "Config" };
 function tab(parent: Place, name: string): Place {
   const screen = parent === PROJECT ? BOARD_TAB_SCREEN[name] ?? null : isScreen(name) ? name : null;
-  return { route: `${parent.route} → ${name}`, screen, tabs: [] };
+  return { route: `${parent.route} → ${name}`, screen, tabs: [], sections: sectionsOf([name]) };
 }
+
+/**
+ * "Server and runner" is the name of a group of Settings pages, not a page (BOS-1492). Cards and notices still write
+ * "Settings → Server and runner → Updates", and they stay true: the group is a place of its own whose pages are the last
+ * Settings pages before "Import and export", and its buttons and fields are the ones on those pages.
+ */
+const SERVER_GROUP = "Server and runner";
+const SERVER_AND_RUNNER: Place = {
+  route: `Settings → ${SERVER_GROUP}`,
+  screen: "Server and runner",
+  tabs: OWNER_TABS.Settings.filter((t) => ["Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy"].includes(t)),
+  sections: sectionsOf(["Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy"]),
+};
 
 /** Every place a step can name, by its normalised name: the side menu, Setup, and the tabs of Settings and a project. */
 const PLACES = (() => {
   const out = new Map<string, Place>(); // not state: local to the PLACES lookup-table builder
   for (const m of OWNER_MENU) out.set(norm(m), top(m));
+  // The menu's names before BOS-1494, so a step that still says "Scrum Master" or "Workflow" finds its page.
+  for (const [label, screen] of Object.entries(MENU_SCREEN)) out.set(norm(screen), top(label));
   out.set("project", top("Projects"));
   const setup: Place = { route: "Setup (Settings → Run the setup wizard)", screen: "Setup", tabs: [] };
   out.set("setup", setup);
   out.set("setup wizard", setup);
   for (const t of OWNER_TABS.Settings) out.set(norm(t), tab(top("Settings"), t));
   for (const t of OWNER_TABS.Board) out.set(norm(t), tab(PROJECT, t));
+  out.set(norm(SERVER_GROUP), SERVER_AND_RUNNER);
   return out;
 })();
 
@@ -76,6 +98,9 @@ const screensOf = (n: string): Set<OwnerScreen> | undefined => {
   return c && f ? new Set([...c, ...f]) : c ?? f;
 };
 
+/** Every section heading, normalised: a path part that starts with one ends there ("→ Checks lands tickets…"). */
+const SECTION_NAMES = new Set(sectionsOf(Object.keys(OWNER_SECTIONS)).map(norm));
+
 /** Where a step sends the owner: the place, and where in the step's text it is named. */
 type PlaceHit = { at: number; place: Place | null };
 
@@ -89,7 +114,7 @@ function knownRun(s: string, fromEnd: boolean): string | null {
   for (let k = Math.min(8, words.length); k > 0; k--) {
     const run = (fromEnd ? words.slice(-k) : words.slice(0, k)).join(" ");
     const n = norm(run);
-    if (PLACES.has(n) || screensOf(n)) return run;
+    if (PLACES.has(n) || screensOf(n) || SECTION_NAMES.has(n)) return run;
   }
   return null;
 }
@@ -161,6 +186,7 @@ function walk(parts: string[], problems: string[]): Place | null | undefined {
     // A tab may be named by its first words ("Settings → Reviews" is Reviews and CEO), as cards shorten them.
     const child = at.tabs.find((t) => norm(t) === n) ?? at.tabs.find((t) => norm(t).startsWith(`${n} `));
     if (child) { at = tab(at, child); continue; }
+    if (at.route === "Settings" && (n === norm(SERVER_GROUP) || norm(SERVER_GROUP).startsWith(`${n} `))) { at = SERVER_AND_RUNNER; continue; }
     if (at.projects) {
       const boardTab = OWNER_TABS.Board.find((t) => norm(t) === n);
       at = boardTab ? tab(PROJECT, boardTab) : PROJECT;
@@ -172,7 +198,13 @@ function walk(parts: string[], problems: string[]): Place | null | undefined {
       return null;
     }
     const screens = screensOf(n);
-    if (!screens) continue; // A heading or a word the list doesn't know: the path goes on from the same place.
+    if (!screens) {
+      // A listed section heading: the path goes on from the same place. Where the place lists its pages, any other
+      // word is not a page there (BOS-1649). Other places have no list, so their unknown words pass.
+      if (!at.sections?.length || at.sections.some((s) => norm(s) === n || norm(s).startsWith(`${n} `) || n.startsWith(`${norm(s)} `))) continue;
+      problems.push(`sends the owner to ${at.route} → ${raw}, but there is no "${raw}" under ${at.route}. What is there: ${pagesOf(at).join(", ")}. Give a path the app shows`);
+      return null;
+    }
     if (at.screen && !screens.has("Any screen") && !screens.has(at.screen)) {
       problems.push(`sends the owner to ${at.route} for "${raw}", which isn't there: it is on ${whereAll(screens)}. Give the path to that screen`);
       return null;
@@ -180,6 +212,18 @@ function walk(parts: string[], problems: string[]): Place | null | undefined {
     break; // A button or field ends the path.
   }
   return at;
+}
+
+/** Whether the text has a "Settings → …" path that walks to a real page, tab or heading (R17 counts only such a path as a how-to, BOS-1649). */
+export function hasWalkingSettingsPath(prose: string): boolean {
+  for (const s of sentences(prose)) {
+    for (const chain of chainsIn(s.text)) {
+      if (norm(chain.parts[0]!) !== "settings") continue;
+      const problems: string[] = [];
+      if (walk(chain.parts, problems) !== undefined && !problems.length) return true;
+    }
+  }
+  return false;
 }
 
 /** A place named without an arrow: "Open Settings and…", "on the Secrets page", "under Config". */

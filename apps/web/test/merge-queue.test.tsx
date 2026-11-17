@@ -98,6 +98,17 @@ describe("merge queue screen (BOS-587)", () => {
     expect(screen.queryByRole("link", { name: "Needs you: open the card" })).toBeNull();
   });
 
+  it("says a running merge is also waiting for GitHub CI, with the jobs left and the minutes so far (BOS-1070)", async () => {
+    const running = [{ ...data.running[0], ci: { minutes: 12, waiting: ["images (arm64)", "check"] } }];
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, running })));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Merging now")).toBeTruthy();
+    const row = screen.getAllByRole("article")[0]!;
+    expect(row.querySelector("[data-ci-wait]")?.textContent).toBe("Waiting for GitHub CI: images (arm64), check, 12 min so far. It merges only once CI passes.");
+    // The check line beside it still says the check is running: both go on at once.
+    expect(row.textContent).toContain("running the check");
+  });
+
   it("says plainly when nothing is waiting or running", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waitingCount: 0, running: [], waiting: [], recent: [] })));
     render(<MergeQueue companies={[company]} companyId="c1" />);
@@ -156,6 +167,45 @@ describe("merge queue screen in server mode (BOS-597)", () => {
   });
 });
 
+// BOS-1517: one status line per ticket: step, since when, next, and what is in the way.
+describe("status line (BOS-1517)", () => {
+  it("shows a train-seat wait and a running check each as one line, with the check's own start", async () => {
+    const since = new Date(Date.now() - 12 * 60_000).toISOString();
+    const server = {
+      ...data,
+      mode: "server",
+      waitingCount: 1,
+      running: [{ ...data.running[0]!, statusLine: { step: "slot 1: running the check", since, next: "It merges by itself if the check passes.", blocker: null } }],
+      waiting: [{ ticketId: "t1", ref: "APP-12", title: "Behind the queue", minutes: 8, state: "waiting_for_seat", label: "waiting for a train seat", stuck: false, next: "x", actor: "system", decisionId: null, risk: "low", urgent: false, failedCheck: false, statusLine: { step: "waiting for a train seat", since, next: "It takes a seat as soon as one frees; its check then starts by itself.", blocker: "Every merge-train seat is taken." } }],
+      recent: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => json(server)));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Waiting for a train seat")).toBeTruthy();
+    const lines = document.querySelectorAll("[data-status-line]");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]!.textContent).toMatch(/^Slot 1: running the check · since .*\(12m\)\. Next: It merges by itself if the check passes\.$/);
+    expect(lines[1]!.textContent).toMatch(/Next: It takes a seat as soon as one frees; its check then starts by itself\. In the way: Every merge-train seat is taken\.$/);
+    expect(screen.queryByText(/check slot/)).toBeNull();
+  });
+
+  it("shows Move to front on a row waiting for a train seat (BOS-1516, BOS-1510), a button with a real label for touch", async () => {
+    const server = {
+      ...data,
+      mode: "server",
+      waitingCount: 1,
+      running: [],
+      waiting: [{ ticketId: "t1", ref: "APP-12", title: "Behind the queue", minutes: 8, state: "waiting_for_seat", label: "waiting for a train seat", stuck: false, next: "x", actor: "system", decisionId: null, risk: "low", urgent: true, failedCheck: false, place: 1 }],
+      recent: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => json(server)));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Behind the queue")).toBeTruthy();
+    const button = screen.getByRole("button", { name: /Move to front/ });
+    expect(button.tagName).toBe("BUTTON");
+  });
+});
+
 // The Merge queue's attention layout (BOS-1239, design BOS-1207).
 const base = { risk: "low", urgent: false, failedCheck: false, decisionId: null, actor: "system" as const, stuck: false, minutes: 10, next: "Boss Man merges it.", signedOffAt: null };
 const checkRow = (over: Record<string, unknown>) => ({ id: "j1", ticketId: "t1", ref: "APP-1", title: "A check", kind: "quick", requestedBy: "Bungle", state: "waiting", position: 1, minutes: 22, fixesMain: false, heldBy: null, ...over, heldByMain: String(over.heldBy ?? "").startsWith("main is red") });
@@ -209,6 +259,21 @@ describe("merge queue attention layout (BOS-1239)", () => {
     const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
     await screen.findByText("APP-3");
     expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/2 checks are held/);
+  });
+
+  // R28: only a GitHub-CI hold (no queued check is held by main) still shows the one "main is red" banner, naming the fix.
+  it("main red from a hold behind a fix: the banner shows with no held check, naming the fix and linking the update card", async () => {
+    const line = { state: "held_behind_fix", held: 3, since: null, fixes: [{ ticketId: "fx", ref: "APP-9", title: "Fix main", stateText: "merged, waiting for the server update", ownerUpdate: true, updateCardId: "card-1" }] };
+    serve({ ...calm, line }, noChecks);
+    goTo("#/merge-queue/c1/checks");
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText(/Main is red\./);
+    expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/3 approved tickets are held until the fix \(APP-9, merged, waiting for the server update\)/);
+    goTo("#/merge-queue/c1");
+    cleanup();
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    const link = await screen.findByRole("link", { name: "Open the update card" });
+    expect(link.getAttribute("href")).toBe("#/decisions/card-1");
   });
 
   it("a pill on the Merges tab moves focus to its target", async () => {

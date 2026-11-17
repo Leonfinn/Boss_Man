@@ -195,7 +195,9 @@ if [[ $1 == ps && $2 == -a && $3 == --filter && $4 == label=com.docker.compose.p
   printf 'aaa\tsrv\t%s\t%s\t2 hours ago\tsrv\tsrv\n' "${FAKE_RUN:-running}" "${FAKE_STATUS:-Up 2 hours}"
   printf 'bbb\tbm-migrate-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tmigrate\n'
   printf 'ccc\tbm-netguard-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tnetguard\n'
-  printf 'ddd\tserver-green\texited\tExited (0) 1 minute ago\t1 minute ago\tbm\tserver-green\n'
+  printf 'ddd\tserver-green\texited\tExited (%s) 1 minute ago\t1 minute ago\tbm\tserver-green\n' "${FAKE_GREEN_EXIT:-0}"
+  # BOS-1584: FAKE_BLUE=running|exited adds the other colour, to test the standby filter with a known live colour.
+  [[ -n ${FAKE_BLUE:-} ]] && printf 'bl1\tserver-blue\t%s\tUp 1 hour\t1 hour ago\tbm\tserver-blue\n' "$FAKE_BLUE"
   printf 'eee\tbm-worker-1\texited\tExited (%s) 2 hours ago\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}"
   printf 'fff\tbm-cache-1\trestarting\tRestarting (255) 1 second ago\t1 minute ago\tbm\tcache\n'
   printf 'ggg\tbm-db-1\texited\tExited (0) 10 minutes ago\t10 minutes ago\tbm\tdb\n'
@@ -210,7 +212,9 @@ if [[ $1 == inspect && $2 == -f && $3 == '{{.State.ExitCode}}' ]]; then
   [[ -n ${FAKE_INSPECT_EMPTY:-} ]] && exit 0
   for id in "$@"; do
     case $id in
-      bbb|ccc|ddd|ggg) echo 0 ;;
+      ddd) echo "${FAKE_GREEN_EXIT:-0}" ;;
+      bl1) echo "${FAKE_BLUE_EXIT:-1}" ;;
+      bbb|ccc|ggg) echo 0 ;;
       eee|hhh) echo "${FAKE_EXIT:-137}" ;;
       fff) echo 255 ;;
       *) echo 0 ;;
@@ -257,6 +261,30 @@ node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=
 # A worker that exited 0 with a normal restart policy is still named, not hidden as a finished one-shot.
 FAKE_EXIT=0 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (all up) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.notRunning!==3)process.exit(1)' "$D/outbox/host.json" || fail "only the migrate/netguard one-shots and the standby colour should be ignored"
+# BOS-1584: with blue/green on and blue the live colour (running), the stopped green standby is meant to be stopped
+# whatever its exit code (docker stop gives 137). Blue/green is on when COMPOSE_FILE names the bluegreen file, and the
+# live colour is read from the proxy include.
+mkdir -p "$D/proxy"; printf 'reverse_proxy server-blue:3100\n' >"$D/proxy/active.caddy"
+bgnames() { COMPOSE_FILE="docker-compose.yml:deploy/truenas-bluegreen.yml" "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (standby) exited non-zero"; }
+  node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=>x.name+":"+x.exit);process.stdout.write(s.sort().join(","))' "$D/outbox/host.json"; }
+for gx in 0 137 143 1; do
+  [[ $(FAKE_BLUE=running FAKE_GREEN_EXIT=$gx bgnames) == "bm-cache-1:255,bm-db-1:0,bm-worker-1:137" ]] || fail "standby green (exit $gx) beside a running blue must be ignored"
+done
+# A crashed live colour is still reported: blue is live but not running, so green's stop is not "meant" and blue is named.
+names="$(FAKE_BLUE=exited FAKE_BLUE_EXIT=137 FAKE_GREEN_EXIT=137 bgnames)"
+[[ $names == *"server-blue:137"* && $names == *"server-green:137"* ]] || fail "a live colour that is down must still be reported, with its standby: $names"
+rm -f "$D/proxy/active.caddy"
+# BOS-1584: the repo probe goes over the same ssh command a deploy uses. A checkout's core.sshCommand (the deploy key)
+# must survive: the probe adds only the no-prompt options. A fake ssh records what it was given and refuses.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s/ssh.args"\nexit 255\n' "$T" >"$T/fd/fakessh"; chmod +x "$T/fd/fakessh"
+git -C "$T/src" config core.sshCommand "$T/fd/fakessh -i /keys/deploy_key -o IdentitiesOnly=yes"
+git -C "$T/src" remote set-url origin "ssh://someone@git.example.test/repo.git"
+rm -f "$D/state/repo-probe" "$T/ssh.args"; host
+has "$T/ssh.args" "-i /keys/deploy_key -o IdentitiesOnly=yes"
+has "$T/ssh.args" "BatchMode=yes"
+git -C "$T/src" config --unset core.sshCommand
+git -C "$T/src" remote set-url origin "$T/origin.git"
+rm -f "$D/state/repo-probe"; host
 # When inspect returns nothing for every container (removed between ps and inspect, or inspect denied), `exit` must
 # still be a string so host.json stays valid JSON and the panel keeps every other fact (Rod's must-fix).
 FAKE_INSPECT_EMPTY=1 "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (empty inspect) exited non-zero"; }
@@ -266,6 +294,42 @@ const c=h.checks.container_status;
 if(!c||!Array.isArray(c.stopped))process.exit(2);
 if(!c.stopped.every(s=>typeof s.exit==="string")){console.error(JSON.stringify(c.stopped));process.exit(3)};
 ' "$D/outbox/host.json" || fail "an empty inspect must leave a valid host.json with string exits: $(cat "$D/outbox/host.json")"
+# ntfy reach (BOS-1466): "running" is not "the server can resolve ntfy". The report says whether the ntfy container
+# shares a Docker network with a running server container; false is the blue/green install started without
+# deploy/ntfy-bluegreen.yml. Only the ntfy and server service labels answer; network names never appear in host.json.
+mkdir -p "$T/nt"; cat >"$T/nt/docker" <<'FAKE'
+#!/usr/bin/env bash
+if [[ $1 == ps && $2 == --filter ]]; then
+  case $3 in
+    label=com.docker.compose.service=ntfy) [[ $4 == --format ]] && echo ntfy-1 ;;
+    label=com.docker.compose.service=server-green) [[ $4 == --format ]] && echo sg1 ;;
+  esac
+  exit 0
+fi
+if [[ $1 == exec && $2 == ntfy-1 && $3 == wget ]]; then
+  printf '# TYPE ntfy_subscribers_total gauge\nntfy_subscribers_total %s\n' "${FAKE_NTFY_SUBS:-2}"
+  exit 0
+fi
+if [[ $1 == inspect && $2 == -f ]]; then
+  case $4 in
+    ntfy-1) [[ $3 == *StartedAt* ]] && echo "2026-11-14T10:00:00.123456789Z" || echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
+    sg1) echo "bm_front bm_internal " ;;
+  esac
+  exit 0
+fi
+exit 0
+FAKE
+chmod +x "$T/nt/docker"
+sed "s#^export PATH=.*#export PATH=$T/nt:\$PATH#" "$here/host-deployer.sh" >"$T/nt/hd.sh"; chmod +x "$T/nt/hd.sh"
+"$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy fake) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.container!=="ntfy-1"||n.serverReach!==false)process.exit(1)' "$D/outbox/host.json" || fail "ntfy on edge only must report serverReach false: $(cat "$D/outbox/host.json")"
+hasnt "$D/outbox/host.json" 'bm_front'
+FAKE_NTFY_NETS="bm_edge bm_front " "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy on front) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.serverReach!==true)process.exit(1)' "$D/outbox/host.json" || fail "ntfy on the front network must report serverReach true: $(cat "$D/outbox/host.json")"
+# BOS-1589: the report carries when ntfy last started and how many phones are connected now (0 = a silent phone).
+node -e 'const n=require(process.argv[1]).ntfy;if(n.startedAt!=="2026-11-14T10:00:00.123456789Z"||n.subscribers!==2)process.exit(1)' "$D/outbox/host.json" || fail "ntfy facts must carry startedAt and subscribers 2: $(cat "$D/outbox/host.json")"
+FAKE_NTFY_SUBS=0 "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy 0 subscribers) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(n.subscribers!==0)process.exit(1)' "$D/outbox/host.json" || fail "0 subscribers must be reported as 0: $(cat "$D/outbox/host.json")"
 # --facts writes the report on demand, with no request and no deploy run (BOS-986), so a fix can be checked at once.
 printf '{"id":"x"\n' >"$D/inbox/request.json"
 rm -f "$D/outbox/host.json"; : >"$STUB_LOG"
@@ -322,8 +386,11 @@ has "$D/outbox/status.json" "already handled"
 c2="$(push apps/server/b)"
 req server "$c2"
 host
-[[ $(status result) == rejected ]] || fail "rate limit result"
-has "$D/outbox/status.json" "only one server deploy every 10 minutes"
+# BOS-1469: the refusal is its own record and never replaces the last real result in status.json.
+[[ $(jget "$D/outbox/refused.json" result) == rejected ]] || fail "rate limit result"
+has "$D/outbox/refused.json" "only one server deploy every 10 minutes"
+has "$D/outbox/status.json" "already handled" # the step before's result is still there
+! grep -q "only one server deploy" "$D/outbox/status.json" || fail "refusal text leaked into status.json"
 [[ $(calls) == 1 ]] || fail "deploy ran despite the rate limit"
 has "$T/hook.out" '"result": "rejected"'
 node -e '
@@ -353,7 +420,7 @@ has "$D/outbox/status.json" "deployment files (docker-compose.yml)"
 [[ $(calls) == 1 ]] || fail "infra change was deployed"
 infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
-for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh apps/server/Dockerfile .env.example; do
+for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh apps/server/Dockerfile .env.example; do
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
@@ -521,8 +588,9 @@ has "$STUB_LOG" "deploy.sh --yes --no-runner --force --commit $head"
 # It shares the server's rate limit (one slot, state/last-server), both ways.
 [[ -e $D/state/last-server && ! -e $D/state/last-restart ]] || fail "restart did not use the server's rate-limit slot"
 req restart "$head"; host
-[[ $(status result) == rejected ]] || fail "second restart inside the limit: $(cat "$D/outbox/status.json")"
-has "$D/outbox/status.json" "updated or restarted less than 10 minutes ago"
+[[ $(jget "$D/outbox/refused.json" result) == rejected ]] || fail "second restart inside the limit: $(cat "$D/outbox/refused.json")"
+has "$D/outbox/refused.json" "updated or restarted less than 10 minutes ago"
+[[ $(status result) == deployed && $(status target) == restart ]] || fail "the refused restart replaced the real result: $(cat "$D/outbox/status.json")"
 [[ $(calls) == $((before + 1)) ]] || fail "a restart ran inside the rate limit"
 # A commit that is not what runs (an update ran since the click): refused, nothing runs.
 rm -f "$D/state/last-server"
@@ -553,7 +621,7 @@ has "$D/outbox/status.json" "have not passed their merge check yet. ${c5:0:8} is
 # 13h. Deploy latest pressed for the tip, then two more merges land, both checked: the new tip goes out, and the runner
 # change it brings is reported, though the card's own range had none.
 rm -f "$D/state/last-server"
-c7="$(push apps/runner/x)"; c8="$(push apps/server/f)"
+c7="$(push apps/runner/src/x)"; c8="$(push apps/server/f)"
 printf '%s\n' "$c5" "$c6" "$c7" "$c8" >"$D/inbox/checked"
 before="$(calls)"
 req server "$c6"; host
@@ -980,6 +1048,14 @@ at "$sD"; FAKE_NO_HASH=1 svc_check; has "$D/outbox/available.json" '"changedServ
 FAKE_NO_RENDER=1 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; has "$D/outbox/available.json" '"changedServices": []'
 has "$D/outbox/available.json" "\"tip\": \"$sH\""; has "$D/deployer.log" "could not be rendered"
 [[ ! -e $D/state/render ]] || fail "the render folder was left behind after a failure"
+# it can't unpack the commit: reported as not checked, the reason is logged, and docker is never asked to render the
+# empty folder (BOS-1690: the unpack's failure check is a plain function call now, not a negated subshell with a redirect)
+# shellcheck disable=SC2016  # the fake's own script text: it expands when the fake runs
+printf '#!/usr/bin/env bash\n[[ -z ${FAKE_NO_UNPACK:-} ]] || { echo "tar: fake unpack failure" >&2; exit 2; }\nexec "%s" "$@"\n' "$(command -v tar)" >"$T/bin/tar"; chmod +x "$T/bin/tar"
+FAKE_NO_UNPACK=1 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; has "$D/deployer.log" "could not unpack"
+has "$D/deployer.log" "tar: fake unpack failure"; hasnt "$DL" "config"
+[[ ! -e $D/state/render ]] || fail "the render folder was left behind after a failed unpack"
+rm -f "$T/bin/tar"
 # switched off in host.conf: not compared, and docker is not asked to render anything
 printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\nSERVICE_COMPARE=0\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/host.conf"
 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; hasnt "$DL" "config"; has "$D/deployer.log" "Service compare is off"
@@ -1235,6 +1311,142 @@ rm -f "$D/state/last-staging" "$D/state/last-server"; sreq "$s1"; : >"$STUB_LOG"
 c2="$(push apps/server/b)"; (cd "$T/src" && git fetch -q origin main); req server "$c2"; host
 [[ -e $D/inbox/staging-request.json ]] || fail "staging ran ahead of a waiting production request"
 rm -f "$D/inbox/staging-request.json"
+# The staging section left host.conf pointing at the staging checkout; the sections below set their own.
+conf 0
+
+# ================= BOS-1004: "Create phone login" (inbox/phone-login.json), fake docker, fake ntfy =================
+# The deployer makes the phone's read-only ntfy user inside the ntfy container and returns the password sealed to the
+# public key in the request. The password must be in no file the deployer writes and on no command line.
+unset COMPOSE_FILE
+PL="$T/pl"; PLW="$PL/world"; PLLOG="$PL/docker.log"; PD="$PL/deployer"
+mkdir -p "$PL/bin" "$PLW" "$PD/inbox" "$PD/outbox"; : >"$PLLOG"; : >"$PLW/users"
+sed "s#^export PATH=.*#export PATH=$PL/bin:\$PATH#" "$here/host-deployer.sh" >"$PL/hd.sh"; chmod +x "$PL/hd.sh"
+printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$T/src" >"$PD/host.conf"; chmod 600 "$PD/host.conf"
+cat >"$PL/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+# A pretend ntfy container: users in a file, passwords kept apart so the test can compare them. Logs arguments only.
+echo "docker $*" >>"$PLLOG"
+if [[ $1 == ps ]]; then printf '%s' "${PL_CIDS-abc123def456}" | tr ' ' '\n' | grep . || true; exit 0; fi
+[[ $1 == exec && $2 == -e && $3 == NTFY_PASSWORD ]] || { echo "fake docker: unhandled: $*" >&2; exit 98; }
+shift 3; cid=$1; shift; [[ $1 == ntfy ]] || exit 98; shift
+if [[ -n ${PL_FAIL:-} && $1 == "$PL_FAIL" ]]; then echo "boom: the password is ${NTFY_PASSWORD:-none}" >&2; exit 1; fi
+case "$1 $2" in
+  "token list") grep -q . "$PLW/tokens.$3" 2>/dev/null && printf 'user %s (role: user, tier: none)\n- %s (no label), never expires\n' "$3" "$(cat "$PLW/tokens.$3")" || printf 'user %s (role: user, tier: none)\n' "$3" ;;
+  "token add") [[ $3 == bossman-publish ]] || exit 97; printf 'tk_%s' "$(printf 'a%.0s' $(seq 1 29))" >"$PLW/tokens.$3"; printf 'token %s created for user %s, never expires\n' "$(cat "$PLW/tokens.$3")" "$3" ;;
+  "user list") [[ -n ${PL_NOPUB:-} ]] || printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
+  "user add") [[ $3 == --role=user && ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; echo "$4" >>"$PLW/users"; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$4" ;;
+  "user change-pass") [[ ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$3" ;;
+  access*) [[ $3 == read-only || $4 == read-only || $4 == write-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
+  *) echo "fake ntfy: unhandled: $*" >&2; exit 98 ;;
+esac
+FAKE
+chmod +x "$PL/bin/docker"
+export PLLOG PLW
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$PL/key.pem" 2>/dev/null
+pubb64() { openssl pkey -in "$1" -pubout -outform DER 2>/dev/null | base64 -w0; }
+PUB="$(pubb64 "$PL/key.pem")"
+plreq() { # action user topic pubkey [id]: write a request the way the server does; sets PLID
+  PLID="${5:-$(node -e 'console.log(crypto.randomUUID())')}"
+  printf '{"id":"%s","action":"%s","user":"%s","topic":"%s","pubkey":"%s"}\n' "$PLID" "$1" "$2" "$3" "$4" >"$PD/inbox/phone-login.json"
+  rm -f "$PD/state/last-phone-login"
+}
+plhost() { BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (phone login)"; }; }
+plx() { grep '^docker exec' "$PLLOG" | grep -vc ' wget -qO- http://localhost:9090/metrics' || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect and the ntfy metrics read don't count)
+plres() { jget "$PD/outbox/phone-login.json" "$1"; }
+unseal() { jget "$PD/outbox/phone-login.json" sealed | base64 -d | openssl pkeyutl -decrypt -inkey "$PL/key.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256; }
+no_plaintext() { # the password must be in nothing the deployer or the log wrote, nor on any command line
+  [[ -n $1 ]] || fail "empty password"
+  ! grep -rqF -- "$1" "$PD" "$PLLOG" "$T/out" "$T/hook.out" 2>/dev/null || fail "the password is in the clear in: $(grep -rlF -- "$1" "$PD" "$PLLOG" "$T/out" 2>/dev/null)"
+}
+# PL1. Create: the user is added with the role and access fixed here, and the password comes back sealed only.
+plreq create phone-read alerts "$PUB"; plhost
+[[ $(plres result) == created && $(plres id) == "$PLID" ]] || fail "PL1: $(cat "$PD/outbox/phone-login.json")"
+[[ ! -e $PD/inbox/phone-login.json ]] || fail "PL1: the request was left in the inbox"
+pw1="$(unseal)"; [[ $pw1 =~ ^[A-Za-z0-9]{24}$ && $pw1 == "$(cat "$PLW/pw.phone-read")" ]] || fail "PL1: the sealed password does not decrypt to the one ntfy was given"
+no_plaintext "$pw1"
+has "$PLLOG" "docker exec -e NTFY_PASSWORD abc123def456 ntfy user add --role=user phone-read"
+has "$PLLOG" "docker exec -e NTFY_PASSWORD abc123def456 ntfy access phone-read alerts read-only"
+has "$PD/state/phone-login.log" " $PLID created phone-read"
+# PL2. The same create again: the user exists, nothing changes, nothing is sealed.
+plreq create phone-read alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == exists && -z $(plres sealed) ]] || fail "PL2: $(cat "$PD/outbox/phone-login.json")"
+hasnt "$PLLOG" "user add"; hasnt "$PLLOG" "change-pass"; [[ $(cat "$PLW/pw.phone-read") == "$pw1" ]] || fail "PL2: the password changed"
+# PL3. Reset: a new password, access applied again, and an old request id is never run twice.
+plreq reset phone-read alerts "$PUB"; ID3=$PLID; : >"$PLLOG"; plhost
+[[ $(plres result) == reset ]] || fail "PL3: $(cat "$PD/outbox/phone-login.json")"
+pw3="$(unseal)"; [[ $pw3 != "$pw1" && $pw3 == "$(cat "$PLW/pw.phone-read")" ]] || fail "PL3: reset did not change the password"
+no_plaintext "$pw3"; no_plaintext "$pw1"
+has "$PLLOG" "ntfy user change-pass phone-read"; has "$PLLOG" "ntfy access phone-read alerts read-only"
+plreq reset phone-read alerts "$PUB" "$ID3"; : >"$PLLOG"; plhost
+hasnt "$PLLOG" "change-pass" # the same id again is ignored
+[[ $(plres id) == "$ID3" ]] || fail "PL3: a replay overwrote the answer"
+# PL4. Reset of a user that is not there.
+cp "$PLW/users" "$PLW/users.keep"; : >"$PLW/users"
+plreq reset phone-read alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == missing ]] || fail "PL4: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "change-pass"
+cp "$PLW/users.keep" "$PLW/users"
+# PL4b. Only phone-read: an existing admin (or any other) user is never reset, and docker is not touched.
+echo owner-admin >>"$PLW/users"
+plreq reset owner-admin alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == rejected ]] || fail "PL4b: $(cat "$PD/outbox/phone-login.json")"; [[ $(plx) == 0 ]] || fail "PL4b: the container was used: $(cat "$PLLOG")"
+# PL5. Bad fields are refused before docker is touched: user, reserved user, topic, key (bad, tiny, not RSA), action.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:1024 -out "$PL/small.pem" 2>/dev/null
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$PL/ec.pem" 2>/dev/null
+for bad in "create Bad_User alerts $PUB" "create ab alerts $PUB" "create admin alerts $PUB" "create bossman-publish alerts $PUB" "create phone-two alerts $PUB" "reset phone-reader alerts $PUB" "create phone-read al/erts $PUB" "create phone-read alerts.x $PUB" \
+  "create phone-read alerts bm90LWEta2V5" "create phone-read alerts $(pubb64 "$PL/small.pem")" "create phone-read alerts $(pubb64 "$PL/ec.pem")" "delete phone-read alerts $PUB"; do
+  # shellcheck disable=SC2086 # the words are split on purpose
+  plreq $bad; : >"$PLLOG"; plhost
+  [[ $(plres result) == rejected && $(plres id) == "$PLID" ]] || fail "PL5 ($bad): $(cat "$PD/outbox/phone-login.json")"
+  [[ $(plx) == 0 ]] || fail "PL5 ($bad): the container was used: $(cat "$PLLOG")"
+done
+# A request with an extra field, a symlink or junk is ignored without any answer for it.
+printf '{"id":"%s","action":"create","user":"phone-read","topic":"a","pubkey":"%s","extra":"x"}\n' "$(node -e 'console.log(crypto.randomUUID())')" "$PUB" >"$PD/inbox/phone-login.json"; : >"$PLLOG"; plhost
+[[ ! -e $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL5: an extra field was accepted"
+ln -s /etc/hostname "$PD/inbox/phone-login.json"; plhost; [[ ! -e $PD/inbox/phone-login.json && ! -L $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL5: a symlink was followed"
+# PL6. Rate limit: a second request inside 30 s is refused.
+plreq reset phone-read alerts "$PUB"; plhost; plreq reset phone-read alerts "$PUB"; date +%s >"$PD/state/last-phone-login"; : >"$PLLOG"; plhost
+if [[ $(plres result) == rejected ]] && has "$PD/outbox/phone-login.json" "30 seconds" && [[ $(plx) == 0 ]]; then :; else fail "PL6: $(cat "$PD/outbox/phone-login.json")"; fi
+# PL7. No ntfy container, or two: nothing is changed.
+plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="" plhost
+[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
+plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="abc123def456 fed654cba321" plhost
+[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
+# PL8. A failing ntfy command is reported without the password, and a failed create leaves no sealed answer.
+: >"$PLW/users"
+plreq create phone-read alerts "$PUB"; PL_FAIL=user plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PL8a: $(cat "$PD/outbox/phone-login.json")"
+plreq create phone-read alerts "$PUB"; PL_FAIL=access plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PL8b: $(cat "$PD/outbox/phone-login.json")"
+no_plaintext "$(cat "$PLW/pw.phone-read")"
+# PL9. The host says whether it can seal; a dry run changes nothing.
+has "$PD/outbox/host.json" '"phoneLogin": {"openssl": true}'
+plreq reset phone-read alerts "$PUB"; : >"$PLLOG"; BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" --dry-run >"$T/out" 2>&1 || fail "PL9 dry run"
+[[ -e $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL9: a dry run handled the request"
+rm -f "$PD/inbox/phone-login.json"
+# PS (BOS-1581): action "setup" makes the publish user, write-only access and a token; the token comes back sealed only.
+export PL_NOPUB=1; : >"$PLW/users"; : >"$PLLOG"
+plreq setup bossman-publish alerts "$PUB"; plhost
+[[ $(plres result) == setup && $(plres id) == "$PLID" ]] || fail "PS1: $(cat "$PD/outbox/phone-login.json")"
+tok1="$(unseal)"; [[ $tok1 =~ ^tk_[a-z0-9]{29}$ && $tok1 == "$(cat "$PLW/tokens.bossman-publish")" ]] || fail "PS1: the sealed token is not the one ntfy made"
+has "$PLLOG" "ntfy user add --role=user bossman-publish"; has "$PLLOG" "ntfy access bossman-publish alerts write-only"; has "$PLLOG" "ntfy token add bossman-publish"
+no_plaintext "$tok1"; no_plaintext "$(cat "$PLW/pw.bossman-publish")"
+# PS2. Pressing it again finds all three: no user add, no token add, the same token comes back, and the answer says nothing changed.
+plreq setup bossman-publish alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == setup && $(unseal) == "$tok1" ]] || fail "PS2: $(cat "$PD/outbox/phone-login.json")"
+hasnt "$PLLOG" "user add"; hasnt "$PLLOG" "token add"; has "$PD/outbox/phone-login.json" "Nothing was changed"
+[[ $(grep -c . "$PLW/users") == 1 ]] || fail "PS2: a second user was made"
+# PS3. Only the publish user can be set up, and phone logins cannot be made for it.
+for bad in "setup phone-read alerts $PUB" "setup admin alerts $PUB" "create bossman-publish alerts $PUB" "reset bossman-publish alerts $PUB"; do
+  # shellcheck disable=SC2086
+  plreq ${bad%% "$PUB"} "$PUB"; : >"$PLLOG"; plhost
+  [[ $(plres result) == rejected && $(plx) == 0 ]] || fail "PS3 ($bad): $(cat "$PD/outbox/phone-login.json")"
+done
+# PS4. A failing ntfy step reports failed with no sealed token.
+rm -f "$PLW/tokens.bossman-publish"
+plreq setup bossman-publish alerts "$PUB"; PL_FAIL=token plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PS4: $(cat "$PD/outbox/phone-login.json")"
+unset PL_NOPUB
+rm -f "$PD/inbox/phone-login.json"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"

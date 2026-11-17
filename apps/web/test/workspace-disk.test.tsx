@@ -29,7 +29,7 @@ describe("workspace disk cap setting (BOS-274)", () => {
     const calls = stub();
     render(<WorkspaceDisk company={company({ diskCapBytes: null })} onChanged={() => {}} />);
     expect(screen.getByText("Currently the server default, 20 GB.")).toBeTruthy();
-    const input = screen.getByLabelText("Disk cap (GB)") as HTMLInputElement;
+    const input = screen.getByLabelText(/^Most disk to use \(GB\)/) as HTMLInputElement;
     expect(input.value).toBe("");
     fireEvent.change(input, { target: { value: "60" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -41,14 +41,14 @@ describe("workspace disk cap setting (BOS-274)", () => {
   it("shows the current cap when one is set", () => {
     stub();
     render(<WorkspaceDisk company={company({ diskCapBytes: 60 * 1024 ** 3 })} onChanged={() => {}} />);
-    expect((screen.getByLabelText("Disk cap (GB)") as HTMLInputElement).value).toBe("60");
+    expect((screen.getByLabelText(/^Most disk to use \(GB\)/) as HTMLInputElement).value).toBe("60");
     expect(screen.getByText("Currently 60.0 GB.")).toBeTruthy();
   });
 
   it("refuses a cap that isn't a whole number of gigabytes", () => {
     stub();
     render(<WorkspaceDisk company={company()} onChanged={() => {}} />);
-    fireEvent.change(screen.getByLabelText("Disk cap (GB)"), { target: { value: "2.5" } });
+    fireEvent.change(screen.getByLabelText(/^Most disk to use \(GB\)/), { target: { value: "2.5" } });
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

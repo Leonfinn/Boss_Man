@@ -4,18 +4,17 @@
 // model rejects dangling tool_use blocks the way the real API does.
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
 
-const require = createRequire(import.meta.url);
-const pkg = "@agentclientprotocol/claude-agent-acp";
-const manifest = require(`${pkg}/package.json`) as { bin: Record<string, string> | string };
-const BIN = path.join(path.dirname(require.resolve(`${pkg}/package.json`)), typeof manifest.bin === "string" ? manifest.bin : Object.values(manifest.bin)[0]!);
+// The adapter lives in the Claude pack now (DR-050, BOS-972), not the runner's node_modules; this spike
+// only runs on request, so it looks the adapter up when it runs, never at import.
+const BIN = process.env.RUN_SPIKES === "1" ? (claudeAdapterBin() ?? "claude-agent-acp") : "";
 
 let stub: Awaited<ReturnType<typeof startStubAnthropic>>;
 const log: StubLogEntry[] = [];

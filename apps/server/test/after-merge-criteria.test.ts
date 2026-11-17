@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DEFAULT_REVIEW_POLICY, afterMergeLint, cardAnswerLine, carryFailedOver, criteriaForCard, failedAfterMerge, isAfterMerge, mentionsCriterion, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, reviewRequests, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
+import { agents, decisions, reviewRequests, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { landingText } from "../src/services/review.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
@@ -622,6 +622,56 @@ describe("after-merge criteria", () => {
     expect(f).not.toBeNull();
     expect((await ctx.row(f!.id)).assigneeAgentId).toBe(ctx.co.ceo.id);
     expect(await ctx.review.followUpFailedChecks(orphan.id, [], "", null)).toBeNull();
+  });
+
+  // BOS-1586: BOS-986 closed on "pass" while the panel showed repo.probe = failed.
+  describe("a fact clause is settled by the host's report, not by a pass", () => {
+    const FACT = { text: "On our host the panel shows no failing check (fact: no failing check)", after: "merge" as const };
+    const report = async (reportedAt: string, facts: Record<string, string>) => {
+      const rec = { facts: Object.fromEntries(Object.entries(facts).map(([k, value]) => [k, { value, source: "host", at: reportedAt }])), hostName: "nas01", reportedAt };
+      await ctx.db.insert(settings).values({ key: "host_facts", value: rec }).onConflictDoUpdate({ target: settings.key, set: { value: rec } });
+    };
+    const fact = (patch: Record<string, unknown> = {}) => ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [FACT], mergeCommit: "e".repeat(40), mergedAt: new Date("2026-11-15T10:00:00Z"), liveAt: new Date("2026-11-15T12:00:00Z"), ...patch });
+    const close = async (id: string, summary: string, as = ctx.dev.id, outcome?: string) =>
+      textOf(await (await ctx.agent(as)).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary, ...(outcome ? { outcome } : {}) } }));
+
+    it("refuses a pass while the newest report shows a failing check, quoting the value and its time", async () => {
+      await report("2026-11-15T16:12:00Z", { "check.repo.probe": "failed", "check.container_status.notRunning": "1" });
+      const t = await fact();
+      const r = await close(t.id, "1 pass");
+      expect(r).toContain("check.repo.probe = failed");
+      expect(r).toContain("2026-11-15 16:12 UTC");
+      expect(r).toMatch(/cancelled/);
+      expect((await ctx.row(t.id)).systemState).not.toBe("done");
+    });
+
+    it("refuses a report taken before the ticket went live", async () => {
+      await report("2026-11-15T11:00:00Z", { "check.repo.probe": "ok" });
+      const t = await fact();
+      expect(await close(t.id, "1 pass")).toContain("before this ticket went live");
+    });
+
+    it("closes on a pass once a report taken after go-live shows no failing check", async () => {
+      await report("2026-11-15T13:00:00Z", { "check.repo.probe": "ok", "check.container_status.notRunning": "0" });
+      const t = await fact();
+      expect(await close(t.id, "1 pass")).toContain("is now done");
+    });
+
+    it("lets the assignee report the criterion as fail, and the CEO cancel, whatever the host says", async () => {
+      await report("2026-11-15T16:12:00Z", { "check.repo.probe": "failed" });
+      const failed = await fact();
+      expect(await close(failed.id, "1 fail: the probe still fails")).toMatch(/is now done/);
+      const cancelled = await fact();
+      expect(await close(cancelled.id, "1 fail: dropped, superseded", ctx.co.ceo.id, "cancelled")).toContain("is now done");
+    });
+
+    it("an 'or a card was raised' pass must cite the open card's id", async () => {
+      const OR = { text: "The panel shows no failing check, or names one the owner must fix with a card raised for it", after: "merge" as const };
+      const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [OR], mergeCommit: "f".repeat(40) });
+      expect(await close(t.id, "1 pass")).toMatch(/open card/);
+      const [card] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "Fix the probe?", options: ["Yes"], recommendedOption: "Yes", context: { ticketId: t.id } }).returning();
+      expect(await close(t.id, `1 pass: card ${card!.id.slice(0, 8)} covers it`)).toContain("is now done");
+    });
   });
 
   it("the diff checklist a reviewer reads separates the two kinds", async () => {

@@ -2,12 +2,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, decisions, notifications, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
@@ -98,6 +98,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const commands: Array<Extract<RunnerCommand, { type: "run.start" }> & { company: string }> = [];
   const messages: Array<Extract<RunnerCommand, { type: "run.message" }>> = [];
   const decides: Array<Extract<RunnerCommand, { type: "permission.decide" }>> = [];
+  const cancels: string[] = [];
   let seq = 0;
   /** A company with its runner (connected unless said otherwise) and a launcher slug. */
   const company = async (name: string, slug: string, connect = true) => {
@@ -108,6 +109,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
       built.runners.connect(reg.runnerId, (cmd) => {
         if (cmd.type === "run.start") commands.push({ ...cmd, company: name });
         if (cmd.type === "run.message") messages.push(cmd);
+        if (cmd.type === "run.cancel") cancels.push(cmd.runId);
         if (cmd.type === "permission.decide") decides.push(cmd);
         return true;
       });
@@ -132,7 +134,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const maint = () => req("GET", "/api/maintenance").then((r) => r.json());
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "maintenance");
   const titles = async () => (await db.select().from(notifications)).map((n) => `${n.level}: ${n.title}`);
-  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, decides, advance, maint, open, titles };
+  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, decides, cancels, advance, maint, open, titles };
 }
 
 describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
@@ -189,6 +191,101 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(chat).toBeDefined();
     // The banner counts the work run only, and says chat stays open.
     expect(await c.maint()).toMatchObject({ on: true, runs: 1, companies: 1, chatOpen: true });
+  });
+
+  it("waits for a running check job like a run, never swaps mid-check, and holds new checks meanwhile (BOS-1471)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" }).onConflictDoNothing();
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const [job] = await c.db
+      .insert(checkJobs)
+      .values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() })
+      .returning();
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.maintenance.step();
+    // No agent run is going, but a check is: the runner stays as it is.
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    expect(c.fake.calls.some((x) => x.endsWith("/recreate"))).toBe(false);
+    // A check queued now is not handed out while the drain is pending.
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: "c2", tree: "t2", state: "queued" });
+    await c.checks.pump();
+    expect((await c.db.select().from(checkJobs).where(eq(checkJobs.state, "running"))).map((j) => j.id)).toEqual([job!.id]);
+    // The check ends: the swap goes ahead.
+    await c.db.update(checkJobs).set({ state: "passed", endedAt: new Date() }).where(eq(checkJobs.id, job!.id));
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("at the deadline the owner's ask names the checks still running (BOS-1471)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    const asks = await c.open();
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.question).toMatch(/1 check is still going/);
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+  });
+
+  it("a check on a separate check worker doesn't hold the swap (BOS-1600)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const [w] = await c.db.insert(checkWorkers).values({ name: "worker-1", tokenHash: "x" } as never).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", workerId: w!.id, startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    expect(await c.maint()).toMatchObject({ on: true, runs: 0, checks: 0 });
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("the status names the runner check it waits on, and update-now ends the wait (BOS-1600)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    const st = (await c.maint()) as { checks: number; checksList: { kind: string }[] };
+    expect(st.checks).toBe(1);
+    expect(st.checksList[0]!.kind).toBe("merge");
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    expect((await c.maintenance.updateNow()).ok).toBe(true);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("the status counts match what the swap waits on: agents only, checks only, both, nothing (BOS-1600 A, B)", async () => {
+    // For each kind of wait, the banner's numbers must agree with the swap's own decision: it swaps exactly when the
+    // status says nothing is left (runs 0 and checks 0), and the text says "swapping the runners now" only then.
+    for (const [agents, check] of [[true, false], [false, true], [true, true], [false, false]] as const) {
+      if (ctx) {
+        await ctx.app.close();
+        await ctx.close();
+        await rm(ctx.dir, { recursive: true, force: true });
+      }
+      const c = (ctx = await setup());
+      const a = await c.company("App Co", "app-co");
+      const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+      const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+      if (agents) await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: null, model: "m", startedAt: new Date() });
+      if (check) await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+      await c.req("POST", "/api/maintenance/start", {});
+      const st = (await c.maint()) as { runs: number; checks: number };
+      expect(st.runs > 0).toBe(agents);
+      expect(st.checks > 0).toBe(check);
+      await c.maintenance.step();
+      const swapped = c.fake.runnersBySlug.get("app-co")!.current === true;
+      expect(swapped).toBe(st.runs === 0 && st.checks === 0);
+    }
   });
 
   it("a live chat run doesn't stop a busy company's runner swapping", async () => {
@@ -255,28 +352,56 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.maintenance.step();
     const [d] = await c.open();
     expect(await c.open()).toHaveLength(1);
-    expect(d).toMatchObject({ tier: "owner", options: ["Stop the remaining runs and update now", "Keep waiting another 30 min", "Cancel the update"] });
+    expect(d).toMatchObject({ tier: "owner", options: ["Stop these and carry on", "Wait 10 more minutes", "Cancel the runner update"] });
     expect(d!.question).toContain("1 run is still going in 1 company");
+    expect(d!.question).toContain("anything they haven't saved is lost");
+    expect((d!.context as { runIds: string[] }).runIds).toHaveLength(1);
     expect(await c.notes.syncDecisions()).toBeGreaterThan(0);
 
-    // Keep waiting: the deadline moves, the question goes, nothing else changes.
-    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Keep waiting another 30 min" })).statusCode).toBe(200);
+    // Wait 10 more minutes: the deadline moves, the question goes, nothing else changes.
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Wait 10 more minutes" })).statusCode).toBe(200);
     const hold = (await getHold(c.db))!;
-    expect(new Date(hold.deadline).getTime()).toBeGreaterThan(c.advance(0) + Date.now() - 1000 + 29 * MIN);
+    expect(new Date(hold.deadline).getTime()).toBeGreaterThan(c.advance(0) + Date.now() - 1000 + 9 * MIN);
     await c.maintenance.step();
     expect(await c.open()).toHaveLength(0);
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
 
-    // The next deadline earns a new question; "stop and update now" swaps the busy runner too.
-    c.advance(31 * MIN);
+    // The next deadline earns a new question; "Stop these and carry on" stops the listed run, not the runner.
+    c.advance(11 * MIN);
     await c.maintenance.step();
     const [d2] = await c.open();
     expect(d2!.id).not.toBe(d!.id);
-    await c.req("POST", `/api/decisions/${d2!.id}/answer`, { answer: "Stop the remaining runs and update now" });
+    const [listed] = (d2!.context as { runIds: string[] }).runIds;
+    await c.req("POST", `/api/decisions/${d2!.id}/answer`, { answer: "Stop these and carry on" });
+    const [stoppedRun] = await c.db.select().from(runs).where(eq(runs.id, listed!));
+    expect(stoppedRun!.cancelRequestedAt).not.toBeNull();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    expect(await getHold(c.db)).not.toBeNull();
+    // The runner confirms the stop, the company is idle, and the update goes ahead by itself.
+    await c.finish(a);
     await c.maintenance.step();
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
     expect(await getHold(c.db)).toBeNull();
     expect(await c.open()).toHaveLength(0);
+  });
+
+  it("'Stop these' skips a run that has ended and any run the card did not list; Cancel the runner update lifts the hold (BOS-1377)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    await c.maintenance.step();
+    const live = await c.db.select().from(runs);
+    const runId = live[0]!.id;
+    // An unrelated id and a run that has ended are both skipped; nothing is cancelled.
+    await c.finish(a);
+    const res = await c.maintenance.stopRuns([runId, randomUUID()]);
+    expect(res.stopped).toEqual([]);
+    expect(res.skipped).toHaveLength(2);
+    // The card's cancel answer lifts the hold.
+    await c.maintenance.answered("Cancel the runner update");
+    expect(await getHold(c.db)).toBeNull();
   });
 
   it("pages once when no runner has been swapped for twice the reconnect time, and says plainly the wait is for running work (BOS-497)", async () => {
@@ -298,7 +423,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     const waiting = all.filter((n) => n.title === "Runner update is waiting for running work");
     expect(waiting).toHaveLength(1);
     expect(waiting[0]).toMatchObject({ level: "page" });
-    expect(waiting[0]!.body).toContain("app-co still has work runs going");
+    expect(waiting[0]!.body).toContain("app-co still has work runs or checks going");
     expect(waiting[0]!.body).toContain("on purpose");
     expect(await getHold(c.db)).not.toBeNull(); // the hold stays; the owner decides
   });
@@ -363,6 +488,27 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
   });
 
   // BOS-382: a swap that fails is tried again on its own, then goes back to the previous image, then says so once.
+  it("tells the owner the check workers need updating by hand (BOS-1437), and only when one is set up", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last.body).not.toContain("Check workers");
+
+    await c.db.insert(checkWorkers).values([
+      { name: "second-host", tokenHash: "h1" },
+      { name: "turned-off-host", tokenHash: "h2", enabled: false },
+    ]);
+    await c.maintenance.start();
+    await c.maintenance.step();
+    const body = (await c.maint()).last.body as string;
+    expect(body).toContain("Check workers are not swapped by this update");
+    expect(body).toContain("second-host");
+    expect(body).not.toContain("turned-off-host");
+    expect(body).toContain("docs/34-check-workers.md");
+  });
+
   it("tries a failed swap again by itself, and needs nobody when a later try works", async () => {
     const c = (ctx = await setup({ reconnectMs: 1000 }));
     await c.company("App Co", "app-co");
@@ -547,9 +693,10 @@ describe("setting change drain and restart reasons (BOS-594)", () => {
     await c.runners.bootSeen(await runnerOf(c, b.id), "boot-2", { previousExit: "stopped", hostBootAt: "2026-11-05T16:28:00.000Z" });
     // A crash afterwards, which Boss Man didn't ask for, is a flag the owner can act on.
     await c.runners.bootSeen(await runnerOf(c, b.id), "boot-3", { previousExit: "crashed", hostBootAt: "2026-11-05T16:28:00.000Z" });
-    await new Promise((r) => setTimeout(r, 20)); // the notice is sent without blocking the hello
-    const restarts = (await c.titles()).filter((t) => t.includes("Runner restarted"));
-    expect(restarts).toEqual(["note: Runner restarted: setting change", "flag: Runner restarted: crash or out of memory"]);
+    // The notice is sent without blocking the hello: wait for the second one to land, with a deadline.
+    const restartTitles = async () => (await c.titles()).filter((t) => t.includes("Runner restarted"));
+    await vi.waitFor(async () => expect(await restartTitles()).toHaveLength(2), { timeout: 10_000 });
+    expect(await restartTitles()).toEqual(["note: Runner restarted: setting change", "flag: Runner restarted: crash or out of memory"]);
     const status = (await c.serverStatus.status(b.id)) as { runner: { lastRestart: { reason: string; bootId: string } } };
     expect(status.runner.lastRestart).toMatchObject({ reason: "crash or out of memory", bootId: "boot-3" });
   });
@@ -885,5 +1032,64 @@ describe("QA: wrap-up during an update, the cases a regression would slip past (
     expect(after).toMatchObject({ on: true, kind: "update" });
     expect(after.wrapAsked).toBeUndefined();
     expect(after.runsList).toBeUndefined();
+  });
+});
+
+describe("Stop N and carry on with the update (BOS-1238)", () => {
+  it("refuses an unauthenticated request", async () => {
+    const c = (ctx = await setup());
+    const r = await c.app.inject({ method: "POST", url: "/api/maintenance/stop-stragglers", payload: { runIds: [randomUUID()] } });
+    expect(r.statusCode).toBe(401);
+    expect((await c.app.inject({ method: "GET", url: "/api/self-deploy/history" })).statusCode).toBe(401);
+  });
+
+  it("is refused with no wrap-up on, and before the deadline", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const id = c.commands[0]!.runId;
+    expect((await c.req("POST", "/api/maintenance/stop-stragglers", { runIds: [id] })).statusCode).toBe(409);
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    const early = await c.req("POST", "/api/maintenance/stop-stragglers", { runIds: [id] });
+    expect(early.statusCode).toBe(409);
+    expect(early.json()).toMatchObject({ error: "too_early" });
+    expect(c.cancels).toEqual([]);
+  });
+
+  it("stops only the shown runs that were told and still go; an ended run is skipped and an unshown one is never stopped", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    const d = await c.company("Third Co", "third-co");
+    for (const co of [a, b, d]) await c.wake(co);
+    await c.scheduler.tick();
+    const [runA, runB, runC] = c.commands.map((x) => x.runId) as [string, string, string];
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    // Run B ends on its own after the owner was shown the list.
+    await c.finish(b);
+    c.advance(31 * MIN);
+    // The page shows A and B only; C is going but was never in the shown set, and a made-up id was never told.
+    const r = await c.req("POST", "/api/maintenance/stop-stragglers", { runIds: [runA, runB, randomUUID()] });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ stopped: 1, skipped: 2 });
+    expect(c.cancels).toEqual([runA]);
+    expect(c.cancels).not.toContain(runC);
+    // It pauses no lane and moves no ticket: the hold is as it was.
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+  });
+
+  it("lists the newest answered update cards for Recent updates", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.db.insert(decisions).values([
+      { companyId: a.id, kind: "question", question: "Update?", options: ["Deploy"], recommendedOption: "Deploy", status: "answered", answer: "Deploy", answeredAt: new Date("2026-11-10T10:00:00Z"), context: { type: "self_deploy", target: "server", commit: "a".repeat(40), fromCommit: "b".repeat(40), changes: ["x", "y"], result: { result: "deployed", message: "ok", at: "2026-11-10T10:05:00Z" } } },
+      { companyId: a.id, kind: "question", question: "Update?", options: ["Deploy"], recommendedOption: "Deploy", status: "open", context: { type: "self_deploy", target: "server", commit: "c".repeat(40), fromCommit: "a".repeat(40) } },
+    ]);
+    const h = (await c.req("GET", "/api/self-deploy/history?limit=5")).json() as Array<{ target: string; result: string | null; changes: number }>;
+    expect(h).toHaveLength(1);
+    expect(h[0]).toMatchObject({ target: "server", result: "deployed", changes: 2 });
   });
 });

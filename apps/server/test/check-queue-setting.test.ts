@@ -37,7 +37,19 @@ async function setup(features: string[]) {
 describe("the check queue switch (BOS-798)", () => {
   it("is legacy with one slot until the owner changes it, and names a connected runner too old to run queued checks", async () => {
     const c = (ctx = await setup([]));
-    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, runner: null, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"], train: false, runnersTooOldForTrain: ["App Co"] });
+    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, effectiveSlots: 1, runnerSlotsReported: null, runner: null, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"], train: false, runnersTooOldForTrain: ["App Co"], runnerPolicy: { takes: "both", mergeKept: 0 }, workers: [] });
+  });
+
+  it("runner split (BOS-1602): both kinds, none kept until set; saved when sent, left alone by a page that doesn't send it; kept can't exceed the slots", async () => {
+    const c = (ctx = await setup(["check-jobs", "merge-base"]));
+    const put = (body: object) => c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 3, ...body });
+    expect((await put({ runnerPolicy: { takes: "both", mergeKept: 2 } })).json()).toMatchObject({ runnerPolicy: { takes: "both", mergeKept: 2 } });
+    expect((await put({})).json()).toMatchObject({ runnerPolicy: { takes: "both", mergeKept: 2 } });
+    expect((await put({ runnerPolicy: { takes: "both", mergeKept: 4 } })).statusCode).toBe(400);
+    expect((await put({ runnerPolicy: { takes: "sometimes", mergeKept: 0 } })).statusCode).toBe(400);
+    // Kept slots mean nothing for a one-kind machine, so they are stored as 0.
+    expect((await put({ runnerPolicy: { takes: "merge", mergeKept: 2 } })).json()).toMatchObject({ runnerPolicy: { takes: "merge", mergeKept: 0 } });
+    expect(await c.queue.runnerPolicy()).toEqual({ takes: "merge", mergeKept: 0 });
   });
 
   it("merge train switch (BOS-1366): off by default, saved when sent, left alone by a page that doesn't send it", async () => {

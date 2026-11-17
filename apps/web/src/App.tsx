@@ -17,6 +17,7 @@ import { Runs } from "./pages/Runs";
 import { MergeQueue } from "./pages/MergeQueue";
 import { Settings, settingsRedirect } from "./pages/Settings";
 import { ProjectsPage } from "./pages/settings/Projects";
+import { waitingFor, type RunnerCheckView } from "./pages/settings/updates";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
@@ -26,6 +27,7 @@ import { Workflow } from "./pages/Workflow";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
+import { MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { Skills } from "./pages/Skills";
 import { Agents } from "./pages/Agents";
 import { Features } from "./pages/Features";
@@ -97,7 +99,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -108,7 +110,7 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
         Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner.
       </p>
     );
-  const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
+  const waiting = waitingFor(m);
   if (m.kind === "settings")
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
@@ -125,7 +127,12 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
     );
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.
+      Update pending: {waiting}. Nothing new starts until it is done.{" "}
+      {m.runs > 0
+        ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.'
+        : (m.checks ?? 0) > 0
+          ? "To go ahead without waiting, use \"Stop the checks and update now\" on Settings → Server and runner: they restart from the beginning afterwards."
+          : ""}
     </p>
   );
 }
@@ -311,6 +318,18 @@ function Signed({ onLogout }: { onLogout: () => void }) {
     `decisions-tally-${current?.id}`,
   );
   useEffect(() => decisionsTally.reload(), [current?.id]);
+  // (BOS-1485) The company switcher's figure for every company: the same tally call, once per company.
+  const companyIds = (companies.data ?? []).map((c) => c.id);
+  const companyTallies = usePoll(
+    async (signal) => {
+      const rows = await Promise.all(companyIds.map((id) => api<DecisionTally>(`/api/decisions/tally?companyId=${id}`, { signal }).catch(() => null)));
+      const out: Record<string, DecisionTally> = {};
+      companyIds.forEach((id, i) => { const t = rows[i]; if (t) out[id] = t; });
+      return out;
+    },
+    10_000,
+    `decisions-tally-all-${companyIds.join(",")}`,
+  );
   const pick = (id: string) => {
     remember(id, setChosen);
     if (COMPANY_SCREENS.has(page)) go(`${page}/${id}`);
@@ -349,6 +368,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
         decisionsTally={decisionsTally.data}
+        companyTallies={companyTallies.data ?? undefined}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
         mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
@@ -392,7 +412,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "workflow" ? (
           <Workflow company={current} />
         ) : page === "notifications" ? (
-          <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
+          <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} browserPermission={permission} onEnableBrowser={() => void Notification.requestPermission().then(setPermission)} />
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
@@ -404,9 +424,9 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={<SetupChecklist companyId={current?.id} go={go} />} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><SetupChecklist companyId={current?.id} go={go} folded={folded} /></>} />
         ) : (
-          <Dashboard company={current} />
+          <Dashboard company={current} decisions={decisions.data === null ? null : decisions.data.filter((d) => !current || d.companyId === current.id)} tally={decisionsTally.data} />
         )}
         </PageGuard>
       </main>

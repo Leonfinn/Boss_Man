@@ -2,12 +2,16 @@
 // as notes; passages of a note are linked to features as insights, each with how much it
 // matters to that person. Features are scored on demand (from their insights) and on the
 // company's own criteria, then divided by effort. Tickets deliver features.
-import { randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, looksLikeSecurity, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { createHash, randomBytes } from "node:crypto";
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql, type SQL } from "drizzle-orm";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalShows, PORTAL_STATUSES, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
-import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
+import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, portalConfirmedAddresses, tickets } from "../db/schema.js";
+
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+/** One address, one hash, however it was typed. */
+export const emailHash = (email: string) => sha256(email.trim().toLowerCase());
 
 export class FeedbackError extends Error {
   constructor(
@@ -18,8 +22,11 @@ export class FeedbackError extends Error {
   }
 }
 
-export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean };
-const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, portalBackUrl: null, portalBackText: null, hasLogo: false };
+export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; confirmByEmail: boolean; confirmLinkHours: number; rememberAddressDays: number; portalAtBareAddress: boolean };
+const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, portalBackUrl: null, portalBackText: null, hasLogo: false, confirmByEmail: false, confirmLinkHours: 24, rememberAddressDays: 90, portalAtBareAddress: false };
+
+/** A note that counts: unconfirmed portal posts (BOS-1388) are hidden from everyone and score nothing. */
+const counted = isNull(feedbackNotes.confirmTokenHash);
 
 type FeaturePatch = {
   title?: string;
@@ -52,7 +59,12 @@ export type NoteInput = {
   untrusted?: boolean;
   createdByAgentId?: string | null;
   portalVoter?: string | null;
+  /** BOS-1388: save it hidden until the visitor clicks the emailed link; no customer is made and nobody is woken yet. */
+  pending?: { tokenHash: string; expiresAt: Date; email: string; name: string | null };
 };
+
+/** The link-confirmation a portal write asks for: the visitor's address, and how long the link lives. */
+export type PortalConfirm = { email: string; hours: number };
 
 export function feedbackService(
   db: Db,
@@ -66,11 +78,22 @@ export function feedbackService(
     return row;
   }
   const feature = (id: string, companyId?: string) => own(db.select().from(features).where(eq(features.id, id)), companyId, "feature");
-  const note = (id: string, companyId?: string) => own(db.select().from(feedbackNotes).where(eq(feedbackNotes.id, id)), companyId, "note");
+  // An unconfirmed portal note doesn't exist for the owner, agents or the API: it 404s like any other missing note.
+  const note = (id: string, companyId?: string) => own(db.select().from(feedbackNotes).where(and(eq(feedbackNotes.id, id), counted)), companyId, "note");
 
   async function settings(companyId: string): Promise<FeedbackSettings> {
-    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, portalBackUrl: feedbackSettings.portalBackUrl, portalBackText: feedbackSettings.portalBackText, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
+    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, portalBackUrl: feedbackSettings.portalBackUrl, portalBackText: feedbackSettings.portalBackText, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null`, confirmByEmail: feedbackSettings.confirmByEmail, confirmLinkHours: feedbackSettings.confirmLinkHours, rememberAddressDays: feedbackSettings.rememberAddressDays, portalAtBareAddress: feedbackSettings.portalAtBareAddress }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
     return row ?? { ...DEFAULTS };
+  }
+
+  /** The enabled portal whose settings row matches `where`, with what the page and its calls need; or null. */
+  async function portalWhere(where: SQL) {
+    const [row] = await db
+      .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, backUrl: feedbackSettings.portalBackUrl, backText: feedbackSettings.portalBackText, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null`, confirmByEmail: feedbackSettings.confirmByEmail, confirmLinkHours: feedbackSettings.confirmLinkHours, rememberAddressDays: feedbackSettings.rememberAddressDays })
+      .from(feedbackSettings)
+      .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
+      .where(and(where, eq(feedbackSettings.portalEnabled, true)));
+    return row ?? null;
   }
 
   /** Checks that the links a feature points at are in its company, and the hierarchy stays one level. */
@@ -117,9 +140,10 @@ export function feedbackService(
     const rows = await db
       .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, publicTitle: features.publicTitle, status: features.status, releasedAt: features.releasedAt })
       .from(features)
-      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
+      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, [...PORTAL_STATUSES])))
       .orderBy(asc(features.title));
-    return rows.filter((f) => !!f.publicSummary?.trim() && !looksLikeSecurity([f.publicTitle ?? "", f.publicSummary!].join(" ")));
+    // The rest of the rule is portalShows, shared with the Features page (BOS-1496).
+    return rows.filter((f) => portalShows({ portalVisible: true, keepOffPortal: false, status: f.status, publicTitle: f.publicTitle, publicSummary: f.publicSummary }).shown);
   }
 
   /** Every feature of a company with its demand, priority and delivery, in one pass. */
@@ -134,7 +158,7 @@ export function feedbackService(
           .select({ featureId: insights.featureId, importance: insights.importance, customerId: feedbackNotes.customerId, noteId: insights.noteId })
           .from(insights)
           .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
-          .where(inArray(insights.featureId, fs.map((f) => f.id)))
+          .where(and(inArray(insights.featureId, fs.map((f) => f.id)), counted))
       : [];
     const work = fs.length
       ? await db
@@ -168,7 +192,8 @@ export function feedbackService(
         // Why the feature is on or off the portal, so the list can show the tick and a small reason (BOS-957).
         const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
         const portal = portalVerdict({ title: f.title, description: f.description, publicTitle: f.publicTitle, publicSummary: f.publicSummary, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
-        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
+        const portalShow = portalShows({ portalVisible: f.portalVisible, keepOffPortal: f.keepOffPortal, status: f.status, publicTitle: f.publicTitle, publicSummary: f.publicSummary });
+        return { ...f, portalShow, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
   }
@@ -190,10 +215,11 @@ export function feedbackService(
   }
 
   async function createNote(companyId: string, input: NoteInput) {
-    const customerId = await customerFor(companyId, input);
+    const customerId = input.pending ? null : await customerFor(companyId, input);
     const [n] = await db
       .insert(feedbackNotes)
       .values({
+        ...(input.pending ? { confirmTokenHash: input.pending.tokenHash, confirmExpiresAt: input.pending.expiresAt, confirmEmail: input.pending.email, confirmName: input.pending.name } : {}),
         companyId,
         title: input.title ?? null,
         text: input.text,
@@ -204,11 +230,32 @@ export function feedbackService(
         portalVoter: input.portalVoter ?? null,
       })
       .returning();
-    await deps.onNote?.(n!);
+    if (!input.pending) await deps.onNote?.(n!);
     return n!;
-}
+  }
+
+  /** A fresh single-use link token: only its hash is kept. */
+  function newConfirm(c: PortalConfirm, name: string | null | undefined) {
+    const token = randomBytes(32).toString("base64url");
+    return { token, pending: { tokenHash: sha256(token), expiresAt: new Date(now().getTime() + c.hours * 3_600_000), email: c.email.trim(), name: name?.trim() || null } };
+  }
+
+  /**
+   * A note from outside that must be filed once, whatever retries or overlapping passes there are (BOS-1393):
+   * the unique (company, externalId) index decides, so a repeat is a no-op and returns null. It never fires
+   * onNote: the caller (the GitHub watcher) wakes whoever triages, once per pass, not once per note.
+   */
+  async function createExternalNote(companyId: string, input: Pick<NoteInput, "title" | "text" | "source"> & { externalId: string }) {
+    const [n] = await db
+      .insert(feedbackNotes)
+      .values({ companyId, title: input.title ?? null, text: input.text, source: input.source ?? "import", untrusted: true, externalId: input.externalId })
+      .onConflictDoNothing()
+      .returning();
+    return n ?? null;
+  }
 
   return {
+    createExternalNote,
     settings,
     async setSettings(companyId: string, patch: Partial<Pick<FeedbackSettings, "demandWeight" | "ceoTriage" | "portalTitle" | "portalIntro" | "portalBackUrl" | "portalBackText">>) {
       await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...patch }).onConflictDoUpdate({ target: feedbackSettings.companyId, set: patch });
@@ -340,7 +387,7 @@ export function feedbackService(
         .from(insights)
         .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
         .leftJoin(feedbackCustomers, eq(feedbackCustomers.id, feedbackNotes.customerId))
-        .where(inArray(insights.featureId, ids))
+        .where(and(inArray(insights.featureId, ids), counted))
         .orderBy(desc(insights.createdAt));
       return {
         feature: me,
@@ -448,6 +495,7 @@ export function feedbackService(
         .where(
           and(
             eq(feedbackNotes.companyId, companyId),
+            counted,
             opts.state ? eq(feedbackNotes.state, opts.state) : undefined,
             opts.before ? lt(feedbackNotes.createdAt, opts.before) : undefined,
             like ? or(ilike(feedbackNotes.text, like), ilike(feedbackNotes.title, like), ilike(feedbackCustomers.name, like)) : undefined,
@@ -461,7 +509,7 @@ export function feedbackService(
       const rows = await db
         .select({ companyId: feedbackNotes.companyId, n: count() })
         .from(feedbackNotes)
-        .where(and(eq(feedbackNotes.state, "unprocessed"), companyId ? eq(feedbackNotes.companyId, companyId) : undefined))
+        .where(and(eq(feedbackNotes.state, "unprocessed"), counted, companyId ? eq(feedbackNotes.companyId, companyId) : undefined))
         .groupBy(feedbackNotes.companyId);
       return Object.fromEntries(rows.map((r) => [r.companyId, Number(r.n)]));
     },
@@ -579,7 +627,7 @@ export function feedbackService(
         .from(insights)
         .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
         .leftJoin(feedbackCustomers, eq(feedbackCustomers.id, feedbackNotes.customerId))
-        .where(eq(insights.featureId, featureId));
+        .where(and(eq(insights.featureId, featureId), counted));
       evidence.sort((a, b) => IMPORTANCE_POINTS[b.importance as Importance] - IMPORTANCE_POINTS[a.importance as Importance]);
       const lines = [`Delivers the feature "${f.title}".`];
       if (f.description) lines.push("", f.description);
@@ -598,11 +646,17 @@ export function feedbackService(
     // ---- The portal: a page outsiders reach by a secret link ----
 
     /** Turns the portal on or off and sets its words. Turning it on the first time makes its link. */
-    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null; backUrl?: string | null; backText?: string | null }) {
+    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null; backUrl?: string | null; backText?: string | null; confirmByEmail?: boolean; confirmLinkHours?: number; rememberAddressDays?: number; portalAtBareAddress?: boolean }) {
       const current = await settings(companyId);
+      // BOS-1680: only one company's portal can be the one the bare address opens; turning it on here turns it off elsewhere.
+      if (patch.portalAtBareAddress) await db.update(feedbackSettings).set({ portalAtBareAddress: false }).where(and(eq(feedbackSettings.portalAtBareAddress, true), ne(feedbackSettings.companyId, companyId)));
       const token = patch.enabled && !current.portalToken ? randomBytes(24).toString("base64url") : current.portalToken;
       const set = {
         ...(patch.enabled !== undefined ? { portalEnabled: patch.enabled } : {}),
+        ...(patch.confirmByEmail !== undefined ? { confirmByEmail: patch.confirmByEmail } : {}),
+        ...(patch.portalAtBareAddress !== undefined ? { portalAtBareAddress: patch.portalAtBareAddress } : {}),
+        ...(patch.confirmLinkHours !== undefined ? { confirmLinkHours: patch.confirmLinkHours } : {}),
+        ...(patch.rememberAddressDays !== undefined ? { rememberAddressDays: patch.rememberAddressDays } : {}),
         ...(patch.title !== undefined ? { portalTitle: patch.title } : {}),
         ...(patch.intro !== undefined ? { portalIntro: patch.intro } : {}),
         ...(patch.backUrl !== undefined ? { portalBackUrl: patch.backUrl, portalBackText: patch.backUrl === null ? null : patch.backText ?? current.portalBackText } : {}),
@@ -630,12 +684,11 @@ export function feedbackService(
     /** The company behind an enabled portal's token, or null. */
     async portalFor(token: string) {
       if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
-      const [row] = await db
-        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, backUrl: feedbackSettings.portalBackUrl, backText: feedbackSettings.portalBackText, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` })
-        .from(feedbackSettings)
-        .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
-        .where(and(eq(feedbackSettings.portalToken, token), eq(feedbackSettings.portalEnabled, true)));
-      return row ?? null;
+      return portalWhere(eq(feedbackSettings.portalToken, token));
+    },
+    /** BOS-1680: the enabled portal the owner chose to open at the bare public address (no token in the link), or null. */
+    async bareAddressPortal() {
+      return portalWhere(eq(feedbackSettings.portalAtBareAddress, true));
     },
     /** What a visitor sees: features shown on the portal, by stage, with their own votes. */
     async portalView(companyId: string, voter: string | null) {
@@ -646,7 +699,7 @@ export function feedbackService(
             .select({ featureId: insights.featureId, importance: insights.importance, comment: feedbackNotes.text, hasComment: sql<boolean>`${feedbackNotes.title} like 'Portal comment:%'` })
             .from(insights)
             .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
-            .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.portalVoter, voter), inArray(insights.featureId, fs.map((f) => f.id))))
+            .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.portalVoter, voter), counted, inArray(insights.featureId, fs.map((f) => f.id))))
         : [];
       return fs
         .filter((f) => f.status !== "released" || (f.releasedAt && f.releasedAt > cutoff))
@@ -664,7 +717,7 @@ export function feedbackService(
         });
     },
     /** A visitor's vote: one per visitor and feature; voting again changes it. */
-    async portalVote(companyId: string, voter: string, input: { featureId: string; importance: Importance; comment?: string | null; name?: string | null; email?: string | null }) {
+    async portalVote(companyId: string, voter: string, input: { featureId: string; importance: Importance; comment?: string | null; name?: string | null; email?: string | null; confirm?: PortalConfirm }) {
       const [f] = await db.select().from(features).where(and(eq(features.id, input.featureId), eq(features.companyId, companyId), eq(features.portalVisible, true)));
       if (!f || f.status === "declined") throw new FeedbackError(404, "No such feature.");
       // A feature kept off by the portal rule isn't public, so it can't be voted on even if someone has its id.
@@ -674,9 +727,16 @@ export function feedbackService(
         .select({ noteId: feedbackNotes.id })
         .from(insights)
         .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
-        .where(and(eq(insights.featureId, f.id), eq(feedbackNotes.portalVoter, voter), eq(feedbackNotes.companyId, companyId)));
+        .where(and(eq(insights.featureId, f.id), eq(feedbackNotes.portalVoter, voter), eq(feedbackNotes.companyId, companyId), counted));
       const customer = input.name?.trim() ? { name: input.name.trim(), email: input.email?.trim() || null, segment: "Portal" } : null;
       const text = comment ?? `Voted "${IMPORTANCE_LABEL[input.importance]}" for "${f.title}" on the portal.`;
+      if (input.confirm) {
+        // BOS-1388: saved hidden; the existing vote (if any) stays as it is until the emailed link is clicked.
+        const c = newConfirm(input.confirm, input.name);
+        const n = await createNote(companyId, { text, title: comment ? `Portal comment: ${f.title}` : `Portal vote: ${f.title}`, source: "portal", untrusted: true, portalVoter: voter, pending: c.pending });
+        await db.insert(insights).values({ noteId: n.id, featureId: f.id, importance: input.importance, createdBy: "portal" });
+        return { importance: input.importance, comment, confirmToken: c.token, featureTitle: f.title };
+      }
       // A vote without words needs no reading, so it arrives processed; a comment waits in the inbox.
       const state = comment ? ("unprocessed" as const) : ("processed" as const);
       let noteId = existing?.noteId;
@@ -695,18 +755,18 @@ export function feedbackService(
         .insert(insights)
         .values({ noteId, featureId: f.id, importance: input.importance, createdBy: "portal" })
         .onConflictDoUpdate({ target: [insights.noteId, insights.featureId], set: { importance: input.importance } });
-      return { importance: input.importance, comment };
+      return { importance: input.importance, comment, confirmToken: null as string | null, featureTitle: f.title };
     },
     async portalUnvote(companyId: string, voter: string, featureId: string) {
       const rows = await db
         .select({ noteId: feedbackNotes.id })
         .from(insights)
         .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
-        .where(and(eq(insights.featureId, featureId), eq(feedbackNotes.portalVoter, voter), eq(feedbackNotes.companyId, companyId)));
+        .where(and(eq(insights.featureId, featureId), eq(feedbackNotes.portalVoter, voter), eq(feedbackNotes.companyId, companyId), counted));
       if (rows.length) await db.delete(feedbackNotes).where(inArray(feedbackNotes.id, rows.map((r) => r.noteId)));
     },
     /** A visitor's own idea, for the owner (or CEO) to triage. */
-    async portalIdea(companyId: string, voter: string, input: { title: string; text: string; name?: string | null; email?: string | null }) {
+    async portalIdea(companyId: string, voter: string, input: { title: string; text: string; name?: string | null; email?: string | null; confirm?: PortalConfirm }) {
       // At most 10 ideas a day from one visitor.
       const [{ n }] = (await db
         .select({ n: count() })
@@ -714,7 +774,76 @@ export function feedbackService(
         .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.portalVoter, voter), sql`${feedbackNotes.title} like 'Portal idea:%'`, gt(feedbackNotes.createdAt, new Date(now().getTime() - 86_400_000))))) as [{ n: number }];
       if (Number(n) >= 10) throw new FeedbackError(429, "That's plenty of ideas for one day. Thank you!");
       const customer = input.name?.trim() ? { name: input.name.trim(), email: input.email?.trim() || null, segment: "Portal" } : null;
-      await createNote(companyId, { title: `Portal idea: ${input.title}`.slice(0, 200), text: input.text, source: "portal", untrusted: true, portalVoter: voter, customer });
+      const title = `Portal idea: ${input.title}`.slice(0, 200);
+      if (input.confirm) {
+        const c = newConfirm(input.confirm, input.name);
+        await createNote(companyId, { title, text: input.text, source: "portal", untrusted: true, portalVoter: voter, pending: c.pending });
+        return { confirmToken: c.token, what: input.title };
+      }
+      await createNote(companyId, { title, text: input.text, source: "portal", untrusted: true, portalVoter: voter, customer });
+      return { confirmToken: null as string | null, what: input.title };
+    },
+
+    // ---- BOS-1388: confirming by email ----
+
+    /**
+     * The visitor clicked the emailed link. Single use: the token's hash is cleared in the same statement that checks it,
+     * so a second click (or a guess, or an expired link) finds nothing. Returns the address to remember, or null.
+     */
+    async confirmPortalNote(token: string) {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+      const hash = sha256(token);
+      const [seen] = await db.select({ email: feedbackNotes.confirmEmail, name: feedbackNotes.confirmName }).from(feedbackNotes).where(and(eq(feedbackNotes.confirmTokenHash, hash), gt(feedbackNotes.confirmExpiresAt, now())));
+      if (!seen?.email) return null;
+      // The update is the check: of two clicks at once only one finds the hash still there.
+      const [n] = await db
+        .update(feedbackNotes)
+        .set({ confirmTokenHash: null, confirmExpiresAt: null, confirmEmail: null, confirmName: null })
+        .where(and(eq(feedbackNotes.confirmTokenHash, hash), gt(feedbackNotes.confirmExpiresAt, now())))
+        .returning();
+      if (!n) return null;
+      // The customer is made only now, and only when a name was given; an anonymous address is kept nowhere but as a hash.
+      if (seen.name) {
+        const customerId = await customerFor(n.companyId, { text: "", customer: { name: seen.name, email: seen.email, segment: "Portal" } });
+        await db.update(feedbackNotes).set({ customerId }).where(eq(feedbackNotes.id, n.id));
+      }
+      const row = n;
+      // A vote replaces the visitor's earlier one for the same feature, as an unconfirmed-free vote always did.
+      const mine = await db.select({ featureId: insights.featureId }).from(insights).where(eq(insights.noteId, n.id));
+      if (n.portalVoter && mine.length && row.title?.startsWith("Portal ") && !row.title.startsWith("Portal idea:")) {
+        const older = await db
+          .select({ id: feedbackNotes.id })
+          .from(feedbackNotes)
+          .innerJoin(insights, eq(insights.noteId, feedbackNotes.id))
+          .where(and(eq(feedbackNotes.companyId, n.companyId), eq(feedbackNotes.portalVoter, n.portalVoter), inArray(insights.featureId, mine.map((m) => m.featureId)), ne(feedbackNotes.id, n.id), counted));
+        if (older.length) await db.delete(feedbackNotes).where(inArray(feedbackNotes.id, older.map((o) => o.id)));
+      }
+      // A comment waits in the inbox for triage; a bare vote arrives processed, as portal votes do.
+      if (row.title?.startsWith("Portal vote:")) await db.update(feedbackNotes).set({ state: "processed", processedAt: now() }).where(eq(feedbackNotes.id, n.id));
+      else await deps.onNote?.(row);
+      return { email: seen.email, companyId: n.companyId };
+    },
+    /** Remembers a confirmed browser: returns the secret for its cookie (only the hash is stored). */
+    async rememberAddress(companyId: string, email: string, days: number) {
+      const secret = randomBytes(32).toString("base64url");
+      await db.insert(portalConfirmedAddresses).values({ companyId, emailHash: emailHash(email), secretHash: sha256(secret), expiresAt: new Date(now().getTime() + days * 86_400_000) });
+      return secret;
+    },
+    /** Whether this cookie (address and secret) is one the server issued for this portal and has not expired. */
+    async addressRemembered(companyId: string, email: string, secret: string) {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) return false;
+      const [row] = await db
+        .select({ id: portalConfirmedAddresses.id })
+        .from(portalConfirmedAddresses)
+        .where(and(eq(portalConfirmedAddresses.companyId, companyId), eq(portalConfirmedAddresses.secretHash, sha256(secret)), eq(portalConfirmedAddresses.emailHash, emailHash(email)), gt(portalConfirmedAddresses.expiresAt, now())));
+      return !!row;
+    },
+    /** Deletes unconfirmed posts whose link has expired, and remembered browsers past their time. */
+    async purgeUnconfirmed() {
+      const at = now();
+      const gone = await db.delete(feedbackNotes).where(and(sql`${feedbackNotes.confirmTokenHash} is not null`, lt(feedbackNotes.confirmExpiresAt, at))).returning({ id: feedbackNotes.id });
+      const old = await db.delete(portalConfirmedAddresses).where(lt(portalConfirmedAddresses.expiresAt, at)).returning({ id: portalConfirmedAddresses.id });
+      return { notes: gone.length, addresses: old.length };
     },
 
     /** Unprocessed notes, oldest first, for whoever triages them. */
@@ -723,7 +852,7 @@ export function feedbackService(
         .select({ note: feedbackNotes, customer: feedbackCustomers.name })
         .from(feedbackNotes)
         .leftJoin(feedbackCustomers, eq(feedbackCustomers.id, feedbackNotes.customerId))
-        .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.state, "unprocessed")))
+        .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.state, "unprocessed"), counted))
         .orderBy(asc(feedbackNotes.createdAt))
         .limit(limit),
   };

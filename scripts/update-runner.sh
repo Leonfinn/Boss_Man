@@ -16,7 +16,7 @@
 #
 # The drain is asked for by dropping inbox/drain.json into the deployer folder ($BOSSMAN_DEPLOYER: set by
 # the host deployer, or read from .env). The script returns at once, so a host lock is not held while runs finish; Boss Man
-# tells the owner when the swap is done. With no deployer folder, start it in Settings > Server and runner > Updates > Runner update.
+# tells the owner when the swap is done. With no deployer folder, start it in Settings > Server and runner > Updates > Update runners (finish runs first).
 # Without the launcher there is nothing to drain onto, so the runners are restarted at once, as with --now.
 #
 # The canary runs a real Claude Code session inside the new image against a stand-in model
@@ -60,6 +60,21 @@ profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cu
 BOSSMAN_DEPLOYER="${BOSSMAN_DEPLOYER:-$(grep -s '^BOSSMAN_DEPLOYER=' .env | tail -1 | cut -d= -f2- || true)}"
 # Optional runner add-ons (docs/12), e.g. RUNNER_ADDONS=agent-browser,webkit in .env; empty builds the plain image.
 addons="${RUNNER_ADDONS:-$(grep -s '^RUNNER_ADDONS=' .env | tail -1 | cut -d= -f2- || true)}"
+# BOS-1583: the owner's tick boxes (Settings > Runner > Add-ons) are saved by the server as inbox/runner-addons in the deployer
+# folder, one line of comma-separated ids. Once saved, it wins over .env (the boxes started ticked from what was built, so
+# nothing is lost); until then .env keeps working as before. The server can write inbox, so the file is only trusted when it is
+# a plain file (never a symlink) holding nothing but ids, and anything else is ignored with a warning.
+addons_file=""
+[[ -z $BOSSMAN_DEPLOYER ]] || addons_file="$BOSSMAN_DEPLOYER/inbox/runner-addons"
+if [[ -n $addons_file && -f $addons_file && ! -L $addons_file ]]; then
+  saved_addons="$(head -c 400 "$addons_file" | tr -d '\r\n ')"
+  if [[ $saved_addons =~ ^([a-z0-9-]+(,[a-z0-9-]+)*)?$ ]]; then
+    addons="$saved_addons"
+  else
+    echo "WARNING: $addons_file is not a plain list of add-on ids; ignoring it and using RUNNER_ADDONS from .env." >&2
+  fi
+fi
+if [[ -n $addons && ! $addons =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then echo "RUNNER_ADDONS must be comma-separated add-on ids (letters, digits, dashes), got: $addons" >&2; exit 1; fi
 compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
 launcher_id() { docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher; }
 
@@ -97,10 +112,10 @@ request_drain() {
     chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
     mv -fT "$tmp" "$d/inbox/drain.json"
     echo "Asked Boss Man to drain: nothing new starts, runs finish, each runner is swapped when its company is idle."
-    echo "Boss Man notifies you when it is done. To stop it: Settings > Server and runner > Updates > Runner update > Cancel the update."
+    echo "Boss Man notifies you when it is done. To stop it: Settings > Server and runner > Updates > Cancel the runner update."
   else
     echo "The new image is tagged, and the runners still run the old one. Start the drain in Boss Man:"
-    echo "Settings > Server and runner > Updates > Runner update > Update runners. (Or rerun with --now to cut runs off and restart at once.)"
+    echo "Settings > Server and runner > Updates > Update runners (finish runs first). With the host deployer set up, the button is under \"For a hand-built runner image\". (Or rerun with --now to cut runs off and restart at once.)"
   fi
 }
 
@@ -120,10 +135,12 @@ for a in "$@"; do
     --now) NOW=1 ;;
     --rollback) ROLLBACK=1 ;;
     --settings) SETTINGS=1 ;;
-    -*) echo "Usage: $0 [--now] [--settings | --rollback | CLAUDE_CODE_VERSION]" >&2; exit 2 ;;
+    -*) echo "Usage: $0 [--now] [--settings | --rollback]" >&2; exit 2 ;;
     *) version="$a" ;;
   esac
 done
+# Claude Code's version is pinned in apps/runner/claude-pack/package.json now, not a build arg (DR-050, BOS-972).
+if [[ -n $version ]]; then echo "The runner image no longer takes a Claude Code version: it is pinned in apps/runner/claude-pack/package.json (DR-050)." >&2; exit 2; fi
 
 if ((SETTINGS)); then
   if ((NOW)); then
@@ -174,15 +191,14 @@ NETGUARD_PREV="$(docker image inspect --format '{{.Id}}' boss-man-netguard:curre
 if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:pending-previous || NETGUARD_PREV=; fi
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
-echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned in the Dockerfile)}${addons:+ and add-ons: $addons}..."
+echo "Building $IMAGE:candidate (no Anthropic code; Claude Code comes from the pack on first start)${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
-  ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
   --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 
-echo "Running the canary (no network): a Claude session, then each add-on..."
+echo "Running the canary (no network): Codex, OpenCode and each add-on. Claude is proven by its pack installer, not here (DR-050)..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
   "$IMAGE:candidate" node_modules/.bin/tsx src/canary-main.ts; then
   echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2
@@ -199,6 +215,16 @@ if [[ -n "$NETGUARD_PREV" ]]; then
 fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
+# BOS-1583: tell the server which add-ons this image holds (outbox/runner-addons.built, one line, may be empty), so the tick boxes
+# start from what is really built, including add-ons that were only ever set by hand in .env. Written in the root-only state
+# folder, then renamed in, like the drain request.
+if [[ -n ${BOSSMAN_DEPLOYER:-} && -d $BOSSMAN_DEPLOYER/outbox ]]; then
+  mkdir -p "$BOSSMAN_DEPLOYER/state" && chmod 700 "$BOSSMAN_DEPLOYER/state"
+  built_tmp="$(mktemp "$BOSSMAN_DEPLOYER/state/addons.XXXXXX")"
+  printf '%s\n' "$addons" >"$built_tmp"
+  chmod 644 "$built_tmp"; chown 1000:1000 "$built_tmp" 2>/dev/null || true
+  mv -fT "$built_tmp" "$BOSSMAN_DEPLOYER/outbox/runner-addons.built" || echo "WARNING: could not record the built add-ons for Settings." >&2
+fi
 # Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.
 rebuild_launcher
 move_runners

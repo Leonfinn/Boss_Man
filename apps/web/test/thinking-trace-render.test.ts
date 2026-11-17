@@ -112,9 +112,12 @@ const baseApi = (live?: TraceBody) => ({
 async function open(width: number, height: number, hasTouch: boolean, live?: TraceBody): Promise<Page> {
   const api = baseApi(live);
   const page = await browser!.newPage({ viewport: { width, height }, hasTouch, isMobile: hasTouch });
-  await page.route("**/api/**", (route: { request: () => { url: () => string }; fulfill: (o: { status: number; contentType: string; body: string }) => unknown }) => {
+  await page.route("**/api/**", (route: { request: () => { url: () => string }; fulfill: (o: { status: number; contentType: string; body: string }) => Promise<void> }) => {
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify((api as Record<string, unknown>)[path] ?? {}) });
+    // An answer in flight when the test closes its page rejects with "has been closed": expected, not a failure (BOS-1708).
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify((api as Record<string, unknown>)[path] ?? {}) }).catch((e: unknown) => {
+      if (!/closed/i.test(String((e as Error)?.message ?? e))) throw e;
+    });
   });
   await page.goto(`${server!.local}#/chat/c1/a1`, { waitUntil: "networkidle" });
   await page.waitForSelector(".messenger .chat-log .chat-msg", { timeout: 15_000 });

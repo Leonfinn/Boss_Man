@@ -54,7 +54,7 @@ logged "exec launcher-1 node dist/main.js recreate-all" || fail "--now did not r
 # No deployer folder (manual run): tells the owner where to start the drain, recreates nothing.
 saved="$BOSSMAN_DEPLOYER"; unset BOSSMAN_DEPLOYER
 run
-grep -q "Settings > Server and runner > Updates > Runner update" "$T/out" || fail "no manual instructions"
+grep -qF "Settings > Server and runner > Updates > Update runners (finish runs first)" "$T/out" || fail "no manual instructions"
 logged "recreate-all" && fail "manual run recreated the runners"
 # ...unless .env names the deployer folder, which is how a hand run finds it.
 echo "BOSSMAN_DEPLOYER=$saved" >.env
@@ -111,6 +111,32 @@ run
 logged "--build-arg BOSSMAN_IMAGE_COMMIT=$head " || fail "the build did not stamp the checkout's commit: $(grep 'docker build --pull' "$FAKE_LOG")"
 # ...and the stamp is the 40-character sha the runner and the server both require.
 [[ $head =~ ^[0-9a-f]{40}$ ]] || fail "the checkout commit is not a full sha: $head"
+
+# BOS-1583: runner add-ons. Hand-set RUNNER_ADDONS in .env keeps working until the owner saves the tick boxes; the saved
+# file (inbox/runner-addons, written by the server) then wins; what was built is recorded in outbox/runner-addons.built.
+mkdir -p "$T/deployer/outbox"
+echo "RUNNER_ADDONS=agent-browser" >>.env
+run
+logged "--build-arg RUNNER_ADDONS=agent-browser " || fail "RUNNER_ADDONS from .env was not built: $(grep 'docker build --pull' "$FAKE_LOG")"
+[[ $(cat "$T/deployer/outbox/runner-addons.built") == agent-browser ]] || fail "the built add-ons were not recorded"
+echo "webkit,agent-browser" >"$T/deployer/inbox/runner-addons"
+run
+logged "--build-arg RUNNER_ADDONS=webkit,agent-browser " || fail "the saved tick boxes did not win over .env"
+[[ $(cat "$T/deployer/outbox/runner-addons.built") == webkit,agent-browser ]] || fail "the built record does not follow the saved choice"
+# Everything unticked is a plain image, even with .env naming an add-on.
+echo "" >"$T/deployer/inbox/runner-addons"
+run
+logged "--build-arg RUNNER_ADDONS= " || fail "an empty saved choice did not build the plain image"
+# Anything that is not a plain id list (the server can write inbox) is ignored with a warning, never built or shell-expanded.
+echo 'webkit;touch /tmp/x' >"$T/deployer/inbox/runner-addons"
+run
+logged "--build-arg RUNNER_ADDONS=agent-browser " || fail "a bad saved file was not ignored"
+grep -q "not a plain list of add-on ids" "$T/out" || fail "no warning for a bad saved file"
+# A symlink at the saved name is never followed.
+rm -f "$T/deployer/inbox/runner-addons"; echo "webkit" >"$T/victim2"; ln -s "$T/victim2" "$T/deployer/inbox/runner-addons"
+run
+logged "--build-arg RUNNER_ADDONS=agent-browser " || fail "a symlinked saved file was followed"
+rm -f "$T/deployer/inbox/runner-addons" "$T/deployer/outbox/runner-addons.built" .env
 
 # A failed canary promotes nothing and asks for nothing.
 if CANARY_RC=1 run; then fail "a failed canary succeeded"; fi

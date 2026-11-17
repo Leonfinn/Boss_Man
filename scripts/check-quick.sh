@@ -91,6 +91,21 @@ has() { grep -Eq "$1" <<<"$changed"; }
 #   "<package dir> <test file under that package> <path prefix> [<path prefix>...]"
 path_reads=(
   "apps/server test/owner-control-list.test.ts apps/web/src/pages/ apps/web/src/components/ packages/shared/src/owner-controls.ts"
+  # DR-050/BOS-972: the image-holds-no-Anthropic test reads the Dockerfile and package.json by path; the pack
+  # test reads apps/runner/claude-pack by path. Either changing must re-run its test.
+  "apps/runner test/no-anthropic-code.test.ts apps/runner/Dockerfile apps/runner/package.json"
+  "apps/runner test/claude-pack.test.ts apps/runner/claude-pack/"
+  # BOS-1613: main went red on the screen inventory three times (BOS-1177, 1427, 1612). It reads every page and component
+  # as text and imports none of them, so a page change never made it "related".
+  "apps/web test/screen-inventory.test.ts apps/web/src/ apps/web/test/screen-inventory.txt"
+  # Tests that read styles.css as text (no browser) are not related to it either. Browser-driven ones are left to the gate's
+  # full run, as before; add a test here when it reads src files by path and needs no browser.
+  "apps/web test/ticket-layout.test.ts apps/web/src/styles.css"
+  "apps/web test/ticket-details-style.test.ts apps/web/src/styles.css"
+  "apps/web test/board-bar-width.test.ts apps/web/src/styles.css apps/web/src/pages/Board.tsx"
+  "apps/web test/sidebar-height.test.ts apps/web/src/styles.css"
+  "apps/web test/phone-bar-height.test.ts apps/web/src/styles.css"
+  "apps/web test/scroll-wheel.test.ts apps/web/src/styles.css"
 )
 path_read_tests() { # path_read_tests <package dir>: the path-reading tests of that package whose paths the branch changed
   local d=$1 f p hit
@@ -176,6 +191,9 @@ done
   if [ -f scripts/scan-added-lines.mjs ]; then
     step "secrets scan" node scripts/scan-added-lines.mjs "$base"
   fi
+  # BOS-1549: two guides in docs/ must not share a number, counting pages main added since this branch left it. Runs on
+  # every branch (it takes well under a second), since a clash can come from main even when the branch touched no doc.
+  step "docs numbers are unique" node scripts/check-doc-numbers.mjs "$base"
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi

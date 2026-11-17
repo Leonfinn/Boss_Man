@@ -5,9 +5,10 @@
 // change goes live. The server has no git, so "contains" is read from merge order, the same way DR-011 places a
 // ticket: the merge gate merges one ticket at a time, so a commit that merged at or before the image's commit is
 // inside it. A commit Boss Man can't place is never assumed to be inside the image.
-import { and, asc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { runners, tickets } from "../db/schema.js";
+import { allMergeOrder, commitIsLive, serverContains } from "./go-live-wait.js";
 
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
 
@@ -18,30 +19,13 @@ export async function runnerImageCommit(db: Db, companyId: string): Promise<stri
 }
 
 /**
- * This company's merge commits, oldest merge first (the merge gate merges one at a time, so this is merge order).
- * Ordered by stateChangedAt, which is set when the ticket moves to done and not by later notes or touches;
- * lastActivityAt keeps moving on a done ticket and would reorder merges. Release-log shares this helper.
- */
-export async function mergeCommitOrder(db: Db, companyId: string): Promise<string[]> {
-  const rows = await db
-    .select({ mergeCommit: tickets.mergeCommit })
-    .from(tickets)
-    .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")))
-    .orderBy(asc(tickets.stateChangedAt));
-  return [...new Set(rows.map((r) => r.mergeCommit?.toLowerCase()).filter((c): c is string => !!c))];
-}
-
-/**
  * True only when the image was built from `commit` or from a merge that came after it. False when the image's
  * commit isn't recorded or either commit can't be placed in merge order: then the owner is asked, as before.
  */
-export function imageContains(image: string | null, commit: string | null | undefined, order: string[]): boolean {
+export function imageContains(image: string | null, commit: string | null | undefined, order: string[], contains: readonly string[] = []): boolean {
   if (!image || !commit) return false;
-  const want = commit.toLowerCase();
-  if (image === want) return true;
-  const at = order.indexOf(want);
-  const built = order.indexOf(image);
-  return at >= 0 && built >= 0 && at <= built;
+  // `contains`: commits the image's commit is known to contain (BOS-1640), when it is the server's live commit.
+  return serverContains(image, commit, order, contains);
 }
 
 /** A ticket's setup steps as lines: one per step, blank lines and a leading "1." left off. */
@@ -77,16 +61,14 @@ export async function runnerOnlyTickets(db: Db, companyId: string, liveCommit: s
     return steps.length > 0 && steps.every(isRunnerOnlyStep);
   });
   if (!only.length) return [];
-  const [image, order] = [await runnerImageCommit(db, companyId), await mergeCommitOrder(db, companyId)];
+  const order = await allMergeOrder(db, companyId);
   const live = liveCommit.toLowerCase();
-  const liveAt = order.indexOf(live);
-  return only
-    .filter((t) => {
-      const merge = t.mergeCommit!.toLowerCase();
-      const at = order.indexOf(merge);
-      const isLive = merge === live || (at >= 0 && liveAt >= 0 && at <= liveAt);
-      return isLive && !imageContains(image, merge, order);
-    })
+  const lacking: typeof only = [];
+  for (const t of only) {
+    // The live side is the commit being asked about (a deploy not yet recorded); the runner side is the one answer.
+    if (serverContains(live, t.mergeCommit!, order) && !(await commitIsLive(db, companyId, t.mergeCommit, "runner"))) lacking.push(t);
+  }
+  return lacking
     .sort((a, b) => order.indexOf(a.mergeCommit!.toLowerCase()) - order.indexOf(b.mergeCommit!.toLowerCase()))
     .map((t) => ({ ticketId: t.id, title: t.title, mergeCommit: t.mergeCommit!.toLowerCase() }));
 }

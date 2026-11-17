@@ -843,9 +843,27 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -pC/ -i.bak -e s/a/b/ x.rb",
     "ruby -i -pC/ -e s/a/b/ x.rb",
     "ruby -x/ -i -pe s/a/b/ x.rb",
+    // ruby -X[dir] is another spelling of -C[dir] (from ruby's documented -X[directory]; no ruby on the runner).
+    "ruby -X/ -i -pe s/a/b/ etc/hosts",
+    "ruby -X /srv -i -pe s/a/b/ x.rb",
+    "ruby -X /srv -i.bak -pe s/a/b/ f",
+    "ruby -pX/ -i -e s/a/b/ x.rb",
+    "ruby -pX / -i -e s/a/b/ x.rb",
+    "ruby -i -pX/ -e s/a/b/ x.rb",
+    "ruby -0X/ -i -pe s/a/b/ x.rb",
     "ruby -px/ -i -e s/a/b/ x.rb",
     "ruby -x/srv -i.bak -pe s/a/b/ f",
     "ruby --chdir=/srv -pi -e s/a/b/ x.rb",
+    // ruby's -0 is octal only, so an x after it is its own -x[dir] switch, not perl's hex separator (BOS-1441).
+    "ruby -0x/ -i -pe s/a/b/ etc/hosts",
+    "ruby -0x/srv -i -pe s/a/b/ etc/hosts",
+    "ruby -p0x/ -i -e s/a/b/ x.rb",
+    "ruby -i -0x/ -pe s/a/b/ x.rb",
+    "ruby -0777x/ -i -pe s/a/b/ x.rb",
+    "ruby -l0x/ -i -pe s/a/b/ x.rb",
+    "ruby -pl0x/ -i -e s/a/b/ x.rb",
+    "ruby -0xC/ -i -pe s/a/b/ x.rb",
+    "ruby -0C/ -i -pe s/a/b/ x.rb",
     // ruby long options whose value is the next word must not hide the -i (security review round 3).
     "ruby --encoding utf-8 -i -pe s/a/b/ /etc/hosts",
     "ruby --external-encoding utf-8 -i -pe s/a/b/ /etc/hosts",
@@ -886,6 +904,17 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -pC/ -e 'p 1' x.rb",
     "ruby -px -i -e s/a/b/ x.rb",
     "ruby -x script.rb",
+    // -X without -i only reads a script from another folder; ruby edits inside the checkout stay routine.
+    "ruby -X /srv script.rb",
+    "ruby -pX/ -e 'p 1' x.rb",
+    "ruby -i -pe s/a/b/ x.rb",
+    "ruby -pi -e s/a/b/ src/a.rb lib/b.rb",
+    // -0 and -l bundles without a directory (BOS-1441); perl's hex separator is unchanged.
+    "ruby -0777 -pi -e s/a/b/ x.rb",
+    "ruby -0pi -e s/a/b/ x.rb",
+    "ruby -0x -i -e s/a/b/ x.rb",
+    "ruby -lpi -e s/a/b/ x.rb",
+    "perl -0xFF -pi -e s/a/b/ x.pl",
     // Long options that read a value, without -i.
     "ruby --encoding utf-8 script.rb",
     "ruby --encoding utf-8 -pe s/a/b/ x.rb",
@@ -1131,5 +1160,66 @@ describe("delete forms left out of BOS-571 (BOS-856)", () => {
   ])("leaves %j alone", (c) => {
     expect(commandRisks(c)).toEqual([]);
     expect(evaluatePermission(exec(c), []).outcome).toBe("allow");
+  });
+});
+
+describe("$BOSSMAN_SCRATCH / $TMPDIR at the start of a script path (BOS-1454)", () => {
+  // The runner sets both to absolute paths, so these can't turn into -e. Each went to the owner before BOS-1454.
+  it.each([
+    "node $BOSSMAN_SCRATCH/x.mjs",
+    "node ${BOSSMAN_SCRATCH}/x.mjs arg",
+    'node "$TMPDIR/x.mjs"',
+    "node ${TMPDIR}/x.mjs",
+    "python3 $TMPDIR/x.py",
+    "bash $BOSSMAN_SCRATCH/x.sh",
+    "node -r $TMPDIR/a.js $BOSSMAN_SCRATCH/b.mjs",
+    "node ${BOSSMAN_SCRATCH:-/tmp}/x.mjs",
+    "TMPDIR=${BOSSMAN_SCRATCH:-/tmp}/t node $TMPDIR/x.mjs",
+    "TMPDIR=$BOSSMAN_SCRATCH/t; node $TMPDIR/x.mjs",
+    "bash -c 'node $BOSSMAN_SCRATCH/x.mjs'",
+  ])("lets %j through", (c) => {
+    expect(commandRisks(c)).toEqual([]);
+    expect(evaluatePermission(exec(c), []).outcome).toBe("allow");
+  });
+
+  // Variant matrix: every way round the variables still goes to the owner.
+  it.each([
+    "node $S/x.mjs",
+    "node $BOSSMAN_SCRATCH $x",
+    "node $TMPDIR",
+    "node ${TMPDIR}x/y",
+    "node $TMPDIR2/x.mjs",
+    "node $tmpdir/x.mjs",
+    "node ${BOSSMAN_SCRATCH:-$HOME}/x.mjs",
+    "node ${BOSSMAN_SCRATCH:-rel}/x.mjs",
+    "node ${BOSSMAN_SCRATCH:=/tmp}/x.mjs",
+    "node $TMPDIR/x$(rm -rf /)",
+    "node $TMPDIR/*",
+    "node $TMPDIR/{a,b}",
+    "node $TMPDIR$S/x",
+    "node $TMPDIR/x.mjs; node $S/y.mjs",
+    "BOSSMAN_SCRATCH=-e node $BOSSMAN_SCRATCH/x",
+    "TMPDIR=$HOME/t node $TMPDIR/x.mjs",
+    "TMPDIR=rel node $TMPDIR/x.mjs",
+    "TMPDIR=${BOSSMAN_SCRATCH:-/tmp}$x node $TMPDIR/x.mjs",
+    "export TMPDIR=-e; node $TMPDIR/x.mjs",
+    "export TMPDIR=/tmp/t; node $TMPDIR/x.mjs",
+    "declare -n TMPDIR=x; node $TMPDIR/y",
+    "read TMPDIR <<< -e; node $TMPDIR/x.mjs",
+    "printf -v TMPDIR -- -e; node $TMPDIR/x.mjs",
+    "unset TMPDIR; node $TMPDIR/x.mjs",
+    "env TMPDIR=-e node $TMPDIR/x.mjs",
+    'export "${T}DIR=-e"; node $TMPDIR/x.mjs',
+    'T=TMP; export "${T}DIR=-e"; node $TMPDIR/x.mjs',
+    'TMP"DIR"=-e; node $TMPDIR/x.mjs',
+    "TMP$x=-e; node $TMPDIR/x.mjs",
+    "for TMPDIR in -e; do node $TMPDIR/x.mjs; done",
+    "bash -c 'export TMPDIR=-e; node $TMPDIR/x.mjs'",
+    "echo $(node $S/x.mjs)",
+    "echo $(export TMPDIR=-e; node $TMPDIR/x.mjs)",
+    "node $'\\x24TMPDIR'/x",
+    "node -e 'require(\"fs\").rmSync(\"/x\")' $TMPDIR/x.mjs",
+  ])("still sends %j to the owner", (c) => {
+    expect(destroys(c)).toBe(true);
   });
 });

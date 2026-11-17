@@ -137,6 +137,38 @@ export async function requeueUnansweredReviews(db: Db, input: { reviewerAgentId:
   return requeued;
 }
 
+/**
+ * Why this review sits with a stand-in (the CEO) and not the reviewer the policy names, or null when it
+ * doesn't. The reason isn't stored on the row, so the policy is resolved again for the kind; it counts
+ * only while that still lands on the row's reviewer.
+ */
+export async function fallbackReason(db: Db, t: Ticket, r: Pick<ReviewRow, "kind" | "reviewerAgentId">): Promise<string | null> {
+  const kind = r.kind as ReviewSlot;
+  const rule = ruleFor(await effectivePolicy(db, t), t.risk);
+  const ref = kind === "code" ? rule.reviewer : rule.kinds?.[kind];
+  if (ref === undefined) return null;
+  const { agent, note } = await resolveKindReviewer(db, t, kind, ref);
+  return note && agent?.id === r.reviewerAgentId ? note : null;
+}
+
+/** One line per open review: its kind and who holds it, with the reason when a stand-in holds it. For the ticket read and the ticket page. */
+export async function openReviewHolders(db: Db, t: Ticket): Promise<Array<{ kind: string; holder: string | null; reason: string | null }>> {
+  const out: Array<{ kind: string; holder: string | null; reason: string | null }> = [];
+  for (const r of activeRows(await latestRows(db, t.id))) {
+    if (r.status !== "pending") continue;
+    const [who] = r.reviewerAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.reviewerAgentId)) : [];
+    out.push({ kind: r.kind, holder: who?.name ?? null, reason: await fallbackReason(db, t, r) });
+  }
+  return out;
+}
+
+/** The open reviews as the plain lines the ticket read shows; empty when none is open. */
+export async function openReviewLines(db: Db, t: Ticket): Promise<string[]> {
+  const open = await openReviewHolders(db, t);
+  if (!open.length) return [];
+  return ["Open reviews:", ...open.map((o) => `- ${o.kind}: held by ${o.holder ?? "the owner (no agent can take it)"}${o.reason ? ` (stand-in: ${o.reason})` : ""}`)];
+}
+
 /** Wakes the reviewers of these rows, one wake per agent however many reviews it holds. */
 export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify: Notify, skip: Array<string | null> = [], causedByRunId?: string | null) {
   const byAgent: Record<string, ReviewRow[]> = {};
@@ -151,7 +183,10 @@ export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify
         .join("\n") + `\n  If a before-merge one fails, request changes and say which.${after ? " Review can approve with the after-merge ones still unreported; the ticket keeps them open until they pass." : ""}`
     : "";
   for (const [agentId, mine] of Object.entries(byAgent)) {
-    const asks = mine.map((r) => `  Your ${r.kind} review, round ${r.round}: look at ${KIND_FOCUS[r.kind as ReviewSlot]}.`).join("\n");
+    const asks = (await Promise.all(mine.map(async (r) => {
+      const why = await fallbackReason(db, t, r);
+      return `  Your ${r.kind} review, round ${r.round}: look at ${KIND_FOCUS[r.kind as ReviewSlot]}.${why ? `\n  You hold the ${r.kind} review as a stand-in, not as its usual reviewer: ${why}.` : ""}`;
+    }))).join("\n");
     const how = `  Read the changes with the review tool (action diff), then give your verdict with action submit${mine.length > 1 ? " and the kind of each review" : ""}.`;
     await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `${reviewAskPrefix(t.id)}"${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}${checklist ? `\nAcceptance criteria:\n${checklist}` : ""}` });
   }
@@ -190,7 +225,7 @@ export async function setReviewOrder(db: Db, t: Ticket, order: string[], byAgent
   return activeRows(rows).filter((r) => !before.has(r.id));
 }
 
-export const decide = (db: Db, id: string, patch: Partial<Pick<ReviewRow, "status" | "notes" | "comments" | "overruledByAgentId" | "overruleReason">>) =>
+export const decide = (db: Db, id: string, patch: Partial<Pick<ReviewRow, "status" | "notes" | "comments" | "overruledByAgentId" | "overruleReason" | "head" | "readHead">>) =>
   db.update(reviewRequests).set({ ...patch, decidedAt: new Date() }).where(eq(reviewRequests.id, id));
 
 /** Reviews that never ran because an earlier one failed. */
@@ -200,13 +235,16 @@ export const reviveSkipped = (db: Db, rows: ReviewRow[]) => db.update(reviewRequ
 /** Every round of a ticket's reviews with reviewer names, newest round first, for the ticket page. */
 export async function listReviews(db: Db, ticketId: string) {
   const waiting = (await reviewWaits(db, [ticketId])).get(ticketId) ?? null;
+  const [tk] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+  const latestRound = (await latestRows(db, ticketId))[0]?.round ?? 0;
+  const reasons = new Map((tk ? await openReviewHolders(db, tk) : []).filter((o) => o.reason).map((o) => [o.kind, o.reason!]));
   return db
     .select({ r: reviewRequests, reviewer: agents.name })
     .from(reviewRequests)
     .leftJoin(agents, eq(agents.id, reviewRequests.reviewerAgentId))
     .where(eq(reviewRequests.ticketId, ticketId))
     .orderBy(desc(reviewRequests.round), reviewRequests.seq, reviewRequests.kind)
-    .then((rows) => rows.map(({ r, reviewer }) => ({ waitingOn: r.status === "pending" ? waiting : null, id: r.id, kind: r.kind, round: r.round, seq: r.seq, status: r.status, reviewer, reviewerAgentId: r.reviewerAgentId, notes: r.notes, overruleReason: r.overruleReason, createdAt: r.createdAt, decidedAt: r.decidedAt })));
+    .then((rows) => rows.map(({ r, reviewer }) => ({ waitingOn: r.status === "pending" ? waiting : null, standIn: r.status === "pending" && r.round === latestRound ? (reasons.get(r.kind) ?? null) : null, id: r.id, kind: r.kind, round: r.round, seq: r.seq, status: r.status, reviewer, reviewerAgentId: r.reviewerAgentId, notes: r.notes, overruleReason: r.overruleReason, createdAt: r.createdAt, decidedAt: r.decidedAt })));
 }
 
 /** Who each ticket's open reviews are waiting on and why, one short line per ticket ("Sam is busy on BOS-7"). Tickets nobody is holding up are left out. */

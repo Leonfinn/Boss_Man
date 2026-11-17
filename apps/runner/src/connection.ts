@@ -3,18 +3,21 @@
 // goes quiet for three heartbeats is dropped and redialled.
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
-import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type HarnessVersions, type RunnerCommand, type RunnerEvent, type RunnerMessage } from "@boss-man/shared";
+import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type HarnessVersions, type Toolchain, type RunnerCommand, type RunnerEvent, type RunnerMessage, type WorkerMessage, type WorkerRepos } from "@boss-man/shared";
 import type { Journal } from "./journal.js";
 
 export type ConnectionOptions = {
   url: string;
   token: string;
-  journal: Journal;
+  /** Required for a company runner; a check worker (checkWorker set) has none. */
+  journal?: Journal;
   onCommand: (command: RunnerCommand) => void;
   runnerVersion: string;
   imageVersion?: string | null;
   /** The git commit the image was built from (BOS-764), told to the server in hello. */
   imageCommit?: string;
+  /** The tools checks run with and their fingerprint (BOS-1570), told to the server in hello. */
+  toolchain?: Toolchain;
   /** Versions of the harnesses in the image, told to the server in hello (BOS-305). */
   harnessVersions?: HarnessVersions;
   heartbeatMs?: number;
@@ -25,11 +28,35 @@ export type ConnectionOptions = {
   restart?: { previousExit?: "stopped" | "crashed" | null; hostBootAt?: string | null };
   /** Check jobs running now (BOS-316), listed in hello. */
   runningChecks?: () => string[];
+  /** How many checks this runner runs at once (BOS-1471), listed in hello so the server never starts more here. */
+  checkSlots?: number;
   /** Called after the server’s welcome: resend check results it may not have. */
   onWelcome?: () => void;
   /** Ids of the runs the runner has now; the server closes any other open run (BOS-583). */
   liveRuns?: () => string[];
+  /**
+   * BOS-1435: this process is a check worker (BOSSMAN_ROLE=check-worker). Its hello carries only what the worker socket
+   * reads (check features, its slot count, running checks), and it keeps no journal: the worker socket takes no events.
+   */
+  checkWorker?: { slots: number; features: readonly string[]; /** BOS-1436: the commits it holds per project, for thin bundles. */ repos?: () => WorkerRepos };
 };
+
+/**
+ * BOS-1601: what a failed dial means in plain words. A name that does not resolve (ENOTFOUND, EAI_AGAIN) is the usual
+ * first-install slip: the address is a Tailscale (MagicDNS) name and this host is not on the tailnet. Only the host
+ * name of the address is printed, never the token (which is in a header, not the URL).
+ */
+export function describeConnectError(message: string, url: string): string {
+  let host = "";
+  try {
+    host = new URL(url).host;
+  } catch {
+    // not a URL: the raw message is all there is
+  }
+  if (!host || !/ENOTFOUND|EAI_AGAIN/.test(message)) return message;
+  const tailscale = /\.ts\.net$/i.test(new URL(url).hostname);
+  return `${message}. Can't find the address ${host} from this machine.${tailscale ? " It is a Tailscale name and this host is not on your tailnet" : " If it is a Tailscale name, this host is not on your tailnet"}: use the server's LAN address instead (BOSSMAN_URL=ws://<server LAN address>:<port>/api/check-worker/connect), or check this host's DNS.`;
+}
 
 export class RunnerConnection {
   private ws: WebSocket | null = null;
@@ -64,6 +91,8 @@ export class RunnerConnection {
 
   /** Journals the event, then sends it if connected; otherwise it goes out on the next replay. */
   emit(event: RunnerEvent) {
+    // A check worker journals nothing: its socket refuses events (callers in worker mode don't emit; this is the backstop).
+    if (this.opts.checkWorker || !this.opts.journal) return null;
     const entry = this.opts.journal.append(event);
     if (this.live) this.send({ type: "event", entry });
     return entry;
@@ -80,11 +109,11 @@ export class RunnerConnection {
   }
 
   /** A message that is not journalled (BOS-316 check progress and results); the caller resends what matters on reconnect. */
-  sendDirect(m: RunnerMessage) {
+  sendDirect(m: RunnerMessage | WorkerMessage) {
     this.send(m);
   }
 
-  private send(m: RunnerMessage) {
+  private send(m: RunnerMessage | WorkerMessage) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
   }
 
@@ -95,9 +124,8 @@ export class RunnerConnection {
 
     ws.on("open", () => {
       this.attempt = 0;
-      const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
-      const liveRuns = this.opts.liveRuns?.();
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+      if (this.opts.checkWorker) this.helloAsWorker(this.opts.checkWorker);
+      else this.helloAsRunner();
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");
@@ -107,7 +135,21 @@ export class RunnerConnection {
         this.send({ type: "ping" });
       }, this.heartbeatMs);
     });
+    this.listen(ws);
+  }
 
+  private helloAsWorker(w: NonNullable<ConnectionOptions["checkWorker"]>) {
+    const repos = w.repos?.();
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), features: [...w.features], bootId: this.bootId, checkSlots: w.slots, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(repos?.length ? { repos } : {}) });
+  }
+
+  private helloAsRunner() {
+    const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
+    const liveRuns = this.opts.liveRuns?.();
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(this.opts.checkSlots ? { checkSlots: this.opts.checkSlots } : {}),...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+  }
+
+  private listen(ws: WebSocket) {
     ws.on("message", (raw) => {
       this.lastHeard = Date.now();
       let msg: ServerMessage;
@@ -128,25 +170,37 @@ export class RunnerConnection {
       }
       switch (msg.type) {
         case "welcome": {
+          const journal = this.opts.journal;
+          if (this.opts.checkWorker || !journal) {
+            // No journal to replay: only the undelivered check results go again.
+            this.opts.onWelcome?.();
+            this.live = true;
+            return;
+          }
           // The server already holds everything up to lastSeq. If that's beyond anything this
           // journal wrote, the journal is new, so its events are renumbered after the server's.
-          if (msg.lastSeq > this.opts.journal.lastSeq) {
-            this.opts.log?.(`server has seq ${msg.lastSeq}, beyond this runner's journal (${this.opts.journal.lastSeq}); numbering on from the server's`);
-            this.opts.journal.rebase(msg.lastSeq);
+          if (msg.lastSeq > journal.lastSeq) {
+            this.opts.log?.(`server has seq ${msg.lastSeq}, beyond this runner's journal (${journal.lastSeq}); numbering on from the server's`);
+            journal.rebase(msg.lastSeq);
           }
-          this.opts.journal.ack(msg.lastSeq);
-          if (msg.lastSeq < this.opts.journal.ackedUpTo) {
-            this.opts.log?.(`server has seq ${msg.lastSeq} but this runner compacted up to ${this.opts.journal.ackedUpTo}; some events can't be replayed`);
+          journal.ack(msg.lastSeq);
+          if (msg.lastSeq < journal.ackedUpTo) {
+            this.opts.log?.(`server has seq ${msg.lastSeq} but this runner compacted up to ${journal.ackedUpTo}; some events can't be replayed`);
           }
-          for (const entry of this.opts.journal.pending(msg.lastSeq)) this.send({ type: "event", entry });
+          for (const entry of journal.pending(msg.lastSeq)) this.send({ type: "event", entry });
           this.opts.onWelcome?.();
           this.live = true;
           return;
         }
         case "ack":
-          this.opts.journal.ack(msg.upTo);
+          this.opts.journal?.ack(msg.upTo);
           return;
         case "command":
+          // A check worker acts on check commands only, whatever arrives (the server never sends it anything else).
+          if (this.opts.checkWorker && !msg.command.type.startsWith("check.")) {
+            this.opts.log?.(`ignored a ${msg.command.type} command: a check worker runs checks only`);
+            return;
+          }
           this.opts.onCommand(msg.command);
           return;
         case "ping":
@@ -160,7 +214,7 @@ export class RunnerConnection {
       }
     });
 
-    ws.on("error", (err) => this.opts.log?.(`connection error: ${err.message}`));
+    ws.on("error", (err) => this.opts.log?.(`connection error: ${describeConnectError(err.message, this.opts.url)}`));
     ws.on("close", () => {
       this.teardown();
       if (this.stopped) return;

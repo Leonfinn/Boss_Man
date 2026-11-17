@@ -5,12 +5,13 @@
 // The hold is one `settings` row, so there is no migration and a restart keeps it.
 import { rm, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
-import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.js";
+import { agents, checkWorkers, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
+import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, KEEP_WAITING_MORE, STOP_AND_UPDATE, STOP_CHECKS_UPDATE_NOW, STOP_THESE_CARRY_ON, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
+import { runnerBusy, runnerChecks, runsByCompany } from "./runner-busy.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 
@@ -127,6 +128,8 @@ export type MaintenanceDeps = {
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
   tick: () => Promise<unknown>;
+  /** The per-run Stop (runs.ts cancel): BOS-1377's "Stop these and carry on" and BOS-1238's button stop runs through it. */
+  cancelRun?: (runId: string) => Promise<unknown>;
   notify: (n: NotifyInput) => Promise<unknown>;
   /** Sends a message into every run still going, so agents wrap up instead of looking for more work. */
   tellRunning?: (text: string) => Promise<unknown>;
@@ -169,15 +172,12 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
    * Live runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
    * those never hold a runner swap, and they are what the banner's "N agents" counts.
    */
-  async function activeByCompany(workOnly = false) {
-    const live = isNull(runs.endedAt);
-    const rows = await db
-      .select({ companyId: runs.companyId, n: sql<number>`count(*)::int` })
-      .from(runs)
-      .where(workOnly ? and(live, sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`) : live)
-      .groupBy(runs.companyId);
-    return new Map(rows.map((r) => [r.companyId, r.n]));
-  }
+  const activeByCompany = (workOnly = false) => runsByCompany(db, workOnly);
+  /**
+   * What holds a swap (BOS-1471): work runs plus running check jobs, so a recreate never kills a merge check
+   * in flight. The shared function is also what a server update's quiet-host wait reads (runner-busy.ts).
+   */
+  const busyByCompany = async () => (await runnerBusy(db, true)).byCompany;
 
   /**
    * The wrap-up panel's list (BOS-929): every work run still going, with its agent, ticket reference and when it
@@ -288,6 +288,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     }
   }
 
+  /**
+   * BOS-1437 (DR-060): check workers run on other hosts, so this swap doesn't touch them, and a worker built from an older commit
+   * than the runner sits idle until it is updated. The done card says so with the steps; empty when no worker is set up.
+   */
+  async function workerUpdateSteps(): Promise<string> {
+    const rows = await db.select({ name: checkWorkers.name }).from(checkWorkers).where(eq(checkWorkers.enabled, true));
+    if (!rows.length) return "";
+    const names = rows.map((w) => w.name).join(", ");
+    return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: in its compose.yaml, replace the 40-character commit on the two lines marked "CHANGE THIS (commit)" with the new runner commit, and run docker compose up -d next to it (it rebuilds the worker by itself). The steps are in docs/34-check-workers.md; the Checks panel shows which workers are out of date.`;
+  }
+
   async function end(title: string, level: NotifyInput["level"], body: string) {
     const h = await getHold(db);
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
@@ -302,20 +313,28 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   }
 
   /** The one question at a deadline. The key names the deadline, so "Keep waiting" earns a new one at the next. */
-  async function askAtDeadline(h: Hold, n: number, inCompanies: number) {
+  async function askAtDeadline(h: Hold, n: number, inCompanies: number, checksN = 0) {
     const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
     if (!home) return;
-    const options = [STOP_AND_UPDATE, KEEP_WAITING_MORE(h.minutes), CANCEL_UPDATE];
+    // BOS-1377: the runs this card shows are the ones told at wrap-up that are still going; "Stop these" touches only them.
+    const told = { ...h.startTold, ...h.wrapTold };
+    const shown = (await liveWorkRuns(db, h.wrapSince ?? h.since, told)).filter((r) => told[r.runId]);
+    // BOS-1600: with only checks left there are no runs to stop; the plain choice is wait, or end the checks now.
+    const onlyChecks = n === 0 && checksN > 0;
+    const options = shown.length ? [STOP_THESE_CARRY_ON, WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE] : onlyChecks ? [STOP_CHECKS_UPDATE_NOW, WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE] : [WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE];
+    const checksText = onlyChecks ? ` "Stop the checks and update now" ends ${checksN === 1 ? "the check" : "the checks"} running on the runner; ${checksN === 1 ? "it starts" : "they start"} again from the beginning after the update, so the time already spent is lost.` : "";
+    const names = shown.map((r) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})`).join(", ");
+    const stopText = shown.length ? ` "Stop these and carry on" stops ${names}: anything they haven't saved is lost, and their tickets wake again after the update. No other run is touched.` : "";
     await db
       .insert(decisions)
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Until you answer, new runs are not held for this update, so the runs going keep working; it goes ahead by itself once a company has no run left.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n ? `${n} run${n === 1 ? " is" : "s are"}` : ""}${n && checksN ? " and " : ""}${checksN ? `${checksN} check${checksN === 1 ? " is" : "s are"}` : ""} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}.${stopText}${checksText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the work going carries on). Until you answer, new runs and checks are not held for this update; it goes ahead by itself once a company has no run or check left.`,
         options,
-        recommendedOption: options[1]!,
+        recommendedOption: WAIT_TEN_MORE,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
-        context: { type: "maintenance", since: h.since },
+        context: { type: "maintenance", since: h.since, runIds: shown.map((r) => r.runId) },
       })
       .onConflictDoNothing();
   }
@@ -415,10 +434,15 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         }
       }
       if (!h) return last && !last.ok ? { on: false as const, last, healthy } : { on: false as const, last };
-      const active = await activeByCompany(true);
-      const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
+      // BOS-1600 (criterion A): the same runnerBusy result the swap's own drain waits on, so text and swap never disagree.
+      const busyNow = await runnerBusy(db, true);
+      const active = busyNow.runs;
+      const runsTotal = busyNow.runsTotal;
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), last };
+      // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
+      // A "stop the checks and update now" answer (force) means nothing is waited for any more.
+      const checksList = h.kind === "wrapup" || h.force ? [] : await runnerChecks(db, now());
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows
@@ -433,6 +457,21 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         notRespondingAfter: h.wrapNotRespondingAfter ?? WRAPUP_NOT_RESPONDING_MINUTES,
         runsList: list,
       };
+    },
+
+    /**
+     * "Stop the checks and update now" (BOS-1600): the owner's choice when only checks on a runner are left. The swap
+     * then ignores them; each one goes back in line and starts again from the beginning once its runner is back.
+     * Refused while agent runs are still going (those have their own wrap-up) and when no check is waited on. // leader-only
+     */
+    async updateNow(): Promise<{ ok: true } | { ok: false; reason: "no_update" | "agents_running" | "no_checks" }> {
+      const h = await getHold(db);
+      if (!h || h.kind === "wrapup") return { ok: false, reason: "no_update" };
+      const busy = await runnerBusy(db, true);
+      if (busy.runsTotal > 0) return { ok: false, reason: "agents_running" };
+      if (busy.checksTotal === 0) return { ok: false, reason: "no_checks" };
+      await save({ ...h, force: true });
+      return { ok: true };
     },
 
     /** Lifts the hold without finishing the swap; runners already swapped stay on the new image. // leader-only */
@@ -459,15 +498,69 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       return true;
     },
 
-    /** The owner's answer to the deadline question. */
-    async answered(answer: string) {
+    /**
+     * "Stop N and carry on with the update" (BOS-1238): which of the runs the owner was shown may be stopped. The
+     * scope is fixed here, not by the page: only runs that were told to wrap up (`wrapTold`), only once the hold's
+     * deadline has passed, and only those still going now. A run that has since ended is skipped; an id that was
+     * never told is never returned, whatever the request says. It stops nothing itself: the caller ends each id
+     * through the same per-run stop as BOS-929's Stop this run.
+     */
+    async stragglers(shown: string[]): Promise<{ ok: true; ids: string[]; skipped: number } | { ok: false; reason: "no_wrapup" | "too_early" }> {
+      const h = await getHold(db);
+      if (!h || !(h.kind === "wrapup" || h.wrapSince)) return { ok: false, reason: "no_wrapup" };
+      if (now() < new Date(h.deadline)) return { ok: false, reason: "too_early" };
+      const told = new Set(Object.keys(h.wrapTold ?? {}));
+      const asked = [...new Set(shown)].filter((id) => told.has(id));
+      if (!asked.length) return { ok: true, ids: [], skipped: shown.length };
+      const live = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.id, asked), isNull(runs.endedAt)));
+      const ids = live.map((r) => r.id);
+      return { ok: true, ids, skipped: shown.length - ids.length };
+    },
+
+    /**
+     * Stops exactly these runs through the per-run Stop (BOS-1377; BOS-1238's button calls this too): only ids the hold
+     * told at wrap-up that are still going are stopped, so a run that ended since is skipped and a run that started later
+     * is never touched. No lane pause, no ticket moves, no dropped wakes: the stopped tickets wake after the hold lifts.
+     * Answers which runs it stopped and which it skipped. // leader-only
+     */
+    async stopRuns(runIds: string[]) {
+      const h = await getHold(db);
+      const told = new Set([...Object.keys(h?.startTold ?? {}), ...Object.keys(h?.wrapTold ?? {})]);
+      const stopped: string[] = [];
+      const skipped: string[] = [];
+      const going = new Set(await liveWorkRunIds());
+      for (const id of new Set(runIds)) {
+        if (!told.has(id) || !going.has(id) || !deps.cancelRun) {
+          skipped.push(id);
+          continue;
+        }
+        try {
+          await deps.cancelRun(id);
+          stopped.push(id);
+        } catch (err) {
+          skipped.push(id); // it ended just now, or could not be stopped: the rest are still tried
+          deps.log?.(`wrap-up stop: run ${id} was not stopped: ${(err as Error).message}`);
+        }
+      }
+      return { stopped, skipped };
+    },
+
+    /** The owner's answer to the deadline question. `ctx.runIds` are the runs the card listed (BOS-1377). */
+    async answered(answer: string, ctx: { runIds?: string[] } = {}) {
       const h = await getHold(db);
       if (!h) return;
       // A wrap-up never asks the deadline question, so its answers are for an old card: nothing to do.
       if (h.kind === "wrapup") return;
-      if (answer === STOP_AND_UPDATE) await save({ ...h, force: true });
-      else if (answer === CANCEL_UPDATE) await self.cancel();
-      else await save({ ...h, deadline: new Date(now().getTime() + h.minutes * 60_000).toISOString() });
+      const later = (minutes: number) => new Date(now().getTime() + minutes * 60_000).toISOString();
+      if (answer === STOP_THESE_CARRY_ON) {
+        await self.stopRuns(ctx.runIds ?? []);
+        // Give the stops time to land; the hold keeps new runs out meanwhile and asks again if some are still going.
+        await save({ ...(await getHold(db) ?? h), deadline: later(DEADLINE_WAIT_MINUTES) });
+      } else if (answer === WAIT_TEN_MORE) await save({ ...h, deadline: later(DEADLINE_WAIT_MINUTES) });
+      else if (answer === CANCEL_RUNNER_UPDATE || answer === CANCEL_UPDATE) await self.cancel();
+      // Cards raised before BOS-1377 keep their old meanings.
+      else if (answer === STOP_AND_UPDATE || answer === STOP_CHECKS_UPDATE_NOW) await save({ ...h, force: true });
+      else await save({ ...h, deadline: later(h.minutes) });
     },
 
     /**
@@ -520,9 +613,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         return;
       }
       const t = now();
-      let active = await activeByCompany(true);
-      const total = [...active.values()].reduce((a, b) => a + b, 0);
-      if (!h.force && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, total, active.size);
+      // BOS-1471: running check jobs hold a swap like agent runs do, with the same deadline and the same ask.
+      const first = await runnerBusy(db, true); // BOS-1600: checks on a separate check worker do not hold a swap
+      let active = first.byCompany;
+      const total = first.runsTotal + first.checksTotal;
+      if (!h.force && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, first.runsTotal, active.size, first.checksTotal);
 
       const failed = { ...h.failed };
       const swapped = { ...h.swapped };
@@ -534,7 +629,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
-        active = await activeByCompany(true);
+        active = await busyByCompany();
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         try {
           // Said before the call, so the runner's next hello is recorded as this, not as a crash (BOS-594).
@@ -571,9 +666,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           const idle = waiting.filter((r) => !busy(r));
           const busyList = waiting.filter(busy).map((r) => r.slug);
           if (!idle.length)
-            await deps.notify({ companyId: null, level: "page", title: "Runner update is waiting for running work", body: `No runner has been swapped for ${minutes} minutes because ${busyList.join(", ")} still ${busyList.length === 1 ? "has" : "have"} work runs going. This wait is on purpose: each runner is swapped as soon as its runs finish, and at the deadline you are asked whether to stop them. New runs are held everywhere until then. To stop waiting, open Settings > Server and runner and cancel the update.`, link: "#/settings" });
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is waiting for running work", body: `No runner has been swapped for ${minutes} minutes because ${busyList.join(", ")} still ${busyList.length === 1 ? "has" : "have"} work runs or checks going. This wait is on purpose: each runner is swapped as soon as its runs finish, and at the deadline you are asked whether to stop them. New runs are held everywhere until then. To stop waiting, open Settings > Server and runner and cancel the update.`, link: "#/settings" });
           else
-            await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${minutes} minutes. Still waiting on: ${idle.map((r) => r.slug).join(", ")}${busyList.length ? ` (and on ${busyList.join(", ")}, which still ${busyList.length === 1 ? "has" : "have"} work runs going)` : ""}. New runs are held everywhere. Open Settings > Server and runner: wait for that company to finish, or cancel the update.`, link: "#/settings" });
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${minutes} minutes. Still waiting on: ${idle.map((r) => r.slug).join(", ")}${busyList.length ? ` (and on ${busyList.join(", ")}, which still ${busyList.length === 1 ? "has" : "have"} work runs or checks going)` : ""}. New runs are held everywhere. Open Settings > Server and runner: wait for that company to finish, or cancel the update.`, link: "#/settings" });
         }
       }
       await save(h);
@@ -596,7 +691,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const settingsDone = h.kind === "settings";
       if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
       else if (settingsDone) await end("Runners restarted with the new settings", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " was" : "s were"}` : "No runners were"} recreated after their runs finished. New runs have started again.`);
-      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.`);
+      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.${await workerUpdateSteps()}`);
     },
   };
   return self;

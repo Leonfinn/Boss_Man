@@ -10,15 +10,17 @@ import { and, asc, eq, gte, lt } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db/client.js";
-import { activity, checkJobs } from "./db/schema.js";
+import { activity, checkJobs, checkWorkers } from "./db/schema.js";
 import { MERGE_LINE_KIND } from "./services/merge-line.js";
 import { CHECK_REUSED_KIND } from "./services/check-request.js";
 import { fail, text, type Scope } from "./mcp-common.js";
 
 export const MERGE_LINE_EXPORT_DEFAULT = 5000;
 export const MERGE_LINE_EXPORT_MAX = 20_000;
-export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs", "check", "passed", "by"] as const;
-export const CHECK_JOB_COLUMNS = ["ticket_id", "kind", "scope", "queued", "started", "finished", "outcome", "reused"] as const;
+/** with and files (BOS-1515): a train_clash row's clashing tickets (ids, space-separated) and files (comma-separated, capped). */
+export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs", "check", "passed", "by", "commit", "with", "files"] as const;
+/** ran_on (BOS-1435): "company runner" or the check worker's name, for a job that started; null otherwise. */
+export const CHECK_JOB_COLUMNS = ["ticket_id", "kind", "scope", "queued", "started", "finished", "outcome", "reused", "ran_on"] as const;
 
 type Cell = string | number | boolean | null;
 type Row = Record<(typeof MERGE_LINE_COLUMNS)[number], Cell>;
@@ -39,18 +41,22 @@ export function exportRow(r: { ticketId: string | null; at: Date; detail: Record
     check: str(d.check),
     passed: typeof d.passed === "boolean" ? d.passed : null,
     by: str(d.by),
+    commit: str(d.commit),
+    with: Array.isArray(d.with) ? d.with.map((w) => str((w as { ticketId?: unknown } | null)?.ticketId)).filter((x): x is string => !!x).join(" ") || null : null,
+    files: Array.isArray(d.files) ? d.files.filter((f): f is string => typeof f === "string").join(",") || null : null,
   };
 }
 
 /** A check job: queued/started/finished are its own times; outcome is its state (queued, running, passed, failed, stuck, cancelled). */
-export function jobRow(j: { ticketId: string; kind: string; scope: string; state: string; queuedAt: Date; startedAt: Date | null; endedAt: Date | null }): JobRow {
-  return { ticket_id: j.ticketId, kind: j.kind, scope: j.scope, queued: iso(j.queuedAt), started: iso(j.startedAt), finished: iso(j.endedAt), outcome: j.state, reused: null };
+export function jobRow(j: { ticketId: string; kind: string; scope: string; state: string; queuedAt: Date; startedAt: Date | null; endedAt: Date | null; worker?: string | null; workerId?: string | null }): JobRow {
+  const ranOn = !j.startedAt ? null : j.workerId ? (j.worker ?? "a check worker") : "company runner";
+  return { ticket_id: j.ticketId, kind: j.kind, scope: j.scope, queued: iso(j.queuedAt), started: iso(j.startedAt), finished: iso(j.endedAt), outcome: j.state, reused: null, ran_on: ranOn };
 }
 
 /** A reused request: queued is when it was asked; it never waits or runs; reused is "passed" or "live"; outcome is the answering job's state then. */
 export function reusedRow(r: { ticketId: string | null; at: Date; detail: Record<string, unknown> | null }): JobRow {
   const d = r.detail ?? {};
-  return { ticket_id: r.ticketId, kind: "pre_review", scope: str(d.scope), queued: r.at.toISOString(), started: null, finished: null, outcome: str(d.outcome), reused: str(d.reused) };
+  return { ticket_id: r.ticketId, kind: "pre_review", scope: str(d.scope), queued: r.at.toISOString(), started: null, finished: null, outcome: str(d.outcome), reused: str(d.reused), ran_on: null };
 }
 
 /** A CSV cell, quoted when needed; a leading = + - @ is prefixed so a spreadsheet never reads it as a formula. */
@@ -69,8 +75,8 @@ export function registerMergeLineExport(server: Pick<McpServer, "registerTool">,
     "merge_line_records",
     {
       description:
-        `Read-only export of your company's merge-line timeline (the rows BOS-769 records: approved, check queued/started/ended, hold started/ended, merged), oldest first. Returns ticket_id, at, event, hold, heldMs, check, passed and by for each row, and nothing else. since is an ISO date or time (e.g. 2026-11-08T21:22:00Z); optional until (exclusive), format json (default) or csv, and limit (default ${MERGE_LINE_EXPORT_DEFAULT}, at most ${MERGE_LINE_EXPORT_MAX}). If the answer was cut at the limit it says so; ask again with since set to the last row's at to carry on (rows at that exact moment repeat, so drop them). ` +
-        `what: "check_jobs" exports the whole check line instead, by queue time: every check job (kind pre_review for agents' request_check, merge for the gate) with ticket_id, kind, scope, queued, started, finished, outcome and reused. Queue wait = started - queued; a job never started has started empty. A request_check answered by an earlier pass or by the ticket's job already in line is its own row with reused "passed" or "live" and no start or finish. Carry on from the last row's queued.`,
+        `Read-only export of your company's merge-line timeline (the rows BOS-769 records: approved, check queued/started/ended, hold started/ended, merged, and each server takeover: event "takeover" with the cause in by and the live commit in commit), oldest first. Returns ticket_id, at, event, hold, heldMs, check, passed, by, commit, with and files for each row, and nothing else (with and files: a train_clash row's clashing ticket ids and files, for a ticket held to land alone or sent back for a clash with main). since is an ISO date or time (e.g. 2026-11-08T21:22:00Z); optional until (exclusive), format json (default) or csv, and limit (default ${MERGE_LINE_EXPORT_DEFAULT}, at most ${MERGE_LINE_EXPORT_MAX}). If the answer was cut at the limit it says so; ask again with since set to the last row's at to carry on (rows at that exact moment repeat, so drop them). ` +
+        `what: "check_jobs" exports the whole check line instead, by queue time: every check job (kind pre_review for agents' request_check, merge for the gate) with ticket_id, kind, scope, queued, started, finished, outcome, reused and ran_on ("company runner" or a check worker's name). Queue wait = started - queued; a job never started has started empty. A request_check answered by an earlier pass or by the ticket's job already in line is its own row with reused "passed" or "live" and no start or finish. Carry on from the last row's queued.`,
       inputSchema: {
         since: z.string().min(8).max(40),
         until: z.string().min(8).max(40).optional(),
@@ -94,8 +100,9 @@ export function registerMergeLineExport(server: Pick<McpServer, "registerTool">,
           .limit(max + 1);
       if (what === "check_jobs") {
         const jobs = await db
-          .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, scope: checkJobs.scope, state: checkJobs.state, queuedAt: checkJobs.queuedAt, startedAt: checkJobs.startedAt, endedAt: checkJobs.endedAt })
+          .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, scope: checkJobs.scope, state: checkJobs.state, queuedAt: checkJobs.queuedAt, startedAt: checkJobs.startedAt, endedAt: checkJobs.endedAt, workerId: checkJobs.workerId, worker: checkWorkers.name })
           .from(checkJobs)
+          .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
           .where(and(eq(checkJobs.companyId, scope.companyId), gte(checkJobs.queuedAt, from), to ? lt(checkJobs.queuedAt, to) : undefined))
           .orderBy(asc(checkJobs.queuedAt), asc(checkJobs.id))
           .limit(max + 1);

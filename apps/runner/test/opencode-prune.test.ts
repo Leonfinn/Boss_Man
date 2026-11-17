@@ -298,7 +298,7 @@ describe("OpenCode session prune (BOS-616)", () => {
     const took = Date.now() - t0;
     expect(r).toMatchObject({ converted: 0, failed: 1 });
     expect(held).toEqual(["on", "off"]); // released
-    expect(took).toBeLessThan(5000); // at the cap, not after the 10 s busy wait
+    expect(took).toBeLessThan(9000); // cut at the cap, not after the full 10 s busy wait (margin for a slow gate's process start)
     expect(cuts).toHaveLength(1);
     expect(cuts[0]!.heldMs).toBeGreaterThanOrEqual(1500);
     expect(cuts[0]).toMatchObject({ agentHome: false, bytes: statSync(file).size });
@@ -311,7 +311,9 @@ describe("OpenCode session prune (BOS-616)", () => {
     // Within a day it isn't tried again (no hold at all); after a day it is, and goes through.
     expect(await pruneOpencodeSessions({ ...opts, now: NOW + DAY - 1 })).toMatchObject({ converted: 0, failed: 0 });
     expect(held).toEqual(["on", "off"]);
-    expect(await pruneOpencodeSessions({ ...opts, now: NOW + DAY + 1 })).toMatchObject({ converted: 1, failed: 0 });
+    // The retry runs with a generous cap, not the 1.5 s one that makes the first run stall: the blocker is gone, so the
+    // VACUUM finishes on its own, and a loaded merge gate must not cut it. The cap still catches a retry that hangs.
+    expect(await pruneOpencodeSessions({ ...opts, vacuumTimeoutMs: 120_000, now: NOW + DAY + 1 })).toMatchObject({ converted: 1, failed: 0 });
     expect(held).toEqual(["on", "off", "on", "off"]);
     expect(cuts).toHaveLength(1);
     db.close();

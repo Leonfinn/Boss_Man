@@ -10,6 +10,8 @@ lead: Boss Man backs up its database before every update. This guide covers upda
 
 ## Update the server
 
+To see what an update brings before you run it, read [What's new](/whats-new).
+
 From the install folder, run:
 
 ```sh Run on the Linux machine, as root
@@ -33,21 +35,21 @@ cd $B/src && scripts/update-runner.sh
 It builds a new runner image and checks it with networking off. If the check fails, the script says "The canary failed", and the runners keep the old image. If the check passes, the script also rebuilds the launcher, the part that starts each company's runner. Then the runners move to the new image:
 
 - **With the host deployer set up** (see below), Boss Man stops starting new runs, lets the current ones finish, and swaps each company's runner when it is idle.
-- **Without the host deployer**, the runners stay on the old image until you start the swap. Open **Settings > Server and runner**, find **Runner update**, and choose **Update runners (finish runs first)**.
+- **Without the host deployer**, the runners stay on the old image until you start the swap. Open **Settings > Server and runner**, find **Updates**, and choose **Update runners (finish runs first)**.
 - **If no launcher is running**, the script restarts the runners at once. This cuts off any runs in progress.
 
-Follow the swap in **Runner update**, which also has **Cancel the update**. To undo, run `scripts/update-runner.sh --rollback`.
+Follow the swap in **Updates**, which also has **Cancel the update**. To undo, run `scripts/update-runner.sh --rollback`.
 
 ## Update from the web page (optional)
 
-With the optional host deployer, you can update from Boss Man. The host deployer is a root script on the machine, run every minute by cron. Setting it up is in [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md), section 9a, and works on any Linux host.
+With the optional host deployer, you can update from Boss Man. The host deployer is a root script on the machine, run every minute by cron. Setting it up is in [`docs/30-in-app-updates.md`](@repo/blob/main/docs/30-in-app-updates.md), which works on any Linux host, with a short section for TrueNAS.
 
 Once it is set up:
 
 - when the main branch moves, a card on Decisions asks whether to deploy, with **Deploy** and **Not now**
-- **Settings > Server and runner > Updates** has **Deploy latest**, **Build and update runners** and **Restart the server**
+- **Settings > Server and runner > Updates** shows the same offer (**Review and deploy**, or **Check for updates now** when there is none), and has **Build and update runners** and **Restart the server**
 
-**Deploy** and **Deploy latest** update the server only, never the runners. When an update changes the runners' code, the Deploy card says so, and Boss Man raises a second card later to update the runners. You can also choose **Build and update runners** yourself.
+A server deploy updates the server only, never the runners. When an update changes the runners' code, the Deploy card says so, and Boss Man raises a second card later to update the runners. You can also choose **Build and update runners** yourself.
 
 The host deployer will not apply changes to these files:
 

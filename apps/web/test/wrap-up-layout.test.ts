@@ -39,6 +39,8 @@ const maintenance = (mode: string) => {
   if (mode === "none") return { on: false, last: null };
   const base = { on: true, kind: "update", reason: "runner update", since: now(), deadline: new Date(Date.now() + 30 * 60000).toISOString(), runs: runsList.length, companies: 1, chatOpen: true, last: null };
   if (mode === "waiting") return base;
+  // "late": the wrap-up deadline has passed and the runs are still going.
+  if (mode === "late") return { ...base, deadline: new Date(Date.now() - 60000).toISOString(), wrapAsked: true, notRespondingAfter: 30, runsList };
   return { ...base, wrapAsked: true, notRespondingAfter: 30, runsList };
 };
 
@@ -57,6 +59,10 @@ function answer(p: string, mode: string): unknown {
   if (p === "/api/maintenance") return maintenance(mode);
   if (p === "/api/runner-report") return { live: [{ slug: "app-co", name: "Boss Man Co", registered: true, connected: true, at: now(), imageVersion: "v1.2", fault: null }], update: { at: now(), title: "Runners updated", body: "All 1 runner is on the new image.", state: "ok", todo: null } };
   if (p === "/api/self-deploy") return selfDeploy;
+  if (p === "/api/self-deploy/history") return [
+    { id: "h1", target: "server", commit: "b6985c93", changes: 3, result: "deployed", message: null, at: now() },
+    { id: "h2", target: "runner", commit: "a1b2c3d4", changes: 0, result: "failed", message: "has not reconnected", at: now() },
+  ];
   if (p === "/api/host-facts") return { hostName: "bossman-host", reportedAt: now(), ownerFacts: [], facts: {} };
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
@@ -92,7 +98,7 @@ afterAll(async () => {
   await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
 });
 
-type Page = { on: (ev: string, cb: (a: unknown) => void) => void; setViewportSize: (s: { width: number; height: number }) => Promise<void>; goto: (u: string) => Promise<unknown>; waitForSelector: (s: string, o?: { timeout?: number }) => Promise<unknown>; locator: (s: string) => { boundingBox: () => Promise<{ x: number; y: number; width: number; height: number } | null>; innerText: () => Promise<string>; count: () => Promise<number> }; screenshot: (o: { path: string; fullPage: boolean }) => Promise<unknown>; close: () => Promise<void> };
+type Page = { evaluate: <T>(fn: () => T) => Promise<T>; on: (ev: string, cb: (a: unknown) => void) => void; setViewportSize: (s: { width: number; height: number }) => Promise<void>; goto: (u: string) => Promise<unknown>; waitForSelector: (s: string, o?: { timeout?: number }) => Promise<unknown>; locator: (s: string) => { boundingBox: () => Promise<{ x: number; y: number; width: number; height: number } | null>; innerText: () => Promise<string>; count: () => Promise<number> }; screenshot: (o: { path: string; fullPage: boolean }) => Promise<unknown>; close: () => Promise<void> };
 type Browser = { newPage: (o: { viewport: { width: number; height: number }; deviceScaleFactor?: number; hasTouch?: boolean }) => Promise<Page>; close: () => Promise<void> };
 
 async function launch(): Promise<Browser | null> {
@@ -124,41 +130,74 @@ const saveShot = (name: string, page: Page) => {
 };
 
 describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
-  it("is inside the Updates box, above the update buttons, with the bottom panel gone, at desktop and foldable", async () => {
+  // One test per size (BOS-1708 pattern): each keeps the 60 s limit (not raised) but now covers 4 page loads, not 16.
+  // The limit still catches a page that never draws the mode's data (the wait above has a 20 s deadline).
+  const sizes = [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "brave1667", width: 1667, height: 724, touch: true, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }];
+  it.each(sizes)("is inside the Updates box, above the update buttons, with the bottom panel gone, at $name", async (vp) => {
     const browser = await launch();
     if (!browser) return; // no browser here: skipped, not passed
     try {
-      for (const vp of [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }]) {
-        for (const m of ["waiting", "asked", "none"]) {
+      {
+        for (const m of ["waiting", "asked", "late", "none"]) {
           mode = m;
           const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.dsf, hasTouch: vp.touch });
           const errors: string[] = [];
           page.on("pageerror", (e) => errors.push(String(e)));
           // The Updates box is on Settings → Server and runner since the Settings menu redesign; #/settings alone is the menu.
-          await page.goto(`${base}/#/settings/${company.id}/system`);
+          await page.goto(`${base}/#/settings/${company.id}/updates`);
           await page.waitForSelector("body", { timeout: 4000 });
           await page.waitForSelector("section.card:has(h2#deploy-h)", { timeout: 8000 });
-          await new Promise((r) => setTimeout(r, 1200));
+          // Wait for the data of this mode to be drawn (an event, with a deadline), not a fixed sleep: a cold GitHub
+          // runner is several times slower than a dev machine. The page-error check below still sees late errors
+          // because the elements waited on only exist once the maintenance answer has been rendered.
+          const sec0 = "section.card:has(h2#deploy-h)";
+          const ready: Record<string, string> = {
+            none: `${sec0} [data-testid='update-tag']:has-text('Up to date')`,
+            waiting: `${sec0} [data-testid='update-tag']:has-text('Waiting for agents')`,
+            asked: `${sec0} [data-testid='wrapup-runs']`,
+            late: `${sec0} [data-testid='update-main']:has-text('Stop 4 and carry on')`,
+          };
+          await page.waitForSelector(ready[m]!, { timeout: 20000 });
           expect(JSON.stringify(errors), `${vp.name}/${m} page errors`).toBe("[]");
           const updates = page.locator("section.card:has(h2#deploy-h)");
           const box = await updates.boundingBox();
-          const wrap = page.locator("section.card:has(h2#deploy-h) [data-testid='wrapup-box']");
-          if ((await wrap.count()) === 0) throw new Error(`no wrap-up action in the Updates box ${vp.name}/${m}: ${(await updates.innerText()).slice(0, 500)}`);
-          expect(await wrap.count(), `${vp.name}/${m}: wrap-up is inside the Updates box`).toBe(1);
-          // The separate bottom "Ask agents to wrap up" panel is gone.
-          expect(await page.locator("section.card:has(h2:has-text('Ask agents to wrap up'))").count(), `${vp.name}/${m}: no bottom panel`).toBe(0);
-          const wb = await wrap.boundingBox();
-          expect(wb && box && wb.y >= box.y && wb.y <= box.y + box.height, `${vp.name}/${m}: the action sits in the box`).toBe(true);
           const sec = "section.card:has(h2#deploy-h)";
+          // BOS-1238: one status box, at most one blue main button, nothing wider than the page at any width.
+          expect(await page.locator(`${sec} [data-testid='update-status']`).count(), `${vp.name}/${m}: one status box`).toBe(1);
+          expect(await page.locator(`${sec} button.primary`).count(), `${vp.name}/${m}: at most one blue button`).toBeLessThanOrEqual(1);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), `${vp.name}/${m}: nothing runs off the page`).toBeLessThanOrEqual(0);
+          expect(box && box.x + box.width <= vp.width + 1, `${vp.name}/${m}: the card fits the window`).toBe(true);
+          // The separate bottom "Ask agents to wrap up" panel and the Runner update box are gone.
+          expect(await page.locator("section.card:has(h2:has-text('Runner update'))").count(), `${vp.name}/${m}: no Runner update box`).toBe(0);
+          const main = await page.locator(`${sec} [data-testid='update-main']`).count();
+          if (main) {
+            const mb = await page.locator(`${sec} [data-testid='update-main']`).boundingBox();
+            // The owner's 1667x724 screen: status box and main button end above the fold; a phone: a tap-sized, full-width button.
+            if (vp.name === "brave1667") expect(mb!.y + mb!.height, `${m}: main button above 724`).toBeLessThanOrEqual(724);
+            if (vp.name === "phone380") {
+              expect(mb!.height, `${m}: tap size`).toBeGreaterThanOrEqual(44);
+              const sb = await page.locator(`${sec} [data-testid='update-status']`).boundingBox();
+              expect(mb!.width, `${m}: full width`).toBeGreaterThanOrEqual(sb!.width - 2);
+            }
+          }
+          if (m === "none") {
+            expect(await page.locator(`${sec} [data-testid='wrapup-box']`).count(), `${vp.name}/${m}: no runs list`).toBe(0);
+            expect(await page.locator(`${sec} [data-testid='update-tag']`).innerText()).toBe("Up to date");
+          }
           if (m === "waiting") {
-            // The main action is present while an update waits, and the plain wording names the count and when it starts.
-            expect(await page.locator(`${sec} button:has-text('Ask agents to wrap up')`).count(), `${vp.name}: ${(await updates.innerText()).slice(0, 400)}`).toBeGreaterThan(0);
-            const line = await page.locator(`${sec} [data-testid='wrapup-waiting']`).innerText();
-            expect(line).toContain("still running");
-            expect(line).toContain("starts when they have finished");
-            expect(line).not.toContain("above");
+            expect(await page.locator(`${sec} [data-testid='update-tag']`).innerText()).toBe("Waiting for agents");
+            expect(await page.locator(`${sec} [data-testid='update-main']`).innerText()).toBe("Ask agents to wrap up");
+            expect(await page.locator(`${sec} [data-testid='update-say']`).innerText()).toContain("waiting for 4 agents to finish");
+          }
+          if (m === "late") {
+            expect(main, `${vp.name}: main button past the deadline`).toBe(1);
+            expect(await page.locator(`${sec} [data-testid='update-main']`).innerText()).toBe("Stop 4 and carry on with the update");
+            expect(await page.locator(`${sec} [data-testid='update-next']`).innerText()).toContain("anything they haven't saved is lost");
           }
           if (m === "asked") {
+            // Before the deadline there is no main button; the per-run Stop stays.
+            expect(main, `${vp.name}: no main button before the deadline`).toBe(0);
+            expect(await page.locator(`${sec} button:has-text('Stop this run')`).count()).toBe(4);
             expect(await page.locator(`${sec} [data-testid='wrapup-runs']`).count(), `${vp.name}: still-running list shows`).toBe(1);
             const text = (await page.locator(`${sec} [data-testid='wrapup-runs']`).innerText()).toLowerCase();
             expect(text).toContain("bungle");

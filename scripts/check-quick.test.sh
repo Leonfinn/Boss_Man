@@ -211,6 +211,19 @@ notlogged "vitest related --run src/mcp.ts" "broad beside page"
 run 0 "merge check runs it" env BOSSMAN_MERGE_CHECK=1
 logged "$own" "merge check"
 
+# BOS-1613: any apps/web/src change runs the screen inventory test; a styles.css change runs the CSS text tests.
+inv="pnpm --filter @boss-man/web exec vitest related --run test/screen-inventory.test.ts"
+g checkout -q -B inventory origin/main; commit apps/web/src/lib/format.ts
+run 0 "a web lib change runs the screen inventory" env
+logged "$inv" "web lib"
+grep -q "^PASS  path-reading test screen-inventory.test.ts (apps/web)" "$t/out" || fail "no inventory PASS line: $(cat "$t/out")"
+g checkout -q -B inventorycss origin/main; commit apps/web/src/styles.css
+run 0 "a styles.css change runs the CSS text tests" env
+logged "vitest related --run test/ticket-layout.test.ts" "styles.css"
+g checkout -q -B inventoryserver origin/main; commit apps/server/src/other.ts
+run 0 "a server-only change leaves the inventory out" env
+notlogged "screen-inventory" "server-only change"
+
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
 g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
 run 0 "mcp.ts is broad" env

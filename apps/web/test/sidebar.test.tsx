@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Agent, Company } from "../src/api";
 import { Sidebar } from "../src/components/Sidebar";
@@ -66,5 +66,35 @@ describe("settings pages", () => {
     expect(within(menu).getByRole("link", { name: /Secrets/ }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByText("the secrets page")).toBeTruthy();
     expect(within(menu).getByRole("link", { name: /Funding/ })).toBeTruthy();
+  });
+});
+
+describe("the main menu groups (BOS-1506)", () => {
+  it("keeps every page reachable at its old address, with Settings pinned and Log out beside it", () => {
+    show([]);
+    const pages: Record<string, string> = { Dashboard: "dashboard", Decisions: "decisions", Notifications: "notifications", Chat: "chat", Projects: "projects", Roadmap: "roadmap", Features: "features", Feedback: "feedback", Plan: "plan", "Merge queue": "merge-queue", Wiki: "wiki", Agents: "agents", Skills: "skills", Engagements: "engagements", Runs: "runs", "Scrum Master log": "scrum-master", "Workflow report": "workflow", Settings: "settings" };
+    for (const [name, id] of Object.entries(pages)) expect(screen.getByRole("link", { name }).getAttribute("href"), name).toBe(`#/${id}`);
+    const pinned = document.querySelector(".side-pinned")!;
+    expect(within(pinned as HTMLElement).getByRole("link", { name: "Settings" })).toBeTruthy();
+    expect(within(pinned as HTMLElement).getByRole("button", { name: "Log out" })).toBeTruthy();
+  });
+
+  it("has ten top-level rows, three of which are groups, and no section headings", () => {
+    show([]);
+    expect(document.querySelectorAll(".nav-scroll > section > ul > li").length).toBe(10);
+    expect(document.querySelectorAll(".nav-scroll .nav-group-row").length).toBe(3);
+    expect(document.querySelector(".side h2")).toBeNull();
+  });
+
+  it("marks the group of the open page and folds and unfolds on press", () => {
+    localStorage.setItem("bm-side-groups", "[]");
+    show([], undefined, [], "feedback");
+    expect(screen.queryByRole("link", { name: "Feedback" })).toBeNull();
+    const product = screen.getByRole("button", { name: /^Product/ });
+    expect(within(product).getByText("Feedback")).toBeTruthy();
+    fireEvent.click(product);
+    expect(screen.getByRole("link", { name: "Feedback" }).getAttribute("aria-current")).toBe("page");
+    expect(JSON.parse(localStorage.getItem("bm-side-groups")!)).toEqual(["product"]);
+    localStorage.removeItem("bm-side-groups");
   });
 });

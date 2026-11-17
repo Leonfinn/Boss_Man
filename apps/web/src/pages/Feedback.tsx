@@ -8,6 +8,8 @@ import { NotFoundBlock } from "../components/NotFoundBlock";
 import { STATUS_TONE } from "./Features";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { clearDraft } from "../drafts";
+import { defaultLinkAddress } from "../link-address";
+import type { HostFactsView } from "../host-facts-display";
 import { DraftTextarea } from "../components/DraftTextarea";
 
 type State = "unprocessed" | "processed" | "archived";
@@ -316,6 +318,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
   const introKey = `portal-intro/${companyId}`;
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const d = s.data;
+  const hostFacts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 60_000, "host-facts-portal");
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
   const [backBusy, setBackBusy] = useState(false);
@@ -336,7 +339,10 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
     r.onload = () => run(api(`${logoUrl}`, { method: "PUT", body: { data: String(r.result).split(",")[1] ?? "" } }).then(() => setLogoV((v) => v + 1)), "Logo saved.");
     r.readAsDataURL(file);
   };
-  const link = d.portalToken ? `${d.portalUrl ?? window.location.origin}/portal.html#${d.portalToken}` : null;
+  // BOS-1603: with no portal address set, never fall back to the owner's own browser address: clients may not reach it.
+  const guess = d.portalUrl ? null : defaultLinkAddress({ origin: window.location.origin, facts: hostFacts.data?.facts, who: "clients" });
+  const base = d.portalUrl ?? guess?.url ?? "";
+  const link = d.portalToken && base ? `${base}/portal.html#${d.portalToken}` : null;
   return (
     <section className="card" aria-labelledby="portal-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <h2 id="portal-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -363,9 +369,14 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
           </button>
         </div>
       )}
-      {d.portalEnabled && (
-        <p className="muted" style={{ fontSize: 13 }}>
-          This link uses the address you're on now. If you serve the portal on its own port (BOSSMAN_PORTAL_PORT, see the install guide), swap in that address and keep everything after "#".
+      {d.portalEnabled && d.portalToken && !link && (
+        <p className="error" style={{ fontSize: 14 }} data-testid="portal-no-address">
+          {guess?.note} Set BOSSMAN_PORTAL_URL (see the install guide) to the address your clients open; the link appears here once it is set.
+        </p>
+      )}
+      {d.portalEnabled && link && (
+        <p className="muted" style={{ fontSize: 13 }} data-testid="portal-address-note">
+          {guess ? `${guess.note} ` : "This link uses the portal address set in BOSSMAN_PORTAL_URL. "}If you serve the portal on its own port (BOSSMAN_PORTAL_PORT, see the install guide), swap in that address and keep everything after "#".
         </p>
       )}
       <form
@@ -447,12 +458,84 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         </div>
         <SaveButton dirty saved={false} busy={backBusy} disabled={!!backProblem || !back || (!back.url.trim() && !back.text.trim())} style={{ alignSelf: "flex-start" }} />
       </form>
+      <fieldset style={{ border: "1px solid var(--border, #333)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+        <legend style={{ fontSize: 14, fontWeight: 600, padding: "0 6px" }}>Short public address</legend>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input
+            type="checkbox"
+            checked={!!d.portalAtBareAddress}
+            aria-describedby="bare-address-help"
+            onChange={(e) =>
+              run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { portalAtBareAddress: e.target.checked } }), e.target.checked ? "The public address now opens this portal." : "The public address no longer opens this portal.")
+            }
+          />
+          Open this portal at the public address itself{d.portalUrl ? ` (${d.portalUrl})` : ""}, with no secret link part
+        </label>
+        <p id="bare-address-help" className="muted" style={{ fontSize: 13 }}>
+          Anyone who opens that address sees this portal, so use it for a portal meant to be public, such as the one your website links to. Only one company's portal can use it; turning it on here turns it off for any other. The portal must also be turned on.
+        </p>
+      </fieldset>
+      <ConfirmByEmail companyId={companyId} d={d} run={run} />
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
           {note.text}
         </p>
       )}
     </section>
+  );
+}
+
+/** BOS-1388: visitors must click an emailed link before a post, comment or vote counts. Needs outgoing email first. */
+function ConfirmByEmail({ companyId, d, run }: { companyId: string; d: FeedbackSettingsView; run: (p: Promise<unknown>, ok?: string) => unknown }) {
+  // An older server sends neither number: show the defaults rather than "undefined".
+  const savedHours = d.confirmLinkHours ?? 24;
+  const savedDays = d.rememberAddressDays ?? 90;
+  const [hours, setHours] = useState(String(savedHours));
+  const [days, setDays] = useState(String(savedDays));
+  const h = Number(hours);
+  const dy = Number(days);
+  const problem = !Number.isInteger(h) || h < 1 || h > 168 ? "The link must last 1 to 168 hours." : !Number.isInteger(dy) || dy < 1 || dy > 365 ? "Remember a browser for 1 to 365 days." : null;
+  const patch = (body: object, ok: string) => run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body }), ok);
+  const blocked = !d.emailReady || !d.portalUrl;
+  return (
+    <fieldset style={{ border: "1px solid var(--border, #333)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+      <legend style={{ fontSize: 14, fontWeight: 600, padding: "0 6px" }}>Confirm posts by email</legend>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+        <input type="checkbox" checked={d.confirmByEmail} disabled={blocked && !d.confirmByEmail} aria-describedby="confirm-email-help" onChange={(e) => patch({ confirmByEmail: e.target.checked }, e.target.checked ? "Visitors now confirm by email." : "Visitors no longer need to confirm.")} />
+        Visitors must click a link we email them before a post, comment or vote counts
+      </label>
+      <p id="confirm-email-help" className="muted" style={{ fontSize: 13 }}>
+        {!d.emailReady
+          ? "Set up outgoing email first (Settings → Server and runner → Outgoing email): the links are sent from it."
+          : !d.portalUrl
+            ? "The links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide)."
+            : "With this on, visitors give an email address. What they send is kept out of sight, and counts for nothing, until they click the emailed link. Unconfirmed posts are deleted when the link runs out."}
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!problem) void patch({ confirmLinkHours: h, rememberAddressDays: dy }, "Saved.");
+        }}
+        style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}
+      >
+        <div className="field">
+          <label htmlFor="confirm-hours">Link works for (hours)</label>
+          <input id="confirm-hours" type="number" min={1} max={168} value={hours} onChange={(e) => setHours(e.target.value)} style={{ width: 90 }} />
+        </div>
+        <div className="field">
+          <label htmlFor="confirm-days">Remember a confirmed browser for (days)</label>
+          <input id="confirm-days" type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} style={{ width: 90 }} />
+        </div>
+        <button className="btn small" type="submit" disabled={!!problem || (h === savedHours && dy === savedDays)}>
+          Save times
+        </button>
+      </form>
+      {problem && (
+        <p role="alert" className="error" style={{ fontSize: 13 }}>
+          {problem}
+        </p>
+      )}
+    </fieldset>
   );
 }
 

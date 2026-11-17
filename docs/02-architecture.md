@@ -47,16 +47,17 @@ flowchart LR
 
 ### Runners (one per company)
 - **What's in the image:**
-  - the **official Claude Code**, installed with Anthropic's installer;
-  - `@agentclientprotocol/claude-agent-acp`, with `CLAUDE_CODE_EXECUTABLE` set to that binary;
+  - **no Anthropic code** (DR-050): Claude Code and its ACP adapter are installed on first start (below), so the image can be published;
   - Codex and `@agentclientprotocol/codex-acp`;
+  - OpenCode (`opencode-ai`, MIT);
   - a small **runner daemon**.
+- **The Claude pack (DR-050, BOS-972):** `apps/runner/claude-pack/` pins `@anthropic-ai/claude-code` and `@agentclientprotocol/claude-agent-acp` with a committed lockfile. A one-shot installer container (the runner image, another command) runs `npm ci` into `/opt/bossman-claude/<lock hash>` on the `bossman-claude` named volume, checks `claude --version`, runs the canary, then writes a `READY` marker; only a ready folder is used. The launcher runs it before starting a runner (and the compose `claude-pack` service does the same for hand-started runners); the runner mounts the volume **read-only** and points `CLAUDE_CODE_EXECUTABLE` at the ready pack, with the adapter from the pack too. Without a ready pack the runner reports Claude Code absent (Claude agents say so), and Codex and OpenCode keep working. Folders are content-addressed, so an update installs beside the old one and a rollback just picks the old folder.
 - **Connection:** the daemon **dials out** to the server over WebSocket using a per-runner token. A runner can therefore run on a different host from the server without any inbound ports.
 - **Work:** it starts and manages ACP sessions over JSON-RPC on stdio, one session per agent task. It streams events back to the server: messages, tool calls, `usage_update`, permission requests, and `rate_limit_event` if spike S1 shows it is available.
 - **Workspace:** each company has its own volumes. Secrets are injected at runtime from that company's grants and never written into the image.
-- **Rebuilds:** the image is rebuilt by hand, roughly weekly, to pick up new releases (R9); nothing rebuilds it on a timer. `scripts/update-runner.sh` builds a candidate and runs a canary in it with networking off: a real Claude Code, Codex and OpenCode session against stand-in models, each with one permission-checked tool call, and each inside the agent fence where the host has one (BOS-321). Only a passing build replaces `boss-man-runner:current`; the one before is kept as `:previous` for `--rollback` (R52). The runners then move onto it without cutting off runs in progress (see [09-self-deploy.md](09-self-deploy.md), "Phase 2"). With the launcher (R55), the server asks a small launcher container to start, stop and swap each company's runner.
+- **Rebuilds:** the image is rebuilt by hand, roughly weekly, to pick up new releases (R9); nothing rebuilds it on a timer. `scripts/update-runner.sh` builds a candidate and runs a canary in it with networking off: a real Codex and OpenCode session against stand-in models, each with one permission-checked tool call, and each inside the agent fence where the host has one (BOS-321); a Claude session is proven by the pack installer instead (it runs the same canary once it has the pack). Only a passing build replaces `boss-man-runner:current`; the one before is kept as `:previous` for `--rollback` (R52). The runners then move onto it without cutting off runs in progress (see [09-self-deploy.md](09-self-deploy.md), "Phase 2"). With the launcher (R55), the server asks a small launcher container to start, stop and swap each company's runner.
 - **Spike S2 settled these details** (see `spikes/s2-acp/README.md`):
-  - **Installing Claude Code:** use Anthropic's npm package `@anthropic-ai/claude-code`, which installs the same native binary as the standalone installer. Set `CLAUDE_CODE_EXECUTABLE` so the adapter uses it rather than its own bundled copy. Set `DISABLE_UPDATES=1`.
+  - **Installing Claude Code:** Anthropic's npm package `@anthropic-ai/claude-code`, installed by the pack on first start (DR-050) rather than baked into the image. `CLAUDE_CODE_EXECUTABLE` points the adapter at it rather than its own bundled copy. `DISABLE_UPDATES=1`.
   - **Codex approvals:** Codex must start in `INITIAL_AGENT_MODE=workspace-write`. Its default `agent` mode sends approvals to Codex's own AI reviewer instead of Boss Man.
   - **Codex sandbox:** superseded by the agent fence (DR-004, below). Codex's own bubblewrap sandbox can't start in a runner container (user namespaces are blocked; BOS-315 proved it fails outright), and loosening seccomp for it would weaken the whole container. A shell call fails in Codex's sandbox until the model asks to escalate it, which raises a permission request to Boss Man; the escalated command then runs inside the agent fence.
   - **Denials:** Codex ends the turn when a permission is denied, while Claude continues. The decision flow re-wakes Codex agents with the answer.
@@ -81,6 +82,14 @@ flowchart LR
   - **Shared memory:** Claude Code keys project memory by the git root, which for a clone is the clone. The runner links `projects/<clone>/memory` to the shared repo's, in the shared `~/.claude` and in a fenced agent's home.
   - **Rollout and rollback:** an image from before BOS-323 deletes any ticket folder whose `.git` isn't a worktree pointer, so clones may only be made once every image a runner could roll back to understands them. BOS-323 shipped with worktrees as the default; BOS-343 switched the default to clones (it only landed once every runner image in use included BOS-323), and a later one removes the worktree code. Rolling back past BOS-323 after the switch would delete every clone and its uncommitted work (the branches survive in the shared repo).
 - **Event delivery (R31).** Each event from the runner has a sequence number. The runner keeps a journal until the server acknowledges each event, and replays from the last acknowledged one after a reconnect. Both sides send heartbeats. Because of the Claude Code licence, the public repo **publishes the Dockerfile, not prebuilt images containing Claude Code** (see the risks in 03).
+
+### Check workers (DR-060, BOS-1435)
+- **What:** the runner image started with `BOSSMAN_ROLE=check-worker` on any Docker host. It takes queued checks the company runner has no free slot for. The owner adds one in Settings → Server and runner → Checks → Check workers, which shows its token once (`bmw_…`, only the hash is kept), and sets the companies it may serve, its slots and optional per-check caps (test threads, memory), which reach the job as `BOSSMAN_CHECK_THREADS` and `BOSSMAN_CHECK_MEMORY_MB`.
+- **Not a runner:** a worker is a row in `check_workers`, never in `runners`. Its token opens only `/api/check-worker/connect`, which carries `check.run`, `check.cancel` and `check.ack` one way and hello, ping, `check.progress` and `check.done` the other, and nothing else: no journal events, no replies, no runs, no merges, no `/api/runner/env` and so no secrets. A merge job carries the owner's private-details list, as on the runner.
+- **Scheduling:** each machine has its own slots. `pump()` fills the company runner first, then each ready worker up to the smaller of the owner's slots and what the worker reports in hello. A worker's slots are shared by every company it serves, and the merge-reserve rule applies per machine. A job records `worker_id` (then `runner_id` is null), and only that machine may report on it. The merge train's seats are the runner's slots plus the ready workers'.
+- **Ready means:** turned on, connected, allowed for the company, announces `check-jobs` and `check-bundle` (it can fetch the code itself, BOS-1436), and built from the same commit as the company's runner (DR-042). Otherwise it sits idle and the Checks panel says why. The company runner must also be connected and announce `check-bundle` (it packs the code), or no worker gets a job.
+- **Getting the code (BOS-1436):** a worker has no GitHub login. When a worker claims a job, the server asks the company runner (`check.bundle`) to pack the job's commit plus its `refs/remotes/origin/<main>` (check-quick diffs against it) as a git bundle, `--not` the commits the worker last said it holds (hello `repos`, then `check.haves`; at most 20 per project). The runner streams it to `PUT /api/check-bundles/<jobId>` with its own token, accepted only while the server waits on that runner for that job; then the worker gets `check.run` with `bundle` (size, sha256, main ref) and downloads `GET /api/check-bundles/<jobId>` with its worker token, only while the job runs on it. No URL or credential travels in a message. The worker checks size and hash, `git bundle verify`s and fetches with fsck into one bare repo per project. A missing base gets one full bundle (`check.needCode`); after that, or any other failure (`check.noCode`, a pack that fails), the job goes back in line, is not a failed check, and that worker is left out of it. The bundle file goes once fully downloaded, when the job ends, on the periodic sweep, and at server start. Folder `BOSSMAN_CHECK_BUNDLE_DIR` (default under the OS temp folder; the server only ever touches `<uuid>.bundle` files there), caps `BOSSMAN_CHECK_BUNDLE_MAX_MB` per bundle (1024) and `BOSSMAN_CHECK_BUNDLE_TOTAL_MB` for the folder (4096). The routes are leader-only.
+- **Going away:** a dropped worker's running checks go back in line after three heartbeats unless it reconnects; turning it off or removing it puts them back at once and closes its socket. On hello, checks it lists that the server didn't give it are stopped. Merges are prepared and finished on the company runner only, and finish re-checks the tree, so a worker can delay a merge, never land a wrong one.
 
 ### Claude credentials (R10)
 - **Default:** a `claude setup-token` one-year token, kept in the secrets store and injected as `CLAUDE_CODE_OAUTH_TOKEN`. Shared interactive logins race when they refresh (anthropics/claude-code#73576, #88583), so the setup-token is the default for any runner with agents running in parallel.
@@ -140,6 +149,36 @@ score = W_block * Σ (priority_weight(objective of t))  for t in tickets transit
 - It is answered in place. A "yes" accepts the recommended option.
 - The answer wakes the agent that asked.
 - Any ticket that was waiting on the decision moves forward automatically.
+
+## Usability gate (BOS-1571)
+
+A feature has to deliver its value in real use, without the owner on hand. Working once is not enough. The rules are in `packages/shared/src/usability-gate.ts`.
+
+**Which tickets it covers.** Every code ticket in a feature, and every code ticket with owner setup steps.
+- It is added when the ticket is created or edited.
+- Any ticket that still lacks it gets it when it moves to review.
+- It goes in as a built-in "Usability gate" acceptance criterion. The author reports it pass or fail at review, like any other criterion.
+
+**The fail rule.** The gate fails if:
+- the owner must repeat a manual step routinely, for example after every update, or
+- the feature works only while someone watches it.
+
+One-time setup is fine.
+
+**What a reviewer must write.** A code or infra review that approves one of these tickets must include a `Real use:` walk-through in its summary. Without one, the approval is refused. The walk-through covers:
+- day 1
+- after the next update or runner rebuild
+- after a restart
+- a week on
+- the owner away
+- every step the owner repeats, and how often
+
+The same applies to a change that touches what the owner installs: compose files, `deploy/`, a Dockerfile, or install and update docs.
+
+**What the owner sees.** Nothing new to do: the owner's own approvals and sign-offs are never refused.
+- The review diff lists any wording in the change or the setup steps that reads as a routine owner duty, such as "after every update" or "until then … idle".
+- The setup-steps check warns on that wording, but doesn't refuse it.
+- A plan for a covered ticket ends with the walk-through. `submit_plan` refuses a plan without one, and a plan card sent without one says so on the card.
 
 ## Engagement lifecycle
 

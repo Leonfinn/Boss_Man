@@ -7,13 +7,14 @@ import { Section, useAction } from "./shared";
 /** What each kind of credential is called inside an agent's environment by default. */
 const CREDENTIALS = [
   { kind: "claude_oauth_token", label: "Claude setup-token", env: "CLAUDE_CODE_OAUTH_TOKEN", help: "Run `claude setup-token` on your own computer and paste the token it prints." },
-  { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents, Pull requests and Workflows read and write. Gitea: a token with the write:repository scope." },
+  { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents, Pull requests and Workflows read and write, plus Actions read-only (so Boss Man can read CI runs). Gitea: a token with the write:repository scope." },
   { kind: "anthropic_api_key", label: "Anthropic API key", env: "ANTHROPIC_API_KEY", help: "From the Anthropic Console. Runs on it are billed to your API credit." },
   { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },
   { kind: "generic", label: "OpenRouter API key", env: "OPENROUTER_API_KEY", help: "For OpenCode agents. Models are named openrouter/<model>." },
   { kind: "generic", label: "Ollama Cloud API key", env: "OLLAMA_API_KEY", help: "For OpenCode agents. Models are named ollama-cloud/<model>." },
   { kind: "generic", label: "Synthetic API key", env: "SYNTHETIC_API_KEY", help: "For OpenCode agents. Models are named synthetic/<model>, e.g. synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" },
-  { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
+  { kind: "generic", label: "GitHub watcher token (read-only)", env: "GITHUB_WATCH_TOKEN", help: "A fine-grained GitHub token with Issues, Discussions and Metadata read access only, for the project's GitHub feedback watcher. Give it no write access." },
+  { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose. The one exception is GITHUB_WATCH_TOKEN, the GitHub watcher's token: only the server reads it and no agent run ever gets it." },
 ] as const;
 
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };

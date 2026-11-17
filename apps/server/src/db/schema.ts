@@ -64,6 +64,10 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Most minutes one run may go before the server stops it (BOS-846); null means no limit. */
   maxRunMinutes: integer("max_run_minutes"),
+  /** BOS-1489: hold new starts (a Ready ticket is not started) while this many approved merges wait in the merge line; null is off. */
+  holdStartsMergesWaiting: integer("hold_starts_merges_waiting"),
+  /** BOS-1489: ...while this many quick checks are queued in the check queue; null is off. */
+  holdStartsQuickChecksQueued: integer("hold_starts_quick_checks_queued"),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
   /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */
@@ -73,6 +77,8 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** A cleanup that only deletes plain entries directly in /tmp is allowed by the rules with no card (BOS-1453). On by default; off sends it to the CEO first as before. */
+  autoTempCleanup: boolean("auto_temp_cleanup").notNull().default(true),
   /**
    * The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323).
    * New companies start at watch (DR-049 point 3, BOS-940); companies made before then kept their mode.
@@ -84,6 +90,14 @@ export const companies = pgTable("companies", {
    * unchosen Off gets the card.
    */
   fenceModeChosenAt: timestamp("fence_mode_chosen_at", { withTimezone: true }),
+  /**
+   * The runner platform (kernel, Docker version, OS type) the owner was on when they answered the fence card with
+   * "Run agents without the fence" (DR-049 point 1). A different platform asks again. Null for an Off chosen in Settings.
+   */
+  fenceOffFingerprint: text("fence_off_fingerprint"),
+  /** When the owner chose to run agents without the network guard, and on which runner platform; a different platform asks again (DR-049 point 1). */
+  guardOffChosenAt: timestamp("guard_off_chosen_at", { withTimezone: true }),
+  guardOffFingerprint: text("guard_off_fingerprint"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -177,6 +191,8 @@ export const runners = pgTable("runners", {
   imageVersion: text("image_version"),
   /** The git commit the runner image was built from (BOS-764), from its last hello; null for an image built before it was recorded. */
   imageCommit: text("image_commit"),
+  /** The tools checks run with and their fingerprint (BOS-1570), from its last hello; null from an image built before it. */
+  toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
   /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
   harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -345,11 +361,17 @@ export const tickets = pgTable(
     /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
     mergedAt: timestamp("merged_at", { withTimezone: true }),
     touchesRunner: boolean("touches_runner"),
+    /** Whether the merge changed the runner-update path (BOS-1467); null = not known (merged before this, or no file list). */
+    touchesRunnerUpdate: boolean("touches_runner_update"),
+    /** Whether the merge changed only tests, docs and CI, so nothing has to go live (BOS-1609); null = not known (counts as needing a deploy). */
+    deploysNothing: boolean("deploys_nothing"),
     /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
     /** For a company that puts its own work live (BOS-1345): when its CEO marked the merge live, and the evidence given (a sha or a note). */
     liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
+    /** BOS-1586: when the merge went live (the go-live wait ended). Null when none was recorded; readers fall back to mergedAt. A host report older than this proves nothing about the new code. */
+    liveAt: timestamp("live_at", { withTimezone: true }),
     liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
@@ -396,6 +418,8 @@ export const tickets = pgTable(
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
+    /** The files the branch changed when its diff was last read for a landing (BOS-1411): the plan-overlap warning reads them, so it needs no runner call. */
+    diffFiles: jsonb("diff_files").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
@@ -403,10 +427,16 @@ export const tickets = pgTable(
     /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
      * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
     ownerSetupOverride: text("owner_setup_override"),
+    /** BOS-1650: one line on what the setup changes for the owner; the go-live card opens with it. Null on tickets written before it existed (the card says "not given"). */
+    ownerSetupWhy: text("owner_setup_why"),
+    /** BOS-1650: one line on what happens if the owner skips the setup ("nothing breaks" is an answer). */
+    ownerSetupIfSkipped: text("owner_setup_if_skipped"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /** BOS-1516: the owner's "Priority 1" switch. It is the urgent mark plus this flag (set by the owner only); tiers read `urgent`, only the merge page reads this. */
+    urgentByOwner: boolean("urgent_by_owner").notNull().default(false),
     /**
      * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
      * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
@@ -951,6 +981,8 @@ export const reviewRequests = pgTable(
     overruleReason: text("overrule_reason"),
     /** The branch head the verdict was given on (BOS-1173), so a return to review on that same head keeps the pass. Null when the runner couldn't say, and on rows from before. */
     head: text("head"),
+    /** The branch head this reviewer's last `review diff` served (BOS-1567). Submit refuses an approval if the branch moved since, so the stamped head is one the reviewer read. Null: no diff read yet, or rows from before. */
+    readHead: text("read_head"),
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
   },
@@ -1033,6 +1065,39 @@ export const checkResults = pgTable(
 );
 
 /**
+ * A check worker (DR-060, BOS-1435): a runner image started with BOSSMAN_ROLE=check-worker on any Docker host, which takes
+ * check jobs when the company runner's slots are full. Deliberately not a `runners` row: a runner holds secrets, merges and
+ * agent runs, and runners.company_id is unique. A worker's token opens only /api/check-worker/connect, which carries check
+ * messages and nothing else. Its slots are shared across every company it may serve.
+ */
+export const checkWorkers = pgTable("check_workers", {
+  id: id(),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** The companies whose checks it may run; empty means none. */
+  companyIds: jsonb("company_ids").$type<string[]>().notNull().default([]),
+  /** The owner's slot count for this machine (1 to MAX_CHECK_SLOTS); the worker's own reported count can only lower it. */
+  slots: integer("slots").notNull().default(1),
+  /** BOS-1602: what kinds of check this machine takes: "both", "merge" (merge checks only) or "checks" (pre-review checks only). */
+  takes: text("takes").notNull().default("both"),
+  /** BOS-1602: how many of its slots only ever run merge checks (with takes "both"); 0 = none kept. */
+  mergeKept: integer("merge_kept").notNull().default(0),
+  /** Per-check caps for this host, sent with each job (BOSSMAN_CHECK_THREADS / BOSSMAN_CHECK_MEMORY_MB); null leaves the image default. */
+  checkThreads: integer("check_threads"),
+  checkMemoryMb: integer("check_memory_mb"),
+  enabled: boolean("enabled").notNull().default(true),
+  /** From the worker's last hello. Shown to the owner; a job goes to it when its toolchain matches the runner's (BOS-1570), or, for an image that reports none, when imageCommit equals the runner's (DR-042). */
+  imageCommit: text("image_commit"),
+  /** The tools it checks with and their fingerprint (BOS-1570), from its last hello. */
+  toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
+  imageVersion: text("image_version"),
+  reportedSlots: integer("reported_slots"),
+  features: jsonb("features").$type<string[]>(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: createdAt(),
+});
+
+/**
  * The server-owned check queue (DR-003, BOS-316). One row per requested check; the runner runs it in a process it owns,
  * outside any agent session. kind: merge (the gate's one full check) or pre_review (an author's or reviewer's quick or full check).
  * state: queued, running, passed, failed, stuck (with a reason), cancelled (with a reason). A job never leaves the queue without a reason.
@@ -1061,6 +1126,8 @@ export const checkJobs = pgTable(
     /** The agent to wake with the result. */
     requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
     runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
+    /** BOS-1435: the check worker a running job was sent to (runner_id is then null); null for a runner's job. */
+    workerId: uuid("worker_id").references(() => checkWorkers.id, { onDelete: "set null" }),
     command: text("command"),
     exitCode: integer("exit_code"),
     /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
@@ -1075,6 +1142,7 @@ export const checkJobs = pgTable(
     index("check_jobs_state_queued").on(t.state, t.queuedAt),
     index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
     index("check_jobs_project_tree").on(t.projectId, t.tree),
+    index("check_jobs_worker_state").on(t.workerId, t.state),
   ],
 );
 
@@ -1497,7 +1565,29 @@ export const feedbackSettings = pgTable("feedback_settings", {
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),
+  /** BOS-1388: posts, comments and votes count only after the visitor clicks an emailed link. Off by default. */
+  confirmByEmail: boolean("confirm_by_email").notNull().default(false),
+  /** How long an emailed link works, in hours. */
+  confirmLinkHours: integer("confirm_link_hours").notNull().default(24),
+  /** How long a confirmed browser may post without confirming again, in days. */
+  rememberAddressDays: integer("remember_address_days").notNull().default(90),
+  /** BOS-1680: the portal's public address with no secret part (the bare BOSSMAN_PORTAL_URL) opens this company's portal. At most one company; the owner turns it on. */
+  portalAtBareAddress: boolean("portal_at_bare_address").notNull().default(false),
 });
+
+/** BOS-1388: a browser that confirmed an address. Hashes only: the cookie holds the secret, never this table. */
+export const portalConfirmedAddresses = pgTable(
+  "portal_confirmed_addresses",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    emailHash: text("email_hash").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("portal_confirmed_secret").on(t.secretHash), index("portal_confirmed_expires").on(t.expiresAt)],
+);
 
 /** A criterion features are scored on, 0 to 5, e.g. "Fits the mission". */
 export const featureDrivers = pgTable("feature_drivers", {
@@ -1537,6 +1627,8 @@ export const features = pgTable(
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
+    /** BOS-1516: the owner's "Priority 1" switch on a feature: its open tickets (and new ones) carry the owner's urgent mark. */
+    priorityOne: boolean("priority_one").notNull().default(false),
     portalVisible: boolean("portal_visible").notNull().default(false),
     /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
     keepOffPortal: boolean("keep_off_portal").notNull().default(false),
@@ -1593,11 +1685,56 @@ export const feedbackNotes = pgTable(
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** The portal visitor who sent it, so a repeat vote updates rather than adds. */
     portalVoter: text("portal_voter"),
+    /** Who the note is, out in the world (BOS-1393): the GitHub watcher's id for an issue, discussion or comment, so a repeat fetch never files it twice. */
+    externalId: text("external_id"),
+    /** BOS-1388: set while the visitor has not yet clicked the emailed link (SHA-256 of the link's token). Such a
+     * note is hidden from everyone and counts for nothing; confirming clears it. Null means counted. */
+    confirmTokenHash: text("confirm_token_hash"),
+    confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
+    /** The address and name the visitor gave, kept only until they confirm (then they move to the customer, if a name was given). */
+    confirmEmail: text("confirm_email"),
+    confirmName: text("confirm_name"),
     createdAt: createdAt(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },
-  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt)],
+  (t) => [
+    index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt),
+    uniqueIndex("feedback_notes_confirm_token").on(t.confirmTokenHash),
+    uniqueIndex("feedback_notes_external_id").on(t.companyId, t.externalId).where(sql`${t.externalId} is not null`),
+  ],
 );
+
+/**
+ * The GitHub watcher's setting and cursor, one row per project (BOS-1393). Off by default. The token is a
+ * secret granted to the company as GITHUB_WATCH_TOKEN, never stored here. The cursors live here, in the
+ * database, so a restart or a server takeover carries on where the last pass stopped.
+ */
+export const githubWatches = pgTable("github_watches", {
+  projectId: uuid("project_id").primaryKey().references(() => projects.id, { onDelete: "cascade" }),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  /** "owner/name" on github.com. */
+  repo: text("repo"),
+  /** Minutes between passes: 60 unless the owner says otherwise (BOS-1393); never below 15 (the service and the route both clamp it). */
+  intervalMinutes: integer("interval_minutes").notNull().default(60),
+  watchIssues: boolean("watch_issues").notNull().default(true),
+  watchDiscussions: boolean("watch_discussions").notNull().default(true),
+  /** Logins whose posts are skipped (the owner's own, Boss Man's account), compared without case. */
+  skipLogins: jsonb("skip_logins").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  /** Everything updated up to here has been filed (issues and their comments; discussions and theirs). Null: not yet synced. */
+  issuesCursor: timestamp("issues_cursor", { withTimezone: true }),
+  /** Issue comments are a separate stream on GitHub (repo-wide, by update time), so they have their own cursor. */
+  commentsCursor: timestamp("comments_cursor", { withTimezone: true }),
+  discussionsCursor: timestamp("discussions_cursor", { withTimezone: true }),
+  /** "ok", "error" or "backoff"; the plain reason is in lastError. */
+  status: text("status").notNull().default("idle"),
+  lastError: text("last_error"),
+  failures: integer("failures").notNull().default(0),
+  backoffUntil: timestamp("backoff_until", { withTimezone: true }),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+  lastNewNotes: integer("last_new_notes").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** A link from (a passage of) a note to a feature, with how much it matters to them. */
 export const insights = pgTable(
@@ -1666,7 +1803,33 @@ export const wikiSemanticSettings = pgTable("wiki_semantic_settings", {
   model: text("model").notNull().default("google/gemini-embedding-001"),
   dims: integer("dims").notNull().default(768),
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /**
+   * Also use the same provider and key for meaning search over the owner's past answers (BOS-1593). Off by
+   * default and ticked apart from the wiki, because it sends the owner's chat and ticket messages to the provider.
+   */
+  ownerAnswers: boolean("owner_answers").notNull().default(false),
 });
+
+/**
+ * One embedding per owner answer (BOS-1593): an answered card, an owner ticket message, an owner chat
+ * message or a lasting note, named by kind and source id. Only written while the company has meaning
+ * search for owner answers on; a copy of nothing but numbers, so the sources stay the record.
+ */
+export const ownerAnswerEmbeddings = pgTable(
+  "owner_answer_embeddings",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** card, ticket_reply, chat or note (services/owner-answers.ts). */
+    kind: text("kind").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    model: text("model").notNull(),
+    dims: integer("dims").notNull(),
+    embedding: vector("embedding", { dimensions: 768 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("owner_answer_embeddings_source").on(t.kind, t.sourceId), index("owner_answer_embeddings_company").on(t.companyId)],
+);
 
 /** One embedding per wiki section. Searched exactly (no index); add an HNSW index on embedding with vector_cosine_ops when sections number in the hundreds of thousands. */
 export const wikiSectionEmbeddings = pgTable(

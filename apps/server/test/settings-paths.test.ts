@@ -16,7 +16,11 @@ const ARROW = /Settings\s*(?:→|->|›|>)\s*([A-Z][^,.:;"`()\n]{0,80})/g;
 /** The pages under Settings, as the store knows them. */
 const PAGES = new Set(OWNER_TABS.Settings.map(norm));
 /** The old Settings tabs (BOS-442): a string that names one of these is stale, wherever it appears (BOS-1019). */
-const RETIRED = ["server and runner", "access and funding", "reviews and ceo", "rules"];
+// ("Server and runner" is no longer one: since BOS-1492 it is the name of a group of pages, so it is a valid first part.)
+const RETIRED = ["access and funding", "reviews and ceo", "rules"];
+
+/** A "Settings → …" that is not Boss Man's: GitHub's own token page, which no list of ours can follow. */
+const EXTERNAL = /^(?:Developer settings|Billing and licensing)\b/;
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -45,6 +49,7 @@ describe("every Settings path in server and shared code exists (BOS-1019)", () =
     const name = relative(ROOT, file);
     it(`${name} names real Settings pages`, () => {
       for (const p of paths) {
+        if (EXTERNAL.test(p)) continue;
         const first = norm(p.split(/\s*(?:→|->|›|>)\s*/)[0]!).replace(/\s+(?:leads|names|panel|line|should|again|instead|is|are|must|has|does)\b.*$/, "");
         // A retired tab ("Access and funding", "Reviews and CEO") is stale text: name the new page instead.
         if (RETIRED.includes(first) && !PAGES.has(first)) {
@@ -56,6 +61,11 @@ describe("every Settings path in server and shared code exists (BOS-1019)", () =
         const pagePart = p.split(/\s*(?:→|->|›|>)\s*/)[0]!.replace(/\s+(?:leads|names|panel|line|should|again|instead|and|is|are|must|has|does)\b.*$/, "");
         const { r8 } = screenFindings(`Open Settings → ${pagePart}.`, []);
         expect(r8, `"Settings → ${p}" in ${name}: ${r8.join("; ")}`).toEqual([]);
+        // The whole path (BOS-1649): after the page, every part must be a tab, a listed section heading, a button or a
+        // field (OWNER_SECTIONS), so renaming a heading in the web app fails here and not on an owner's card.
+        if (EXTERNAL.test(p)) continue;
+        const whole = screenFindings(`Open Settings → ${p}.`, []).r8;
+        expect(whole, `"Settings → ${p}" in ${name}: ${whole.join("; ")}`).toEqual([]);
       }
     });
   }

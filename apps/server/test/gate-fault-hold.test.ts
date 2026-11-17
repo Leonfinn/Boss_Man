@@ -8,7 +8,7 @@ import { SENIOR_DEV_TEMPLATE, type RunnerCommand, type WorkspaceDiff } from "@bo
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, projects, reviewHolds, reviewRequests, runners, settings, ticketDependencies, tickets } from "../src/db/schema.js";
-import { holdView } from "../src/services/review-holds.js";
+import { holdView, wakeReadyHolds } from "../src/services/review-holds.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 afterEach(async () => {
@@ -34,8 +34,8 @@ async function setup() {
   await db.update(projects).set({ verifyCommand: "pnpm check" }).where(eq(projects.id, project.id));
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   const sent: RunnerCommand[] = [];
-  const state = { head: HEAD, verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 5 } as typeof RED | { ok: true; exitCode: 0; timedOut: false; output: string; ms: number }, covers: false, onVerify: null as null | (() => Promise<void>) };
-  const diff = (): WorkspaceDiff => ({ baseCommit: "a".repeat(40), head: state.head, commits: [{ sha: state.head, subject: "Add it" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "diff --git a/src/a.ts b/src/a.ts\n+x", truncated: false });
+  const state = { head: HEAD, verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 5 } as typeof RED | { ok: true; exitCode: 0; timedOut: false; output: string; ms: number }, covers: false, onVerify: null as null | (() => Promise<void>), files: ["src/a.ts"] };
+  const diff = (): WorkspaceDiff => ({ baseCommit: "a".repeat(40), head: state.head, commits: [{ sha: state.head, subject: "Add it" }], files: state.files.map((path) => ({ path, added: 1, removed: 0 })), diff: "diff --git a/src/a.ts b/src/a.ts\n+x", truncated: false });
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const reply = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
@@ -257,6 +257,206 @@ describe("back in review on the head its reviews passed keeps the approvals (cri
     expect(await ctx.review.withdrawRepeatRounds(new Set())).toEqual([id]);
     expect((await ctx.rounds(id)).map((r) => r.round)).toEqual([1]);
     expect((await ctx.rounds(other)).filter((r) => r.round === 2)).toHaveLength(2);
+  });
+});
+
+// BOS-1609: BOS-1607 fixed main's red test with a test-only change, and every merge held on it stayed held until the
+// next server update, because "in force" meant "merged and live" and a test file never goes live. These fail on the
+// code before it: the hold waited for the server to run the fix's merge.
+describe("a merge-check fix that needs no deploy releases at merge (BOS-1609)", () => {
+  const FIX_MERGE = "e".repeat(40);
+  /** The fix merges with these facts while the server still runs an older commit, as on 15 Nov. */
+  const mergeFix = async (fix: string, deploysNothing: boolean | null) => {
+    await ctx.db.update(tickets).set({ mergeCommit: FIX_MERGE, mergedAt: new Date(), touchesRunner: false, deploysNothing, systemState: "done" }).where(eq(tickets.id, fix));
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: "9".repeat(40) } });
+  };
+
+  it("Boss Man's own hold on a marked fix: a test-only fix releases it while the server still runs the old code", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Fix main's red test", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    await mergeFix(fix, true);
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+    // The whole gate ran on the released merge: nothing was skipped.
+    expect(ctx.verifies()).toBe(1);
+  });
+
+  it("a reviewer's hold that waits only on the fix releases the same way", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Fix main's red test", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    await ctx.review.submit(id, { verdict: "approved", reviewer: "Reviewer", reviewerAgentId: ctx.reviewer.id, hold: { reason: "Wait for the merge-check fix", waitsOn: [{ ticketId: fix }], releaseAt: null } });
+    await mergeFix(fix, true);
+    expect((await holdView(ctx.db, id))!.ready).toBe(true);
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+  });
+
+  it.each([
+    ["changed app code", false],
+    ["merged with an unknown file list", null],
+  ] as const)("a fix that %s still waits until it is live", async (_label, deploysNothing) => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Fix the merge check", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    await mergeFix(fix, deploysNothing);
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    expect((await holdView(ctx.db, id))!.ready).toBe(false);
+    // Live now: released as before.
+    await ctx.db.update(settings).set({ value: { new: FIX_MERGE } }).where(eq(settings.key, `live_release:${ctx.company.id}`));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+  });
+
+  it("the merge records whether its files need a deploy", async () => {
+    ctx = await setup();
+    const testOnly = await ctx.ticket("Fix a test", { fixesMergeCheck: true });
+    ctx.state.files = ["apps/server/test/compose-memory-limits.test.ts", "docs/10-migrations.md"];
+    await ctx.slot(testOnly);
+    // A direct approval runs the merge before it returns (as for the fix in criterion 2).
+    await ctx.approve(testOnly);
+    expect((await ctx.row(testOnly))).toMatchObject({ mergeCommit: MERGE, deploysNothing: true });
+    const code = await ctx.ticket("Fix the gate");
+    ctx.state.files = ["apps/server/test/x.test.ts", "apps/server/src/services/review.ts"];
+    await ctx.slot(code);
+    await ctx.approve(code);
+    expect((await ctx.row(code))).toMatchObject({ mergeCommit: MERGE, deploysNothing: false });
+  });
+
+  // BOS-1693: BOS-1641 (main's CI fix) changed runner tests and the runner's vitest config next to a gate script. It
+  // was stored as touching runner code, so with the server live and no runner rebuild ~35 held merges never released.
+  // Fails on the code before it: touchesRunner was true and releaseHolds returned [].
+  it("a fix that changed runner tests releases once the server runs it, with no runner rebuild", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Main's CI is failing", { fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    // The server runs the fix's merge (the deploy takeover); the runners still run an older image.
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: MERGE } });
+    await ctx.db.update(runners).set({ imageCommit: "f".repeat(40) }).where(eq(runners.companyId, ctx.company.id));
+    ctx.state.files = [
+      ".github/workflows/ci.yml",
+      "apps/runner/test/check-job-cleanup.test.ts",
+      "apps/runner/test/setup-env.ts",
+      "apps/runner/vitest.config.ts",
+      "apps/web/test/status-tags-feed-render.test.ts",
+      // BOS-1641 changed scripts/check-all.sh; any script makes the merge "needs a deploy" (that one also needs the owner's sign-off).
+      "scripts/check-quick.sh",
+      "scripts/check-all.test.sh",
+    ];
+    await ctx.slot(fix);
+    await ctx.approve(fix);
+    expect(await ctx.row(fix)).toMatchObject({ mergeCommit: MERGE, touchesRunner: false, deploysNothing: false });
+    // The merge's own release may have started it already; a second pass never starts it twice (conditional close).
+    await ctx.review.releaseHolds();
+    await settled(id);
+    expect(await holdView(ctx.db, id)).toBeNull();
+    expect(await ctx.db.select().from(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "review_hold_released")))).toHaveLength(1);
+  });
+
+  // BOS-1693 criterion 3: a reviewer's own hold (here also waiting on an ordinary ticket, so Boss Man doesn't end it
+  // itself) wakes the reviewer once when the same test-only fix is live. Fails on the code before it: the fix never
+  // counted as in force, so the hold never became ready and nobody was woken.
+  it("wakes a holding reviewer once when a fix that changed runner tests is live, with no runner rebuild", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Main's CI is failing", { fixesMergeCheck: true });
+    const other = await ctx.ticket("Something else", { systemState: "in_progress" });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    await ctx.review.submit(id, { verdict: "approved", reviewer: "Reviewer", reviewerAgentId: ctx.reviewer.id, hold: { reason: "Wait for main's CI fix", waitsOn: [{ ticketId: fix }, { ticketId: other }], releaseAt: null } });
+    const woke: string[] = [];
+    const wake = async (w: { agentId: string }) => void woke.push(w.agentId);
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, other));
+    expect(await wakeReadyHolds(ctx.db, new Date(), wake)).toBe(0);
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: MERGE } });
+    await ctx.db.update(runners).set({ imageCommit: "f".repeat(40) }).where(eq(runners.companyId, ctx.company.id));
+    ctx.state.files = ["apps/runner/test/check-job-cleanup.test.ts", "apps/runner/vitest.config.ts", "scripts/check-quick.sh"];
+    await ctx.slot(fix);
+    await ctx.approve(fix);
+    expect(await ctx.row(fix)).toMatchObject({ mergeCommit: MERGE, touchesRunner: false });
+    expect(await wakeReadyHolds(ctx.db, new Date(), wake)).toBe(1);
+    expect(await wakeReadyHolds(ctx.db, new Date(), wake)).toBe(0);
+    expect(woke).toEqual([ctx.reviewer.id]);
+  });
+});
+
+// BOS-1694: Boss Man's own hold kept the waits copied when it opened. BOS-1628 stayed held on BOS-1641 after the CEO
+// removed the link, and 13 tickets stayed held on BOS-1697/1702 after their fix marks were cleared. Each test fails
+// on the code before it: releaseHolds returned [] because the stored blocker was still not in force.
+describe("Boss Man's own hold follows the ticket's current waits (BOS-1694)", () => {
+  it("a waits-on link removed after the hold opened releases it", async () => {
+    ctx = await setup();
+    const blocker = await ctx.ticket("Not merging soon", { systemState: "in_progress" });
+    const id = await ctx.ticket("Approved work");
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: id, blockerTicketId: blocker, until: "merged" });
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    await ctx.db.delete(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, id));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+    expect((await ctx.rounds(id)).map((r) => r.status)).toEqual(["approved"]);
+  });
+
+  it("clearing a ticket's merge-check fix mark releases the holds that mark placed", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Fix the merge check", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    await ctx.db.update(tickets).set({ fixesMergeCheck: false }).where(eq(tickets.id, fix));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+  });
+
+  it("with one of two links removed it stays held, and the board names only the one left", async () => {
+    ctx = await setup();
+    const a = await ctx.ticket("First blocker", { systemState: "in_progress" });
+    const b = await ctx.ticket("Second blocker", { systemState: "in_progress" });
+    const id = await ctx.ticket("Approved work");
+    await ctx.db.insert(ticketDependencies).values([{ blockedTicketId: id, blockerTicketId: a, until: "merged" }, { blockedTicketId: id, blockerTicketId: b, until: "merged" }]);
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    expect((await holdView(ctx.db, id))!.waits.map((w) => w.id).sort()).toEqual([a, b].sort());
+    await ctx.db.delete(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, id), eq(ticketDependencies.blockerTicketId, a)));
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    const view = (await holdView(ctx.db, id))!;
+    expect(view.waits.map((w) => w.id)).toEqual([b]);
+    expect(view.ready).toBe(false);
+    expect(ctx.verifies()).toBe(0);
+  });
+
+  // Rows from before BOS-1693: BOS-1641 changed only runner tests and gate scripts but was stored with touchesRunner
+  // true, so it never counted as in force without a runner rebuild. Its kept file list now decides.
+  it("a fix merged before BOS-1693 with a stale runner flag counts as in force once the server runs it", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Main's CI is failing", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    const fixMerge = "e".repeat(40);
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: fixMerge } });
+    await ctx.db.update(runners).set({ imageCommit: "f".repeat(40) }).where(eq(runners.companyId, ctx.company.id));
+    // As stored by the old classifier, with no file list kept: still waits for the runners (the stored flags stand).
+    await ctx.db.update(tickets).set({ mergeCommit: fixMerge, mergedAt: new Date(), touchesRunner: true, deploysNothing: false, systemState: "done" }).where(eq(tickets.id, fix));
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    // The same row with the merge's files kept: today's rules say no runner code, so it is in force.
+    await ctx.db.update(tickets).set({ diffFiles: ["apps/runner/test/check-job-cleanup.test.ts", "apps/runner/vitest.config.ts", "scripts/check-quick.sh"] }).where(eq(tickets.id, fix));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
   });
 });
 

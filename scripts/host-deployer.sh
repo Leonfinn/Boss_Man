@@ -72,12 +72,15 @@ if [[ -e $CONF ]]; then
 fi
 INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # Files that change how Boss Man runs or deploys. Build-only scripts (make-app-icons, check-*, test-*, lint-migrations, backups) are not on it (BOS-269);
-# docs/09-self-deploy.md lists the same files.
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+# docs/09-self-deploy.md lists the same files. scripts/host-deployer.sh stays on the list (BOS-1588, security review): it is
+# what root runs, so a change to it is applied by the owner on the hand-apply card; that hand deploy then refreshes the copy
+# itself with scripts/install-deployer.sh (also on the list, as it runs as root).
+INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
-# Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
-RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
+# Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
+# packages/shared/src/go-live.ts: what the runner, launcher and netguard images COPY in, read from their Dockerfiles (BOS-1648).
+RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
@@ -140,6 +143,7 @@ if ((ROLLBACK)); then flock -w 120 9 || { echo "ERROR: another deployer run hold
 else flock -n 9 || exit 0; fi # a run is already going; the next minute tries again
 
 REQ_ID="" TARGET="" COMMIT="" STARTED="" FROM=""
+REFUSAL=0 # 1 while a rate-limit refusal is recorded: write_status then leaves status.json alone (BOS-1469)
 RESTART=0 # 1 while a "restart" request runs the blue/green swap: same commit, different messages, no rollback record
 HEALTH_KV=() # the latest whole-stack checklist as key=value pairs (stack, check_*), merged into the status file
 REQ_KV=()    # what the request asked for when it differs from what runs (BOS-753): requested_commit, runner_changed
@@ -151,10 +155,13 @@ write_status() { # result message [backup]
   [[ $1 == running ]] || ended="$(now)"
   local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
   if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${REQ_KV[@]+"${REQ_KV[@]}"} ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
-  chmod 644 "$OUTBOX/status.json.tmp"
-  mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
-  [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
+  # BOS-1469: a rate-limit refusal goes to refused.json, never over status.json, so it can't replace the result of the run that really happened.
+  local out=status.json
+  ((REFUSAL)) && out=refused.json
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${REQ_KV[@]+"${REQ_KV[@]}"} ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/$out.tmp"
+  chmod 644 "$OUTBOX/$out.tmp"
+  mv "$OUTBOX/$out.tmp" "$OUTBOX/$out"
+  [[ $1 == running ]] || cat "$OUTBOX/$out" >>"$OUTBOX/history.jsonl"
 }
 
 post_webhook() { # result message
@@ -272,11 +279,14 @@ compose_project() {
 # commit, so relative bind mounts render the same and don't look like a change), with the checkout's own .env, and
 # rendered under the live project's name and a pinned BOSSMAN_COMMIT, so nothing differs but the settings themselves.
 # Nothing in the checkout is touched. Returns non-zero (and logs why) when it can't render.
+unpack_commit() { (set -o pipefail; g archive "$1" | tar -x -C "$RENDER_DIR"); } # commit: into $RENDER_DIR
 render_hashes() { # commit project
   local commit=$1 project=$2 out="" rc=0
   [[ -n $project ]] || { log "Service compare: could not tell the compose project name."; return 1; }
   rm -rf "$RENDER_DIR"; mkdir -p "$RENDER_DIR"
-  if ! (set -o pipefail; g archive "$commit" | tar -x -C "$RENDER_DIR") 2>>"$LOG"; then
+  # A function and not `if ! ( … ) 2>>"$LOG"`: bash does not apply the `!` when a group's or subshell's own redirect
+  # fails, so that form would carry on unpacked (BOS-1689). scripts/negated-redirect.test.sh guards the pattern.
+  if ! unpack_commit "$commit" 2>>"$LOG"; then
     log "Service compare: could not unpack ${commit:0:8}."; rm -rf "$RENDER_DIR"; return 1
   fi
   # The commit may carry its own .env or secrets (even a link to another file): remove them first, so the copy below
@@ -657,8 +667,17 @@ host_extra_facts() {
       # deployer reads main itself, so a failed main read is only a probe failure when HEAD fails too).
       local errf="$STATE/repo-probe.err" rc=0 ok=0
       : >"$errf" 2>/dev/null || true
-      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
-      if ((!ok)) && (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
+      # BOS-1584: the probe must reach origin exactly as a deploy's `g fetch` does. Git ranks GIT_SSH_COMMAND above the
+      # checkout's `core.sshCommand` (where the docs put the deploy key, `-i key -o IdentitiesOnly=yes`), so setting
+      # GIT_SSH_COMMAND to a bare `ssh` dropped the key and said "Permission denied (publickey)" on a host whose
+      # deploys work. Start from the command a deploy would use (the environment's, else the checkout's setting, else
+      # `ssh`) and only add the no-prompt options; ssh keeps the first value of an option, so the key stays.
+      local sshbase="${GIT_SSH_COMMAND:-}"
+      [[ -n $sshbase ]] || sshbase="$(g config --get core.sshCommand 2>/dev/null || true)"
+      [[ -n $sshbase ]] || sshbase="ssh"
+      local probe_ssh="$sshbase -o BatchMode=yes -o ConnectTimeout=10"
+      if (GIT_SSH_COMMAND="$probe_ssh" timeout 20 git -C "$REPO" ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
+      if ((!ok)) && (GIT_SSH_COMMAND="$probe_ssh" timeout 20 git -C "$REPO" ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
       if ((ok)); then probe=ok; else probe=failed; fi
       probed="$(now)"
       # One short line saying which part failed, secret-free: drop anything that looks like a URL or a credential,
@@ -735,7 +754,43 @@ host_extra_facts() {
     [[ $ncont =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || ncont=""
   fi
   [[ -n $ncont ]] && nparts+="${nparts:+, }\"container\": $(jstr "$ncont")"
+  # Does the running ntfy container share a Docker network with a running Boss Man server container? The server
+  # publishes to the name "ntfy", which only resolves on a shared network (under blue/green that needs
+  # deploy/ntfy-bluegreen.yml). "running" alone does not prove the server can reach it. Reported only when both are
+  # found; names of networks never leave this function.
+  if [[ -n $ncont ]]; then
+    local sids="" sid snets nnets reach=false n svcname
+    # shellcheck disable=SC2016 # the braces are a Go template for docker, not shell expansion
+    nnets="$(dk inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$ncont")" || nnets=""
+    for svcname in server server-blue server-green; do # label filters are ANDed, so one call each
+      sids+="$(dk ps --filter "label=com.docker.compose.service=$svcname" --format '{{.ID}}' || true) "
+    done
+    if [[ -n $nnets && -n $sids ]]; then
+      for sid in $sids; do
+        # shellcheck disable=SC2016 # Go template for docker
+        snets="$(dk inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$sid")" || snets=""
+        for n in $snets; do
+          [[ " $nnets " == *" $n "* ]] && reach=true
+        done
+      done
+      nparts+="${nparts:+, }\"serverReach\": $reach"
+    fi
+  fi
+  # BOS-1589: after an ntfy restart a phone that does not reconnect gets no push. Two host facts make that visible:
+  # when this ntfy container last started, and how many subscribers (open phone connections) it has right now.
+  # Subscribers come from ntfy's own metrics, served on an in-container-only port (deploy/ntfy.yml), read with
+  # `docker exec`; nothing is published. A count of 0 shortly after startedAt is a silent phone. Left out when unreadable.
+  if [[ -n $ncont ]]; then
+    local nstart nsubs
+    # shellcheck disable=SC2016 # Go template for docker
+    nstart="$(dk inspect -f '{{.State.StartedAt}}' "$ncont")" || nstart=""
+    [[ $nstart =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$ ]] && nparts+="${nparts:+, }\"startedAt\": $(jstr "$nstart")"
+    nsubs="$(dk exec "$ncont" wget -qO- http://localhost:9090/metrics </dev/null | sed -n 's/^ntfy_subscribers_total \([0-9][0-9]*\).*/\1/p' | head -n1)" || nsubs=""
+    [[ $nsubs =~ ^[0-9]{1,9}$ ]] && nparts+="${nparts:+, }\"subscribers\": $nsubs"
+  fi
   [[ -n $nparts ]] && out+="$sep\"ntfy\": {$nparts}"
+  # --- BOS-1004: can this host seal a phone-login password? (openssl is what "Create phone login" needs)
+  if command -v openssl >/dev/null 2>&1; then out+="$sep\"phoneLogin\": {\"openssl\": true}"; else out+="$sep\"phoneLogin\": {\"openssl\": false}"; fi
   # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
   # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
   # (any token that isn't host:port is dropped), and no other key is read.
@@ -808,6 +863,13 @@ host_extra_facts() {
       local i
       for i in "${!idsarr[@]}"; do exit_code["${idsarr[i]}"]="${ecodes[i]:-}"; done
     fi
+    # Is the live colour's server container running? (BOS-1584: the standby filter below needs it.)
+    local live_up=false
+    if [[ -n $colour ]]; then
+      while IFS=$'\t' read -r _ _ cstate_str _ _ _ csvc; do
+        [[ $csvc == "server-$colour" && $cstate_str == running ]] && live_up=true
+      done <"$listing"
+    fi
     while IFS=$'\t' read -r cid cname cstate_str cstatus csince _ csvc; do
       [[ -n $cstate_str ]] || continue
       # One entry per container name: a stack run twice on one host (BOS-986's duplicate compose-file entry on
@@ -839,6 +901,10 @@ host_extra_facts() {
       # finished window, so a stopped colour is never counted as "not running" (a colour that crashed exits non-zero
       # and is counted below).
       if [[ $cexit == 0 && $csvc =~ ^server-(blue|green)$ ]]; then continue; fi
+      # BOS-1584: the standby after a swap is stopped with `docker stop`, which ends in exit 137 when the server does not
+      # quit within the grace time. So when the live colour is known and its container is up, the other colour is meant
+      # to be stopped whatever its exit code. A crashed live colour is never hidden: it is the one that is not up.
+      if [[ -n $colour && $csvc =~ ^server-(blue|green)$ && $csvc != "server-$colour" && $live_up == true ]]; then continue; fi
       notrun=$((notrun + 1))
       # `exit` is a string, never bare: if instead of a number inspect returns nothing (the container was removed
       # between ps and inspect, or inspect was denied), a bare value would leave `"exit": ,` and break the whole
@@ -863,10 +929,10 @@ host_extra_facts() {
 }
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
-do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
+do_deploy_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
 # A restart on a single server (BOS-647): --force rebuilds and recreates what is checked out; --commit pins it to the
 # commit the request named, which main() has already checked is HEAD, so nothing new can come in.
-do_restart_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
+do_restart_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
 # so this lock is not held while runs finish. The swap itself is reported by the server.
 do_update_runner() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/update-runner.sh); }
@@ -1548,6 +1614,136 @@ staging_tick() {
   staging_done deployed "Staging runs ${commit:0:8}.${failed:+ Smoke checks failed: $failed.}"
 }
 
+# BOS-1004: "Create phone login". The server asks (inbox/phone-login.json) for the phone's read-only ntfy user; this
+# makes it inside the ntfy container and hands the password back sealed (RSA-OAEP) to a public key that only the
+# server's memory holds the private half of. The password is never written anywhere in the clear: not the inbox, the
+# outbox, the history, the log or the webhook, and never on a command line (it reaches ntfy through the environment).
+# The request is data only. Every field is checked against its own pattern, and the only commands that run inside the
+# container are these fixed ones: ntfy user list | user add | user change-pass | access <user> <topic> read-only.
+PHONE_USER='phone-read' # the only account this request may make or reset: the server is not trusted to pick another (an owner's admin login would be one reset away)
+# BOS-1581: action "setup" makes (or finds) the one account Boss Man itself publishes with, write-only on the topic, and
+# one access token for it. Same rules: the user is fixed here, and the token goes back sealed like the password does.
+PUBLISH_USER='bossman-publish'
+PHONE_SEAL_OPTS=(-pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256)
+PL_USER=""
+phone_result() { # id result message [sealed]: the answer the server polls for. Only the sealed (encrypted) password is ever in it.
+  json id="$1" result="$2" message="$3" sealed="${4:-}" at="$(now)" >"$OUTBOX/phone-login.json.tmp"
+  chmod 644 "$OUTBOX/phone-login.json.tmp"; mv "$OUTBOX/phone-login.json.tmp" "$OUTBOX/phone-login.json"
+  printf '%s %s %s %s\n' "$(now)" "$1" "$2" "${PL_USER:--}" >>"$STATE/phone-login.log" # history: no secret
+  log "Phone login $2 (request $1, user ${PL_USER:--})."
+}
+ntfy_exec() { # container-id args...: a fixed ntfy command in the container; a NTFY_PASSWORD set by the caller is passed on through the environment
+  local cid=$1; shift
+  timeout 30 docker exec -e NTFY_PASSWORD "$cid" ntfy "$@" </dev/null 2>&1
+}
+phone_setup_run() { # id user topic workdir cid: BOS-1581. Make or find the publish user, its write-only access and its token; seal the token.
+  local id=$1 user=$2 topic=$3 td=$4 cid=$5 out pw tok made=0
+  # Only fixed commands: ntfy user list | user add | access <user> <topic> write-only | token list <user> | token add <user>.
+  # Running it again finds all three and adds nothing. The token is only ever in the sealed answer.
+  if ! out="$(ntfy_exec "$cid" user list)"; then phone_result "$id" failed "Failed: ntfy could not list its users: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; fi
+  if ! grep -qE "^user $user( |$)" <<<"$out"; then
+    # The account needs a password to exist; nobody is ever shown it (Boss Man signs in with the token), so it is thrown away.
+    pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24)" || true
+    [[ ${#pw} -eq 24 ]] || { phone_result "$id" failed "Failed: could not make a password."; return 0; }
+    out="$(NTFY_PASSWORD="$pw" ntfy_exec "$cid" user add --role=user "$user")" || { phone_result "$id" failed "Failed: ntfy could not add the user: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; }
+    made=1
+  fi
+  out="$(ntfy_exec "$cid" access "$user" "$topic" write-only)" || { phone_result "$id" failed "Failed: ntfy refused the write-only access on topic $topic: $(head -n 1 <<<"$out" | cut -c1-160). Press the button again to retry."; return 0; }
+  out="$(ntfy_exec "$cid" token list "$user")" || { phone_result "$id" failed "Failed: ntfy could not list the tokens of $user: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; }
+  tok="$(grep -oE 'tk_[a-z0-9]{29}' <<<"$out" | head -n 1 || true)"
+  if [[ -z $tok ]]; then
+    out="$(ntfy_exec "$cid" token add "$user")" || { phone_result "$id" failed "Failed: ntfy could not make a token for $user: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; }
+    tok="$(grep -oE 'tk_[a-z0-9]{29}' <<<"$out" | head -n 1 || true)"
+    made=1
+  fi
+  [[ $tok =~ ^tk_[a-z0-9]{29}$ ]] || { phone_result "$id" failed "Failed: ntfy answered in a form this deployer did not expect, so no token was read."; return 0; }
+  local sealed
+  sealed="$(printf '%s' "$tok" | openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$td/pub.der" "${PHONE_SEAL_OPTS[@]}" 2>/dev/null | base64 -w0)" || sealed=""
+  [[ $sealed =~ ^[A-Za-z0-9+/]{100,}={0,2}$ ]] || { phone_result "$id" failed "Failed: could not seal the token."; return 0; }
+  if ((made)); then phone_result "$id" setup "Made the publish user $user with write-only access to topic $topic and a token." "$sealed"
+  else phone_result "$id" setup "The publish user $user, its write-only access to topic $topic and its token were already there. Nothing was changed." "$sealed"; fi
+}
+phone_login_run() { # file: handle one request; never exits the deployer
+  local f=$1 flat k id action user topic pubkey now_s last
+  PL_USER=""
+  [[ -f $f && ! -L $f && $(stat -c %s "$f") -le 2048 ]] || { log "Phone login request ignored: not a plain file under 2 KB."; return 0; }
+  [[ $(LC_ALL=C tr -d '\0' <"$f" | wc -c) -eq $(stat -c %s "$f") ]] || { log "Phone login request ignored: unexpected format."; return 0; }
+  flat="$(LC_ALL=C tr -d ' \t\r\n' <"$f")"
+  local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9+/=_.:-]{0,1024}"'
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || { log "Phone login request ignored: unexpected format."; return 0; }
+  [[ $(tr ',' '\n' <<<"$flat" | wc -l) -eq 5 ]] || { log "Phone login request ignored: unexpected fields."; return 0; }
+  for k in id action user topic pubkey; do
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || { log "Phone login request ignored: unexpected fields."; return 0; }
+  done
+  id="$(jfield id <<<"$flat")" action="$(jfield action <<<"$flat")" user="$(jfield user <<<"$flat")"
+  topic="$(jfield topic <<<"$flat")" pubkey="$(jfield pubkey <<<"$flat")"
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ ]] || { log "Phone login request ignored: bad id."; return 0; }
+  if grep -qs " $id " "$STATE/phone-login.log"; then log "Phone login request $id ignored: already handled."; return 0; fi
+  PL_USER=$user
+  [[ $action =~ ^(create|reset|setup)$ ]] || { PL_USER=-; phone_result "$id" rejected "Rejected: the action must be create, reset or setup."; return 0; }
+  if [[ $action == setup ]]; then
+    if [[ $user != "$PUBLISH_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: the ntfy setup can only be made for the user $PUBLISH_USER."; return 0; fi
+  elif [[ $user != "$PHONE_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: a phone login can only be made for the user $PHONE_USER."; return 0; fi
+  [[ $topic =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { phone_result "$id" rejected "Rejected: the topic may only have letters, digits, - and _ (1 to 64)."; return 0; }
+  [[ $pubkey =~ ^[A-Za-z0-9+/]{100,900}={0,2}$ ]] || { phone_result "$id" rejected "Rejected: the sealing key is not valid."; return 0; }
+  now_s="$(date +%s)"; last="$(cat "$STATE/last-phone-login" 2>/dev/null || echo 0)"
+  [[ $last =~ ^[0-9]+$ ]] || last=0
+  if ((last + 30 > now_s)); then phone_result "$id" rejected "Rejected: one phone login every 30 seconds. Try again in a moment."; return 0; fi
+  printf '%s\n' "$now_s" >"$STATE/last-phone-login"
+  command -v openssl >/dev/null 2>&1 || { phone_result "$id" failed "Failed: openssl is not installed on the host, which is needed to seal the password."; return 0; }
+  have_docker || { phone_result "$id" unavailable "The ntfy add-on is not installed here (this host has no Docker)."; return 0; }
+  local td; td="$(umask 077; mktemp -d "$STATE/pl.XXXXXX")" || { phone_result "$id" failed "Failed: could not make a private work folder."; return 0; }
+  # The public key must parse as a 2048-bit or larger RSA key before anything in ntfy is touched.
+  local keytext bits
+  printf '%s' "$pubkey" | base64 -d >"$td/pub.der" 2>/dev/null || true
+  keytext="$(openssl pkey -pubin -inform DER -in "$td/pub.der" -noout -text 2>/dev/null)" || keytext=""
+  bits="$(sed -n 's/^.*Public-Key: (\([0-9]*\) bit).*$/\1/p' <<<"$keytext" | head -n 1)"
+  if ! grep -q '^Modulus' <<<"$keytext" || [[ ! $bits =~ ^[0-9]+$ ]] || ((bits < 2048)); then
+    rm -rf "$td"; phone_result "$id" rejected "Rejected: the sealing key is not an RSA key of 2048 bits or more."; return 0
+  fi
+  local cids ncids cid
+  cids="$(timeout 10 docker ps --filter "label=com.docker.compose.service=ntfy" --format '{{.ID}}' 2>/dev/null)" || cids=""
+  ncids="$(grep -c . <<<"$cids" || true)"
+  if [[ $ncids != 1 ]]; then
+    rm -rf "$td"
+    if [[ $ncids == 0 ]]; then phone_result "$id" unavailable "The ntfy add-on is not set up or not running on this host."
+    else phone_result "$id" failed "Failed: more than one running container is labelled as ntfy, so it is not clear which to change."; fi
+    return 0
+  fi
+  cid="$cids"
+  [[ $cid =~ ^[0-9a-f]{12,64}$ ]] || { rm -rf "$td"; phone_result "$id" failed "Failed: docker named the ntfy container in a form that was not expected."; return 0; }
+  if [[ $action == setup ]]; then phone_setup_run "$id" "$user" "$topic" "$td" "$cid"; rm -rf "$td"; return 0; fi
+  # The password is made and sealed before anything changes, so a failure here leaves ntfy as it was.
+  local pw sealed out exists=0
+  pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24)" || true
+  if [[ ${#pw} -ne 24 ]]; then rm -rf "$td"; phone_result "$id" failed "Failed: could not make a password."; return 0; fi
+  sealed="$(printf '%s' "$pw" | openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$td/pub.der" "${PHONE_SEAL_OPTS[@]}" 2>/dev/null | base64 -w0)" || sealed=""
+  rm -rf "$td"
+  [[ $sealed =~ ^[A-Za-z0-9+/]{100,}={0,2}$ ]] || { phone_result "$id" failed "Failed: could not seal the password."; return 0; }
+  if ! out="$(ntfy_exec "$cid" user list)"; then phone_result "$id" failed "Failed: ntfy could not list its users: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; fi
+  grep -qE "^user $user( |$)" <<<"$out" && exists=1
+  if [[ $action == create && $exists == 1 ]]; then phone_result "$id" exists "The user $user already exists. Reset its password to get a new one."; return 0; fi
+  if [[ $action == reset && $exists == 0 ]]; then phone_result "$id" missing "The user $user does not exist yet. Create it first."; return 0; fi
+  if [[ $action == create ]]; then
+    out="$(NTFY_PASSWORD="$pw" ntfy_exec "$cid" user add --role=user "$user")" || { phone_result "$id" failed "Failed: ntfy could not add the user: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; }
+  else
+    out="$(NTFY_PASSWORD="$pw" ntfy_exec "$cid" user change-pass "$user")" || { phone_result "$id" failed "Failed: ntfy could not change the password: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; }
+  fi
+  # Always (re)applied: a repeat fixes drift. Read-only on this one topic, never more.
+  out="$(ntfy_exec "$cid" access "$user" "$topic" read-only)" || { phone_result "$id" failed "Failed: the user $user was set up but ntfy refused its read-only access: $(head -n 1 <<<"$out" | cut -c1-160). Use Reset password to try again."; return 0; }
+  if [[ $action == create ]]; then phone_result "$id" created "Created the read-only user $user for topic $topic." "$sealed"
+  else phone_result "$id" reset "Changed the password of $user and re-applied read-only access to topic $topic." "$sealed"; fi
+}
+handle_phone_login() {
+  local req="$INBOX/phone-login.json"
+  [[ -e $req || -L $req ]] || return 0
+  if ((DRY)); then log "[dry-run] a phone-login request is waiting; a real tick would handle it"; return 0; fi
+  local mine="$STATE/phone-login.$$.json"
+  mv -T "$req" "$mine" 2>/dev/null || return 0
+  phone_login_run "$mine" || true
+  rm -f "$mine"
+}
+
 main() {
   local req="$INBOX/request.json"
   # What this host says about itself (BOS-427), refreshed every tick, so an owner card's steps can be
@@ -1593,6 +1789,7 @@ main() {
     fi
     log "Baseline renewed, but the checklist still fails: $VERIFY_WHY"; exit 1
   fi
+  handle_phone_login
   recover_interrupted
   if bluegreen_enabled; then soak_tick; fi
   if [[ ! -e $req && ! -L $req ]]; then staging_tick || log "The staging lane stopped with an error; production is unaffected."; refresh_available; exit 0; fi
@@ -1677,6 +1874,7 @@ main() {
   last="$(cat "$STATE/last-$slot" 2>/dev/null || echo 0)"
   wait=$((last + RATE_LIMIT_SECONDS - $(date +%s)))
   if ((wait > 0)); then
+    REFUSAL=1
     [[ $TARGET != restart ]] || finish rejected "Rejected: nothing was restarted. The server was updated or restarted less than $((RATE_LIMIT_SECONDS / 60)) minutes ago. Try again in $(((wait + 59) / 60)) minute(s)."
     finish rejected "Rejected: only one $TARGET deploy every $((RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."
   fi
@@ -1712,6 +1910,8 @@ main() {
   if [[ $TARGET != runner ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
     # A good swap keeps measuring through the standby window (soak_tick); anything else ends here.
+    # BOS-1588: a good swap also refreshes this deployer's own copy (it takes effect on the next run); a failure only warns.
+    if [[ $BG_RESULT == deployed && -x $REPO/scripts/install-deployer.sh ]]; then BOSSMAN_DEPLOYER="$D" "$REPO/scripts/install-deployer.sh" >>"$LOG" 2>&1 || log "Warning: the deployer copy was not refreshed."; fi
     [[ $BG_RESULT == deployed ]] || { mem_report; BG_MSG="${BG_MSG:-The blue/green ${TARGET/server/swap} stopped with an error (exit $rc).} See $LOG on the host."; }
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi

@@ -13,7 +13,7 @@
 //    unchosen Watch was set to Off here, which let agents run unfenced with nobody choosing it.)
 // The sweep runs with the others (about once a minute), so it covers a boot as well as each runner report.
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { FENCE_OFF_CONSEQUENCE } from "@boss-man/shared";
+import { FENCE_OFF_CONSEQUENCE, platformFingerprint, type SandboxReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, runners } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -37,13 +37,47 @@ export const FENCE_HELD = "held: this runner can't fence agents, and the owner h
  * can't fence is refused by the runner itself, and holding unproven runners is DR-049's gate (BOS-938).
  * Board-tools-only runs (owner chat, the PA) are the caller's exception.
  */
-export function fenceHold(c: { fenceMode: string; fenceModeChosenAt: Date | null }, level: string | null | undefined): string | null {
-  if (c.fenceMode === "off" && c.fenceModeChosenAt) return null;
+export function fenceHold(c: { fenceMode: string; fenceModeChosenAt: Date | null; fenceOffFingerprint?: string | null }, level: string | null | undefined, fingerprint: string | null = null): string | null {
+  // An Off the owner chose on the fence card is kept with the platform it was chosen on; a different one asks again (DR-049 point 1).
+  if (c.fenceMode === "off" && c.fenceModeChosenAt && (c.fenceOffFingerprint == null || c.fenceOffFingerprint === fingerprint)) return null;
   return level === "unavailable" ? FENCE_HELD : null;
 }
 
+/** A wake's waiting status while the network guard isn't proven on (DR-049 point 1). */
+export const GUARD_HELD = "held: this runner can't keep agents off your home network, and the owner hasn't chosen to run them without the network guard";
+/** ... while the runner hasn't sent (or has stopped sending) its safety report, so nothing is proven. */
+export const UNPROVEN_HELD = "held: this runner hasn't proven its safety features (fence and network guard) yet";
+/** The runner re-reports every 5 minutes; a report older than this is no longer proof. */
+export const REPORT_STALE_MS = 15 * 60_000;
+
+export type HoldCompany = {
+  fenceMode: string;
+  fenceModeChosenAt: Date | null;
+  fenceOffFingerprint: string | null;
+  guardOffChosenAt: Date | null;
+  guardOffFingerprint: string | null;
+};
+
+/**
+ * The one gate for every agent run (DR-049 point 1, BOS-938; it grew out of BOS-373's fence hold): why a company's agent
+ * work must wait, or null. A run starts only when the runner's latest report proves the fence works (partial or full,
+ * unless the owner chose Off for this platform) and the network guard is on (unless the owner chose to run without it
+ * for this platform). requireProof is off only in tests that don't build a runner report; the server's main.ts turns it on.
+ */
+export function agentHold(c: HoldCompany, sandbox: SandboxReport | null, checkedAt: Date | null, o: { requireProof: boolean; now: Date }): string | null {
+  const fingerprint = platformFingerprint(sandbox?.platform);
+  const fence = fenceHold(c, sandbox?.level, fingerprint);
+  if (fence) return fence;
+  if (!o.requireProof) return null;
+  if (!sandbox || !checkedAt || o.now.getTime() - checkedAt.getTime() > REPORT_STALE_MS) return UNPROVEN_HELD;
+  if (sandbox.guard?.state === "on") return null;
+  return c.guardOffChosenAt && c.guardOffFingerprint === fingerprint ? null : GUARD_HELD;
+}
+
 const canFence = sql`${runners.sandbox}->>'level' in ('full', 'partial')`;
-const chosenOff = and(eq(companies.fenceMode, "off"), sql`${companies.fenceModeChosenAt} is not null`);
+/** The runner's platform as one string, the same as platformFingerprint(); null when the runner reported none. */
+const runnerFingerprint = sql<string | null>`(${runners.sandbox}->'platform'->>'kernel') || '|docker ' || (${runners.sandbox}->'platform'->>'dockerVersion') || '|' || (${runners.sandbox}->'platform'->>'osType')`;
+const chosenOff = and(eq(companies.fenceMode, "off"), sql`${companies.fenceModeChosenAt} is not null`, sql`(${companies.fenceOffFingerprint} is null or ${companies.fenceOffFingerprint} = ${runnerFingerprint})`);
 
 export async function fenceDefaultSweep(db: Db, now: Date): Promise<{ raised: number; heldCards: number; released: number }> {
   // A runner that reported it can't fence, in a company that didn't choose Off: its agent work is held, so the owner
@@ -134,7 +168,7 @@ export async function closeFenceUnavailableCard(db: Db, companyId: string, now: 
 /** The owner's answer on a fence-unavailable card: running without the fence is their choice of Off, recorded as such. */
 export async function applyFenceUnavailableAnswer(db: Db, companyId: string, answer: string, now: Date) {
   if (answer !== FENCE_RUN_UNFENCED) return;
-  await db.update(companies).set({ fenceMode: "off", fenceModeChosenAt: now }).where(eq(companies.id, companyId));
+  await db.update(companies).set({ fenceMode: "off", fenceModeChosenAt: now, fenceOffFingerprint: await currentFingerprint(db, companyId) }).where(eq(companies.id, companyId));
   await record(db, { companyId, kind: "settings", summary: "Owner chose to run agents without the fence: this company's runner can't fence agents", detail: { fenceMode: "off", from: "fence-unavailable card" }, at: now });
   await closeFenceCard(db, companyId, now);
 }
@@ -167,4 +201,111 @@ export async function closeFenceCard(db: Db, companyId: string, now: Date) {
     .where(and(eq(decisions.dedupeKey, fenceCardKey(companyId)), eq(decisions.status, "open")))
     .returning({ id: decisions.id });
   for (const r of rows) await db.update(notifications).set({ readAt: now }).where(and(eq(notifications.decisionId, r.id), isNull(notifications.readAt)));
+}
+
+// ---------- The network guard and the owner's choices (DR-049 point 1, BOS-938) ----------
+
+export const GUARD_RUN_WITHOUT = "Run agents without the network guard";
+export const GUARD_KEEP_STOPPED = "Keep agents stopped";
+/** One card per episode of a runner whose network guard isn't proven on; the key is let go when the episode ends. */
+export const guardUnavailableKey = (companyId: string) => `guard-unavailable:${companyId}`;
+
+/** The company's runner's platform fingerprint now, or null (no runner, or one that reports none). */
+export async function currentFingerprint(db: Db, companyId: string): Promise<string | null> {
+  const [r] = await db.select({ sandbox: runners.sandbox }).from(runners).where(eq(runners.companyId, companyId));
+  return platformFingerprint(r?.sandbox?.platform);
+}
+
+/** What Settings shows for each safety feature: whether it is proven, and whether the owner chose to run without it here. */
+export function featureStates(c: HoldCompany, sandbox: SandboxReport | null) {
+  const fingerprint = platformFingerprint(sandbox?.platform);
+  const fenceProven = sandbox?.level === "full" || sandbox?.level === "partial";
+  const fenceOff = c.fenceMode === "off" && !!c.fenceModeChosenAt && (c.fenceOffFingerprint == null || c.fenceOffFingerprint === fingerprint);
+  const guardProven = sandbox?.guard?.state === "on";
+  const guardOff = !!c.guardOffChosenAt && c.guardOffFingerprint === fingerprint;
+  return {
+    fingerprint,
+    fence: { proven: fenceProven, runWithout: !fenceProven && fenceOff },
+    guard: { proven: guardProven, runWithout: !guardProven && guardOff, reason: sandbox?.guard?.reason ?? null },
+  };
+}
+
+/** The owner's choice about running without the network guard: it is kept with this runner's platform, so a different host or kernel asks again. */
+export async function chooseGuard(db: Db, companyId: string, runWithout: boolean, now: Date) {
+  const fingerprint = await currentFingerprint(db, companyId);
+  await db.update(companies).set(runWithout ? { guardOffChosenAt: now, guardOffFingerprint: fingerprint } : { guardOffChosenAt: null, guardOffFingerprint: null }).where(eq(companies.id, companyId));
+  await record(db, { companyId, kind: "settings", summary: runWithout ? "Owner chose to run agents without the network guard on this runner" : "Owner chose to keep agents stopped until the network guard is proven", detail: { feature: "guard", runWithout }, at: now });
+  if (runWithout) await closeGuardCard(db, companyId, now, "The owner chose to run agents without the network guard.");
+}
+
+/** Settings' two buttons for the fence. Keeping agents stopped puts the mode back to Watch, which the gate holds while the runner can't fence. */
+export async function chooseFence(db: Db, companyId: string, runWithout: boolean, now: Date) {
+  if (runWithout) {
+    await applyFenceUnavailableAnswer(db, companyId, FENCE_RUN_UNFENCED, now);
+    await closeFenceUnavailableCard(db, companyId, now, "The owner chose to run agents without the fence in Settings.");
+    return;
+  }
+  await db.update(companies).set({ fenceMode: "watch", fenceModeChosenAt: now, fenceOffFingerprint: null }).where(eq(companies.id, companyId));
+  await record(db, { companyId, kind: "settings", summary: "Owner chose to keep agents stopped until the fence works", detail: { fenceMode: "watch", from: "settings card" }, at: now });
+}
+
+export async function applyGuardAnswer(db: Db, companyId: string, answer: string, now: Date) {
+  if (answer === GUARD_RUN_WITHOUT) await chooseGuard(db, companyId, true, now);
+}
+
+/** Ends a guard episode: withdraws its open card and lets the key go. Returns how many open cards it withdrew. */
+export async function closeGuardCard(db: Db, companyId: string, now: Date, note: string): Promise<number> {
+  const key = guardUnavailableKey(companyId);
+  const withdrawn = { by: "system", note, at: now.toISOString() };
+  const open = await db
+    .update(decisions)
+    .set({ status: "withdrawn", answeredAt: now, dedupeKey: null, context: sql`${decisions.context} || ${JSON.stringify({ withdrawn })}::jsonb` })
+    .where(and(eq(decisions.dedupeKey, key), eq(decisions.status, "open")))
+    .returning({ id: decisions.id });
+  for (const r of open) await db.update(notifications).set({ readAt: now }).where(and(eq(notifications.decisionId, r.id), isNull(notifications.readAt)));
+  await db.update(decisions).set({ dedupeKey: null }).where(eq(decisions.dedupeKey, key));
+  return open.length;
+}
+
+/**
+ * One owner card per episode of a runner that reported its network guard isn't on, in a company whose owner hasn't
+ * chosen to run without it on this platform; the card goes by itself once the guard is proven or the choice is made.
+ * (A runner that has reported nothing gets no card: its runs wait and the board says why.)
+ */
+export async function guardHoldSweep(db: Db, now: Date): Promise<{ raised: number; released: number }> {
+  const rows = await db
+    .select({ id: companies.id, name: companies.name, guardOffChosenAt: companies.guardOffChosenAt, guardOffFingerprint: companies.guardOffFingerprint, sandbox: runners.sandbox })
+    .from(companies)
+    .innerJoin(runners, eq(runners.companyId, companies.id));
+  let raised = 0;
+  let released = 0;
+  for (const c of rows) {
+    const state = c.sandbox?.guard?.state;
+    const fingerprint = platformFingerprint(c.sandbox?.platform);
+    const chosen = !!c.guardOffChosenAt && c.guardOffFingerprint === fingerprint;
+    if (state === "absent" && !chosen) {
+      const r = await db
+        .insert(decisions)
+        .values({
+          companyId: c.id,
+          kind: "question",
+          tier: "owner",
+          question:
+            `${c.name}'s agent work is held: its runner can't keep agents off your home network (the network guard isn't on: ${c.sandbox?.guard?.reason ?? "no reason given"}). Chat with the CEO still works.` +
+            ` Either fix the host (Settings → Server and runner) and restart the runner; work starts again by itself once the guard is proven, and this card goes.` +
+            ` Or run agents without the network guard: they could then reach other devices on your network. The choice is kept for this host and kernel only; a new one asks again.`,
+          options: [GUARD_KEEP_STOPPED, GUARD_RUN_WITHOUT],
+          recommendedOption: GUARD_KEEP_STOPPED,
+          dedupeKey: guardUnavailableKey(c.id),
+          context: { type: "guard_unavailable" },
+          createdAt: now,
+        })
+        .onConflictDoNothing()
+        .returning({ id: decisions.id });
+      raised += r.length;
+    } else if (state === "on" || chosen) {
+      released += await closeGuardCard(db, c.id, now, "The network guard is proven on, or the owner chose to run without it.");
+    }
+  }
+  return { raised, released };
 }

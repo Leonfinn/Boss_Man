@@ -17,12 +17,22 @@ Only what you set up yourself:
 | Synthetic | A check of your remaining credit | Only if you use a Synthetic account |
 | The service you name under **Semantic search** on the Wiki page | Wiki text and search words | Only if you tick **Search by meaning as well as words** |
 | GitHub | A request for the skill's files | Only when you add a skill from a GitHub link |
+| The model service you name under **Second opinion from a model** (Settings, Permissions) | What a permission card asks about, with secrets taken out | Only if you turn the second opinion on (off by default) |
 
 ## Things to know
 
 - **The agent programs are made by others.** Claude Code, Codex and OpenCode talk to their own makers' services. Boss Man turns off Claude Code's non-essential traffic for every agent run. For the others, read their own documentation.
 - **Agents can read web pages** while they work. What else they may run or reach is set by your permission rules (see Guide 6 on the website).
 - **Installing and updating** downloads Docker images and software packages from their usual public sources, like any other download.
+
+## Visitors to your feedback portal
+
+If you tick **Confirm posts by email** (Feedback → Feedback portal), visitors give an email address, and Boss Man emails them one confirmation link through the outgoing email you set up.
+
+- **Unconfirmed posts** are saved out of sight (not shown to you, your agents or other visitors, and not counted) and deleted when the link runs out (24 hours unless you change it).
+- **The address** is kept on the post only until the visitor clicks the link. If they gave a name, the name and address then become a customer on the Feedback page; if not, the address is not kept at all.
+- **Confirmed browsers** are remembered for 90 days (you can change it) by a cookie, and Boss Man stores only a one-way hash of the address and of the cookie's secret, never the address itself. Expired ones are deleted.
+- **Other visitors** never see an address. Your agents see a customer's address only inside a block marked as coming from outside.
 
 ## How we checked
 

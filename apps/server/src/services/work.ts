@@ -1,19 +1,20 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
+import { addsUsabilityCriterion, withUsabilityCriterion, columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
 import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
 import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
+import { goLiveNote, openUpdateCards } from "./go-live-note.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
-import { addTicketDependency, WorkError } from "./ticket-links.js";
+import { addTicketDependency, openBlockers, WorkError, type OpenBlocker } from "./ticket-links.js";
 import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
 import { derivedSignoff } from "./signoff.js";
 import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
-import { wipExemptKind } from "./agent-wip.js";
+import { cantMoveSql, isWorkingRun, wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 import { checkQueue } from "./check-queue.js";
 import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "./check-wording.js";
@@ -76,12 +77,17 @@ type TicketPatch = {
   ownerSetup?: string | null;
   /** The CEO's lintOverride reason for these steps (DR-052); stored with them, cleared by any write without one. */
   ownerSetupOverride?: string | null;
+  /** BOS-1650: the one-line "why" and "if skipped" the go-live card opens with; blank clears. Written with the steps. */
+  ownerSetupWhy?: string | null;
+  ownerSetupIfSkipped?: string | null;
   /** The CEO is fixing a merged ticket's steps while Boss Man's "can't go to the owner" card is open (DR-052). */
   setupFix?: boolean;
   /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
   fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
+  /** BOS-1516: the urgent mark was set by the owner ("Priority 1"). Only the owner's routes pass it; clearing urgent clears it too. */
+  urgentByOwner?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
   /** A move into review: "new" opens a review round (the owner's move), "keep" (the default here) leaves it to the caller (review.ts moves tickets into review itself). */
@@ -112,16 +118,17 @@ const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
  */
 export function startRefusal(
   t: { systemState: SystemState; createdAt: Date | null; lastActivityAt: Date | null },
-  deps: Array<{ ticketState: string | null; ticketTitle?: string | null; engagementStatus: string | null }>,
+  /** What still holds the ticket, from `openBlockers` (BOS-1458); an open decision doesn't stop a start. */
+  open: OpenBlocker[],
   actor: { agentId?: string | null; role?: string | null },
 ): string | null {
   if (t.systemState === "in_progress" || t.systemState === "review" || t.systemState === "done") return null;
   // The owner (no agent), the CEO and a manager may start anything.
   if (!actor.agentId) return null;
   if (actor.role && START_OVERRIDE_ROLES.has(actor.role)) return null;
-  const waiting = deps.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+  const waiting = open.filter((d) => d.kind !== "decision");
   if (waiting.length) {
-    const names = waiting.map((d) => (d.ticketTitle ? `"${d.ticketTitle}"` : "another ticket"));
+    const names = waiting.map((d) => (d.title ? `"${d.title}"` : "another ticket"));
     return `This ticket still waits on ${names.join(" and ")}, which ${waiting.length === 1 ? "isn't" : "aren't"} finished, so you can't start work on it yet. Finish or drop that first, or ask your CEO to move it on.`;
   }
   // Backlog is for work nobody has picked up: only a hand-over (the owner, a manager or a wake that
@@ -237,7 +244,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     const col = target.columnId ? cols.find((c) => c.id === target.columnId) : cols.find((c) => c.systemState === (target.state ?? "backlog"));
     if (!col) throw new WorkError(422, "That column isn't on this project's board.");
     if (col.wipLimit != null && !opts.overLimit) {
-      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState)));
+      // The same counting rule as ticket-moves.ts and the agent's limit: in progress, tickets that can't move don't count.
+      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState), col.systemState === "in_progress" ? sql`not ${cantMoveSql}` : undefined));
       if (inCol.filter((t) => t.id !== opts.ticketId).length >= col.wipLimit) {
         throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
       }
@@ -351,7 +359,30 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const doing = (r: (typeof everyLive)[number], ticketId?: string) =>
         r.origin === REVIEW_REASON ? (!r.ticketId || r.ticketId === ticketId ? "reviewing" : "working") : r.origin === "check due" ? "re-checking" : r.origin === "ci passed" ? "checking the merge" : r.origin === "nudge" ? "picking this up" : "working";
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
-      const withoutCard = everyLive.filter((r) => about(r).size === 0);
+      const notHere = everyLive.filter((r) => about(r).size === 0);
+      // A run on a ticket in another project is real, tracked work: name the ticket and its project instead of calling it ticketless.
+      const candidates = (r: (typeof everyLive)[number]) => [r.ticketId, r.runTicketId, ...named(r)].filter((x): x is string => !!x);
+      const elsewhereIds = [...new Set(notHere.flatMap((r) => (r.purpose === "chat" ? [] : candidates(r))))];
+      const elsewhereRows = elsewhereIds.length
+        ? await db
+            .select({ id: tickets.id, number: tickets.number, title: tickets.title, projectId: tickets.projectId, projectName: projects.name })
+            .from(tickets)
+            .innerJoin(projects, eq(projects.id, tickets.projectId))
+            .where(and(inArray(tickets.id, elsewhereIds), eq(projects.companyId, p.companyId), ne(tickets.projectId, p.id)))
+        : [];
+      const elsewhereOf = (r: (typeof everyLive)[number]) => {
+        if (r.purpose === "chat") return null;
+        for (const id of candidates(r)) {
+          const hit = elsewhereRows.find((e) => e.id === id);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      const withoutCard = notHere.filter((r) => !elsewhereOf(r));
+      const otherProjects = notHere.flatMap((r) => {
+        const e = elsewhereOf(r);
+        return e ? [{ id: r.id, agent: r.agent, purpose: r.purpose, startedAt: r.startedAt.toISOString(), ticketId: e.id, ticketNumber: e.number, ticketTitle: e.title, projectId: e.projectId, projectName: e.projectName }] : [];
+      });
       const waits = await reviewWaits(db, inReview);
       // Approved by every reviewer, so only the merge is left (BOS-667): the board shows these apart from
       // tickets still waiting on a reviewer, so a long merge line doesn't read as a reviewer shortage.
@@ -381,6 +412,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const heldFor = (t: typeof tickets.$inferSelect) => heldWakes.find((h) => h.ticketId === t.id) ?? (t.assigneeAgentId ? heldWakes.find((h) => h.agentId === t.assigneeAgentId) : undefined);
       const heldByAgent = (t: typeof tickets.$inferSelect) => !heldWakes.some((h) => h.ticketId === t.id) && !!(t.assigneeAgentId && heldWakes.some((h) => h.agentId === t.assigneeAgentId));
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
+      const updateCards = rows.some((r) => r.t.goLiveWait && r.t.systemState !== "done") ? await openUpdateCards(db, p.companyId) : { server: null, runner: null };
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
         // A sign-off still open on a ticket no longer in review (moved, blocked) must not vanish from the owner's lane.
@@ -420,13 +452,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),
+        // BOS-1546: a merged ticket that only waits to go live says so, so it doesn't look stuck in Blocked.
+        goLiveNote: t.systemState !== "done" ? goLiveNote(t.goLiveWait as GoLiveWait | null, updateCards) : null,
         };
       });
       return {
         project: p,
-        // Same source as the Dashboard's "agents working": every agent with a run going.
-        workingAgents: new Set(everyLive.map((r) => r.agentId)).size,
+        // Same rule as the Dashboard's "agents working" and the Agents page (DR-061 Q3): every agent with a run going that isn't a chat.
+        workingAgents: new Set(everyLive.filter(isWorkingRun).map((r) => r.agentId)).size,
         withoutTicket: withoutCard.map((r) => ({ id: r.id, agent: r.agent, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, wakeNote: r.wakeNote, runTicketId: r.runTicketId, startedAt: r.startedAt.toISOString() })),
+        otherProjects,
         columns: cols.map((c) => ({
           ...c,
           // A ticket shows in its column while that column matches its state; otherwise (no
@@ -451,7 +486,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
       if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
+      const featureP1 = featureId ? !!(await db.select({ p: features.priorityOne }).from(features).where(eq(features.id, featureId)))[0]?.p : false;
       const col = await placement(projectId, { columnId: input.columnId, state: input.state }, { overLimit: input.overLimit });
+      // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate from the start.
+      const criteria = withUsabilityCriterion(input.acceptanceCriteria ?? [], { featureId, ownerSetup: input.ownerSetup, noCode: input.noCode });
       const [t] = await db
         .insert(tickets)
         .values({
@@ -468,11 +506,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           keyResultId: input.keyResultId ?? null,
           dueDate: input.dueDate ?? null,
           customFields: input.customFields ?? {},
-          acceptanceCriteria: input.acceptanceCriteria ?? [],
+          acceptanceCriteria: criteria,
           noCode: input.noCode ?? false,
           ownerSetup: input.ownerSetup?.trim() || null,
           fixesLive: input.fixesLive?.trim() || null,
-          urgent: input.urgent ?? false,
+          // BOS-1516: a ticket made in a Priority 1 feature carries the owner's mark from the start.
+          urgent: input.urgent ?? featureP1,
+          urgentByOwner: (input.urgent ?? featureP1) && (input.urgentByOwner ?? featureP1),
           lastActivityAt: now(),
           risk: input.risk ?? null,
           size: input.size ?? null,
@@ -644,6 +684,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (parent.projectId !== (dest?.id ?? t.projectId)) throw new WorkError(422, "The parent task is in another project. Move the parent, or move this ticket to the parent's project in the same call.");
         fields.featureId = parent.featureId;
       }
+      // BOS-1516: switching urgent off (by anyone) drops the owner's mark too; turning it on keeps whatever the caller said (agents never set it).
+      if (patch.urgent === false) fields.urgentByOwner = false;
       if (dest && t.parentTicketId && newParent === undefined) {
         const [old] = await db.select({ projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, t.parentTicketId));
         if (old?.projectId !== dest.id) throw new WorkError(422, "It is a sub-task: move its parent task (sub-tasks go with it), or take it out of the parent first.");
@@ -657,12 +699,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Starting work (BOS-254): a run can't begin a ticket that still waits on something unfinished,
       // or one in the Backlog nobody handed it. The owner, the CEO and managers override.
       if (target === "in_progress" && t.systemState !== "in_progress" && !patch.internal) {
-        const deps = await db
-          .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
-          .from(ticketDependencies)
-          .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-          .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-          .where(eq(ticketDependencies.blockedTicketId, ticketId));
+        const deps = await openBlockers(db, ticketId);
         const [who] = patch.byAgentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, patch.byAgentId)) : [];
         const refusal = startRefusal({ systemState: t.systemState, createdAt: t.createdAt, lastActivityAt: t.lastActivityAt }, deps, { agentId: patch.byAgentId, role: who?.role ?? null });
         if (refusal) throw new WorkError(409, refusal);
@@ -677,10 +714,19 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // An override covers only the text it came with, so any other write of the steps clears it.
         fields.ownerSetupOverride = fields.ownerSetup ? (patch.ownerSetupOverride ?? null) : null;
       }
+      if (patch.ownerSetupWhy !== undefined) fields.ownerSetupWhy = patch.ownerSetupWhy?.trim() || null;
+      if (patch.ownerSetupIfSkipped !== undefined) fields.ownerSetupIfSkipped = patch.ownerSetupIfSkipped?.trim() || null;
       if (patch.fixesLive !== undefined) {
         const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
         if (bad) throw new WorkError(400, bad);
         fields.fixesLive = patch.fixesLive?.trim() || null;
+      }
+      // BOS-1571: a ticket that joins a feature, gains owner setup steps or has its criteria replaced keeps the
+      // usability gate; the write that makes it due adds it, so nobody has to remember it.
+      if (!t.mergeCommit && (fields.featureId !== undefined || fields.ownerSetup !== undefined || fields.acceptanceCriteria !== undefined || fields.noCode !== undefined)) {
+        const criteria = fields.acceptanceCriteria ?? readCriteria(t.acceptanceCriteria);
+        const gate = { featureId: fields.featureId !== undefined ? fields.featureId : t.featureId, ownerSetup: fields.ownerSetup !== undefined ? fields.ownerSetup : t.ownerSetup, noCode: fields.noCode ?? t.noCode };
+        if (addsUsabilityCriterion(criteria, gate)) fields.acceptanceCriteria = withUsabilityCriterion(criteria, gate);
       }
       if (dest) Object.assign(fields, { projectId: dest.id });
       // Plan first follows the risk level (there's no checkbox): changing the risk before work

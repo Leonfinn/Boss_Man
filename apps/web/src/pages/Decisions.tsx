@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
+import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -137,7 +137,7 @@ export function effectOf(d: Decision, option: string, alwaysWho = "any agent"): 
 
 type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean; phase?: string } | { state: "finished"; text?: string };
 const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
+const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Merge check running", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 
@@ -307,12 +307,23 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
  * The fences are read by the same parser as the server's card lint (BOS-550), so a step the lint accepts renders
  * its commands as blocks, labelled fence lines and indented list items included.
  */
-function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
-  const parsed = parseStep(text);
-  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text }];
+function StepText({ text, refs, stored }: { text: string; refs?: Decision["refs"]; stored?: StepSource | null }) {
+  // BOS-1665: the server takes the R19 tag out once and keeps the step's source beside it (`stored`). A card raised
+  // before that still has the tag in its text, so it is split here too; either way the owner reads a muted line.
+  const split = splitStepSource(text);
+  const shown = split.text;
+  const source = stored ?? split.source;
+  const parsed = parseStep(shown);
+  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text: shown }];
   return (
     <>
       {parts.map((p, i) => (p.type === "command" ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
+      {source?.kind === "seen" && (
+        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={`/api/ticket-images/${source.imageId}`} target="_blank" rel="noreferrer">your screenshot</a>{source.takenAt ? ` of ${source.takenAt}` : ""}</span>
+      )}
+      {source?.kind === "notSeen" && (
+        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={source.url} target="_blank" rel="noreferrer noopener">the vendor's docs</a>, {source.date}</span>
+      )}
     </>
   );
 }
@@ -504,7 +515,7 @@ function useLinkedCard(): string | null {
   return id;
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
   // A link straight to one card (#/decisions/<id>, BOS-1078: the Merge queue names the card holding a merge):
   // that card is scrolled to and marked once it is on the page.
@@ -725,8 +736,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {counts.open === 1 ? "1 decision to do" : `${counts.open} decisions to do`}
-            {counts.waiting > 0 ? ` · ${counts.waiting === 1 ? "1 waiting" : `${counts.waiting} waiting`}` : ""}
+            {counts.open === 1 ? "1 needs you" : `${counts.open} need you`}
+            {counts.waiting > 0 ? ` · ${counts.waiting} with the team` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (
@@ -756,7 +767,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           </div>
         )}
       </header>
-      {banner}
+      {typeof banner === "function" ? (queueCards.length > 0 ? null : banner(false)) : banner}
       {withTeam.length > 0 && (
         // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
         <details className="sub">
@@ -1062,7 +1073,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
-                            <li key={i}><StepText text={s} refs={d.refs} /></li>
+                            <li key={i}><StepText text={s} refs={d.refs} stored={d.context?.stepSources?.[i]} /></li>
                           ))}
                         </ol>
                         {/* The lint's findings (BOS-417): small, under the steps, never the headline. */}
@@ -1396,6 +1407,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               );
             })}
           </ol>
+          {/* (BOS-1497) With cards to answer, the setup checklist comes after them, folded to one line. */}
+          {typeof banner === "function" ? banner(true) : null}
           </>
           )}
           {waitingCards.length > 0 && (

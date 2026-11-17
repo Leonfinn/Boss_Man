@@ -79,6 +79,23 @@ describe("iPhone Focus note", () => {
   });
 });
 
+describe("Phone type (BOS-1484)", () => {
+  const notes = async (phoneType: NotifySettings["phoneType"]) => {
+    stub(settings({ phoneType }));
+    render(<Notifications feed={{ items: [], unread: 0 }} onChanged={() => {}} />);
+    await screen.findByLabelText("My phone");
+    const out = { iphone: !!screen.queryByTestId("phone-iphone-note"), android: !!screen.queryByTestId("phone-android-note") };
+    cleanup();
+    return out;
+  };
+  it("shows only the chosen phone's note; both or unset show both", async () => {
+    expect(await notes("android")).toEqual({ iphone: false, android: true });
+    expect(await notes("iphone")).toEqual({ iphone: true, android: false });
+    expect(await notes("both")).toEqual({ iphone: true, android: true });
+    expect(await notes(null)).toEqual({ iphone: true, android: true });
+  });
+});
+
 describe("Android Do Not Disturb note", () => {
   it("names the Override Do Not Disturb switch when ntfy is set up, and not otherwise", async () => {
     stub(settings({}));

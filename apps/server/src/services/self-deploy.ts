@@ -11,19 +11,24 @@ import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
+import { priorityGroup } from "./priority-group.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
+import { allMergeOrder, commitIsLive, liveServerRecord, serverContains } from "./go-live-wait.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
-import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
+import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
+import { runnerUpdateNeed, wakeCeoIfRunnerNeedUnknown, type CeoWake, type RunnerNeed } from "./runner-update-need.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
 /** The runner rebuild, by button path; a server card whose update changes runner code names it (BOS-835). */
-const RUNNER_STEP = "rebuild the runners: Settings → Server and runner → Updates → Build and update runners";
+/** The role the Server panel should show after an update. A host without blue/green copies reports "single", which server-status counts as healthy too. */
+const ROLE_EXPECTED = "leader (or single on a server that runs one copy)";
+const RUNNER_STEP ="rebuild the runners: Settings → Server and runner → Updates → Build and update runners";
 
 const Available = z.object({
   checkedAt: z.string(),
@@ -131,7 +136,7 @@ const DEPLOYER_COPY_GRACE_MS = 15 * 60_000;
 export type DeployerScriptState = { state: "current" | "behind" | "unknown" | "none"; since?: string };
 // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
 const NO_SRC = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
-const NO_HOST = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
+const NO_HOST = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This server and ask us on this ticket for the exact commands.";
 
 const short = (sha: string) => sha.slice(0, 8);
 /** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213): the ticket id, or null for any other commit. */
@@ -144,7 +149,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** BOS-990: the deployer script fingerprints from the host's report; null = no report. */ deployerScript?: () => Promise<{ scriptSha: string; repoSha: string } | null>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** BOS-990: the deployer script fingerprints from the host's report; null = no report. */ deployerScript?: () => Promise<{ scriptSha: string; repoSha: string } | null>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; /** Wakes an agent (the CEO) when Boss Man can't tell whether a runner update is needed (BOS-1648). */ wake?: CeoWake; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -155,7 +160,20 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     }
   };
   const available = () => (dir ? readJson(path.join(dir, "outbox", "available.json"), Available) : Promise.resolve(null));
-  const status = () => (dir ? readJson(path.join(dir, "outbox", "status.json"), Status) : Promise.resolve(null));
+  /** The last real run: what the host's status.json holds. A refusal never replaces it (BOS-1469). */
+  const realStatus = () => (dir ? readJson(path.join(dir, "outbox", "status.json"), Status) : Promise.resolve(null));
+  /** The newest rate-limit refusal, kept apart from the real result (BOS-1469); null when none. */
+  const refusal = () => (dir ? readJson(path.join(dir, "outbox", "refused.json"), Status) : Promise.resolve(null));
+  /**
+   * What the host did last: the real run, or a refusal that came after it. Everything that reasons about "the last
+   * result" sees a refusal as before; the panel also gets the real run it did not replace (`previousRun`).
+   */
+  const status = async () => {
+    const [real, refused] = [await realStatus(), await refusal()];
+    if (!refused) return real;
+    if (!real || real.result === "running") return real ?? refused;
+    return Date.parse(refused.ended || refused.started) >= Date.parse(real.ended || real.started) ? refused : real;
+  };
   const pending = async () => !!inboxFile && (await stat(inboxFile).then(() => true, () => false));
   /** BOS-1086: whether the request waiting in the inbox is a runner update (read from the file the host reads; false when none or unreadable). */
   const pendingRunnerRequest = async () => {
@@ -168,6 +186,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   };
   const availableFile = dir && path.join(dir, "outbox", "available.json");
   const statusFile = dir && path.join(dir, "outbox", "status.json");
+  const refusedFile = dir && path.join(dir, "outbox", "refused.json");
   const checkedFile = dir && path.join(dir, "inbox", "checked");
 
   /**
@@ -211,6 +230,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   /** Asks the host to look at main on its next tick (only the file's existence is read). True when the ask was written. */
   const askHostToLook = () => (dir ? writeFile(path.join(dir, "inbox", "check"), "", { mode: 0o640 }).then(() => true, () => false) : Promise.resolve(false));
 
+  async function readRunnerAddons() {
+    if (!dir) return { enabled: false as const, saved: null as string[] | null, built: null as string[] | null };
+    const read = async (f: string) => {
+      const t = await readFile(path.join(dir, f), "utf8").then((s) => s.trim(), () => null);
+      return t === null ? null : t === "" ? [] : /^[a-z0-9-]+(,[a-z0-9-]+)*$/.test(t) ? t.split(",") : null;
+    };
+    return { enabled: true as const, saved: await read("inbox/runner-addons"), built: await read("outbox/runner-addons.built") };
+  }
+
   /** Why there is no offer to act on, in words that don't send the owner to a cron job that is running fine (BOS-753). */
   async function noOfferReason(a: Available | null, s: DeployStatus | null): Promise<string> {
     const seen = await deployerSeen(a, s);
@@ -246,7 +274,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    */
   const unchanged = async () => {
     const nowMs = Date.now();
-    const print = (await Promise.all([fingerprint(availableFile), fingerprint(statusFile), fingerprint(inboxFile)])).join("|");
+    const print = (await Promise.all([fingerprint(availableFile), fingerprint(statusFile), fingerprint(refusedFile), fingerprint(inboxFile)])).join("|");
     const skip = seen !== null && seen.print === print && nowMs - seen.at < FORCED_SYNC_MS;
     // On a skip only the print is refreshed: the clock for the forced pass stays on the last real pass.
     seen = skip ? { print, at: seen!.at } : { print, at: nowMs };
@@ -327,8 +355,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * deploy card (open, withdrawn or answered): main moving on raises a new card, and that must not page
    * the owner again for the same fix.
    */
-  async function urgentFor(a: Available | null): Promise<DeployUrgent | undefined> {
-    const ids = [...new Set((a?.commits ?? []).flatMap((c) => { const id = c.subject ? mergedTicket(c.subject) : null; return id ? [id] : []; }))];
+  async function urgentFor(a: Available | null, extraIds: string[] = []): Promise<DeployUrgent | undefined> {
+    const ids = [...new Set([...(a?.commits ?? []).flatMap((c) => { const id = c.subject ? mergedTicket(c.subject) : null; return id ? [id] : []; }), ...extraIds])];
     if (!ids.length) return undefined;
     const rows = await db
       .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, fixesLive: tickets.fixesLive })
@@ -343,9 +371,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const symptom = r?.fixesLive?.trim();
       return r && ref && symptom ? [{ ticketId: r.id, ref, symptom }] : [];
     });
-    if (!fixes.length) return undefined;
+    // BOS-1516: no live fix on it, but the owner's Priority 1 work is: "Ready to put live", once the whole group has merged.
+    const ready = fixes.length ? [] : await readyFor(ids);
+    const listed = fixes.length ? fixes : ready;
+    if (!listed.length) return undefined;
     let repeat = true;
-    for (const f of fixes) {
+    for (const f of listed) {
       const [earlier] = await db
         .select({ id: decisions.id })
         .from(decisions)
@@ -353,7 +384,29 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         .limit(1);
       if (!earlier) repeat = false;
     }
+    if (!fixes.length) return { heading: readyHeading(ready), fixes: ready, kind: "ready", ...(repeat ? { repeat } : {}) };
     return { heading: fixesLiveHeading(fixes), fixes, ...(repeat ? { repeat } : {}) };
+  }
+
+  /**
+   * BOS-1516: the tickets in `ids` that carry the owner's Priority 1 mark and whose whole group (parent links, waits-on links, a
+   * Priority 1 feature's tickets) has merged. A group still open pages nobody: the card is raised without the heading, and the
+   * last member to merge brings the heading (the earlier members are in the card's range too, or already on an earlier card).
+   * `symptom` holds the ticket's title here.
+   */
+  async function readyFor(ids: string[]): Promise<LiveFix[]> {
+    const rows = await db
+      .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, title: tickets.title })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(inArray(tickets.id, ids), eq(tickets.urgent, true), eq(tickets.urgentByOwner, true)));
+    const out: LiveFix[] = [];
+    for (const r of rows) {
+      const ref = ticketRef(r.prefix, r.number);
+      if (!ref) continue;
+      if ((await priorityGroup(db, r.id)).every((m) => m.finished)) out.push({ ticketId: r.id, ref, symptom: r.title });
+    }
+    return out;
   }
 
   async function openFor(target: string) {
@@ -385,6 +438,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (blocker && !opts.askAnyway) {
       deps.log?.(`self-deploy: runner update for ${short(commit)} held; ${blocker}`);
       return { blocked: blocker };
+    }
+    // BOS-1648: Boss Man never offers a runner update by itself that the one answer says isn't needed. The owner's own
+    // press (requested) still raises its card, which says so.
+    if (!opts.requested) {
+      const need = await runnerNeed(a);
+      if (need?.state === "not_needed") {
+        deps.log?.(`self-deploy: runner update for ${short(commit)} not offered; ${need.words}`);
+        return null;
+      }
     }
     const row = await raise("runner", commit, fromCommit, a, opts.again ?? false, opts.requested ?? false);
     if (!row) return null;
@@ -435,7 +497,35 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * now, one in its trial, or the host's "try again in N minutes" wait. It reads the host's own files, never a
    * guessed state, so it holds on any Docker host and on blue/green or single-colour alike.
    */
+  /**
+   * BOS-1467: a merged change to the runner-update path (scripts/update-runner.sh) that the server doesn't run yet.
+   * Runners are built only from the version the server runs, so every press would run the OLD script until it is
+   * live. Refused, never queued: a queued press would just fail the same way. Names the oldest such ticket, or null.
+   * The server has no git, so "live" is read from merge order, as in go-live-wait.ts; a merge it can't place, or
+   * nothing recorded about what runs, is never waited for.
+   */
+  async function runnerUpdateFix(): Promise<string | null> {
+    const companyId = await homeCompany();
+    if (!companyId) return null;
+    const rows = await db
+      .select({ number: tickets.number, mergeCommit: tickets.mergeCommit, prefix: companies.ticketPrefix })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.touchesRunnerUpdate, true), isNotNull(tickets.mergeCommit)))
+      .orderBy(asc(sql`coalesce(${tickets.mergedAt}, ${tickets.stateChangedAt})`));
+    if (!rows.length) return null;
+    const { live, contains } = await liveServerRecord(db, companyId);
+    if (!live) return null;
+    const order = await allMergeOrder(db, companyId);
+    const waiting = rows.find((r) => !serverContains(live, r.mergeCommit!, order, contains) && order.includes(r.mergeCommit!.toLowerCase()));
+    if (!waiting) return null;
+    const ref = ticketRef(waiting.prefix, waiting.number) ?? "A merged change";
+    return `Waiting for ${ref} to go live: it fixes the runner update itself.`;
+  }
+
   async function runnerBlocker(a: Available | null): Promise<string | null> {
+    const fix = await runnerUpdateFix();
+    if (fix) return fix.replace(/^Waiting/, "waiting").replace(/\.$/, ", so the runners can't be updated yet.");
     const s = await status();
     if (s?.result === "running") return "a server update is running now, so the runners can't be updated until it finishes.";
     if (await pending()) return "a server update is already waiting for the host, so the runners can't be updated until it has run.";
@@ -454,9 +544,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (!companyId) return null;
     // DR-042 point 5: the runner card names the live tickets whose only step is the runner update, kept as a list.
     const runnerTickets = target === "runner" ? (await runnerOnlyTickets(db, companyId, commit)).map((t) => ({ ticketId: t.ticketId, title: t.title })) : [];
-    // The button still raises its card when the runners already have the commit (the owner may know of a runner fault), but says so.
-    const image = target === "runner" && requested ? await runnerImageCommit(db, companyId) : null;
-    const alreadyRun = image && imageContains(image, commit, await mergeCommitOrder(db, companyId)) ? `The runners already run ${short(image)}, which includes this. Nothing to do.\n\n` : "";
+    // The button still raises its card when no runner update is needed (the owner may know of a runner fault), but says
+    // so in the one answer's words (BOS-1648), and says "can't tell" with its reason when that is the answer.
+    const need = target === "runner" && requested ? await runnerNeed(a) : null;
+    const alreadyRun = need?.state === "not_needed" ? `${need.words} Nothing to do, unless you know of a fault in the runners.\n\n` : need?.state === "unknown" ? `${need.words}\n\n` : "";
     const infra = target === "server" && (a?.infraPaths.length ?? 0) > 0;
     // Merge commits only repeat the ticket's title; the commits under them say what changed.
     const changes = (a?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
@@ -556,7 +647,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // Only when the runner's files changed: the same flag drives the summary line on the card.
       if (a?.runnerChanged) handSteps.push(`${RUNNER_STEP[0]!.toUpperCase()}${RUNNER_STEP.slice(1)}.`);
     }
-    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
+    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads ${ROLE_EXPECTED}.`: undefined;
     const rollbackNote = "Database restore isn't a fallback yet.";
     const rollback = infra
       ? src && shaOk && bg !== undefined
@@ -597,8 +688,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
       risks,
     });
-    // Only the server update carries the fix: the runner card that may follow it is unchanged (BOS-639).
-    const urgent = target === "server" ? await urgentFor(a) : undefined;
+    // BOS-1462: a runner card carries the same heading and one page when a live fix only needs the runners rebuilt
+    // (its runner-only tickets). A fix already on an earlier card, server or runner, is a repeat and pages no more.
+    const urgent = target === "server" ? await urgentFor(a) : await urgentFor(a, runnerTickets.map((t) => t.ticketId));
     // (BOS-551) A server update restarts Boss Man, which resets anything a reading on the owner's queue
     // would measure. Point the update card at the open owner cards a restart would disturb: a card the
     // raising agent marked `resetsOnRestart`, and a hand-apply to-do that isn't itself a server or runner
@@ -690,7 +782,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   /** A card closed by the product, not answered: its notification is marked read here (BOS-413). */
   async function withdrawOpen(id: string, notice?: ClosedNotice | ((steps?: string[]) => ClosedNotice)) {
     const [row] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, id));
-    await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, id));
+    await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
     await markDecisionNotificationRead(db, id);
     // BOS-739: a card the system closed leaves a notice where it was, so an owner part-way through its
     // hand steps knows why it closed (and where to carry on). Its steps stay readable with the notice.
@@ -781,9 +873,20 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   async function imageHas(commit: string | null | undefined) {
     const companyId = await homeCompany();
     if (!companyId || !commit) return false;
-    const image = await runnerImageCommit(db, companyId);
-    if (!image) return false;
-    return imageContains(image, commit, await mergeCommitOrder(db, companyId));
+    return commitIsLive(db, companyId, commit, "runner");
+  }
+
+  /**
+   * BOS-1648: the one answer to "is a runner update needed?" for Boss Man's own runners (runner-update-need.ts), which
+   * the Settings line, the button's card and the automatic card all read. A "can't tell" wakes the CEO once per cause,
+   * but only from the background pass (`wake: true`): reading the status page must not queue a run as a side effect.
+   */
+  async function runnerNeed(a: Available | null, opts: { wake?: boolean } = {}): Promise<RunnerNeed | null> {
+    const companyId = await homeCompany();
+    if (!companyId) return null;
+    const need = await runnerUpdateNeed(db, companyId, { liveFallback: a?.deployed ?? null });
+    if (opts.wake) await wakeCeoIfRunnerNeedUnknown(db, companyId, need, deps.wake).catch((err: Error) => deps.log?.(`self-deploy: waking the CEO about the runner answer failed: ${err.message}`));
+    return need;
   }
 
   /**
@@ -792,21 +895,29 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * that changes nothing. The card is withdrawn with a note saying so, and the held offer is dropped when the
    * image has the commit that carried the runner change.
    */
-  async function closeBuiltRunnerCards() {
+  async function closeBuiltRunnerCards(need: RunnerNeed | null) {
     const open = await openFor("runner");
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
     if (!open.length && !due?.needs) return;
     const companyId = await homeCompany();
     const image = companyId ? await runnerImageCommit(db, companyId) : null;
     if (!companyId || !image) return;
-    const order = await mergeCommitOrder(db, companyId);
+    const order = need?.state === "not_needed" ? await allMergeOrder(db, companyId) : [];
     for (const o of open) {
       const c = o.context as SelfDeployContext;
       // A rebuild the owner asked for with the button (its key carries a random suffix) is never closed under them.
       if (c.requested || /^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(o.dedupeKey ?? "")) continue;
-      if (!c.commit || !imageContains(image, c.commit, order)) continue;
+      if (!c.commit) continue;
+      const built = await commitIsLive(db, companyId, c.commit, "runner");
+      // BOS-1648: also closed when the one answer says no runner update is needed for what the server runs, and the
+      // card's version is inside that (the changes since the image was built are server-only).
+      const notNeeded = !built && need?.state === "not_needed" && serverContains(need.live, c.commit, order);
+      if (!built && !notNeeded) continue;
       const now = new Date();
-      const withdrawal = { by: "system" as const, note: `The runners were already rebuilt from commit ${short(image)}, which has this change, so there is nothing left to build. You don't need to do anything.`, at: now.toISOString() };
+      const note = built
+        ? `The runners were already rebuilt from commit ${short(image)}, which has this change, so there is nothing left to build. You don't need to do anything.`
+        : `${need!.words} So there is nothing to build. You don't need to do anything.`;
+      const withdrawal = { by: "system" as const, note, at: now.toISOString() };
       // The shared withdraw path (BOS-788): it frees the key, marks the notification read and, for a card the owner had
       // opened, leaves the DR-039 closed notice. The withdrawal note is kept on the card's context as before.
       await db.update(decisions).set({ context: { ...(o.context as object), withdrawn: withdrawal } }).where(and(eq(decisions.id, o.id), eq(decisions.status, "open")));
@@ -814,7 +925,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       await record(db, { companyId: o.companyId, kind: "decision_withdrawn", summary: withdrawal.note, at: now });
       deps.log?.(`self-deploy: runner update card for ${short(c.commit)} closed; the runner image is built from ${short(image)}`);
     }
-    if (due?.needs && !due.pressed && imageContains(image, due.needs, order)) await putSetting(RUNNER_DUE, null);
+    if (due?.needs && !due.pressed && (await commitIsLive(db, companyId, due.needs, "runner"))) await putSetting(RUNNER_DUE, null);
   }
   const DEFAULT_SOAK_SECONDS = 900;
   type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
@@ -888,12 +999,48 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * `until` and, once it has passed, says the owner can deploy now (a later result replaces the line). Null when the
    * last status is not a rate-limit refusal.
    */
-  function deployWait(s: DeployStatus | null): { until: string } | null {
-    if (!s || s.result !== "rejected" || s.target === "runner") return null;
+  function deployWait(s: DeployStatus | null): { until: string; target: string } | null {
+    if (!s || s.result !== "rejected") return null;
     const mins = s.message.match(/Try again in (\d+) minute\(s\)/i)?.[1];
     const ended = Date.parse(s.ended || s.started);
     if (!mins || !Number.isFinite(ended)) return null;
-    return { until: new Date(ended + Number(mins) * 60_000).toISOString() };
+    // BOS-1469: runner refusals count too; `target` tells the panel whose buttons wait (each kind has its own limit).
+    return { until: new Date(ended + Number(mins) * 60_000).toISOString(), target: s.target };
+  }
+
+  /**
+   * The host takes one deploy of each kind per RATE_LIMIT (10 minutes, stamped when the run starts). Plain words when
+   * the last real run of this kind started inside it, so a press is told so at once; null otherwise. Only the last
+   * run is known here, so a miss is possible and the host's refusal (shown in the panel) still covers it.
+   */
+  function rateLimitNote(s: DeployStatus | null, target: "server" | "runner" | "restart"): string | null {
+    if (!s || s.result === "rejected" || s.result === "nothing_new") return null;
+    const slot = (t: string) => (t === "restart" ? "server" : t);
+    if (slot(s.target) !== slot(target)) return null;
+    const left = Date.parse(s.started) + 600_000 - Date.now();
+    if (!Number.isFinite(left) || left <= 0) return null;
+    const mins = Math.ceil(left / 60_000);
+    return `Turned away: the host only takes one ${slot(target)} deploy every 10 minutes, and the last one started at ${clock(s.started)}. Press again in about ${mins} minute${mins === 1 ? "" : "s"}.`;
+  }
+
+  /**
+   * The request the owner pressed that the host has not finished (BOS-1469): waiting in the inbox (with the time the
+   * file was written) or running (since its start). Null when none. `what` is plain words for the button pressed.
+   */
+  async function activeRequest(s: DeployStatus | null): Promise<{ phase: "waiting" | "running"; what: string; since: string } | null> {
+    const words = (t: string | undefined) => (t === "runner" ? "Build and update runners" : t === "restart" ? "Restart the server" : "Server update");
+    if (inboxFile && (await pending())) {
+      let target: string | undefined;
+      try {
+        target = (JSON.parse(await readFile(inboxFile, "utf8")) as { target?: string }).target;
+      } catch {
+        target = undefined;
+      }
+      const since = (await stat(inboxFile).then((st) => st.mtime.toISOString(), () => null)) ?? new Date().toISOString();
+      return { phase: "waiting", what: words(target), since };
+    }
+    if (s?.result === "running") return { phase: "running", what: words(s.target), since: s.started };
+    return null;
   }
 
   /** Raises the held runner update once its trial is over, if the server is still on that commit; otherwise drops it quietly. */
@@ -1047,8 +1194,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     steps.push(
       missing ??
         (live
-          ? step(`Check Boss Man reconnected. Run this on the same machine; it asks the running server (${live}) whether it is ready. The answer should say ok is true and the role is leader:`, cmd(`cd ${src} && docker compose exec -T ${live} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`))
-          : "Check Boss Man reconnected: open Settings → Server and runner → Server. Role should read leader. (Boss Man can't tell which server copy is live, so no command is shown.)"),
+          ? step(`Check Boss Man reconnected. Run this on the same machine; it asks the running server (${live}) whether it is ready. The answer should say ok is true and the role is ${ROLE_EXPECTED}:`, cmd(`cd ${src} && docker compose exec -T ${live} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`))
+          : `Check Boss Man reconnected: open Settings → Server and runner → Server. Role should read ${ROLE_EXPECTED}. (Boss Man can't tell which server copy is live, so no command is shown.)`),
     );
     return steps;
   }
@@ -1098,7 +1245,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         question: `This update changes the ${word}'s settings, and they are not applied yet. Apply them when you are ready: Boss Man is unreachable for a few seconds.`,
         key: `${SERVICE_KEY}${svc}:${a.deployed}`,
         steps: serviceSteps(svc, a.deployed, a, host),
-        check: `Settings → Server and runner → Server: Role reads leader, and this card clears by itself once the host sees the ${word} running with its new settings.`,
+        check: `Settings → Server and runner → Server: Role reads ${ROLE_EXPECTED}, and this card clears by itself once the host sees the ${word} running with its new settings.`,
         rollback: serviceRollback(svc),
         ofDecisionId: "system",
       });
@@ -1133,10 +1280,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const missing = !src || !deployer ? "Boss Man can't tell where the install or deployer folder is, so no command is shown here. Ask us on this ticket for the exact commands." : !host ? NO_HOST : null;
     const file = `${deployer}/host-deployer.sh`;
     const steps = [
-      missing ?? step("Keep a copy of the current script, then copy the new one into the deployer folder. Run this on the machine that runs Boss Man. It prints the one file it copied:", cmd(`cp -p ${file} ${file}.old && cp -v ${src}/scripts/host-deployer.sh ${file} && chown root:root ${file} && chmod 750 ${file}`)),
+      missing ?? step("Keep a copy of the current script, then copy the new one into the deployer folder. Run this on the machine that runs Boss Man. It prints the one file it copied:", cmd(`cp -p ${file} ${file}.old && BOSSMAN_DEPLOYER=${deployer} ${src}/scripts/install-deployer.sh`)),
       missing ?? step("Check it. Run this on the same machine; it prints two lines, and the long code at the start of both should be the same:", cmd(`sha256sum ${src}/scripts/host-deployer.sh ${file}`)),
     ];
-    const check = "Within a couple of minutes this card closes by itself, once the host reports it runs the live script. Settings → Server and runner → This host then says \"Deployer script: current\".";
+    const check = "Within a couple of minutes this card closes by itself, once the host reports it runs the live script. Settings → Server and runner → This server then says \"Deployer script: current\".";
     const rollback = missing ?? step("To undo, put the old script back. Run this on the same machine:", cmd(`cp -p ${file}.old ${file}`));
     return { steps, check, rollback };
   }
@@ -1310,7 +1457,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (a) await this.clearDoneOwnerTodos(a, s).catch((err) => deps.log?.(`self-deploy: clearing done to-dos failed: ${(err as Error).message}`));
       await syncDeployerScript().catch((err) => deps.log?.(`self-deploy: deployer script check failed: ${(err as Error).message}`));
       // Close any runner card, and drop any held offer, that the live image already has the change for (BOS-764).
-      await closeBuiltRunnerCards().catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
+      const need = await runnerNeed(a, { wake: true }).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null));
+      await closeBuiltRunnerCards(need).catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
       // BOS-1010 rule 7: never more than one open runner card; clears any duplicate a release left on the queue.
       await dedupeRunnerCards(a).catch((err) => deps.log?.(`self-deploy: de-duplicating runner cards failed: ${(err as Error).message}`));
       // BOS-1086: an open runner card stays open while a server update waits, is approved or runs (it used to be
@@ -1359,8 +1507,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const deployedUnderUs = !!s && (s.result === "deployed" || s.result === "rolled_back") && Date.parse(s.ended) > startedAt;
       const live = deployedUnderUs ? reported : newestRunning(reported, build);
       if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
+      // BOS-1640: a server deploy by the host deployer is always a fast-forward of what ran (deploy.sh refuses anything
+      // else), so its from_commit is inside the live commit. Kept beside it, it places a live commit that is no ticket's
+      // recorded merge. Never for a rollback or a hand-apply: those say nothing about what the new commit contains.
+      const from = s && s.target === "server" && s.result === "deployed" && s.to_commit.toLowerCase() === live.toLowerCase() ? s.from_commit : undefined;
       const rows = await db.select({ id: companies.id }).from(companies);
-      for (const c of rows) await deps.releaseLog.note(c.id, live);
+      for (const c of rows) await deps.releaseLog.note(c.id, live, from);
       const how: ReleaseHow = !s ? "restarted" : s.result === "rolled_back" ? "rolled-back" : "deployed";
       return deps.releaseLog.releaseManagerWakes(how);
     },
@@ -1395,6 +1547,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // wait) is QUEUED, never refused: it starts by itself the moment nothing blocks it (releaseRunnerDue), is cancelled
       // with a plain reason if the server update is switched back, and the owner can cancel it. A server update only
       // waiting for the owner's answer does not count (it never blocks the runners).
+      // BOS-1467: refused, not queued, while a merged fix to the runner update itself isn't live: the press would run the old script and fail.
+      const fix = await runnerUpdateFix();
+      if (fix) return { error: fix } as const;
       const trial = await trialState(a);
       const notNow = await runnerBlocker(a);
       if (trial || notNow) {
@@ -1420,8 +1575,34 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       return { decisionId: r.row.id } as const;
     },
 
+    /**
+     * BOS-1583: the runner add-on tick boxes. `saved` is the owner's choice (inbox/runner-addons, written here), `built` what the
+     * last runner build held (outbox/runner-addons.built, written by update-runner.sh); either is null when the file is absent.
+     * Ids are plain strings, not checked against the catalogue on read, so an add-on this version doesn't list is carried along.
+     */
+    runnerAddons: () => readRunnerAddons(),
+
+    /** Saves the owner's ticked add-ons for the next "Build and update runners". Returns the list written, or an error. */
+    async setRunnerAddons(ids: string[], known: string[]) {
+      if (!dir) return { error: "Self-deploy is not set up on this install, so the host can't read a choice." } as const;
+      const current = await readRunnerAddons();
+      // An id the host holds or was told about that this catalogue doesn't list is kept as it is, never dropped on the first save.
+      const carried = [...(current.saved ?? current.built ?? [])].filter((id) => !known.includes(id));
+      const list = [...new Set([...ids.filter((id) => known.includes(id)), ...carried])].sort();
+      const file = path.join(dir, "inbox", "runner-addons");
+      const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+      try {
+        await writeFile(tmp, `${list.join(",")}\n`, { mode: 0o640 });
+        await rename(tmp, file);
+      } catch {
+        await rm(tmp, { force: true });
+        return { error: "Could not save the choice: the deployer folder is not writable from the server." } as const;
+      }
+      return { saved: list } as const;
+    },
+
     /** What Settings shows. */
-    /** BOS-990: Settings → This host's "Deployer script" line. */
+    /** BOS-990: the "Deployer script" line. */
     deployerScript: () => deployerScriptState(),
 
     async overview() {
@@ -1429,11 +1610,24 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // BOS-953: the runner trial (with the time it ends) and any "try again in N minutes" wait, both worked out
       // from the real time rather than the frozen text in the host's last status, so the panel counts down by itself.
       const trial = await trialState(a);
-      const wait = deployWait(s);
+      // BOS-1469: a request that is waiting for the host or running comes first in the panel, and a refusal from
+      // before it is shown as the previous attempt, without its "Try again in N minutes" (that press was superseded).
+      const active = await activeRequest(s);
+      const wait = active ? null : deployWait(s);
+      const [real, refused] = [await realStatus(), await refusal()];
+      const shown = s && active && s.result === "rejected" ? { ...s, message: s.message.replace(/\s*Try again in \d+ minute\(s\)\.?/i, "").trim() } : s;
+      const companyId = await homeCompany();
+      const runnerImage = companyId ? await runnerImageCommit(db, companyId) : null;
       // BOS-753: when the host deployer last showed it is alive, so Settings only says "not reported" when it really is overdue.
       return {
         enabled: !!dir,
-        status: s,
+        status: shown,
+        active,
+        // The last real run when a refusal is the newest word: the refusal never replaced it (BOS-1469).
+        previousRun: real && s && refused && s.id === refused.id && s.ended === refused.ended && real.result !== "running" ? real : null,
+        runnerImage: { running: runnerImage, needed: a?.deployed ?? null },
+        // BOS-1648: needed / not needed / can't tell, with the words the panel shows (never "may be needed").
+        runnerUpdate: await runnerNeed(a).then((n) => (n ? { state: n.state, words: n.words, tickets: n.state === "unknown" ? [] : n.tickets } : null)).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null)),
         available: a,
         staging: await stagingBlock(),
         pending: await pending(),
@@ -1475,6 +1669,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       if (s?.result === "running") throw new AnswerError("A deploy is running now. Wait for it to finish.");
       if (await pending()) throw new AnswerError("A deploy request is already waiting for the host. Try again in a minute.");
+      // BOS-1469: say so now when the host's one-deploy-every-10-minutes limit would turn this away, not only later in the panel.
+      const limit = rateLimitNote(await realStatus(), ctx.target);
+      if (limit) throw new AnswerError(limit);
       if (ctx.target === "runner") {
         const a = await available();
         const trial = await trialState(a);
@@ -1541,6 +1738,31 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       }
       if (ctx.target === "server") await writeChecked().catch((err: Error) => deps.log?.(`self-deploy: could not write the checked list: ${err.message}`));
       await writeRequest(decisionId, ctx.target, ctx.commit, opts);
+    },
+
+    /**
+     * The newest answered update cards for the panel's Recent updates (BOS-1238): target, how it ended, how many
+     * changes and when. Read-only, from the cards that already hold it; `result` is null while the host is still on it.
+     */
+    async history(limit = 5) {
+      const rows = await db
+        .select({ id: decisions.id, context: decisions.context, answeredAt: decisions.answeredAt, createdAt: decisions.createdAt })
+        .from(decisions)
+        .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'self_deploy'`))
+        .orderBy(desc(sql`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`))
+        .limit(Math.max(1, Math.min(limit, 20)));
+      return rows.map((r) => {
+        const c = r.context as SelfDeployContext;
+        return {
+          id: r.id,
+          target: c.target,
+          commit: c.commit,
+          changes: c.changes?.length ?? 0,
+          result: c.result?.result ?? null,
+          message: c.result?.message ?? null,
+          at: c.result?.at ?? (r.answeredAt ?? r.createdAt).toISOString(),
+        };
+      });
     },
 
     /** "Cancel" on the queued runner update (BOS-1086): the owner's press is taken back and the hold goes back to what it was. */
