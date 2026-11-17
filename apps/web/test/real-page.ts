@@ -115,7 +115,13 @@ export const API: Record<string, unknown> = {
 export async function stubApi(page: Page, api: Record<string, unknown> = API): Promise<void> {
   await page.route("**/api/**", (route: any) => {
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(api[path] ?? {}) });
+    // The app polls: an answer can be in flight when a test closes its page, and Playwright then rejects
+    // fulfill() with "Target page, context or browser has been closed". Nothing awaits this handler, so that
+    // rejection reached vitest as an unhandled error on slow GitHub runners (BOS-1708). Only that case is
+    // swallowed; any other fulfill failure (a bad body) still surfaces.
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(api[path] ?? {}) }).catch((e: unknown) => {
+      if (!/has been closed|closed/i.test(String((e as Error)?.message ?? e))) throw e;
+    });
   });
 }
 
