@@ -435,7 +435,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       if (liveMerge.some((j) => j.state === "running")) {
         const live = await db.select().from(checkJobs).where(and(inArray(checkJobs.state, ["queued", "running"]), inArray(checkJobs.ticketId, liveMerge.map((j) => j.ticketId))));
         for (const j of liveMerge.filter((m) => m.state === "running")) {
-          const newer = live.some((n) => n.ticketId === j.ticketId && n.id !== j.id && n.commit !== j.commit && n.queuedAt > j.queuedAt);
+          const newer = live.some((n) => n.ticketId === j.ticketId && n.id !== j.id && n.kind === "merge" && n.commit !== j.commit && (n.state === "queued" || (!!n.startedAt && !!j.startedAt && n.startedAt > j.startedAt))); // a later merge job inherits the earlier one's queuedAt (BOS-1328), so queuedAt can't order them
           if (newer) await cancelJob(j.id, NEWER_COMMIT_TEXT).catch(() => null);
         }
       }

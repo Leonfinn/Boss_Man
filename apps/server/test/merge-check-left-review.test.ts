@@ -67,14 +67,26 @@ describe("merge check of a ticket that left review (BOS-1757)", () => {
     expect(row!.state).toBe("running");
   });
 
-  it("stops a running merge check once a newer commit of the same ticket has a check queued", async () => {
+  it("leaves a running merge check alone when a quick check of the branch head is queued", async () => {
+    const s = await setup();
+    const t = await s.ticket("review");
+    const running = await s.merge(t, "m");
+    await s.d.pump();
+    const { db } = s;
+    const [tk] = await db.select().from(tickets).where(eq(tickets.id, t));
+    await checkQueue(db).enqueue({ companyId: tk!.companyId, projectId: tk!.projectId, ticketId: t, kind: "quick", scope: "quick", commit: "c-head", tree: "head" } as never);
+    await s.d.sweep();
+    const [row] = await db.select().from(checkJobs).where(eq(checkJobs.id, running.id));
+    expect(row!.state).toBe("running");
+  });
+
+  it("stops a running merge check once a newer merge check of the same ticket is queued", async () => {
     const s = await setup();
     const t = await s.ticket("review");
     const old = await s.merge(t, "old");
     await s.d.pump();
     const { db } = s;
-    const [tk] = await db.select().from(tickets).where(eq(tickets.id, t));
-    await checkQueue(db).enqueue({ companyId: tk!.companyId, projectId: tk!.projectId, ticketId: t, kind: "quick", scope: "quick", commit: "c-new", tree: "new" } as never);
+    await s.merge(t, "new");
     await s.d.sweep();
     const [row] = await db.select().from(checkJobs).where(eq(checkJobs.id, old.id));
     expect(row!.state).toBe("cancelled");
