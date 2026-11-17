@@ -244,7 +244,14 @@ describe("the main-CI watcher", () => {
   // BOS-1703: main's red run 43981883165 was hidden by a newer finished run of the same workflow.
   const redImagesRun = (c: Awaited<ReturnType<typeof setup>>) => {
     c.gh.runs.unshift(run(41, "failure", sha("a")));
-    c.gh.jobs[41] = [job("images (amd64)", [["Set up", "success"], ["Shell script tests", "failure"]])];
+    // Run 43981883165's shape: images (amd64) red; check, host-steps and web-browser skipped.
+    const skipped = (name: string): WorkflowJob => ({ ...job(name, []), conclusion: "skipped" });
+    c.gh.jobs[41] = [
+      skipped("check"),
+      skipped("host-steps"),
+      skipped("web-browser"),
+      job("images (amd64)", [["Set up", "success"], ["Shell script tests", "failure"]]),
+    ];
   };
 
   it("sees a red run that a newer cancelled run and a queued run sit on top of (BOS-1703)", async () => {

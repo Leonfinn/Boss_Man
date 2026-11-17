@@ -172,6 +172,8 @@ export function mainCiService(
       const seenId = Number((state.seen[workflow] ?? "").split(":")[0]);
       const at = finished.findIndex((r) => r.id === seenId);
       const pending = at < 0 ? [newest] : finished.slice(0, at + (`${finished[at]!.id}:${finished[at]!.attempt}` === state.seen[workflow] ? 0 : 1)).reverse();
+      // Left in the log so the next missed run can be told apart: not polled, not seen, or seen and judged.
+      if (pending.length) deps.log?.(`main CI: ${workflow}: reading ${pending.map((r) => `${r.id}:${r.conclusion}`).join(", ")} (last seen ${state.seen[workflow] ?? "none"})`);
       for (const run of pending) {
       const seenKey = `${run.id}:${run.attempt}`;
       const bad = BAD.has(String(run.conclusion));
@@ -187,6 +189,7 @@ export function mainCiService(
         } catch (err) {
           // Try again next pass: the run isn't marked seen.
           deps.log?.(`main CI: couldn't read run ${run.id}: ${(err as Error).message}`);
+          // Stop here: newer pending runs of this workflow wait too, so the order is kept and nothing is marked seen past the unread run.
           break;
         }
         if (!found.length) found = [{ key: keyOf(workflow, "(run)", "(no failing job found)"), workflow, job: "(run)", step: "(no failing job found)", jobUrl: run.url, lines: [] }];
