@@ -332,3 +332,32 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
     expect(await h.commitAnnotations(cfg("github"), "t", "a".repeat(40))).toEqual([{ name: "test", lines: ["a.ts:3 boom"] }]);
   });
 });
+
+describe("the gate's CI branches (BOS-1749): list and delete only bossman-ci/", () => {
+  const calls: Array<{ method: string; url: string }> = [];
+  const fake = (): typeof fetch =>
+    (async (url: string, init?: RequestInit) => {
+      calls.push({ method: init?.method ?? "GET", url: String(url) });
+      const u = String(url);
+      if (u.includes("/git/matching-refs/")) return json(200, [{ ref: "refs/heads/bossman-ci/t1", object: { sha: "a".repeat(40) } }, { ref: "refs/heads/bossman-ci/t2", object: { sha: "b".repeat(40) } }]);
+      if (u.includes("/git/commits/" + "a".repeat(40))) return json(200, { committer: { date: "2026-11-17T01:00:00Z" } });
+      if (u.includes("/git/commits/")) return json(404, {});
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+  it("lists them with the commit time, an unreadable commit counting as old", async () => {
+    calls.length = 0;
+    const list = await gitHostService({ fetch: fake() }).ciBranches(cfg("github"), "t");
+    expect(list).toEqual([
+      { branch: "bossman-ci/t1", sha: "a".repeat(40), committedAt: Date.parse("2026-11-17T01:00:00Z") },
+      { branch: "bossman-ci/t2", sha: "b".repeat(40), committedAt: 0 },
+    ]);
+    expect(calls[0]!.url).toContain("/git/matching-refs/heads/bossman-ci/");
+  });
+  it("deletes a bossman-ci branch and refuses every other name", async () => {
+    calls.length = 0;
+    const h = gitHostService({ fetch: fake() });
+    expect(await h.deleteCiBranch(cfg("github"), "t", "bossman-ci/t1")).toBe(true);
+    for (const bad of ["main", "bossman/t1", "bossman-ci/", "bossman-ci/../main", "x/bossman-ci/t1"]) expect(await h.deleteCiBranch(cfg("github"), "t", bad)).toBe(false);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["DELETE https://host/api/repos/leon/site/git/refs/heads/bossman-ci/t1"]);
+  });
+});

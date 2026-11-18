@@ -67,8 +67,17 @@ describe("tickets check_log", () => {
     expect(first).toMatch(/continue with tickets check_log offset=\d+/);
     const next = Number(/offset=(\d+)/.exec(first)![1]);
     expect(textOf(await open(a, { jobId: job.id, offset: next }))).toBeTruthy();
-    // No jobId: the newest kept log of the ticket.
-    expect(textOf(await open(a, {}))).toContain("FAIL  related tests");
+    // BOS-1723: no jobId lists the ticket's failed checks (2+ here) with ids and first failing line, not one log.
+    const { job: job2 } = await q.enqueue({ companyId: a.companyId, projectId: a.projectId, ticketId: t!.id, kind: "merge", scope: "full", commit: "c2", tree: "t2" });
+    await q.claimNext(null);
+    await q.complete(job2.id, { runnerId: null, commit: "c2", exitCode: 1, logTail: " FAIL  test/b.test.ts > b > breaks\n" });
+    const list = textOf(await open(a, {}));
+    expect(list).toContain(`job ${job.id}: quick check`);
+    expect(list).toContain(`job ${job2.id}: merge check`);
+    expect(list).toContain("First failing line: test/b.test.ts > b > breaks");
+    // A tail that names nothing falls back to the job's recorded reason.
+    expect(list).toContain("First failing line: The check failed with exit code 1.");
+    expect(list).not.toContain("some failing output");
     // Another company can't read it, even with the ids.
     const other = await open(b, { jobId: job.id });
     expect(other).toMatchObject({ isError: true });

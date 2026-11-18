@@ -33,6 +33,7 @@ const REASON_LABEL: Record<string, string> = {
   "missed work": "A missed-work sweep (scheduled)",
   "idle slot": "A free run slot (scheduled)",
   "idle agents": "Agents with nothing to do (scheduled)",
+  "nothing startable": "Free run slots, but nothing can start",
   "wiki upkeep": "Wiki sweep (scheduled)",
   "ticket watch": "A missed-work sweep (scheduled)",
   "tree stopped": "A stopped ticket tree needed it",

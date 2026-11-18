@@ -56,6 +56,8 @@ export type PullRequestCommits = { pull: PullRequest; commits: string[] };
 /** A compare between two commits (BOS-1688): its commits, oldest first, and every file the range changed (old names of renames too). */
 export type CompareDetail = { commits: Array<{ sha: string; message: string; parents: string[] }>; files: string[] };
 
+/** BOS-1749: every branch the merge gate pushes for CI starts with this (protocol.ts ciBranchFor); the only branches ever deleted. */
+export const CI_BRANCH_PREFIX = "bossman-ci/";
 export class GitHostError extends Error {
   constructor(
     readonly status: number,
@@ -279,6 +281,40 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       if (cfg.kind !== "github") return false;
       const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun`).catch(() => null);
       return !!res?.ok;
+    },
+
+    /**
+     * BOS-1749: the merge gate's CI branches (bossman-ci/*) on the host with the time of the commit each points at, newest
+     * first. GitHub only: other hosts get an empty list. Reads at most 5 pages of 100 refs.
+     */
+    async ciBranches(cfg: GitHostConfig, token: string): Promise<Array<{ branch: string; sha: string; committedAt: number }>> {
+      if (cfg.kind !== "github") return [];
+      const refs: Array<{ branch: string; sha: string }> = [];
+      for (let page = 1; page <= 5; page++) {
+        const res = await call(cfg, token, "GET", `/git/matching-refs/heads/${CI_BRANCH_PREFIX}?per_page=100&page=${page}`);
+        if (!res.ok || !Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't list ${CI_BRANCH_PREFIX} branches: ${messageOf(res.json, res.status)}`);
+        for (const r of res.json) {
+          const name = typeof r.ref === "string" ? r.ref.replace(/^refs\/heads\//, "") : "";
+          const sha = (r.object as { sha?: unknown } | undefined)?.sha;
+          if (name.startsWith(CI_BRANCH_PREFIX) && typeof sha === "string") refs.push({ branch: name, sha });
+        }
+        if (res.json.length < 100) break;
+      }
+      const out: Array<{ branch: string; sha: string; committedAt: number }> = [];
+      for (const r of refs) {
+        const c = await call(cfg, token, "GET", `/git/commits/${encodeURIComponent(r.sha)}`);
+        const when = c.ok && c.json && !Array.isArray(c.json) ? Date.parse(String((c.json.committer as { date?: unknown } | undefined)?.date ?? "")) : NaN;
+        // Unreadable commit: treated as old (0), so a branch whose commit can't be read is still cleared.
+        out.push({ ...r, committedAt: Number.isFinite(when) ? when : 0 });
+      }
+      return out.sort((a, b) => b.committedAt - a.committedAt);
+    },
+
+    /** BOS-1749: deletes one CI branch. Refuses any name outside bossman-ci/ so no other branch can ever be touched. Already gone counts as deleted. */
+    async deleteCiBranch(cfg: GitHostConfig, token: string, branch: string): Promise<boolean> {
+      if (cfg.kind !== "github" || !branch.startsWith(CI_BRANCH_PREFIX) || branch.includes("..") || branch.length <= CI_BRANCH_PREFIX.length) return false;
+      const res = await call(cfg, token, "DELETE", `/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);
+      return res.ok || res.status === 404 || res.status === 422;
     },
 
     /**

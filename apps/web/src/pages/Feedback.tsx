@@ -458,6 +458,23 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         </div>
         <SaveButton dirty saved={false} busy={backBusy} disabled={!!backProblem || !back || (!back.url.trim() && !back.text.trim())} style={{ alignSelf: "flex-start" }} />
       </form>
+      <fieldset style={{ border: "1px solid var(--border, #333)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+        <legend style={{ fontSize: 14, fontWeight: 600, padding: "0 6px" }}>Short public address</legend>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input
+            type="checkbox"
+            checked={!!d.portalAtBareAddress}
+            aria-describedby="bare-address-help"
+            onChange={(e) =>
+              run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { portalAtBareAddress: e.target.checked } }), e.target.checked ? "The public address now opens this portal." : "The public address no longer opens this portal.")
+            }
+          />
+          Open this portal at the public address itself{d.portalUrl ? ` (${d.portalUrl})` : ""}, with no secret link part
+        </label>
+        <p id="bare-address-help" className="muted" style={{ fontSize: 13 }}>
+          Anyone who opens that address sees this portal, so use it for a portal meant to be public, such as the one your website links to. Only one company's portal can use it; turning it on here turns it off for any other. The portal must also be turned on.
+        </p>
+      </fieldset>
       <ConfirmByEmail companyId={companyId} d={d} run={run} />
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
@@ -489,7 +506,7 @@ function ConfirmByEmail({ companyId, d, run }: { companyId: string; d: FeedbackS
       </label>
       <p id="confirm-email-help" className="muted" style={{ fontSize: 13 }}>
         {!d.emailReady
-          ? "Set up outgoing email first (Settings → Server and runner → Outgoing email): the links are sent from it."
+          ? "Set up outgoing email first (Settings → Server and runner → Email): the links are sent from it."
           : !d.portalUrl
             ? "The links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide)."
             : "With this on, visitors give an email address. What they send is kept out of sight, and counts for nothing, until they click the emailed link. Unconfirmed posts are deleted when the link runs out."}

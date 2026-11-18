@@ -76,7 +76,7 @@ export function featureRoutes(
 
   owner.patch("/api/companies/:id/portal", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable(), confirmByEmail: z.boolean(), confirmLinkHours: z.number().int().min(1).max(168), rememberAddressDays: z.number().int().min(1).max(365) }).partial().parse(req.body);
+    const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable(), confirmByEmail: z.boolean(), portalAtBareAddress: z.boolean(), confirmLinkHours: z.number().int().min(1).max(168), rememberAddressDays: z.number().int().min(1).max(365) }).partial().parse(req.body);
     // BOS-1388: posts can only wait for an email once email can be sent, and a link needs the portal's own address.
     if (b.confirmByEmail) {
       if (!mailer || !(await mailer.isConfigured())) throw new FeedbackError(422, "Set up outgoing email first (Settings → Server and runner → Outgoing email): the confirmation links are sent from it.");
