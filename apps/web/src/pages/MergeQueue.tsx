@@ -10,7 +10,7 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
-import { HeldBehindFixLine, heldSummary, inLineOf, type HeldSummary, type MergeLine } from "../components/MergesStuckBanner";
+import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
 import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
@@ -152,10 +152,10 @@ function SectionHead({ title, fact }: { title: string; fact: string }) {
   );
 }
 
-function Running({ rows, slots }: { rows: RunningNow[]; slots: number }) {
+function Running({ rows, slots, paused }: { rows: RunningNow[]; slots: number; paused?: PausedSummary | null }) {
   return (
     <section>
-      <SectionHead title="Running now" fact={`${rows.length} of ${slotsText(slots)} busy · flagged after an hour`} />
+      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} of ${slotsText(slots)} busy · flagged after an hour`} />
       {!rows.length ? (
         <p className="muted">Nothing is checking or merging right now.</p>
       ) : (
@@ -443,6 +443,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
   const stuck = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck).length : 0;
   const heldChecks = cq ? cq.rows.filter((r) => r.heldByMain).length : 0;
   const heldBehind = heldSummary(data);
+  const pausedLine = pausedSummary(data);
   const base = `#/merge-queue/${companyId}`;
 
   const pick = (t: Tab) => go(t === "checks" ? `merge-queue/${companyId}/checks` : `merge-queue/${companyId}`);
@@ -523,7 +524,10 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
                 </div>
               )}
               <NeedsYou rows={needsYou} />
-              <Running rows={data.running} slots={data.slots} />
+              {pausedLine && (
+                <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong></p>
+              )}
+              <Running rows={data.running} slots={data.slots} paused={pausedLine} />
               <Waiting rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />
             </>
