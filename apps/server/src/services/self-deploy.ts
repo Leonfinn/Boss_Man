@@ -21,6 +21,7 @@ import { allMergeOrder, commitIsLive, liveServerRecord, serverContains, serverHa
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
+import { withStagingLock } from "./staging-lock.js";
 import { runnerUpdateNeed, wakeCeoIfRunnerNeedUnknown, type CeoWake, type RunnerNeed } from "./runner-update-need.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -1430,18 +1431,22 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     for (const d of cards) {
       const ctx = d.context as SelfDeployContext;
       const urgent = !!ctx.urgent;
-      if (!urgent && !(await stagingPending())) {
-        const auto = await getSetting<{ commit: string }>(STAGED_AUTO);
-        const st = await stagingStatus();
-        const busy = st?.result === "running";
-        const done = st?.to_commit === ctx.commit && (st.result === "deployed" || st.result === "failed" || st.result === "rejected");
-        // A request the host turned down only for its 5-minute rate limit (another staging deploy ran just before) is asked
-        // again once the limit has passed, so a merge right after another staging deploy doesn't leave the card "not checked".
-        const rateLimited = done && st?.result === "rejected" && /only one staging deploy/.test(st.message) && Date.now() - Date.parse(st.at ?? "") > 6 * 60_000;
-        if (!busy && ((auto?.commit !== ctx.commit && !done) || rateLimited)) {
-          await writeStagingRequest(randomUUID(), ctx.commit, "deploy-card");
-          await putSetting(STAGED_AUTO, { commit: ctx.commit });
-        }
+      if (!urgent) {
+        // Under the staging lock (staging-lock.ts): the pending check and the write must not interleave with another writer.
+        await withStagingLock(async () => {
+          if (await stagingPending()) return;
+          const auto = await getSetting<{ commit: string }>(STAGED_AUTO);
+          const st = await stagingStatus();
+          const busy = st?.result === "running";
+          const done = st?.to_commit === ctx.commit && (st.result === "deployed" || st.result === "failed" || st.result === "rejected");
+          // A request the host turned down only for its 5-minute rate limit (another staging deploy ran just before) is asked
+          // again once the limit has passed, so a merge right after another staging deploy doesn't leave the card "not checked".
+          const rateLimited = done && st?.result === "rejected" && /only one staging deploy/.test(st.message) && Date.now() - Date.parse(st.at ?? "") > 6 * 60_000;
+          if (!busy && ((auto?.commit !== ctx.commit && !done) || rateLimited)) {
+            await writeStagingRequest(randomUUID(), ctx.commit, "deploy-card");
+            await putSetting(STAGED_AUTO, { commit: ctx.commit });
+          }
+        });
       }
       const line = await stagingLine(ctx.commit, urgent);
       if (STAGING_LINE.test(d.question) && d.question.replace(STAGING_LINE, "") + line !== d.question) {
@@ -1476,11 +1481,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     /** The "Deploy to staging" button on Settings → Server and runner (owner): main's newest commit, as the host last saw it. No card: staging isn't production. */
     async deployStaging() {
       if (!(await stagingLane())) return { error: "Staging isn't set up on this host yet: the host deployer's staging lane is off (STAGING_DIR in its host.conf, docs/22-staging.md)." } as const;
-      if ((await stagingPending()) || (await stagingStatus())?.result === "running") return { error: "A staging deploy is already queued or running. Wait for its result." } as const;
-      const commit = (await available())?.tip;
-      if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return { error: "The host hasn't reported main's newest commit yet. Try again in a minute." } as const;
-      await writeStagingRequest(randomUUID(), commit);
-      return { commit } as const;
+      return withStagingLock(async () => {
+        if ((await stagingPending()) || (await stagingStatus())?.result === "running") return { error: "A staging deploy is already queued or running. Wait for its result." } as const;
+        const commit = (await available())?.tip;
+        if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return { error: "The host hasn't reported main's newest commit yet. Try again in a minute." } as const;
+        await writeStagingRequest(randomUUID(), commit);
+        return { commit } as const;
+      });
     },
     /** BOS-1805: wakes the CEO about an owner's approved update that was not sent (the deploy wait's 3-hour cap). */
     tellCeo,
