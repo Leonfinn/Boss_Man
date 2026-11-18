@@ -27,11 +27,12 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MainLogResult,type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MergeCarried, type MainLogResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
 import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
+import { carryVerdict, nameList } from "./merge-carry.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
@@ -106,7 +107,7 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
 }
 
 /** A split merge's step (BOS-316; `base` / `expectBase` are the merge train's, BOS-1366), and the git host's CI publish around it (BOS-1070). */
-export type MergeStep = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string };
+export type MergeStep = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string; carry?: boolean };
 export type MergePhase = MergeStep | { phase: "publish"; commit: string } | { phase: "unpublish" };
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
@@ -1995,8 +1996,25 @@ export class Workspaces {
         await this.git(["update-ref", keep, commit], { cwd: repo });
         return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
       }
-      // The target moved to something whose merge differs from what was checked: check again.
-      if (tried.tree !== phase.tree) return { status: "main_moved" };
+      // The target moved to something whose merge differs from what was checked: check again, unless the passed merge may be
+      // carried across the move (BOS-1762).
+      if (tried.tree !== phase.tree) {
+        if (!phase.carry) return { status: "main_moved" };
+        const carry = await this.carryAcross(repo, phase, tried);
+        if (!carry.ok) return { status: "main_moved", notCarried: { why: carry.why, ...(carry.files ? { files: carry.files.slice(0, 30) } : {}) } };
+        const toPush = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
+        const pushed = await this.pushOrigin(repo, toPush, target, auth);
+        if (pushed.code !== 0) {
+          // A push by URL doesn't move origin's tracking ref, so fetch to tell a race from a push refused for good.
+          await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+          const again = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+          if (again === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
+          // Lost a race with another landing: the same tested merge may be tried on the newer tip without preparing again.
+          return { status: "main_moved", carryEligible: true };
+        }
+        await this.git(["update-ref", "-d", keep], { cwd: repo }).catch(() => undefined);
+        return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: phase.tree, ms: 0 }, carried: carry.carried };
+      }
       // Same tree. The checked commit itself if its parents are still current; otherwise a new commit with the same tree.
       const parents = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
       const same = parents[0] === tried.targetSha && parents[1] === tried.branchSha;
@@ -2011,6 +2029,32 @@ export class Workspaces {
       await this.git(["update-ref", "-d", keep], { cwd: repo }).catch(() => undefined);
       return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: tried.tree, ms: 0 }, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
     });
+  }
+
+  /**
+   * BOS-1762: whether the passed merge `phase.commit` (built on the tested base, its first parent) may land as the new merge
+   * `tried` on main's newer tip without being tested again. The branch must be the one tested, nothing renumbered, main only
+   * moved forward, and merge-carry.ts's rule must hold for the three file lists. Read-only.
+   */
+  private async carryAcross(repo: string, phase: { commit: string; tree: string }, tried: { tree: string; targetSha: string; branchSha: string; renamed?: unknown[] }): Promise<{ ok: true; carried: MergeCarried } | { ok: false; why: string; files?: string[] }> {
+    const [testedBase, testedBranch] = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
+    if (!testedBase || testedBranch !== tried.branchSha) return { ok: false, why: "the branch is not the one that was tested" };
+    if (tried.renamed?.length) return { ok: false, why: "the merge renumbers a migration" };
+    const forward = await this.gitCode(["merge-base", "--is-ancestor", testedBase, tried.targetSha], { cwd: repo });
+    if (forward.code !== 0) return { ok: false, why: "main did not move forward from the tested base" };
+    // A diff git couldn't make must never read as "no files": that would carry anything.
+    const names = async (a: string, b: string) => {
+      const r = await this.gitCode(["diff", "--no-renames", "--name-only", "-z", a, b], { cwd: repo });
+      if (r.code !== 0) throw new Error(`git diff failed (exit ${r.code}): ${r.stderr.slice(0, 300)}`);
+      return nameList(r.stdout);
+    };
+    const mine = await names(testedBase, phase.commit);
+    const theirs = await names(testedBase, tried.targetSha);
+    const drift = await names(phase.tree, tried.tree);
+    const v = carryVerdict({ mine, theirs, drift });
+    if (!v.ok) return v;
+    const commits = Number(await this.git(["rev-list", "--count", `${testedBase}..${tried.targetSha}`], { cwd: repo }));
+    return { ok: true, carried: { from: testedBase, to: tried.targetSha, commits, files: theirs.length } };
   }
 
   /**
