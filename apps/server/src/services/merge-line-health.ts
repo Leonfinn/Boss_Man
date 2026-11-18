@@ -16,6 +16,9 @@ export const EMPTY_SEAT_MIN = 3;
 export const SLOW_AFTER_MIN = 60;
 /** The landing rate is read from merges within this window. */
 const RATE_WINDOW_MIN = 6 * 60;
+/** BOS-1715: no time to clear is told from fewer than this many landings, or landings spread over less than this (just after a restart or a lull). */
+export const RATE_MIN_LANDINGS = 3;
+export const RATE_MIN_SPAN_MIN = 30;
 
 export type StuckCause = "check_too_long" | "gate_fault" | "empty_seat" | "no_landing" | "fix_stalled";
 
@@ -61,7 +64,9 @@ export type StuckLine = {
 export type SlowLine = {
   state: "over_capacity";
   waiting: number;
-  /** Minutes to clear the queue at the current landing rate; null when the rate can't be told yet (fewer than two recent landings). */
+  /** All tickets in the merge line (the sidebar badge); only present when more than `waiting` (the rest wait on an agent or the owner). */
+  inQueue?: number;
+  /** Minutes to clear the queue at the current landing rate; null when the rate can't be told yet (too few recent landings over too short a time). */
   etaMinutes: number | null;
   lastLandedAt: string | null;
   /** What adds capacity, or null when nothing would (every slot is in use, or the install can't tell). */
@@ -178,12 +183,14 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
 
   // Not stuck. Over capacity: landing, but the queue is long.
   const inWindow = merged.filter((t) => nowMs - t <= RATE_WINDOW_MIN * 60_000);
-  const gap = inWindow.length >= 2 ? (inWindow[0]! - inWindow[inWindow.length - 1]!) / (inWindow.length - 1) / 60_000 : null;
+  const spanMin = inWindow.length >= 2 ? (inWindow[0]! - inWindow[inWindow.length - 1]!) / 60_000 : 0;
+  const gap = inWindow.length >= RATE_MIN_LANDINGS && spanMin >= RATE_MIN_SPAN_MIN ? spanMin / (inWindow.length - 1) : null;
   const eta = gap === null ? null : Math.round(mergeable.length * gap);
   if (mergeable.length && ((eta !== null && eta > SLOW_AFTER_MIN) || oldestWait >= SLOW_AFTER_MIN)) {
     // Capacity is only advised when it would add something: a check worker, on an install with none connected.
     const advice = opts.workerReady === false ? "A check worker would add check slots: Settings → Server and runner → Checks → Check workers." : null;
-    return { state: "over_capacity", waiting: mergeable.length, etaMinutes: eta, lastLandedAt: lastLanded === null ? null : new Date(lastLanded).toISOString(), advice };
+    // inQueue: the sidebar badge's figure (every approved ticket in the line); `waiting` is only those Boss Man itself has to move.
+    return { state: "over_capacity", waiting: mergeable.length, ...(waiting.length !== mergeable.length ? { inQueue: waiting.length } : {}), etaMinutes: eta, lastLandedAt: lastLanded === null ? null : new Date(lastLanded).toISOString(), advice };
   }
   return { state: "healthy" };
 }
@@ -223,9 +230,10 @@ export function startBrakeText(b: StartBrakeOff): string {
 
 /** "Merging, but slowly: ..." as one plain sentence; `clock` turns the last landing into HH:MM (the server uses UTC). */
 export function slowText(s: SlowLine, clock: (iso: string) => string): string {
-  const eta = s.etaMinutes === null ? "" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
+  const eta = s.etaMinutes === null ? ", estimating the time to clear…" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
   const last = s.lastLandedAt ? `, last landed ${clock(s.lastLandedAt)}` : "";
-  return `Merging, but slowly: ${s.waiting} merge ${plural(s.waiting, "check", "checks")} waiting${eta}${last}.${s.advice ? ` ${s.advice}` : ""}`;
+  const of = s.inQueue && s.inQueue > s.waiting ? ` (${s.inQueue} in the queue; the other ${s.inQueue - s.waiting} wait on an agent or you)` : "";
+  return `Merging, but slowly: ${s.waiting} merge ${plural(s.waiting, "check", "checks")} waiting${of}${eta}${last}.${s.advice ? ` ${s.advice}` : ""}`;
 }
 
 /** The held line as one plain sentence; `clock` turns the start into HH:MM (the server uses UTC). Amber, never "stuck". */

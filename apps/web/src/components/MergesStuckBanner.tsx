@@ -12,7 +12,7 @@ import { usePoll } from "../hooks";
 export type MergeLine =
   | { state: "healthy" }
   | { state: "stuck"; cause: string; title: string; reason: string; fix: string; others: number }
-  | { state: "over_capacity"; waiting: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null }
+  | { state: "over_capacity"; waiting: number; inQueue?: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null }
   | { state: "held_behind_fix"; held: number; fixes: HeldFix[]; since: string | null };
 
 /** A ticket that fixes the merge check and holds approved work (R28). */
@@ -65,7 +65,7 @@ export type MergeHealthView = {
 };
 
 export type StuckSummary = { title: string; reason: string; fix: string; others: number };
-export type SlowSummary = { waiting: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null };
+export type SlowSummary = { waiting: number; inQueue?: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null };
 
 /** "16 h", "1 h 20 min", "45 min": the same words as the server's alert. */
 export function waitedText(minutes: number): string {
@@ -87,14 +87,15 @@ export function stuckSummary(view: Pick<MergeHealthView, "line">): StuckSummary 
 /** Merging but slowly, or null. */
 export function slowSummary(view: Pick<MergeHealthView, "line">): SlowSummary | null {
   const l = view.line;
-  return l?.state === "over_capacity" ? { waiting: l.waiting, etaMinutes: l.etaMinutes, lastLandedAt: l.lastLandedAt, advice: l.advice } : null;
+  return l?.state === "over_capacity" ? { waiting: l.waiting, inQueue: l.inQueue, etaMinutes: l.etaMinutes, lastLandedAt: l.lastLandedAt, advice: l.advice } : null;
 }
 
 /** "Merging, but slowly: 17 waiting, about 4 h to clear at the current rate, last landed 19:03." */
 export function slowText(s: SlowSummary): string {
-  const eta = s.etaMinutes === null ? "" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
+  const eta = s.etaMinutes === null ? ", estimating the time to clear…" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
   const last = s.lastLandedAt ? `, last landed ${clock(s.lastLandedAt)}` : "";
-  return `Merging, but slowly: ${s.waiting} merge ${s.waiting === 1 ? "check" : "checks"} waiting${eta}${last}.`;
+  const of = s.inQueue && s.inQueue > s.waiting ? ` (${s.inQueue} in the queue; the other ${s.inQueue - s.waiting} wait on an agent or you)` : "";
+  return `Merging, but slowly: ${s.waiting} merge ${s.waiting === 1 ? "check" : "checks"} waiting${of}${eta}${last}.`;
 }
 
 /** R47: the start brake has no limit and the line has grown for an hour; null when a limit is set (nothing is said then). */

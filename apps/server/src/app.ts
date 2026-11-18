@@ -471,7 +471,12 @@ export async function buildApp(opts: AppOptions) {
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const trace = chatTraceService();
-  const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces", trace });
+  const chat = chatService(db, {
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces",
+    trace,
+    flag: (n) => notes.notify({ ...n, level: "flag" }),
+  });
   const pa = paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     now: opts.now,
@@ -825,7 +830,7 @@ export async function buildApp(opts: AppOptions) {
       let closed = await clearing.check();
       // BOS-1193: the validity table runs over every open agent card (a dead one closes by itself, which also
       // clears the leftovers older flagging left behind), then a stale one is flagged and its re-check clock moves.
-      closed += await closeInvalidCards(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now }).catch((err) => { app.log.error({ err }, "closing dead cards failed"); return 0; });
+      closed += await closeInvalidCards(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now, notify: (n) => notes.notify(n) }).catch((err) => { app.log.error({ err }, "closing dead cards failed"); return 0; });
       await ticketStateChanged(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "flagging cards after a ticket changed state failed"));
       await recheckDeadlines(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "moving cards on in their re-check failed"));
       return closed;
@@ -1249,6 +1254,14 @@ export async function buildApp(opts: AppOptions) {
   const preflightRecover = setTimeout(() => void ciPreflight.recover().catch(() => undefined), 60_000);
   preflightRecover.unref();
   app.addHook("onClose", async () => clearTimeout(preflightRecover));
+  // BOS-1749: bossman-ci/* branches the gate's own cleanup missed (a restart mid-check, a refused delete) are deleted from GitHub.
+  // First sweep 5 minutes after start (so old leftovers go without anyone asking), then every 30 minutes; branches under 6 hours old stay.
+  const sweepCi = () => void review.sweepCiBranches().catch(() => undefined);
+  const ciSweepFirst = setTimeout(sweepCi, 5 * 60_000);
+  const ciSweepEvery = setInterval(sweepCi, 30 * 60_000);
+  ciSweepFirst.unref();
+  ciSweepEvery.unref();
+  app.addHook("onClose", async () => { clearTimeout(ciSweepFirst); clearInterval(ciSweepEvery); });
   await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId) }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });

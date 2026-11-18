@@ -516,6 +516,14 @@ export function mergeQueueService(
       held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
       for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
       live = live.filter((l) => slotOf.has(l.ticketId));
+      // BOS-1757: a running merge job is what holds a slot, so it is listed even when no landing marker owns it (the ticket
+      // was sent back, or the server restarted). The Checks panel counts the same rows, so the two screens can't disagree.
+      const marked = new Set(live.map((l) => l.ticketId));
+      for (const j of held) {
+        if (j.kind !== "merge" || marked.has(j.ticketId)) continue;
+        marked.add(j.ticketId);
+        live.push({ ticketId: j.ticketId, startedAt: (j.startedAt ?? new Date(0)).toISOString(), startedBy: "the merge gate (no landing is waiting on it)" });
+      }
     }
     return { live, slotOf, restarted, checkStart };
   }
