@@ -37,7 +37,11 @@ git clone -q "$T/origin.git" "$T/src" 2>/dev/null
 push() { # file: change a file and push main; prints the new sha
   mkdir -p "$(dirname "$T/w/$1")"; echo "$RANDOM" >"$T/w/$1"
   git -C "$T/w" add -A; git -C "$T/w" commit -qm "change $1"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
-  git -C "$T/w" rev-parse HEAD
+  # Exactly one 40-char sha, or stop here naming the helper (BOS-1817): a stray line or an empty value
+  # would otherwise only show up later as the deployer rejecting the request's shape.
+  local sha; sha="$(git -C "$T/w" rev-parse HEAD)"
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: push($1) did not give one 40-char sha, got: [$sha]" >&2; exit 1; }
+  echo "$sha"
 }
 c1="$(push apps/server/a)"
 
@@ -70,7 +74,12 @@ conf() { printf 'REPO=%s\nWEBHOOK_URL=http://127.0.0.1:%s/hook\nWEBHOOK_ON_SUCCE
 conf 0
 host() { "$here/host-deployer.sh" "$@" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero"; }; }
 req() { # target commit [id]: write a request the way the server does
-  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${3:-$(node -e 'console.log(crypto.randomUUID())')}" "$1" "$2" >"$D/inbox/request.json"
+  # Build the id first and check it, so a failed node start under load stops here with a clear message.
+  local rid="${3:-}"
+  [[ -n $rid ]] || rid="$(node -e 'console.log(crypto.randomUUID())')"
+  [[ $rid =~ ^[0-9A-Za-z-]{1,64}$ ]] || { echo "FAIL: req($1) request id is not a plain id, got: [$rid]" >&2; exit 1; }
+  [[ $2 =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: req($1) commit is not one 40-char sha, got: [$2]" >&2; exit 1; }
+  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$rid" "$1" "$2" >"$D/inbox/request.json"
 }
 status() { jget "$D/outbox/status.json" "$1"; }
 calls() { wc -l <"$STUB_LOG" | tr -d ' '; }
