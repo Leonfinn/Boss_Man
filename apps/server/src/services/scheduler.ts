@@ -191,6 +191,8 @@ export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, backg
 const CHECK_RESULT_REASON = "check_result";
 /** Reasons whose older unstarted copies for one agent and ticket are dropped for the newest (BOS-1555). */
 const SUPERSEDED_REASONS = [CHECK_RESULT_REASON, "check due", "checking an old card"];
+/** BOS-1791: wakes that hand a ticket to its assignee; dropped when the ticket was parked or reassigned after they were queued. */
+const PARKED_DROP_REASONS = new Set(["assigned", "check due", CHECK_RESULT_REASON, "unblocked", "chased", "idle slot", "idle agents", "spare capacity", "urgent idle"]);
 const SUPERSEDED_WAKE_REASON = "replaced by a newer wake for the same ticket";
 /** Wakes that start an agent on a new ticket; they wait while the agent has a check result to pick up (BOS-1555). */
 const NEW_TICKET_REASONS = ["assigned", "idle slot", "idle agents", "spare capacity", "urgent idle"];
@@ -972,6 +974,21 @@ export function schedulerService(
       .where(and(eq(wakes.ticketId, w.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
     if (!finishedSince(waiting, t)) return null;
     return { finished: true, ids: waiting.map((x) => x.id).filter((id) => id !== w.id) };
+  }
+
+  /**
+   * BOS-1791: why a wake queued for an agent no longer has a ticket to start, or null. The CEO parks a ticket
+   * (unassigned, in Backlog) or hands it to another agent; an "assigned" or "check due" wake queued earlier
+   * must not pull it out of Backlog or run the old agent on it. Only boss-started wakes of the kinds below:
+   * a person's wake, a review, a watch or a card is left to its own handling.
+   */
+  async function parkedTicketWake(w: typeof wakes.$inferSelect): Promise<string | null> {
+    if (!w.ticketId || !PARKED_DROP_REASONS.has(w.reason) || fromOwner(w)) return null;
+    const [t] = await db.select({ state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, w.ticketId));
+    if (!t) return null;
+    if (!t.assignee && (t.state === "backlog" || t.state === "ready")) return "the ticket was parked or unassigned, so there was nothing to do";
+    if (t.assignee && t.assignee !== w.agentId && (t.state === "backlog" || t.state === "ready" || t.state === "in_progress")) return "the ticket was given to another agent, so there was nothing to do";
+    return null;
   }
 
   /**
@@ -1871,6 +1888,13 @@ export function schedulerService(
         if (finished) {
           await db.update(wakes).set({ status: "dropped", statusReason: CLOSED_TICKET_REASON }).where(inArray(wakes.id, [w.id, ...finished.ids]));
           result.dropped += 1 + finished.ids.length;
+          continue;
+        }
+        // BOS-1791: a wake queued before the ticket was parked or reassigned never starts it.
+        const parked = await parkedTicketWake(w);
+        if (parked) {
+          await db.update(wakes).set({ status: "dropped", statusReason: parked }).where(eq(wakes.id, w.id));
+          result.dropped++;
           continue;
         }
         // A stale nudge or other agent-started wake with no ticket is dropped, not delivered (BOS-1136).
