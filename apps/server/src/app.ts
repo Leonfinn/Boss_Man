@@ -825,7 +825,7 @@ export async function buildApp(opts: AppOptions) {
       let closed = await clearing.check();
       // BOS-1193: the validity table runs over every open agent card (a dead one closes by itself, which also
       // clears the leftovers older flagging left behind), then a stale one is flagged and its re-check clock moves.
-      closed += await closeInvalidCards(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now }).catch((err) => { app.log.error({ err }, "closing dead cards failed"); return 0; });
+      closed += await closeInvalidCards(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now, notify: (n) => notes.notify(n) }).catch((err) => { app.log.error({ err }, "closing dead cards failed"); return 0; });
       await ticketStateChanged(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "flagging cards after a ticket changed state failed"));
       await recheckDeadlines(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "moving cards on in their re-check failed"));
       return closed;
