@@ -107,6 +107,8 @@ export const URGENT_IDLE_REASON = "urgent idle";
 export const IDLE_SLOT_REASON = "idle slot";
 /** Free run slots and idle agents with nothing ready: the CEO is asked to hand out work (BOS-615). */
 export const IDLE_AGENTS_REASON = "idle agents";
+/** Free run slots and idle agents for 30 minutes, but every open ticket waits on another: the CEO is told what everything waits on (BOS-1662). */
+export const NOTHING_STARTABLE_REASON = "nothing startable";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** Tickets moved to review, gathered into one CEO run (R85). */

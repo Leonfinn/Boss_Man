@@ -16,7 +16,7 @@ export const ENGAGED_MS = 30 * 60_000;
 
 export type ClosedNotice = {
   /** Why Boss Man closed it: the update is live already, a newer card covers it, it was switched back, or a server update started (BOS-1010). */
-  why: "live" | "newer" | "switched-back" | "replaced" | "withdrawn";
+  why: "live" | "newer" | "switched-back" | "replaced" | "withdrawn" | "closed";
   /** The owner's words, shown on the card and in the feed note. */
   text: string;
   at: string;
@@ -83,6 +83,55 @@ export function switchedBackNotice(a: { steps?: string[]; now: Date }): ClosedNo
     at: a.now.toISOString(),
     until: new Date(a.now.getTime() + NOTICE_MS).toISOString(),
   };
+}
+
+/**
+ * BOS-1691: the notice for a card Boss Man closed by its own check (card-validity.ts closeCardBySystem): a newer card
+ * replaced it, its ticket finished or merged, its plan was approved on another card, its engagement ended. `note` is the
+ * reason the close recorded; with `newer` the notice points to the card that replaced it instead.
+ */
+export function systemClosedNotice(a: { note: string; newer?: { id: string; author: string | null; label?: string }; now: Date }): ClosedNotice {
+  const base = { at: a.now.toISOString(), until: new Date(a.now.getTime() + NOTICE_MS).toISOString() };
+  if (a.newer) {
+    return {
+      why: "newer",
+      newer: { decisionId: a.newer.id, label: a.newer.label ?? "the newer card" },
+      text: `Replaced by a newer card${a.newer.author ? ` from ${a.newer.author}` : ""}${a.newer.label ? `: "${a.newer.label}"` : ""}. Answer that one instead; this one needs nothing from you.`,
+      ...base,
+    };
+  }
+  const why = a.note.replace(/[.\s]+$/, "");
+  return { why: "closed", text: `Closed by Boss Man because ${why}. It needs nothing from you any more.`, ...base };
+}
+
+/**
+ * BOS-1691: the latest time a card being re-checked is back on the owner's list: its author's time, then the CEO's
+ * (card-validity.ts RECHECK_*_MS), then it returns marked "not re-checked" (stale-requests.ts recheckDeadlines). Null outside a re-check.
+ */
+export function recheckBackBy(r: { recheckStage: string | null; recheckStageAt: Date | null }, authorMs: number, ceoMs: number): Date | null {
+  if (!r.recheckStageAt) return null;
+  if (r.recheckStage === "author") return new Date(r.recheckStageAt.getTime() + authorMs + ceoMs);
+  if (r.recheckStage === "ceo") return new Date(r.recheckStageAt.getTime() + ceoMs);
+  return null;
+}
+
+/**
+ * BOS-1691: the line Decisions shows in place of a card hidden while it is re-checked, so the owner never sees a silent
+ * gap: who is checking it, after which of their actions, and when it is back at the latest. The stored reason is
+ * written about "the owner" (stale-requests.ts), so it is turned to "you" here.
+ */
+export function recheckLine(a: { by: string; reason: string | null; backBy: Date | null }) {
+  const reason = (a.reason ?? "").trim();
+  const yours = /^the owner\b/i.test(reason);
+  const cause = !reason ? "" : yours ? ` after ${reason.replace(/^the owner\b/i, "you")}` : ` because ${reason}`;
+  const at = a.backBy ? `${String(a.backBy.getUTCHours()).padStart(2, "0")}:${String(a.backBy.getUTCMinutes()).padStart(2, "0")} UTC` : null;
+  return `Being re-checked by ${a.by}${cause}. ${at ? `Back on your list by ${at}` : "Back on your list within the hour"} unless it is confirmed or closed first; if it closes, this list says why.`;
+}
+
+/** Whether the owner could see this card: an owner-tier card past any CEO handover (DR-058 A). */
+export function reachedOwner(row: { tier: string | null; context: unknown }) {
+  const rung = (row.context as { ladder?: { rung?: string } } | null)?.ladder?.rung;
+  return row.tier === "owner" && (!rung || rung === "owner");
 }
 
 /** DR-058 B: what takes the place of a withdrawn card. */
@@ -185,14 +234,16 @@ export function engagedRecently(row: { createdAt: Date; context: unknown }, now:
  * Only a closed owner card is touched, so a card answered by the owner in between keeps its own outcome.
  * Returns whether the feed was told.
  */
-export async function leaveClosedNotice(db: Db, id: string, notice: ClosedNotice, deps: { notify: (n: NotifyInput) => Promise<unknown>; now?: () => Date }) {
+export async function leaveClosedNotice(db: Db, id: string, notice: ClosedNotice, deps: { notify: (n: NotifyInput) => Promise<unknown>; now?: () => Date; /** The feed note's title, when it isn't about an update card (BOS-1691). */ title?: string }) {
   const now = deps.now?.() ?? new Date();
-  const [row] = await db.select({ companyId: decisions.companyId, createdAt: decisions.createdAt, context: decisions.context, status: decisions.status, tier: decisions.tier }).from(decisions).where(eq(decisions.id, id));
-  if (!row || row.status === "open" || row.tier !== "owner") return false;
+  const [row] = await db.select({ companyId: decisions.companyId, createdAt: decisions.createdAt, context: decisions.context, status: decisions.status, tier: decisions.tier, question: decisions.question }).from(decisions).where(eq(decisions.id, id));
+  // A card still with the CEO in its handover never reached the owner, so there is nothing to explain (DR-058 A).
+  if (!row || row.status === "open" || !reachedOwner(row)) return false;
   // One key merged in place, so nothing else written to the context meanwhile is lost.
   await db.update(decisions).set({ context: sql`${decisions.context} || jsonb_build_object('closedNotice', ${JSON.stringify(notice)}::jsonb)` }).where(eq(decisions.id, id));
   if (!engagedRecently(row, now)) return false;
-  await deps.notify({ companyId: row.companyId, level: "flag", title: notice.why === "live" ? "You can stop: that update is already live" : notice.why === "switched-back" ? "You can stop: that change was switched back off" : notice.why === "replaced" ? "You can stop: that update was replaced by a newer one" : "You can stop: a newer update card covers that one", body: notice.text, link: "#/decisions" });
+  const title = deps.title ?? (notice.why === "live" ? "You can stop: that update is already live" : notice.why === "switched-back" ? "You can stop: that change was switched back off" : notice.why === "replaced" ? "You can stop: that update was replaced by a newer one" : "You can stop: a newer update card covers that one");
+  await deps.notify({ companyId: row.companyId, level: "flag", title, body: deps.title ? `"${row.question.split("\n")[0]!.slice(0, 120)}": ${notice.text}` : notice.text, link: "#/decisions" });
   return true;
 }
 

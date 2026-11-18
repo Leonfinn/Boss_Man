@@ -358,7 +358,61 @@ describe("owner chat", () => {
     const second = c.sent.find((x): x is Start => x.type === "run.start")!;
     await c.emit({ type: "run.ended", runId: second.runId, stopReason: "end_turn", error: null });
     await c.settle();
-    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "system", text: "CEO finished without a reply." });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "system", text: 'CEO finished without a reply (it ended its turn without writing one; stop reason "end_turn"), so it was asked again.' });
+  });
+
+  it("asks a run that ended without a reply again once, then tells the owner why and flags it (BOS-1734)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    const chat = () => c.req("GET", `/api/companies/${c.company.id}/chat`).then((r) => r.json().items as Array<{ role: string; text: string; runId: string | null }>);
+    const starts = () => c.sent.filter((x): x is Start => x.type === "run.start");
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Stop the background workers for the update." });
+    await c.scheduler.tick();
+    const first = starts().at(-1)!;
+    await c.emit({ type: "run.ended", runId: first.runId, stopReason: "max_turn_requests", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    // Asked again straight away, as a chat run, and the owner's message moves to the new run.
+    const second = starts().at(-1)!;
+    expect(second.runId).not.toBe(first.runId);
+    expect(second).toMatchObject({ boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.ceo.id}` });
+    expect((await chat()).find((m) => m.role === "owner")!.runId).toBe(second.runId);
+    expect((await chat()).at(-1)).toMatchObject({ role: "system", text: 'CEO finished without a reply (it hit its step limit; stop reason "max_turn_requests"), so it was asked again.' });
+    expect((await c.db.select().from(runs).where(eq(runs.id, first.runId)))[0]!.outcome).toBe("max_turn_requests");
+
+    // Silent again: no third run; the owner reads why, that the message is kept, and gets a flag.
+    await c.emit({ type: "run.ended", runId: second.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    expect(starts().at(-1)!.runId).toBe(second.runId);
+    expect((await chat()).at(-1)).toMatchObject({ role: "system", text: 'CEO finished without a reply again (it ended its turn without writing one; stop reason "end_turn"). Your message is kept: CEO\'s next chat run answers it, and sending another message starts one.' });
+    const feed = (await c.req("GET", "/api/notifications")).json().items as Array<{ level: string; title: string; link: string }>;
+    expect(feed.filter((n) => n.title === "CEO didn't answer your chat message")).toMatchObject([{ level: "flag", link: `#/chat/${c.company.id}/${c.ceo.id}` }]);
+    // The kept message goes to the next run the owner starts.
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Hello?" });
+    await c.scheduler.tick();
+    const third = starts().at(-1)!;
+    expect((await chat()).filter((m) => m.role === "owner").map((m) => m.runId)).toEqual([third.runId, third.runId]);
+
+    // A run that replied is not asked again.
+    await c.emit({ type: "run.update", runId: third.runId, update: { kind: "agent_message", text: "Workers stopped." } });
+    await c.settle();
+    await c.emit({ type: "run.ended", runId: third.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    expect(starts().at(-1)!.runId).toBe(third.runId);
+    expect((await chat()).at(-1)).toMatchObject({ role: "assistant" });
+
+    // A run someone stopped by hand isn't restarted behind their back; it still says why.
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "And the reviewers?" });
+    await c.scheduler.tick();
+    const fourth = starts().at(-1)!;
+    await c.db.update(runs).set({ cancelRequestedAt: new Date() }).where(eq(runs.id, fourth.runId));
+    await c.emit({ type: "run.ended", runId: fourth.runId, stopReason: "cancelled", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    expect(starts().at(-1)!.runId).toBe(fourth.runId);
+    expect((await chat()).at(-1)!.text).toBe('CEO finished without a reply (it was cancelled; stop reason "cancelled"). Your message is kept: CEO\'s next chat run answers it, and sending another message starts one.');
   });
 
   it("says when a run fails, and asks again after a runner restart", async () => {

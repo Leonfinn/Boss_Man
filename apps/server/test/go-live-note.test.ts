@@ -1,8 +1,9 @@
 // BOS-1546: a merged ticket that only waits to go live says so in plain words, and a ticket that waits for nothing says nothing.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
-import { companies, decisions } from "../src/db/schema.js";
-import { goLiveNote, openUpdateCards } from "../src/services/go-live-note.js";
+import { isLiveCheckWait } from "@boss-man/shared";
+import { companies, decisions, projects, tickets } from "../src/db/schema.js";
+import { blockedSplit, goLiveNote, openUpdateCards } from "../src/services/go-live-note.js";
 
 let db: Awaited<ReturnType<typeof openPglite>>["db"];
 let close: () => Promise<void>;
@@ -13,6 +14,24 @@ beforeAll(async () => {
   await db.insert(companies).values({ id: COMPANY, name: "Home" });
 });
 afterAll(async () => close());
+
+// BOS-1636: "N blocked" counts only real blocks; merged work waiting for its live check is counted apart.
+describe("blocked split", () => {
+  it("counts a blocked ticket with a merge as a live-check wait, not a block", async () => {
+    const PROJECT = "00000000-0000-4000-8000-0000000000a1";
+    await db.insert(projects).values({ id: PROJECT, companyId: COMPANY, name: "P", repoUrl: "x" });
+    const base = { companyId: COMPANY, projectId: PROJECT, systemState: "blocked" as const };
+    await db.insert(tickets).values([
+      { ...base, title: "stuck" },
+      { ...base, title: "merged waiting", mergeCommit: "a".repeat(40) },
+      { ...base, title: "merged done", systemState: "done" as const, mergeCommit: "b".repeat(40) },
+    ]);
+    expect(await blockedSplit(db, COMPANY)).toEqual({ blocked: 1, liveCheck: 1 });
+    expect(isLiveCheckWait({ systemState: "blocked", mergeCommit: "a" })).toBe(true);
+    expect(isLiveCheckWait({ systemState: "blocked", mergeCommit: null })).toBe(false);
+    expect(isLiveCheckWait({ systemState: "done", mergeCommit: "a" })).toBe(false);
+  });
+});
 
 describe("go-live note", () => {
   it("says nothing when nothing waits, so a real stall still looks like one", () => {
