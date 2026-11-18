@@ -5,12 +5,12 @@
 // - missed work (R82): an assigned ticket that is ready to go but that nobody is working on;
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
+import { ageWords, goLiveWaitWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, checkJobs, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
+import { agents, checkJobs, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
@@ -18,11 +18,11 @@ import { raiseDueGoalChecks } from "./goal-check.js";
 import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
 import { agentWipHold, busyAgentIds, canStartNow, cantMoveFor, cantMoveSql, nothingToDoFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
-import { blockedHolds, openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
+import { blockedHolds, openBlockers, ticketBlockerFinished, ticketBlockerOpenSql } from "./ticket-links.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
-import { heldTicketIds, mergeHolds, wakeReadyHolds } from "./review-holds.js";
+import { heldTicketIds, mergeHolds, mergeWaits, wakeReadyHolds } from "./review-holds.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { ownerWaitWatch } from "./owner-todo.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
@@ -31,7 +31,8 @@ import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
 import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
 import { HELD_AGENT } from "./fair-share.js";
-import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
+import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, NOTHING_STARTABLE_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
+import { goLiveWaitOf } from "./go-live-wait.js";
 
 export type SweepLimits = {
   staleAfterMs: number;
@@ -80,6 +81,8 @@ export type SweepLimits = {
   idleAskEveryMs: number;
   /** More tickets than this in review and the CEO's idle-agents list puts no-code work first (BOS-615). */
   mergeLineLongAt: number;
+  /** Free slots and idle agents with nothing that can start for this long: the CEO is told what everything waits on (BOS-1662). */
+  nothingStartableAfterMs: number;
   /** After a runner restart, how long its replayed "interrupted" reports get before a run it never reported is closed as lost (BOS-579). */
   restartReplayMs: number;
   /**
@@ -112,6 +115,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   planGraceMs: 30 * 60_000,
   idleAskEveryMs: 30 * 60_000,
   mergeLineLongAt: 10,
+  nothingStartableAfterMs: 30 * 60_000,
   restartReplayMs: 2 * 60_000,
   // 30 minutes: six times the normal 5, and twice the busy-command limit. A beta throttle on a free model can
   // easily pause a minute or two at a time; a truly hung free run is still caught, just later (BOS-279).
@@ -123,6 +127,8 @@ const IDLE_ASK_TICKETS = 8;
 const HELD_START_REASON = "assigned";
 /** The CEO's idle-agents wake lists work held behind an agent's WIP cap for longer than this (BOS-1180). */
 const HELD_LISTED_AFTER_MS = 30 * 60_000;
+/** The settings row, per company, holding when "slots free, agents idle, nothing can start" began (BOS-1662). */
+const NOTHING_STARTABLE_KEY = "nothing_startable_since:";
 /**
  * The line a re-queued wake carries at the end of its note: it is how the retries of one original
  * wake are counted without a column (BOS-480), and it tells the agent why it was started again.
@@ -1383,6 +1389,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     const byCompany = new Map<string, typeof idle>();
     for (const a of idle) if (!busy.has(a.id)) byCompany.set(a.companyId, [...(byCompany.get(a.companyId) ?? []), a]);
     let asked = 0;
+    // Companies whose "nothing can start" clock keeps running (or wasn't judged this pass); every other clock is reset below (BOS-1662).
+    const stuckOrUnjudged = new Set<string>();
     for (const [companyId, people] of byCompany) {
       const free = await roomIn(companyId);
       if (free <= 0) continue;
@@ -1394,7 +1402,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .where(and(eq(wakes.companyId, companyId), eq(wakes.reason, IDLE_AGENTS_REASON), gt(wakes.createdAt, new Date(t.getTime() - limits.missedEveryMs))))
         .orderBy(desc(wakes.createdAt))
         .limit(1);
-      if (lastAsks[0] && t.getTime() - lastAsks[0].createdAt.getTime() < limits.idleAskEveryMs) continue;
+      if (lastAsks[0] && t.getTime() - lastAsks[0].createdAt.getTime() < limits.idleAskEveryMs) {
+        stuckOrUnjudged.add(companyId);
+        continue;
+      }
       const msObjective = alias(objectives, "ms_objective");
       const open = await db
         .select({ ticket: tickets, prefix: companies.ticketPrefix, krPriority: objectives.priority, msPriority: msObjective.priority })
@@ -1424,7 +1435,12 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         )
         .orderBy(asc(sql`coalesce(${tickets.wipHeldAt}, ${tickets.lastActivityAt})`))
         .limit(IDLE_ASK_TICKETS);
-      if (!open.length && !heldRows.length) continue;
+      // Nothing to offer is itself the alarm once it has lasted (BOS-1662): before, the sweep went quiet here.
+      if (!open.length && !heldRows.length) {
+        stuckOrUnjudged.add(companyId);
+        if (await tellCeoNothingStarts(t, companyId, ceo.id, people, free)) asked++;
+        continue;
+      }
       // While the merge line is long, work that needs no check slot (no-code: research, wiki, docs) goes first.
       const [{ waiting } = { waiting: 0 }] = await db.select({ waiting: sql<number>`count(*)::int` }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")));
       const lineLong = waiting > limits.mergeLineLongAt;
@@ -1444,7 +1460,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const marks = [ticket.systemState, ticket.urgent ? "urgent" : null, ticket.noCode ? "no code, needs no check slot" : null, ticket.planFirst ? "plan first" : null, ticket.risk ? `${ticket.risk} risk` : null].filter(Boolean).join(", ");
         top.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (${marks})`);
       }
-      if (!top.length && !heldRows.length) continue;
+      if (!top.length && !heldRows.length) {
+        stuckOrUnjudged.add(companyId);
+        if (await tellCeoNothingStarts(t, companyId, ceo.id, people, free)) asked++;
+        continue;
+      }
       const heldLines: string[] = [];
       for (const { ticket, prefix, owner } of heldRows) {
         const scope = (await agentWipHold(db, ticket)).hold?.scope;
@@ -1465,7 +1485,131 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       await opts.wake({ agentId: ceo.id, reason: IDLE_AGENTS_REASON, priority: 1, note: `${free} run slot${free === 1 ? " is" : "s are"} free and ${people.length === 1 ? "an agent has" : `${people.length} agents have`} nothing to work on.\n${body}` });
       asked++;
     }
+    // The condition ended (or never held) everywhere else: its clock starts afresh next time.
+    await db.delete(settings).where(and(like(settings.key, `${NOTHING_STARTABLE_KEY}%`), stuckOrUnjudged.size ? notInArray(settings.key, [...stuckOrUnjudged].map((id) => `${NOTHING_STARTABLE_KEY}${id}`)) : undefined));
     return asked;
+  }
+
+  /**
+   * BOS-1662 (R29): run slots are free and agents idle, but nothing can start: every open ticket waits on another,
+   * so askCeoForWork has nothing to offer. Once that has held for `nothingStartableAfterMs` the CEO gets one wake
+   * listing what everything waits on, the tickets holding most work first, each with what it waits for in turn.
+   * The clock's start is kept in `settings` (not in memory), so a server restart doesn't restart the half hour.
+   * The same list isn't sent again: the anti-repeat rule of the idle-agents wake (same text within
+   * `missedEveryMs`, at most one per `idleAskEveryMs`). Returns true when the CEO was woken.
+   */
+  async function tellCeoNothingStarts(t: Date, companyId: string, ceoId: string, people: Array<{ name: string }>, free: number): Promise<boolean> {
+    const key = `${NOTHING_STARTABLE_KEY}${companyId}`;
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, key));
+    const at = Date.parse((row?.value as { since?: string } | undefined)?.since ?? "");
+    if (!Number.isFinite(at)) {
+      await db.insert(settings).values({ key, value: { since: t.toISOString() } }).onConflictDoUpdate({ target: settings.key, set: { value: { since: t.toISOString() } } });
+      return false;
+    }
+    if (t.getTime() - at < limits.nothingStartableAfterMs) return false;
+    const blockers = await blockerLines(companyId);
+    // Nothing waits on anything: the board is simply empty, which is no fault.
+    if (!blockers.length) return false;
+    const [last] = await db
+      .select({ note: wakes.note, createdAt: wakes.createdAt })
+      .from(wakes)
+      .where(and(eq(wakes.companyId, companyId), eq(wakes.reason, NOTHING_STARTABLE_REASON), gt(wakes.createdAt, new Date(t.getTime() - limits.missedEveryMs))))
+      .orderBy(desc(wakes.createdAt))
+      .limit(1);
+    if (last && t.getTime() - last.createdAt.getTime() < limits.idleAskEveryMs) return false;
+    // Without the slot count, idle names or the time, which change every pass: the same list isn't sent twice.
+    const body = [
+      `What everything waits on, the ticket holding most work first:`,
+      ...blockers,
+      ``,
+      `See whether any of these can move sooner: chase or unblock it, start work that doesn't need it from main, or split a waits-on link that is wider than it needs to be. If nothing can, leave it; you are told again only when this list changes.`,
+    ].join("\n");
+    if (last?.note?.endsWith(`\n${body}`)) return false;
+    const names = people.map((p) => p.name).join(", ");
+    await opts.wake({
+      agentId: ceoId,
+      reason: NOTHING_STARTABLE_REASON,
+      priority: 1,
+      note: `Nothing can start: ${free} run slot${free === 1 ? " is" : "s are"} free and ${people.length === 1 ? "1 agent is" : `${people.length} agents are`} idle (${names}), and for ${ageWords(t.getTime() - at)} (since ${hhmm(new Date(at))} UTC) no open ticket could be handed out or started.\n${body}`,
+    });
+    return true;
+  }
+
+  /**
+   * One line per ticket that holds other work in this company (BOS-1662): open tickets waiting on it through a
+   * waits-on link (starts) and approved merges held behind it (`mergeWaits`, which includes a ticket marked as
+   * fixing the merge check). Most work held first; each line says in plain words what the blocker waits for.
+   */
+  async function blockerLines(companyId: string): Promise<string[]> {
+    const held = new Map<string, { starts: number; merges: number }>();
+    const bump = (id: string, k: "starts" | "merges") => {
+      const h = held.get(id) ?? { starts: 0, merges: 0 };
+      h[k]++;
+      held.set(id, h);
+    };
+    const waiting = alias(tickets, "waiting");
+    const deps = await db
+      .select({ blockerId: tickets.id, ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until })
+      .from(ticketDependencies)
+      .innerJoin(waiting, eq(waiting.id, ticketDependencies.blockedTicketId))
+      .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+      .where(and(eq(waiting.companyId, companyId), inArray(waiting.systemState, ["backlog", "ready", "blocked", "in_progress"])));
+    for (const d of deps) if (!ticketBlockerFinished(d)) bump(d.blockerId, "starts");
+    const inReview = await db
+      .select({ id: tickets.id, projectId: tickets.projectId, fixesMergeCheck: tickets.fixesMergeCheck })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")));
+    for (const r of inReview) {
+      const rows = await latestRows(db, r.id);
+      if (!rows.length || evaluate(rows) !== "passed") continue;
+      for (const id of await mergeWaits(db, r)) bump(id, "merges");
+    }
+    const ranked = [...held].sort(([, a], [, b]) => b.merges + b.starts - (a.merges + a.starts));
+    const lines: string[] = [];
+    for (const [id, h] of ranked.slice(0, IDLE_ASK_TICKETS)) {
+      const [b] = await db
+        .select({ ticket: tickets, prefix: companies.ticketPrefix, owner: agents.name })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+        .where(eq(tickets.id, id));
+      if (!b) continue;
+      const holds = [h.merges ? `${h.merges} merge${h.merges === 1 ? "" : "s"}` : null, h.starts ? `${h.starts} waiting ticket${h.starts === 1 ? "" : "s"}` : null].filter(Boolean).join(" and ");
+      const since = b.ticket.stateChangedAt.toISOString().slice(0, 16).replace("T", " ");
+      lines.push(`- ${ticketRef(b.prefix, b.ticket.number) ?? b.ticket.id} "${b.ticket.title}" (${await blockerWaitWords(b.ticket, b.owner)}, since ${since} UTC) holds ${holds}`);
+    }
+    if (ranked.length > IDLE_ASK_TICKETS) lines.push(`- and ${ranked.length - IDLE_ASK_TICKETS} more ticket${ranked.length - IDLE_ASK_TICKETS === 1 ? "" : "s"} that hold less`);
+    return lines;
+  }
+
+  /** What a ticket that holds other work is itself waiting for, in plain words (BOS-1662), with the go-live wording of `goLiveWaitWords`. */
+  async function blockerWaitWords(b: typeof tickets.$inferSelect, owner: string | null): Promise<string> {
+    if (opts.landingActive?.(b.id)) return "merging now";
+    if (b.mergeCommit) {
+      const wait = await goLiveWaitOf(db, b);
+      return wait ? `merged, ${goLiveWaitWords(wait)}` : b.systemState === "done" ? "done" : "merged and live, not marked done yet";
+    }
+    const who = owner ? ` with ${owner}` : ", unassigned";
+    switch (b.systemState) {
+      case "review": {
+        const rows = await latestRows(db, b.id);
+        const approved = rows.length > 0 && evaluate(rows) === "passed";
+        const behind = approved ? await mergeWaits(db, b) : [];
+        if (!behind.length) return approved ? "approved, waiting to merge" : `in review${who}`;
+        const refs = await db.select({ number: tickets.number, prefix: companies.ticketPrefix, id: tickets.id }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(inArray(tickets.id, behind));
+        return `approved, its merge held behind ${refs.map((r) => ticketRef(r.prefix, r.number) ?? r.id).join(", ")}`;
+      }
+      case "in_progress":
+        return `in progress${who}`;
+      case "ready":
+        return `ready${who}, not started`;
+      case "blocked":
+        return `blocked itself${who}`;
+      case "backlog":
+        return `in the backlog${who}`;
+      default:
+        return b.systemState;
+    }
   }
 
   /**
