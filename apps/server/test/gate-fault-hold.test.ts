@@ -144,6 +144,37 @@ describe("an approved ticket that waits on another ticket is held, not checked o
     // One round, still approved: nobody reviewed it again.
     expect((await ctx.rounds(id)).map((r) => [r.round, r.status])).toEqual([[1, "approved"]]);
   });
+
+  // BOS-1805 (18 Nov): the runners were rebuilt from the old live commit while the fix (BOS-1762) was merged but not
+  // deployed. A runner swap alone must not release the hold: the fix has to be in the live server AND the runner image.
+  it("a runner-code merge-check fix in the runner image but not on the live server still holds; both release it", async () => {
+    ctx = await setup();
+    const older = await ctx.ticket("Older merge", { systemState: "done" });
+    const fix = await ctx.ticket("Fix the merge check", { systemState: "in_progress", fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    const OLD_LIVE = "9".repeat(40);
+    const FIX = "e".repeat(40);
+    await ctx.db.update(tickets).set({ mergeCommit: OLD_LIVE, mergedAt: new Date(Date.now() - 60_000) }).where(eq(tickets.id, older));
+    await ctx.db.update(tickets).set({ mergeCommit: FIX, mergedAt: new Date(), touchesRunner: true }).where(eq(tickets.id, fix));
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: OLD_LIVE } });
+    // The image has the fix, the server doesn't: held.
+    await ctx.db.update(runners).set({ imageCommit: FIX }).where(eq(runners.companyId, ctx.company.id));
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    // Neither has it (the 18 Nov state: runners rebuilt from the old live commit): held.
+    await ctx.db.update(runners).set({ imageCommit: OLD_LIVE }).where(eq(runners.companyId, ctx.company.id));
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    // The server runs it, the image is still old: held.
+    await ctx.db.update(settings).set({ value: { new: FIX } }).where(eq(settings.key, `live_release:${ctx.company.id}`));
+    expect(await ctx.review.releaseHolds()).toEqual([]);
+    expect(await holdView(ctx.db, id)).not.toBeNull();
+    // Both: released, and the held merge goes on by itself.
+    await ctx.db.update(runners).set({ imageCommit: FIX }).where(eq(runners.companyId, ctx.company.id));
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+  });
 });
 
 describe("a ticket marked as fixing the merge check holds other approved work (criterion 2)", () => {

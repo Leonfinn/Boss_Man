@@ -416,8 +416,10 @@ If it is still not quiet 30 minutes after approval (or the host holds a sent req
 ### Restarts, main moving, stale reports
 
 - A restart or leader change keeps the wait: the row is in the database, the deadline is an absolute time and the card's dedupe key names the deadline, so no second card.
-- If main moves on while it waits, the approval lapses (the host deploys only the tip, BOS-124); the owner is told and approves the new offer.
-- Safety cap: a soft hold older than 3 hours, in any phase, lifts itself and pages the owner.
+- If main moves on while it waits, the approval stands (BOS-1805): the request names the approved commit and the host deploys the newest checked commit on main from it (BOS-753). Before BOS-1805 the approval lapsed with only a quiet note, which is how the owner's "Deploy" of 18 Nov 14:37 was never sent.
+- A second approval while one waits for quiet replaces it (same place in the wait). One made while an update is with the host or in its standby window is refused with the reason, and its card stays open.
+- Safety cap: a soft hold older than 3 hours, in any phase, lifts itself and pages the owner; an approval it never sent also wakes the CEO.
+- A sent update that leaves the live commit where it was (refused, failed, switched back, nothing new) is told to the owner as before and wakes the CEO with the host's message.
 - Last resort, if the hold ever sticks: delete the `deploy_wait` row from `settings`. Nothing else holds state.
 
 ### The host's memory floor (`scripts/host-deployer.sh`)

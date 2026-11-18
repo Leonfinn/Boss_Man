@@ -1139,6 +1139,7 @@ export async function buildApp(opts: AppOptions) {
     runnerCardOpen: () => selfDeploy.runnerCardOpen(),
     drainOn: async () => !!(await getHold(db)),
     notify: (n) => notes.notify(n),
+    tellCeo: (note) => selfDeploy.tellCeo(note),
     released: async () => {
       await review.gatePump();
       await checks.sweep();
