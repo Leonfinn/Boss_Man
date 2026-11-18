@@ -376,7 +376,18 @@ export class Workspaces {
       mkdirSync(this.reposRoot(), { recursive: true });
       place = {};
     }
-    const extra = { ...opts.env, ...place };
+    const extra: Record<string, string> = { ...opts.env, ...place };
+    // Tests only (BOS-1761): BOSSMAN_GIT_NO_MAINTENANCE=1 in the process env turns git's detached auto-maintenance off, which can
+    // delete empty object folders under a running merge-tree. Never set on the real runner, so production git is unchanged.
+    if (this.baseEnv.BOSSMAN_GIT_NO_MAINTENANCE === "1") {
+      let n = Number(extra.GIT_CONFIG_COUNT) || 0;
+      for (const [k, v] of [["gc.auto", "0"], ["maintenance.auto", "false"]] as const) {
+        extra[`GIT_CONFIG_KEY_${n}`] = k;
+        extra[`GIT_CONFIG_VALUE_${n}`] = v;
+        n++;
+      }
+      extra.GIT_CONFIG_COUNT = String(n);
+    }
     // A clone is always fenced. So is any ticket folder of a runner that makes clones, whatever its .git now is: an agent that swaps the clone's .git for a pointer at a git dir it controls would otherwise move the runner's git out of the fence.
     if (this.fenceCloneGit && opts.cwd && opts.repo && (clone || this.newCopiesAreClones())) return this.fencedGit(args, opts.cwd, opts.repo, extra, opts.reads);
     const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(extra) };

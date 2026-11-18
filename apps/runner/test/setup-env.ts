@@ -7,7 +7,9 @@ delete process.env.BOSSMAN_SCAN_SCRIPT;
 // Git's automatic maintenance runs detached after a commit or fetch and can still be writing (or pruning empty object
 // folders) when a test deletes or reads its temp repo: ENOTEMPTY on removal, "unable to create temporary file" in
 // merge-tree (BOS-1761, BOS-1709). No test needs it, so every git a test starts runs with it off. Workspaces adds its
-// own GIT_CONFIG_* entries after these, so the two lists don't clash.
+// own GIT_CONFIG_* entries after these, so the two lists don't clash. Workspaces builds its git env from scratch (it never
+// reads these), so BOSSMAN_GIT_NO_MAINTENANCE tells it to add the same two settings (the first fix missed this, BOS-1761).
+process.env.BOSSMAN_GIT_NO_MAINTENANCE = "1";
 Object.assign(process.env, {
   GIT_CONFIG_COUNT: "2",
   GIT_CONFIG_KEY_0: "gc.auto",
