@@ -22,12 +22,8 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
-<<<<<<< HEAD
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
-=======
-import { addTicketDependency, blockedHolds, openBlockers, openCardIds } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent } from "./services/blocked-who-acts.js";
->>>>>>> origin/main
 import { OWNER_WAIT_REFUSAL, WAIT_LINK_REFUSAL, ticketHasOpenCard, waitsForNote, waitsOnOwnerNote } from "./services/owner-todo.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";

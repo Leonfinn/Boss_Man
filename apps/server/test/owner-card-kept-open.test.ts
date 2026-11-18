@@ -1,8 +1,11 @@
 // BOS-1755: an owner-only card the owner may be reading never vanishes. On 17 Nov a no-code ticket went to done
 // with its owner_choice card open, and the stale-card clean-up withdrew the card with no word.
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { issueRunToken } from "../src/mcp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, tickets } from "../src/db/schema.js";
@@ -84,6 +87,29 @@ describe("owner-only cards outlive their ticket (BOS-1755)", () => {
       expect((await cardOf(c, q.id)).status).toBe("answered");
     });
   }
+
+  it("set_ticket_state done is refused while the ticket's own owner-only card is open, and allowed once answered or when cancelled", async () => {
+    const c = (ctx = await setup());
+    await c.app.listen({ host: "127.0.0.1", port: 0 });
+    const t = await c.ticket("Research", true);
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    const q = await ownerChoice(c, t.id);
+    const token = await issueRunToken(c.db, { companyId: c.company.id, agentId: c.worker.id, runId: randomUUID() });
+    const mcp = new Client({ name: "test", version: "0" });
+    await mcp.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(c.app.server.address() as { port: number }).port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    try {
+      const text = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+      const refused = await mcp.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Research finished." } });
+      expect(text(refused)).toContain(`Card ${q.id} is the owner's question`);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("review");
+      // Once the owner has answered, nothing holds the ticket and the same move goes through.
+      await c.db.update(decisions).set({ status: "answered", answer: "Jenkins" }).where(eq(decisions.id, q.id));
+      const ok = await mcp.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Closed on the owner's answer." } });
+      expect(text(ok)).not.toContain("is the owner's question");
+    } finally {
+      await mcp.close();
+    }
+  });
 
   it("a merged code ticket's unanswered owner-only card is not closed by the 'is merged' row", async () => {
     const c = (ctx = await setup());
