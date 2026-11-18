@@ -34,10 +34,10 @@ Plan on 16 GB of memory for one company with Boss Man's default settings. 8 GB c
 - a 64-bit Linux machine with Docker Engine and Docker Compose v2 (check with `docker compose version`)
 - `git`, `openssl` and `curl` on that machine
 - a GitHub or Gitea account, for the repositories your agents work in
-- an AI account: a Claude or ChatGPT plan, an Anthropic key, or any OpenAI-compatible API key, such as OpenRouter, Synthetic or Ollama. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
+- an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
 - a computer with a web browser on the same network
 
-Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine. Docker Desktop on Mac and Windows isn't supported yet. Both safety features should work on Docker Desktop 4.60 or newer, and we're testing it.
+Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**. Docker Desktop on Mac and Windows isn't supported yet.
 
 The commands are for a root shell. On a normal Linux machine, run them as root or put `sudo` in front.
 

@@ -16,7 +16,7 @@ Each agent is a session of Claude Code, Codex or OpenCode with a role, instructi
 
 ## The runner
 
-The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. Agents work on a separate copy of the repository for each task.
+The runner is the container where a company's agents work. Each company has one. It connects out to the Boss Man server, so it needs no open ports. Agents work on a separate copy of the repository for each task. You can add check workers on other machines to run checks.
 
 ## Projects and tasks
 
@@ -67,7 +67,7 @@ Decisions is the page where Boss Man asks you things. Plans to approve, permissi
 
 ## Reviews and the merge queue
 
-When an agent finishes a task, another agent reviews it. Approved work joins the merge queue, where Boss Man runs the project's checks and merges it if they pass. High and critical work also needs your sign-off.
+When an agent finishes a task, another agent reviews it. Approved work joins the merge queue, where Boss Man runs the project's checks and merges it if they pass. By default, high and critical work also needs your sign-off, and you approve its plan first. Change this in **Settings › Reviews**.
 
 ![A task's path: it starts in the backlog, is built by an agent, is reviewed by another agent, goes through the merge queue and ends as done.](/img/tickets-path.svg =1160x560 narrow=/img/tickets-path-narrow.svg:360x1016 "A task's path from backlog to done.")
 
