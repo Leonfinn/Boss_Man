@@ -170,7 +170,7 @@ for (const copies of ["worktree", "clone"] as const) {
     it("gives a copy made before BOS-853 (no origin view yet) the same on its next run, with no manual step", async () => {
       const { url, ws, spec, dir, repo } = await setup();
       // What today's code leaves: the copy's origin is the upstream address and there is no origin view.
-      rmSync(ws.originViewDir(repo), { recursive: true, force: true });
+      rmSync(ws.originViewDir(repo), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       expect(ws.copyGitConfig(ids.project)).toEqual([]);
       const tip = commitUpstream(url, "v2");
       await ws.ensure(spec);

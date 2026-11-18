@@ -17,6 +17,7 @@ import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisi
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
+import { CHECK_REPORTED_REASON, reportCheckTicket } from "./after-merge-check-tickets.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { agentWipHold, oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
@@ -191,6 +192,8 @@ export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, backg
 const CHECK_RESULT_REASON = "check_result";
 /** Reasons whose older unstarted copies for one agent and ticket are dropped for the newest (BOS-1555). */
 const SUPERSEDED_REASONS = [CHECK_RESULT_REASON, "check due", "checking an old card"];
+/** BOS-1791: wakes that hand a ticket to its assignee; dropped when the ticket was parked or reassigned after they were queued. */
+const PARKED_DROP_REASONS = new Set(["assigned", "check due", CHECK_RESULT_REASON, "unblocked", "chased", "idle slot", "idle agents", "spare capacity", "urgent idle"]);
 const SUPERSEDED_WAKE_REASON = "replaced by a newer wake for the same ticket";
 /** Wakes that start an agent on a new ticket; they wait while the agent has a check result to pick up (BOS-1555). */
 const NEW_TICKET_REASONS = ["assigned", "idle slot", "idle agents", "spare capacity", "urgent idle"];
@@ -972,6 +975,21 @@ export function schedulerService(
       .where(and(eq(wakes.ticketId, w.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
     if (!finishedSince(waiting, t)) return null;
     return { finished: true, ids: waiting.map((x) => x.id).filter((id) => id !== w.id) };
+  }
+
+  /**
+   * BOS-1791: why a wake queued for an agent no longer has a ticket to start, or null. The CEO parks a ticket
+   * (unassigned, in Backlog) or hands it to another agent; an "assigned" or "check due" wake queued earlier
+   * must not pull it out of Backlog or run the old agent on it. Only boss-started wakes of the kinds below:
+   * a person's wake, a review, a watch or a card is left to its own handling.
+   */
+  async function parkedTicketWake(w: typeof wakes.$inferSelect): Promise<string | null> {
+    if (!w.ticketId || !PARKED_DROP_REASONS.has(w.reason) || fromOwner(w)) return null;
+    const [t] = await db.select({ state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, w.ticketId));
+    if (!t) return null;
+    if (!t.assignee && (t.state === "backlog" || t.state === "ready")) return "the ticket was parked or unassigned, so there was nothing to do";
+    if (t.assignee && t.assignee !== w.agentId && (t.state === "backlog" || t.state === "ready" || t.state === "in_progress")) return "the ticket was given to another agent, so there was nothing to do";
+    return null;
   }
 
   /**
@@ -1873,6 +1891,13 @@ export function schedulerService(
           result.dropped += 1 + finished.ids.length;
           continue;
         }
+        // BOS-1791: a wake queued before the ticket was parked or reassigned never starts it.
+        const parked = await parkedTicketWake(w);
+        if (parked) {
+          await db.update(wakes).set({ status: "dropped", statusReason: parked }).where(eq(wakes.id, w.id));
+          result.dropped++;
+          continue;
+        }
         // A stale nudge or other agent-started wake with no ticket is dropped, not delivered (BOS-1136).
         const stale = await staleAgentWake(w);
         if (stale) {
@@ -2216,6 +2241,10 @@ export function schedulerService(
       // A ticket finishing may make "waiting on it" notes and cards out of date (BOS-123).
       const [finished] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
       if (finished) await ownerActed(db, { companyId: finished.companyId, ticketIds: [ticketId], reason: "a ticket it waited on finished", now: now(), wake: (input) => this.notify(input.agentId, input) });
+      // BOS-1794: a check ticket writes its result on the criterion it was split out for before the parent is released,
+      // so the parent's "unblocked" note already reads the recorded verdict.
+      const reported = await reportCheckTicket(db, ticketId, now());
+      if (reported) await this.notify(reported.agentId, { ticketId: reported.ticketId, reason: CHECK_REPORTED_REASON, note: reported.note, causedByRunId });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
       for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
       // The wiki maintainer files what finished work produced (R73). One waiting run covers

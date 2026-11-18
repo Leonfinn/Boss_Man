@@ -3,13 +3,13 @@ import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
-import { selfDeployService } from "../src/services/self-deploy.js";
+import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
-import { companies, activity, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, activity, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -325,8 +325,10 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const [runner] = await c.open();
     expect(runner).toMatchObject({ options: ["Update runners", "Not now"], context: { type: "self_deploy", target: "runner", commit: B } });
     expect(runner!.question).toContain(`This rebuilds the runner containers from the version Boss Man runs (${B.slice(0, 8)}); the server itself doesn't change.`);
-    // The runner card can list the commits too, when the host has reported them.
-    expect((runner!.context as { update: { total: number; otherCommits: string[] } }).update).toMatchObject({ total: 1, otherCommits: ["Add rate limiting"] });
+    // BOS-1805: the host's offer (here still listing "Add rate limiting") is what the next SERVER deploy brings; the runner
+    // image is built from the live commit, so the runner card never lists that range as its own.
+    expect((runner!.context as { update?: unknown; changes?: unknown }).update).toBeUndefined();
+    expect((runner!.context as { changes?: unknown }).changes).toBeUndefined();
     expect((await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
     expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: true, pending: true, status: { result: "deployed" } });
@@ -1557,6 +1559,73 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     const all = await c.db.select().from(notifications);
     expect(all.filter((n) => n.requested === "page")).toHaveLength(1);
     expect(all.find((n) => n.decisionId === again!.id)).toMatchObject({ requested: "ask", title: HEADING });
+  });
+
+  // BOS-1805 (18 Nov 14:59): a runner card for the live 84aa64cc was headed "Urgent: contains the fix for … (BOS-1762)"
+  // because the heading was read from the host's offer (what the NEXT server deploy brings), and BOS-1762 had only just
+  // reached main as 7704a0c6. The owner rebuilt the runners and nothing changed.
+  it("a runner card is headed only by a fix its image contains, never by the server offer's range (BOS-1805)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const MERGE_FIX = "Merges keep re-testing every time main moves";
+    // Merged as C (runner code), waiting to go live: not done, and no setup step but the runner update.
+    const [fix] = await c.db
+      .insert(tickets)
+      .values({ companyId: co!.id, projectId: p!.id, title: "Merge gate fix", number: 1762, systemState: "blocked", mergeCommit: C, touchesRunner: true, mergedAt: new Date(), fixesLive: MERGE_FIX })
+      .returning();
+    const heading = `Urgent: contains the fix for ${MERGE_FIX} (BOS-1762)`;
+
+    // The server runs A; the fix is in the offer A..C only. The runner card is for A, whose image lacks the fix.
+    await c.available({ deployed: A, tip: C, commits: [{ sha: C, subject: `Merge "Merge gate fix" (${fix!.id})` }] });
+    const r = await c.selfDeploy.updateRunners();
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.id, (r as { decisionId: string }).decisionId));
+    expect(card!.context).toMatchObject({ target: "runner", commit: A });
+    expect(card!.question).not.toContain("Urgent");
+    expect((card!.context as { urgent?: unknown }).urgent).toBeUndefined();
+
+    // Once the server runs C, the runner card for C builds the fix into the image: now it carries the heading.
+    await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Not now" });
+    await c.available({ deployed: C, tip: C, commits: [] });
+    const r2 = await c.selfDeploy.updateRunners();
+    const [card2] = await c.db.select().from(decisions).where(eq(decisions.id, (r2 as { decisionId: string }).decisionId));
+    expect(card2!.context).toMatchObject({ target: "runner", commit: C });
+    expect(card2!.question.split("\n\n")[0]).toBe(`${heading}.`);
+  });
+});
+
+// BOS-1805 (18 Nov 14:37): the owner answered "Deploy" and the live commit never moved, with nobody told why.
+describe("an approved server update that leaves the live commit unchanged (BOS-1805)", () => {
+  it("tells the owner and wakes the CEO with the host's reason", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "rejected", message: "Refused: another deploy ran 3 minutes ago. Try again in 7 minute(s).", from_commit: A, to_commit: B });
+    await c.selfDeploy.sync();
+    await c.selfDeploy.sync();
+    expect((await c.db.select().from(notifications)).find((n) => n.title === `Update refused: ${B.slice(0, 8)}`)?.body).toContain("Try again in 7 minute(s)");
+    const told = (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === DEPLOY_UNCHANGED_REASON);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.note).toContain(`card ${d!.id.slice(0, 8)}`);
+    expect(told[0]!.note).toContain('the host reported "rejected": Refused: another deploy ran 3 minutes ago.');
+  });
+
+  it("a deploy that changed the live commit wakes nobody", async () => {
+    const c = (ctx = await setup());
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "deployed", message: "Deployed aaaaaaaa to bbbbbbbb." });
+    await c.selfDeploy.sync();
+    expect((await c.db.select().from(wakes)).filter((w) => w.reason === DEPLOY_UNCHANGED_REASON)).toHaveLength(0);
   });
 });
 

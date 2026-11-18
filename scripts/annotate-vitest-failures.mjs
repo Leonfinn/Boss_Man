@@ -16,7 +16,8 @@ export function failureSummary(report) {
   return [...bad, ...lost].slice(0, 12).join(" | ").replace(/[\r\n%]/g, " ").slice(0, 1500);
 }
 
-export function annotation(file, title) {
+// cleanTitle names the plain notice written when the report holds no failed test (another package failed).
+export function annotation(file, title, cleanTitle = "no failed test") {
   let report;
   try {
     report = JSON.parse(readFileSync(file, "utf8"));
@@ -29,9 +30,16 @@ export function annotation(file, title) {
   } catch {
     return `::error title=${title}::the JSON report had no test results`;
   }
-  return `::error title=${title}::${summary || "no failed test in the report"}`;
+  if (!summary) {
+    // Only a report that says success, with files in it, proves this package passed. A report with
+    // success:false (unhandled errors, collection failures) or no files names no test but is not clean.
+    const clean = report.success === true && report.testResults.length > 0;
+    if (clean) return `::notice title=${cleanTitle}::the runner report shows no failed test; look at the other packages' test output`;
+    return `::error title=${title}::the runner report says it failed (or has no test files) but names no failed test`;
+  }
+  return `::error title=${title}::${summary}`;
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  console.log(annotation(process.argv[2], process.argv[3] || "tests failed"));
+  console.log(annotation(process.argv[2], process.argv[3] || "tests failed", process.argv[4] || undefined));
 }

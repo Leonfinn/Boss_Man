@@ -37,7 +37,17 @@ async function setup(features: string[]) {
 describe("the check queue switch (BOS-798)", () => {
   it("is legacy with one slot until the owner changes it, and names a connected runner too old to run queued checks", async () => {
     const c = (ctx = await setup([]));
-    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, effectiveSlots: 1, runnerSlotsReported: null, runner: null, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"], train: false, runnersTooOldForTrain: ["App Co"], runnerPolicy: { takes: "both", mergeKept: 0 }, workers: [] });
+    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, effectiveSlots: 1, runnerSlotsReported: null, runner: null, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"], train: false, runnersTooOldForTrain: ["App Co"], laneAgeMinutes: 120, defaultLaneAgeMinutes: 120, runnerPolicy: { takes: "both", mergeKept: 0 }, workers: [] });
+  });
+
+  it("background lane wait (BOS-1803): 120 min by default, saved when sent, left alone by a page that doesn't send it, 0 to 1440", async () => {
+    const c = (ctx = await setup(["check-jobs", "merge-base"]));
+    const put = (body: object) => c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 2, ...body });
+    expect((await put({ laneAgeMinutes: 45 })).json()).toMatchObject({ laneAgeMinutes: 45 });
+    expect((await put({})).json()).toMatchObject({ laneAgeMinutes: 45 });
+    expect((await put({ laneAgeMinutes: 0 })).json()).toMatchObject({ laneAgeMinutes: 0 });
+    for (const bad of [-1, 1441, 2.5]) expect((await put({ laneAgeMinutes: bad })).statusCode).toBe(400);
+    expect(await c.queue.laneAge()).toBe(0);
   });
 
   it("runner split (BOS-1602): both kinds, none kept until set; saved when sent, left alone by a page that doesn't send it; kept can't exceed the slots", async () => {

@@ -113,17 +113,17 @@ describe("Stuck-merges banner", () => {
     expect(banner.textContent).toContain("Merges are stuck: FERN-10 has waited 16 h to merge");
     expect(banner.textContent).toContain("Waiting: no runner is connected.");
     expect(banner.textContent).toContain("Fix: Start the runner container on your host.");
-    expect(banner.textContent).toContain("2 more are waiting behind it.");
+    expect(banner.textContent).toContain("2 more behind it.");
     expect(within(banner).getByRole("link").getAttribute("href")).toBe("#/merge-queue/c1");
   });
 
   it("BOS-1715: one queue state, badge and banner: 31 in the queue, 21 waiting for Boss Man, no clear time yet", () => {
     const line: MergeLine = { state: "over_capacity", waiting: 21, inQueue: 31, etaMinutes: null, lastLandedAt: null, advice: null };
-    const v = view({ waitingCount: 31, line });
+    const v = view({ waitingCount: 31, lineCount: 31, line });
     render(<MergesStuckBanner stuck={null} slow={slowSummary(v)} companyId="c1" />);
     const text = screen.getByRole("status").textContent ?? "";
-    // The sidebar badge shows waitingCount (31); the banner names the same 31 and says why its own count is lower.
-    expect(text).toContain(`21 merge checks waiting (${v.waitingCount} in the queue; the other 10 wait on an agent or you)`);
+    // The sidebar badge shows lineCount (31); the banner names the same 31 under the same label, and its own count under another (R43).
+    expect(text).toContain(`21 for Boss Man to merge (${v.lineCount} in the merge line; the rest are merging now or with an agent or you)`);
     expect(text).toContain("estimating the time to clear…");
     expect(text).not.toMatch(/about .* to clear/);
   });
@@ -132,7 +132,7 @@ describe("Stuck-merges banner", () => {
     expect(stuckSummary(view({ line: slowLine }))).toBeNull();
     render(<MergesStuckBanner stuck={null} slow={slowSummary(view({ line: slowLine }))} companyId="c1" />);
     const banner = screen.getByRole("status");
-    expect(banner.textContent).toContain("Merging, but slowly: 17 merge checks waiting, about 4 h 15 min to clear at the current rate, last landed");
+    expect(banner.textContent).toContain("Merging, but slowly: 17 for Boss Man to merge, about 4 h 15 min to clear at the current rate, last landed");
     expect(banner.textContent).not.toMatch(/stuck/i);
     expect(banner.className).toContain("merges-banner-slow");
   });

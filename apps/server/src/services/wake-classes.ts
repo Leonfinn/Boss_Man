@@ -28,12 +28,16 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "priority watch": "waiting",
   // Merge stall (BOS-1515): the CEO is told the merge train has an empty seat or no landing while tickets wait. Never dropped.
   "merge line stalled": "waiting",
+  // The start brake has no limit and the merge line has grown for an hour (R47): the CEO hears once per stretch. Never dropped.
+  "merge start brake off": "waiting",
   // Nothing can start (BOS-1662): free slots and idle agents, but every open ticket waits on another. The CEO must hear it.
   "nothing startable": "waiting",
   // A planned or urgent ticket was moved off its plan or backwards by someone else (BOS-1509). The CEO must hear it.
   "ticket moved off plan": "waiting",
   // A ticket parked by date three times in a row with no link (BOS-1679): the CEO must hear it. Never dropped.
   "parked by date again and again": "waiting",
+  // A split-out after-merge check ticket closed and its result was written on this ticket (BOS-1794). Never dropped.
+  "after-merge check reported": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",
@@ -62,6 +66,10 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "github security": "scheduled",
   // The runner-update answer is "can't tell" (BOS-1648): a fault the CEO must hear, once per cause, never dropped.
   "runner update: can't tell": "scheduled",
+  // The live commit still can't be placed after the missed-merge sweep (BOS-1645): once per commit, never dropped.
+  "live commit not placed": "scheduled",
+  // The owner's approved server update left the live commit unchanged (BOS-1805): once per deploy, never dropped.
+  "deploy left the server unchanged": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

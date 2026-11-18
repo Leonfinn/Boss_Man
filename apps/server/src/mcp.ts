@@ -21,11 +21,13 @@ import { record } from "./services/activity.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
+import { GO_LIVE_UNMARKED, goLiveProofRefusal, rollbackLine, rollbackRefusal, sayGoLive } from "./services/go-live-card.js";
 import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { ceoPlanText } from "./services/ceo-plan.js";
 import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_HANDS_HINT, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
+import { LINT_OVERRIDE_HELP, lintOverrideSchema } from "./services/lint-override.js";
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
@@ -44,7 +46,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -59,7 +61,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
-import { ownerFactHeld, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
+import { ownerFactHeldLive, type GitTokenProbe, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
 import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
@@ -186,6 +188,8 @@ export type Services = {
   selfDeployCards?: () => Promise<SelfDeployFacts>;
   /** The company's embedder for owner-answer meaning search (BOS-1593); absent or null: word search alone. */
   ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
+  /** Live read of whether the git token can read GitHub Actions (R34); absent where there is no git host. */
+  gitTokenProbe?: GitTokenProbe;
 };
 
 /**
@@ -234,7 +238,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests, ownerAnswerEmbedder }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests, ownerAnswerEmbedder, gitTokenProbe }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -316,7 +320,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async ({ ticketId, text: body, notAnAsk, quotesUrgent }) => {
       const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, body, ticketId);
       if (urgentHold) return fail(urgentHold);
-      const factHold = await ownerFactHeld(db, scope.companyId, body); // BOS-1596
+      const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [body]); // BOS-1596, R34
       if (factHold) return fail(factHold);
       // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
       // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
@@ -388,7 +392,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         ownerMustDo: z.boolean().optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional().describe(`The owner's steps, one per item. ${HOST_TOKEN_HELP} A vague host step (".env" with no path, "restart the add-on" with no command or Settings → path) is refused (R17). A step on someone else's website (a URL not on this server, or a vendor console such as Cloudflare or GitHub) must say where its clicks came from (R19): "seen: <ticket image id>" for a screenshot under 30 days old, or "not seen: <doc URL>, <YYYY-MM-DD>"; a card with a not-seen step must also offer the option "My screen looks different (I'll attach a screenshot)". Such a card opens with a checkpoint step naming something concrete the owner will see ('You should see "holidayhours" listed'), and offers that option as the stop. For 30 days after a site's docs didn't match the owner's screen, a not-seen step for that site is refused: ask the owner for one screenshot of their starting page first and use seen:.`),
         stillNeeded: z.string().max(500).optional(),
-        lintOverride: z.string().max(500).optional(),
+        // R38: a card that asks the owner to put something live (publish, deploy, release, go live, production).
+        goLive: z.boolean().optional().describe("Set true when the card asks the owner to put something live (publish, deploy, release, go live, production). With blocksTicketId it is refused while that ticket's before-merge checks are unreported or a page clause lacks its cited screenshot. Needs rollback. Not for Boss Man's own server deploy cards."),
+        rollback: z.string().max(500).optional().describe("Required with goLive: the exact undo, starting \"tested: <when, how>\" or \"not tested: <docs URL>\". A not-tested undo shows the owner \"not tried yet\"; \"in seconds\" or \"instant\" is refused unless tagged tested."),
+        lintOverride: lintOverrideSchema.optional().describe(LINT_OVERRIDE_HELP),
         setsUp: z.enum(ADDONS).optional(),
         // The host a CEO-raised card is setting up, which Boss Man has no record for yet (DR-046): only that one name may be unrecorded.
         newHost: z.string().min(1).max(64).optional(),
@@ -416,7 +423,25 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+      // R38: a go-live card states its undo with its source, and (below) waits for its ticket's preview proof.
+      if (goLive) {
+        const bad = rollbackRefusal(rollback);
+        if (bad) return fail(bad);
+        question = `${question}\n\n${rollbackLine(rollback!)}`;
+        if (question.length > 1500) return fail("The question plus the undo line is too long: shorten the question or the rollback.");
+        if (blocksTicketId) {
+          const [g] = await db.select({ criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+          if (g) {
+            const shots = await db.select({ id: ticketImages.id }).from(ticketImages).where(eq(ticketImages.ticketId, blocksTicketId));
+            const held = goLiveProofRefusal(readCriteria(g.criteria), g.note, shots.map((i) => i.id));
+            if (held) return fail(held);
+          }
+        }
+      } else if (rollback) {
+        return fail("rollback goes with goLive: true (a card that asks the owner to put something live).");
+      }
+      const unmarkedGoLive = !goLive && sayGoLive(question, ...(steps ?? [])) ? GO_LIVE_UNMARKED : "";
       let replaces: string | undefined;
       if (givenReplaces) {
         const r = await resolveCardId(db, scope.companyId, givenReplaces);
@@ -432,7 +457,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       // BOS-1596: owner-facing text the record contradicts (an installed check worker when none ever connected) is held with the live value.
-      const factHold = await ownerFactHeld(db, scope.companyId, question, ...options, ...(steps ?? []));
+      const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [question, ...options, ...(steps ?? [])]);
       if (factHold) return fail(factHold);
       if (holdsMerge && !blocksTicketId) return fail("holdsMerge holds a ticket's merge, so it goes with blocksTicketId set to that ticket.");
       // A card that records an after-merge check can only be answered once the merge is live: holding that merge would never end.
@@ -454,7 +479,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (reviewWrite) return fail(reviewWrite);
         // BOS-1021: no owner card on a merged ticket until the merge is running. Judged from merge order, so a
         // ticket merged before the wait existed is covered too.
-        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, blocksTicketId));
+        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, deploysNothing: tickets.deploysNothing }).from(tickets).where(eq(tickets.id, blocksTicketId));
         const notLive = m ? await goLiveWaitOf(db, m) : null;
         // Only a card that settles an after-merge criterion is held (it can't pass before the merge runs; the
         // criterion check below holds it too). Any other card is posted with a server-written "not live" line.
@@ -520,7 +545,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // Say now, not after the owner answers, whether this card's answer can settle an after-merge check (BOS-963):
       // the answer records against the criteria the card names, so a card worded differently would record nothing.
       const settle = blocksTicketId ? await afterMergeCardNote(db, blocksTicketId, question, options, criterionIndexes) : "";
-      const extra = `${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${settle ? `\n\n${settle}` : ""}${links ? `\n\n${links}` : ""}${askNotes ? `\n\n${askNotes}` : ""}`;
+      const extra = `${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${settle ? `\n\n${settle}` : ""}${links ? `\n\n${links}` : ""}${unmarkedGoLive ? `\n\n${unmarkedGoLive}` : ""}${askNotes ? `\n\n${askNotes}` : ""}`;
       if (d.withCeo) return text(`Decision ${d.id} went to the CEO first, because it needs none of the owner's hands, money, secrets or sign-off. If the CEO doesn't settle it within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it reaches the owner. ${OWNER_HANDS_HINT} You'll be woken with the answer; don't wait in this turn.${extra}`);
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${extra}`);
     },
@@ -841,7 +866,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       },
     },
     async (input) => {
-      const factHold = await ownerFactHeld(db, scope.companyId, input.title, input.body); // BOS-1596
+      const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [input.title, input.body]); // BOS-1596, R34
       if (factHold) return fail(factHold);
       if (input.ticketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
@@ -1501,6 +1526,8 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         assigneeAgentId = a.id;
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
+      const badPage = pageClauseRefusal(input.acceptanceCriteria ?? []);
+      if (badPage) return fail(badPage);
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);

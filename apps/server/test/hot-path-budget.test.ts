@@ -206,6 +206,37 @@ function judge(m: { blocks: number[]; refs: number[] }, limitMs: number) {
   return { ratio: median(m.blocks.map((b, i) => b / (limitMs * scales[i]!))), scale: median(scales) };
 }
 
+// BOS-1801: the reference scale above still bounced merges at the gate (BOS-1711: board 229 ms vs 199; BOS-1762: board
+// 162 ms vs 162, after 30 min of check-all next to other checks). The gate log shows why no same-run baseline fixes it:
+// idle, board blocks 6x the reference scan (60 ms vs 10 ms); under that load it read 12x (162 ms vs 13.5 ms). The
+// reference is one short stall and the board route a longer one, and CPU sharing stretches a longer stall by more, so
+// the scale lags exactly when it matters. Tuning REF_TO_LIMIT again would only move the edge.
+// So a miss is re-measured instead. Every item is measured once; any item over its scaled limit is measured again
+// after the rest (later, so not inside the same burst of load), up to ATTEMPTS times in all, and fails only when
+// every attempt is over. What a real regression looks like: an item that is over on every attempt. The cases this
+// test exists for are far past that (the board self-join blocked 3.6 s against 244 ms; the BOS-643 freeze 3-4 s), and
+// a route that has slowly grown past its limit misses on every attempt on a quiet machine too. What it no longer
+// fails on: one item brushing its limit once while the machine is shared.
+const ATTEMPTS = 3;
+
+type Attempt = { m: Awaited<ReturnType<typeof measure>>; ratio: number; scale: number };
+
+/** Measures every item, re-measures those over their limit (up to `attempts` in all), and returns each item's attempts in order. An item passes when its last attempt is at most 1. */
+async function budgetCheck(entries: Array<[string, () => Promise<unknown>]>, limitOf: (name: string) => number, attempts = ATTEMPTS) {
+  const results = new Map<string, Attempt[]>();
+  let pending = entries;
+  for (let a = 0; a < attempts && pending.length > 0; a++) {
+    for (const [name, fn] of pending) {
+      const m = await measure(fn);
+      results.set(name, [...(results.get(name) ?? []), { m, ...judge(m, limitOf(name)) }]);
+    }
+    pending = pending.filter(([name]) => results.get(name)!.at(-1)!.ratio > 1);
+  }
+  return results;
+}
+
+const overEveryAttempt = (results: Map<string, Attempt[]>) => [...results].filter(([, tries]) => tries.at(-1)!.ratio > 1).map(([name]) => name);
+
 let seqNo = 0;
 const ingest = (event: RunnerEvent) => ctx.runners.ingest(ctx.runner, { seq: ++seqNo + 1_000_000, at: new Date().toISOString(), event });
 
@@ -291,18 +322,46 @@ describe("hot-path budget (BOS-653)", () => {
     expect(yielding.block).toBeLessThan(LIMIT_MS);
   });
 
+  // BOS-1801: proves the re-measure on fake items. The limit here is a fifth of LIMIT_MS so the spins stay short; the
+  // over item spins 3x its limit at the 2.5x load cap, so it is over on any machine.
+  it("re-measures a miss: one that clears later passes, one over on every attempt fails", async () => {
+    const limit = LIMIT_MS / 5;
+    const spin = (ms: number) => {
+      const end = performance.now() + ms;
+      while (performance.now() < end);
+    };
+    let calls = 0;
+    const perAttempt = ITERATIONS + 1; // measure() runs one warm-up, then ITERATIONS samples
+    const results = await budgetCheck(
+      [
+        ["over once, then fine", async () => spin(++calls <= perAttempt ? limit * MAX_LOAD_SCALE * 3 : 1)],
+        ["over every time", async () => spin(limit * MAX_LOAD_SCALE * 3)],
+        ["always fine", async () => spin(1)],
+      ],
+      () => limit,
+    );
+    expect(results.get("over once, then fine")!.map((a) => a.ratio > 1)).toEqual([true, false]);
+    expect(results.get("over every time")!.map((a) => a.ratio > 1)).toEqual([true, true, true]);
+    expect(results.get("always fine")!.length).toBe(1);
+    expect(overEveryAttempt(results)).toEqual(["over every time"]);
+  }, 60_000);
+
   it(`keeps every item under ${LIMIT_MS} ms of event-loop block`, async () => {
-    const over: string[] = [];
-    const measured: Array<[string, Awaited<ReturnType<typeof measure>>]> = [];
-    for (const [name, fn] of Object.entries(list)) measured.push([name, await measure(fn)]);
-    // Each sample is judged against the reference readings taken right next to it.
-    for (const [name, m] of measured) {
+    const limitOf = (name: string) => (KNOWN_SLOW[name] ? KNOWN_SLOW_CEILING_MS : LIMIT_MS);
+    // Each sample is judged against the reference readings taken right next to it; a miss is re-measured (BOS-1801).
+    const results = await budgetCheck(Object.entries(list), limitOf);
+    const pct = (a: Attempt) => `${(a.ratio * 100).toFixed(0)}%`;
+    for (const [name, tries] of results) {
       const slow = KNOWN_SLOW[name];
-      const base = slow ? KNOWN_SLOW_CEILING_MS : LIMIT_MS;
-      const { ratio, scale } = judge(m, base);
-      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms   load x${scale.toFixed(2)}   ref ${median(m.refs).toFixed(0)} ms (x${(m.block / median(m.refs)).toFixed(1)})   ${(ratio * 100).toFixed(0)}% of limit${slow ? `   (known slow, ${slow}; ceiling ${base} ms)` : ""}`);
-      if (ratio > 1) over.push(`${name}: ${m.block.toFixed(0)} ms (limit ${(base * scale).toFixed(0)} at median load x${scale.toFixed(2)}, ${(ratio * 100).toFixed(0)}% of its scaled limit)`);
+      const { m, ratio, scale } = tries.at(-1)!;
+      const retried = tries.length > 1 ? `   (re-measured: ${tries.map(pct).join(", ")})` : "";
+      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms   load x${scale.toFixed(2)}   ref ${median(m.refs).toFixed(0)} ms (x${(m.block / median(m.refs)).toFixed(1)})   ${(ratio * 100).toFixed(0)}% of limit${slow ? `   (known slow, ${slow}; ceiling ${limitOf(name)} ms)` : ""}${retried}`);
     }
+    const over = overEveryAttempt(results).map((name) => {
+      const tries = results.get(name)!;
+      const { m, scale } = tries.at(-1)!;
+      return `${name}: over on all ${tries.length} attempts (${tries.map((a) => `${a.m.block.toFixed(0)} ms, ${pct(a)}`).join("; ")}); last ${m.block.toFixed(0)} ms vs limit ${(limitOf(name) * scale).toFixed(0)} at median load x${scale.toFixed(2)}`;
+    });
     expect(over).toEqual([]);
-  }, 90_000);
+  }, 120_000);
 });

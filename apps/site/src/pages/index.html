@@ -50,8 +50,8 @@ nav: home
       <li><h3>Ideas waiting their turn</h3><p class="wide-only">Add a task without choosing an agent and it waits in Backlog. Move it to Ready when it can start.</p><p class="phone-only">New tasks wait here until you move them to Ready.</p></li>
       <li><h3>Ready to start</h3><p>These tickets are ready for an agent to start.</p></li>
       <li><h3>Being worked on</h3><p>Each card shows the agent working on it. High and critical risk work carries a tag.</p></li>
-      <li><h3>Stuck, and saying why</h3><p>The card says whether it waits on a decision, another ticket or another company. The Scrum Master follows up tickets that stay stuck.</p></li>
-      <li><h3>Waiting for you</h3><p>Work that needs your answer or your sign-off. High and critical work does not merge until you approve it.</p></li>
+      <li><h3>Stuck, and saying why</h3><p>The card says whether it waits on a decision, another ticket or another company. If you hire a Scrum Master, it chases tickets that stay stuck.</p></li>
+      <li><h3>Waiting for you</h3><p>Work that needs your answer or your sign-off. By default, high and critical work does not merge until you approve it.</p></li>
     </ol>
   </div>
 </section>
@@ -68,7 +68,7 @@ nav: home
           <li><span class="tag" aria-hidden="true">?</span><div><h3>The question in plain words</h3><p>Each card is linked to the ticket it holds up, so you can read the background.</p></div></li>
           <li><span class="tag" aria-hidden="true">✓</span><div><h3>What the agent tried first</h3><p>The agent must say what it tried and why it needs you. Boss Man refuses a card that leaves this vague.</p></div></li>
           <li><span class="tag" aria-hidden="true">★</span><div><h3>Its recommendation</h3><p>Every question names the option the agent recommends.</p></div></li>
-          <li><span class="tag" aria-hidden="true">→</span><div><h3>Your answer</h3><p>Choose an option, write your own answer, or ask the CEO for more detail. The ticket it held up then carries on.</p></div></li>
+          <li><span class="tag" aria-hidden="true">→</span><div><h3>Your answer</h3><p>Choose an option, write your own answer, or ask the CEO for advice. The ticket it held up then carries on.</p></div></li>
         </ol>
         <p class="aside">Away from your desk? With the ntfy add-on, urgent cards reach your phone, and you can answer them in your phone's browser.</p>
       </div>
@@ -93,7 +93,7 @@ nav: home
       <li><p class="kicker">Feedback</p><h3>Every request in one place</h3><p>Paste in feedback, or let agents log what they hear. Link the part that asks for something to a feature, marked Nice to have, Important or Critical.</p></li>
       <li><p class="kicker">Priority</p><h3>A score you can follow</h3><p>Each feature is scored on demand and on your own criteria, then divided by effort. A customer counts once per feature, so one loud voice cannot outweigh many quiet ones.</p></li>
       <li><p class="kicker">Roadmap</p><h3>A roadmap tied to the tickets</h3><p>Put features in Now, Next or Later, under an objective or a dated milestone. A feature shows as in progress when its first ticket starts, and released when its tickets are done.</p></li>
-      <li><p class="kicker">Public roadmap</p><h3>A page for your users</h3><p>The feedback portal shows the features you choose as Under consideration, Planned or Released. Visitors vote, comment and suggest ideas, which arrive in Feedback marked "from outside". Anyone with its secret link can open it.</p></li>
+      <li><p class="kicker">Public roadmap</p><h3>A page for your users</h3><p>The feedback portal shows the features you choose as Under consideration, Planned or Released. Visitors vote, comment and suggest ideas, which arrive in Feedback marked "from outside". Anyone with its secret link can open it. You can ask visitors to confirm their posts by email.</p></li>
     </ol>
     <!--portal-->
     <div class="own-portal">
@@ -134,7 +134,7 @@ nav: home
       <ul>
         <li>Agents pick up tickets that are Ready and work on their own branches.</li>
         <li>They review each other's changes before anything merges.</li>
-        <li>A stuck ticket says what it is waiting for, and the Scrum Master chases it.</li>
+        <li>A stuck ticket says what it is waiting for. If you hire a Scrum Master, it chases the ticket.</li>
         <li>Anything that needs you waits in Decisions, and can reach your phone.</li>
       </ul>
     </div>
@@ -152,13 +152,13 @@ nav: home
       </figure>
       <div>
         <dl class="facts-list">
-          <div><dt>Reviews that match the risk</dt><dd>You choose who reviews work at each risk level. Low-risk work can need only one reviewer, such as a senior developer. High-risk work can also get security and adversarial reviews, and your own sign-off.</dd></div>
+          <div><dt>Reviews that match the risk</dt><dd>You choose who reviews work at each risk level. Low-risk work can need only one reviewer, such as a senior developer. High-risk work can also get security, infrastructure and adversarial reviews. By default you approve its plan first, and sign it off before it merges.</dd></div>
           <div><dt>Specs that get it right first time</dt><dd>Describe what you want in a few lines. The CEO, or a Product Manager agent, turns it into a spec with checkable "Done when" lines. Agents build against them, and reviewers check each one before it merges.</dd></div>
-          <div><dt>Permissions</dt><dd>Agents ask before they push, publish or delete, and commands no rule covers go to the CEO first, then to you.</dd></div>
-          <div><dt>Spending caps</dt><dd>Set a cost cap per task and a monthly cap per project, counted on pay-as-you-go spend.</dd></div>
+          <div><dt>Permissions</dt><dd>Agents ask you before they push, publish or delete data. Tools Boss Man does not recognise go to the CEO first, then to you.</dd></div>
+          <div><dt>Spending caps</dt><dd>Set a cost cap per task, and monthly spending limits per project, agent or company. Monthly limits count pay-as-you-go spend.</dd></div>
           <div><dt>What holds work up</dt><dd>The Plan page shows which tickets wait on which, and what to move first.</dd></div>
-          <div><dt>Your choice of models</dt><dd>Agents run Claude Code, Codex or OpenCode. Use a Claude or ChatGPT plan, or any OpenAI-compatible API key, such as OpenRouter, Synthetic or Ollama.</dd></div>
-          <div><dt>Add-ons when you want them</dt><dd>Phone notifications with ntfy, HTTPS from anywhere with Tailscale, and Penpot for designer agents.</dd></div>
+          <div><dt>Your choice of models</dt><dd>Agents run Claude Code, Codex or OpenCode. Use a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic.</dd></div>
+          <div><dt>Add-ons when you want them</dt><dd>Phone notifications with ntfy, HTTPS from anywhere with Tailscale, Penpot for designer agents, and a browser for agents that test your site.</dd></div>
           <div><dt>More than one company</dt><dd>Each company has its own agents, runner and secrets, and one company can ask another for work.</dd></div>
         </dl>
         <p class="all"><a class="textlink" href="/guides/">See everything in the guides</a></p>
@@ -185,7 +185,7 @@ nav: home
       <div class="arrows" aria-hidden="true"><div>code</div><div>prompts</div></div>
       <div class="out">
         <div><h3>Your git host</h3><p>GitHub or Gitea, with a token you make.</p></div>
-        <div><h3>Your AI accounts</h3><p>A Claude or ChatGPT plan, or any OpenAI-compatible key such as OpenRouter, Synthetic or Ollama. Billed to you.</p></div>
+        <div><h3>Your AI accounts</h3><p>A Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. Billed to you.</p></div>
         <div class="none"><h3>A Boss Man cloud</h3><p>There isn't one. Nothing passes through us.</p></div>
       </div>
     </div>
@@ -197,17 +197,17 @@ nav: home
   <div class="wrap install">
     <div>
       <h2>Install it on a Linux machine with Docker</h2>
-      <p class="intro">The install guide takes you from an empty machine to your first ticket, with a check after each step.</p>
+      <p class="intro">Two guides take you from an empty machine to your first task, with a check after each step: <a href="/guides/install-boss-man">Install Boss Man</a> (steps 1 to 6) and <a href="/guides/first-company-and-ticket">Your first company and task</a> (steps 7 to 12).</p>
       <ul class="need">
         <li>A 64-bit Linux machine with Docker Engine and Docker Compose v2. A home server or NAS works.</li>
         <li>A GitHub or Gitea account for the code your agents work on.</li>
-        <li>A Claude or ChatGPT plan, or any OpenAI-compatible API key, such as OpenRouter, Synthetic or Ollama.</li>
+        <li>A Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic.</li>
         <li>To be happy pasting commands into a terminal.</li>
       </ul>
       <div class="why">
         <h3>Why Linux?</h3>
         <p>Boss Man runs on a 64-bit Linux machine with Docker. Two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.</p>
-        <p><strong>Mac and Windows:</strong> Docker Desktop on Mac and Windows isn't supported yet. Both safety features should work on Docker Desktop 4.60 or newer, and we're testing it.</p>
+        <p><strong>Mac and Windows:</strong> Docker Desktop on Mac and Windows isn't supported yet.</p>
         <p class="beta"><span class="flag">ALPHA</span>Ready-made images for x86 and ARM machines come after the alpha.</p>
       </div>
       <div class="actions">
@@ -218,7 +218,7 @@ nav: home
     <div class="route-wrap">
       <div class="route">
         <span class="boss" aria-hidden="true"><img src="/img/boss-head-clean.webp" width="256" height="256" alt=""></span>
-        <h3>The steps in the guide</h3>
+        <h3>The steps in the two guides</h3>
         <ol>
           <li>Choose a folder</li>
           <li>Get the code</li>

@@ -408,6 +408,12 @@ export const tickets = pgTable(
     featureId: uuid("feature_id").references((): AnyPgColumn => features.id, { onDelete: "set null" }),
     /** The task this is a sub-task of (one level only); the parent waits on it. */
     parentTicketId: uuid("parent_ticket_id").references((): AnyPgColumn => tickets.id, { onDelete: "set null" }),
+    /**
+     * BOS-1794: this ticket is the check for one after-merge criterion of another ticket (split out once that one merged).
+     * When this one closes, its pass or fail is written on that ticket's criterion (checksCriterion, 1-based) and its assignee woken.
+     */
+    checksTicketId: uuid("checks_ticket_id").references((): AnyPgColumn => tickets.id, { onDelete: "set null" }),
+    checksCriterion: integer("checks_criterion"),
     /** Monitor: wake the assignee at monitor_at to re-check monitor_note; monitor_attempts of monitor_max checks used. Not in the version trigger. */
     monitorAt: timestamp("monitor_at", { withTimezone: true }),
     monitorNote: text("monitor_note"),

@@ -450,6 +450,24 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(other.statusLine!.blocker).toMatch(/Every slot is busy: slot 1: APP-1/);
     });
 
+    // BOS-1803: a seat waiter says how many wait ahead for a seat, and a lane merge says so, on the row and the ticket's status line.
+    it("says the seat place and the background lane in the label and status line", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const seat = async () => ({ slots: 2, busy: [], mainRed: false, fixRef: null, seatWait: [id] });
+      const lane = "background lane: newer ordinary work goes first for up to 40 min more";
+      const row = await labelOf(c, id, { queueDetail: seat, places: async () => new Map([[id, { place: null, why: null, seatPlace: 3, lane }]]) });
+      expect(row).toMatchObject({ state: "waiting_for_seat", label: `waiting for a train seat (2 ahead); ${lane}` });
+      expect(row.place ?? null).toBeNull(); // a seat waiter has no check-queue place yet
+      expect(row.statusLine!.step).toBe(`waiting for a train seat (2 ahead); ${lane}`);
+      const next = await labelOf(c, id, { queueDetail: seat, places: async () => new Map([[id, { place: null, why: null, seatPlace: 1, lane: null }]]) });
+      expect(next.label).toBe("waiting for a train seat (next up)");
+      // Waiting for a check slot: its place counts as before and the lane is added after it.
+      const busy = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 5 }), queueDetail: detail(2), places: async () => new Map([[id, { place: 4, why: null, lane }]]) });
+      expect(busy.statusLine!.step).toBe(`waiting for a check slot (3 ahead); ${lane}`);
+      expect(busy.place).toBe(4);
+    });
+
     // BOS-1515 (B1): a merge the train holds to land on main alone says who it clashed with, the files, and what happens next.
     it("says waiting to land on main alone, with the clash, for a merge the train holds alone", async () => {
       const c = (ctx = await setup());
@@ -615,5 +633,8 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     expect(waitingMerges).toHaveLength(4);
     for (const w of waitingMerges) expect(w.label).toMatch(/server restarted/);
     expect(new Set(data.running.map((r) => r.slot)).size).toBe(data.running.length);
+    // R43: the badge and Merges tab figure is everything on the tab, waiting and running; the start hold's stays waiting only.
+    expect(data.lineCount).toBe(data.waiting.length + data.running.length);
+    expect(data.waitingCount).toBe(data.waiting.length);
   });
 });

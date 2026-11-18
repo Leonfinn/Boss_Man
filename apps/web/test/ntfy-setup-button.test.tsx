@@ -37,8 +37,10 @@ describe("NtfySetupButton", () => {
     const onDone = vi.fn();
     render(<NtfySetupButton available pollMs={1} onDone={onDone} />);
     fireEvent.click(screen.getByRole("button", { name: "Set up ntfy for me" }));
-    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
-    expect(screen.getByText(/Made the publish user\./)).toBeTruthy();
+    await waitFor(() => {
+      expect(onDone).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/Made the publish user\./)).toBeTruthy();
+    });
     expect(calls[0]).toEqual({ url: "/api/notification-settings/phone-login", method: "POST", body: JSON.stringify({ action: "setup" }) });
     expect(document.body.textContent).not.toMatch(/tk_/);
     // Safe to press again.

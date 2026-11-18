@@ -6,7 +6,7 @@ A **check worker** is a small container on another Docker host that takes check 
 
 You need Docker with the compose plugin on the second host (`docker compose version` shows 2.23.1 or newer). Nothing to clone, build or download by hand.
 
-1. In Boss Man: Settings → Server and runner → Checks → **Add a check worker**. Give it a name, choose the company, set the number of checks at once, press **Add**.
+1. In Boss Man: Settings → Server and runner → Limits and checks → Checks → **Add a check worker** (under Check workers). Give it a name, choose the company, set the number of checks at once, press **Add**.
 2. Boss Man shows a complete compose file with your server's address, the version and the token already filled in. Press **Copy compose file**. The token is inside it and is shown once.
 3. On the worker host, put that text in a file called `compose.yaml` in an empty folder, and run:
    ```
@@ -60,7 +60,7 @@ Sizing rule of thumb: a check wants about 4 threads and 4 GB when it is busy; le
 
 ## Which checks each machine takes
 
-In Settings → Server and runner → Checks, the company runner and each worker have two settings:
+In Settings → Server and runner → Limits and checks, in the Checks section, the company runner and each worker have two settings:
 
 - **Takes:** merge checks and quick checks (the default), merge checks only, or quick checks only. A merge check is the full test run before a ticket lands; quick checks are the ones agents ask for before review, including the rare full one. Wherever a merge check runs, the code only goes onto main from your main Boss Man server.
 - **Kept for merge checks:** with "merge checks and quick checks", how many of that machine's slots only ever run merge checks (0 to its slot count). The rest take either kind.

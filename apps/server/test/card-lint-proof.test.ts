@@ -213,10 +213,12 @@ describe("R12: steps that print nothing say so", () => {
   });
 
   it("lintOverride lets R12 through, but not R10 on the same card", () => {
-    const over = checkAsk({ triedFirst: TRIED, steps: card(), proof: PROOF, lintOverride: "Each step says what the next one checks.", byCeo: true });
+    // R35: the override names the five steps and the rule it covers.
+    const named = [{ steps: [1, 2, 3, 4, 5], rules: ["R12"], reason: "Each step says what the next one checks." }];
+    const over = checkAsk({ triedFirst: TRIED, steps: card(), proof: PROOF, lintOverride: named, byCeo: true });
     expect(over.error).toBeNull();
     expect(over.lint?.override?.findings.map((f) => f.rule)).toEqual(["R12", "R12", "R12", "R12", "R12"]);
-    const both = checkAsk({ triedFirst: TRIED, steps: [...card(), step("Look at the log.", sh("tail -f app.log"))], proof: PROOF, lintOverride: "Each step says what the next one checks.", byCeo: true });
+    const both = checkAsk({ triedFirst: TRIED, steps: [...card(), step("Look at the log.", sh("tail -f app.log"))], proof: PROOF, lintOverride: named, byCeo: true });
     expect(both.error).toMatch(/Step 6: .*never returns/);
     expect(checkAsk({ triedFirst: TRIED, steps: card(), proof: PROOF }).error).toMatch(/prints nothing when it works/);
   });

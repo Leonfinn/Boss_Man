@@ -5,11 +5,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
+import { agents, companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { priorityGroup } from "./priority-group.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
@@ -139,6 +139,8 @@ const NO_SRC = "Boss Man can't tell where it is installed, because the machine h
 const NO_HOST = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This server and ask us on this ticket for the exact commands.";
 
 const short = (sha: string) => sha.slice(0, 8);
+/** BOS-1805: the CEO's wake when an owner's approved server update left the live commit unchanged (wake-classes.ts). */
+export const DEPLOY_UNCHANGED_REASON = "deploy left the server unchanged";
 /** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213): the ticket id, or null for any other commit. */
 const mergedTicket = (subject: string) => subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i)?.[1]!.toLowerCase() ?? null;
 /** A folder the host reported, if it is safe to put in a command the owner pastes; otherwise null (never guessed). */
@@ -287,6 +289,17 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     return c?.id ?? null;
   }
 
+  /** BOS-1805: wakes the home company's CEO with `note` (an owner's approved update that left the server unchanged). False when there is no one to wake. */
+  async function tellCeo(note: string): Promise<boolean> {
+    const companyId = await homeCompany();
+    if (!companyId || !deps.wake) return false;
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+    if (!ceo) return false;
+    await deps.wake(ceo.id, { reason: DEPLOY_UNCHANGED_REASON, note });
+    deps.log?.(`self-deploy: CEO told: ${note.slice(0, 120)}`);
+    return true;
+  }
+
   /**
    * BOS-1037: what is really live. This process's own commit is the ground truth for what runs: a deploy restarts
    * into the new commit (a single server) or switches to the new colour's process, which is already the new commit
@@ -389,6 +402,26 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
 
   /**
+   * BOS-1805: the merged "fixes live" tickets a runner image built from `commit` brings to the runners: their merge is at
+   * or before `commit` in merge order, it touched runner code (or its files aren't known), and the live runner image
+   * lacks it. A merge Boss Man can't place is left out: a heading is never guessed.
+   */
+  async function runnerLiveFixes(companyId: string, commit: string): Promise<string[]> {
+    const rows = await db
+      .select({ id: tickets.id, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), isNotNull(tickets.fixesLive), isNotNull(tickets.mergeCommit)));
+    if (!rows.length) return [];
+    const order = await allMergeOrder(db, companyId);
+    const out: string[] = [];
+    for (const r of rows) {
+      if (r.touchesRunner === false || !serverContains(commit.toLowerCase(), r.mergeCommit!, order)) continue;
+      if (!(await commitIsLive(db, companyId, r.mergeCommit, "runner"))) out.push(r.id);
+    }
+    return out.sort((x, y) => order.indexOf(rows.find((r) => r.id === x)!.mergeCommit!.toLowerCase()) - order.indexOf(rows.find((r) => r.id === y)!.mergeCommit!.toLowerCase()));
+  }
+
+  /**
    * BOS-1516: the tickets in `ids` that carry the owner's Priority 1 mark and whose whole group (parent links, waits-on links, a
    * Priority 1 feature's tickets) has merged. A group still open pages nobody: the card is raised without the heading, and the
    * last member to merge brings the heading (the earlier members are in the card's range too, or already on an earlier card).
@@ -434,6 +467,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   async function raiseRunner(commit: string, fromCommit: string, a: Available | null, opts: { again?: boolean; requested?: boolean; askAnyway?: boolean } = {}): Promise<{ blocked: string } | { row: typeof decisions.$inferSelect } | null> {
     const companyId = await homeCompany();
     if (!companyId) return null;
+    // BOS-1805: runners are only ever built from the commit the server runs (BOS-947), so a card for any other commit
+    // would promise an image the host never builds. Live is what the host reports or what release-log recorded (a
+    // hand-apply leaves the host's report behind); when neither is known the card is raised as before.
+    const lives = [a?.deployed, (await liveServerRecord(db, companyId)).live].filter((x): x is string => !!x && isSha(x)).map((x) => x.toLowerCase());
+    if (lives.length && !lives.includes(commit.toLowerCase())) {
+      deps.log?.(`self-deploy: runner update for ${short(commit)} not offered; the server runs ${short(lives[0]!)}`);
+      return null;
+    }
     const blocker = await runnerBlocker(a);
     if (blocker && !opts.askAnyway) {
       deps.log?.(`self-deploy: runner update for ${short(commit)} held; ${blocker}`);
@@ -562,7 +603,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const alreadyRun = need?.state === "not_needed" ? `${need.words} Nothing to do, unless you know of a fault in the runners.\n\n` : need?.state === "unknown" ? `${need.words}\n\n` : "";
     const infra = target === "server" && (a?.infraPaths.length ?? 0) > 0;
     // Merge commits only repeat the ticket's title; the commits under them say what changed.
-    const changes = (a?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
+    // BOS-1805: the host's offer (`a.commits`) is the range main is ahead of the live server: what the NEXT server deploy
+    // brings. A runner card rebuilds from the live commit, so none of that range is in its image; it never lists or heads it.
+    const range = target === "server" ? a : null;
+    const changes = (range?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
     // An infra change can only be applied by hand on the host. The steps, the check and the rollback
     // are kept structured so the approval card and the to-do it leaves behind both show them (BOS-122).
     // The approved commit is pinned in every step (BOS-124): `main` may have moved on by the time the
@@ -692,7 +736,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const handBecause = infra
       ? `Needs applying by hand because this update changes ${a!.infraPaths[0]}${infraCount > 1 ? ` and ${infraCount - 1} other deployment file${infraCount === 2 ? "" : "s"}` : ""}.`
       : undefined;
-    const update = await updateFor(commit, fromCommit, a, {
+    const update = await updateFor(commit, fromCommit, range, {
       ...(handBecause ? { handBecause } : {}),
       ...(infra ? { handFiles: a!.infraPaths } : {}),
       ...(handEffect ? { handEffect } : {}),
@@ -702,7 +746,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     });
     // BOS-1462: a runner card carries the same heading and one page when a live fix only needs the runners rebuilt
     // (its runner-only tickets). A fix already on an earlier card, server or runner, is a repeat and pages no more.
-    const urgent = target === "server" ? await urgentFor(a) : await urgentFor(a, runnerTickets.map((t) => t.ticketId));
+    // BOS-1805: a runner card is headed only by fixes its image will contain: merged at or before `commit` (the live
+    // commit it is built from) and not yet in the runners. Never by the server offer's range (18 Nov: a runner card for
+    // 84aa64cc was headed with BOS-1762, merged later as 7704a0c6, so the owner's rebuild changed nothing).
+    const urgent = target === "server" ? await urgentFor(a) : await urgentFor(null, [...runnerTickets.map((t) => t.ticketId), ...(await runnerLiveFixes(companyId, commit))]);
     // (BOS-551) A server update restarts Boss Man, which resets anything a reading on the owner's queue
     // would measure. Point the update card at the open owner cards a restart would disturb: a card the
     // raising agent marked `resetsOnRestart`, and a hand-apply to-do that isn't itself a server or runner
@@ -1136,6 +1183,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const newer = ctx?.type === "self_deploy" && s.target === "server" && !!s.to_commit && s.to_commit !== ctx.commit;
     const changedHead = newer ? `What changed, up to the approved ${short(ctx.commit)} (the newer merges up to ${short(s.to_commit)} went out too):` : "What changed:";
     await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\n${changedHead}\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
+    // BOS-1805: the owner's "Deploy" that left the live commit where it was (refused, failed, switched back, nothing new)
+    // is told to the CEO as well, with the host's own reason, so somebody acts on it. The owner has the line above.
+    if (s.target === "server" && d && ctx?.type === "self_deploy" && (s.result !== "deployed" || (!!s.from_commit && s.to_commit === s.from_commit)))
+      await tellCeo(`The owner approved the server update on card ${d.id.slice(0, 8)} (to ${short(ctx.commit)}), but the live server did not change: the host reported "${s.result}": ${s.message} Find out why, tell the owner on the ticket that needed it, and say when to approve it again.`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
     // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
     if (s.target === "server") {
       await putSetting(LAST_SERVER, { result: s.result, from: s.from_commit, to: s.to_commit, ended: s.ended } satisfies LastServer);
@@ -1431,6 +1482,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       await writeStagingRequest(randomUUID(), commit);
       return { commit } as const;
     },
+    /** BOS-1805: wakes the CEO about an owner's approved update that was not sent (the deploy wait's 3-hour cap). */
+    tellCeo,
 
     /**
      * The owner's hand-apply to-dos the host has caught up with (BOS-122): once the live commit is no

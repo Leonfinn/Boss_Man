@@ -709,7 +709,9 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[]; runnerPolicy?: SlotPolicy };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[]; runnerPolicy?: SlotPolicy; laneAgeMinutes?: number; defaultLaneAgeMinutes?: number };
+/** BOS-1803: the server's MAX_BACKGROUND_LANE_AGE_MINUTES (a day); the server refuses anything above it. */
+const MAX_LANE_AGE_MINUTES = 1440;
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -801,14 +803,17 @@ export function PrivateDetails() {
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
-  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy } | null>(null);
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy; laneAge: string } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train, policy: d.runnerPolicy ?? DEFAULT_POLICY };
+  const hasLaneAge = d.laneAgeMinutes !== undefined;
+  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train, policy: d.runnerPolicy ?? DEFAULT_POLICY, laneAge: String(d.laneAgeMinutes ?? "") };
   const n = Number(v.slots);
-  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots && policyValid(v.policy, n);
+  const lane = Number(v.laneAge);
+  const laneValid = !hasLaneAge || (v.laneAge.trim() !== "" && Number.isInteger(lane) && lane >= 0 && lane <= MAX_LANE_AGE_MINUTES);
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots && policyValid(v.policy, n) && laneValid;
   const was = d.runnerPolicy ?? DEFAULT_POLICY;
-  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train || v.policy.takes !== was.takes || v.policy.mergeKept !== was.mergeKept;
+  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train || v.policy.takes !== was.takes || v.policy.mergeKept !== was.mergeKept || (hasLaneAge && lane !== d.laneAgeMinutes);
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -880,6 +885,16 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      {/* BOS-1803: how long a background-lane merge lets newer ordinary work go first, then it waits by when it joined. */}
+      {hasLaneAge && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label htmlFor="check-lane-age">Background lane gives way for (minutes, 0 to {MAX_LANE_AGE_MINUTES})</label>
+          <input id="check-lane-age" type="number" min={0} max={MAX_LANE_AGE_MINUTES} value={v.laneAge} onChange={(e) => setEdit({ ...v, laneAge: e.target.value })} style={{ width: 80 }} />
+          <p className="muted" style={{ fontSize: 14 }}>
+            Approved work from background-lane agents lets newer ordinary work merge first for this long; after that it takes its place by when it joined the line (default {d.defaultLaneAgeMinutes ?? 120}). 0 means it always goes after ordinary work.
+          </p>
+        </div>
+      )}
       <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
@@ -891,7 +906,7 @@ export function CheckQueueSetting() {
           disabled={act.busy || !valid || !changed}
           onClick={() =>
             void act.run(async () => {
-              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train, ...(d.runnerPolicy ? { runnerPolicy: v.policy } : {}) } });
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train, ...(d.runnerPolicy ? { runnerPolicy: v.policy } : {}), ...(hasLaneAge ? { laneAgeMinutes: lane } : {}) } });
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
@@ -904,6 +919,7 @@ export function CheckQueueSetting() {
       </div>
       {act.view}
       <WaitForCiSetting />
+      <MergeCarrySetting />
     </Section>
   );
 }
@@ -936,6 +952,62 @@ export function WaitForCiSetting() {
             Before each merge Boss Man pushes the exact merged result to a bossman-ci/ branch on GitHub and merges only once GitHub CI passes on it, while its own check runs at the same time. A CI failure goes back to the agent with the failing jobs and tests. Each merge uses GitHub Actions minutes, which a private repo pays for. Projects on other git hosts, or whose CI doesn't run on bossman-ci/ branches, merge on Boss Man's own check as before.
           </span>
         </span>
+      </label>
+      {act.view}
+    </div>
+  );
+}
+
+/** BOS-1762: land a passed merge when main's newer changes touch none of its files, and the landing turn's cap. Both on by default. */
+export function MergeCarrySetting() {
+  const view = usePoll((signal) => api<{ on: boolean; turnMinutes: number }>("/api/settings/merge-carry", { signal }), 60_000, "merge-carry");
+  const act = useAction();
+  const [minutes, setMinutes] = useState<string | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const shown = minutes ?? String(d.turnMinutes);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }} data-testid="merge-carry">
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input
+          type="checkbox"
+          checked={d.on}
+          disabled={act.busy}
+          onChange={(e) => {
+            const next = e.target.checked;
+            void act.run(async () => {
+              await api("/api/settings/merge-carry", { method: "PUT", body: { on: next } });
+              view.reload();
+              return next ? "Saved. A passed merge now lands when main's newer changes touch none of its files." : "Saved. A merge is tested again whenever main moves.";
+            });
+          }}
+        />
+        <span>
+          <strong>Land passed merges when main moved elsewhere</strong>{" "}
+          <span className="muted">
+            When a change has passed its checks but main moved meanwhile, Boss Man lands it anyway if main's newer changes touch none of its files and none of the project's dependency, build, CI or migration files. Main's own CI checks the result. Off: every main move means testing the change again.
+          </span>
+        </span>
+      </label>
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <span>
+          <strong>Landing turn</strong>{" "}
+          <span className="muted">A change rebuilt twice because main moved gets a turn: other changes wait to land for up to this many minutes. 0 turns it off.</span>
+        </span>
+        <input type="number" min={0} max={240} step={5} value={shown} style={{ width: 80 }} disabled={act.busy} onChange={(e) => setMinutes(e.target.value)} aria-label="Landing turn in minutes" />
+        <button
+          disabled={act.busy || minutes === null || !/^\d+$/.test(shown) || Number(shown) > 240}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/settings/merge-carry", { method: "PUT", body: { turnMinutes: Number(shown) } });
+              setMinutes(null);
+              view.reload();
+              return Number(shown) === 0 ? "Saved. No landing turns." : `Saved. Landing turns last up to ${shown} minutes.`;
+            })
+          }
+        >
+          Save landing turn
+        </button>
       </label>
       {act.view}
     </div>
