@@ -287,6 +287,8 @@ export const OWNER_FIELDS = {
     "Wait for GitHub CI before merging",
     // Settings → Checks: the merge train switch (BOS-1366).
     "Merge approved work in the order it was approved",
+    // Settings → Checks: how long a background-lane merge gives way to ordinary ones (BOS-1803).
+    "Background lane gives way for (minutes, 0 to",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
     "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Settings → Checks: each machine's split between merge checks and quick checks (BOS-1602).
