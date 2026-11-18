@@ -98,7 +98,8 @@ export class MergeTrain {
   /** After a restart: tickets to seat first, in their old order, until they've re-joined or the deadline passes. */
   private seed: { order: string[]; until: number } | null = null;
 
-  constructor(private readonly opts: { seats: () => number; now?: () => number }) {}
+  /** `laneAgeMs`: BOS-1803 background-lane ageing (see agedTier); missing or 0 = no ageing. */
+  constructor(private readonly opts: { seats: () => number; now?: () => number; laneAgeMs?: () => number }) {}
 
   private now() {
     return (this.opts.now ?? Date.now)();
@@ -111,7 +112,12 @@ export class MergeTrain {
 
   /** Tickets waiting for a seat, in the order they'd be seated. */
   queue(): string[] {
-    return [...this.waiting.entries()].sort(([, a], [, b]) => a.priority - b.priority || a.place - b.place || a.seq - b.seq).map(([id]) => id);
+    // BOS-1803: a background-lane ticket (2) that has waited the lane age since its place (first merge job's queue time) ranks
+    // as ordinary, by that place. Its stored priority is left as is, so a later setting change re-ranks it on the next read.
+    const t = this.now();
+    const ageMs = this.opts.laneAgeMs?.() ?? 0;
+    const tier = (w: { priority: number; place: number }) => agedTier(w.priority, t - w.place, ageMs);
+    return [...this.waiting.entries()].sort(([, a], [, b]) => tier(a) - tier(b) || a.place - b.place || a.seq - b.seq).map(([id]) => id);
   }
 
   /** Restart (BOS-1289): seat these first, in this order (their old merge jobs' queue order), until all re-joined or `waitMs`. */
@@ -433,12 +439,29 @@ const trains = new Map<string, MergeTrain>();
 // lost on restart, harmless because every trainFor() call sets it again from the check_slots setting.
 const seatCounts = new Map<string, number>();
 
-/** The project's train; `seats` (check_slots, read by the caller) applies from now on. `created`: first use since the server started. */
-export function trainFor(projectId: string, seats: number): { train: MergeTrain; created: boolean } {
+/**
+ * BOS-1803: the tier a wait ranks at: background lane (2) once it has waited `ageMs` ranks as ordinary (1); `ageMs` <= 0 never
+ * ages. Here (pure) so the train and the check queue rank the same way; the setting lives beside checkPriority in check-gate.ts.
+ */
+export function agedTier(tier: number, waitedMs: number, ageMs: number): number {
+  return tier === 2 && ageMs > 0 && waitedMs >= ageMs ? 1 : tier;
+}
+
+// lost on restart, harmless because every trainFor() call sets it again from the background_lane_age_minutes setting.
+let laneAge = 0;
+
+/** BOS-1803: the background-lane age every train ranks its waiting tickets by (the owner's setting changed, or a landing read it). */
+export function setTrainLaneAge(ms: number) {
+  laneAge = Math.max(0, ms);
+}
+
+/** The project's train; `seats` (check_slots, read by the caller) and `laneAgeMs` (BOS-1803) apply from now on. `created`: first use since the server started. */
+export function trainFor(projectId: string, seats: number, laneAgeMs?: number): { train: MergeTrain; created: boolean } {
   seatCounts.set(projectId, seats);
+  if (laneAgeMs !== undefined) setTrainLaneAge(laneAgeMs);
   const had = trains.get(projectId);
   if (had) return { train: had, created: false };
-  const train = new MergeTrain({ seats: () => seatCounts.get(projectId) ?? 1 });
+  const train = new MergeTrain({ seats: () => seatCounts.get(projectId) ?? 1, laneAgeMs: () => laneAge });
   trains.set(projectId, train);
   return { train, created: true };
 }
@@ -457,9 +480,9 @@ export function retierWaiting(projectId: string, ticketId: string, priority: num
  * hold back. Null when this server has no train for the project (a standby copy, or no landing since it started): then the
  * queue serves as it did before. Runners connect only to the server in charge, so the queue's pump runs beside the trains.
  */
-export function trainView(projectId: string): { seated: string[]; withheld: (ticketId: string) => boolean } | null {
+export function trainView(projectId: string): { seated: string[]; waiting: string[]; withheld: (ticketId: string) => boolean } | null {
   const train = trains.get(projectId);
-  return train ? { seated: train.seatedIds(), withheld: (id) => train.withheld(id) } : null;
+  return train ? { seated: train.seatedIds(), waiting: train.queue(), withheld: (id) => train.withheld(id) } : null;
 }
 
 /** BOS-1515: the train's facts (seats, who waits, held-alone clashes, stall clocks); null when this server has no train for it. */
@@ -492,4 +515,5 @@ export function resetTrains() {
   trains.clear();
   seatCounts.clear();
   mainGens.clear();
+  laneAge = 0;
 }

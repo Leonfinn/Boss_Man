@@ -242,6 +242,36 @@ describe("merge train: what the check queue holds back (BOS-1504)", () => {
   });
 });
 
+describe("merge train: background lane ages up (BOS-1803)", () => {
+  const H = 60 * 60_000;
+  it("a lane ticket yields to newer ordinary ones until it has waited the lane age, then ranks by when it joined", () => {
+    const clock = { t: 10 * H };
+    let age = 2 * H;
+    const tr = new MergeTrain({ seats: () => 1, now: () => clock.t, laneAgeMs: () => age });
+    tr.join("head", { priority: 1, place: 9 * H });
+    expect(tr.seated("head")).toBe(true);
+    tr.join("lane", { priority: 2, place: 9 * H }); // joined 1 h ago
+    tr.join("new", { priority: 1, place: 10 * H - 5 * 60_000 });
+    expect(tr.queue()).toEqual(["new", "lane"]);
+    clock.t = 11 * H; // waited 2 h: ordinary now, and it joined first
+    expect(tr.queue()).toEqual(["lane", "new"]);
+    tr.join("urgent", { priority: 0, place: 11 * H });
+    expect(tr.queue()).toEqual(["urgent", "lane", "new"]); // urgent still first
+    age = 0; // the owner turned ageing off: back to last
+    expect(tr.queue()).toEqual(["urgent", "new", "lane"]);
+  });
+
+  it("with no lane age given (older callers) nothing ages", () => {
+    const clock = { t: 100 * H };
+    const tr = train(1, clock);
+    tr.join("head", { priority: 1, place: 0 });
+    tr.seated("head");
+    tr.join("lane", { priority: 2, place: 0 });
+    tr.join("new", { priority: 1, place: 99 * H });
+    expect(tr.queue()).toEqual(["new", "lane"]);
+  });
+});
+
 describe("merge train: re-tier (BOS-1516)", () => {
   it("moves a waiting ticket up, never a seated one, and never down", () => {
     const tr = train(1);

@@ -1203,6 +1203,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p className="muted" style={{ fontSize: 12 }}>Reported {when(d.context.lastFailure.at)}</p>
                       </div>
                     )}
+                    {d.context?.keptOpen && <p className="muted" style={{ fontSize: 13 }}>{d.context.keptOpen.note}</p>}
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>

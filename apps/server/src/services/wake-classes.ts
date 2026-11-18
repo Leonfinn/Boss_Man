@@ -37,6 +37,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "ticket moved off plan": "waiting",
   // A ticket parked by date three times in a row with no link (BOS-1679): the CEO must hear it. Never dropped.
   "parked by date again and again": "waiting",
+  // A split-out after-merge check ticket closed and its result was written on this ticket (BOS-1794). Never dropped.
+  "after-merge check reported": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",
@@ -67,6 +69,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "runner update: can't tell": "scheduled",
   // The live commit still can't be placed after the missed-merge sweep (BOS-1645): once per commit, never dropped.
   "live commit not placed": "scheduled",
+  // The owner's approved server update left the live commit unchanged (BOS-1805): once per deploy, never dropped.
+  "deploy left the server unchanged": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

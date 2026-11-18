@@ -298,6 +298,32 @@ describe("owner-answer memory (BOS-1593)", () => {
       expect(textOf(r)).toContain("stillNeeded");
     });
 
+    it("R34: an answered step card is shown to the raiser as a warning, never a refusal", async () => {
+      const c = (ctx = await setup());
+      const done = await c.ticket("CI access");
+      const [step] = await c.db
+        .insert(decisions)
+        .values({
+          companyId: c.company.id,
+          kind: "question",
+          question: "Give the deploy key write access to the staging server?",
+          options: ["Done"],
+          recommendedOption: "Done",
+          raisedByAgentId: c.ceo.id,
+          status: "answered",
+          answer: "Done",
+          answeredAt: new Date(Date.now() - 3_600_000),
+          context: { type: "question", ticketId: done.id, steps: ["Open the host settings.", "Give the deploy key write access."], ownerMustDo: true },
+        })
+        .returning();
+      const asking = await c.ticket("Staging deploy");
+      const r = await raise(await mcpAs(c, c.ceo.id), "Give the deploy key write access to the staging server?", { blocksTicketId: asking.id });
+      expect(isError(r)).toBe(false); // a step can need redoing, so it is not a refusal
+      expect(textOf(r)).toContain("The owner already did these steps");
+      expect(textOf(r)).toContain(`the owner did this on card ${step!.id.slice(0, 8)}`);
+      expect(textOf(r)).toContain("Check the live state first");
+    });
+
     it.each([
       { kind: "chat", ask: "Which port should the staging site use?", said: "Use port 8080 for the staging site, never 3000." },
       { kind: "ticket message", ask: "Send the weekly email on Sundays?", said: "Never send the weekly email on Sundays." },

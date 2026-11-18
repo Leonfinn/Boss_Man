@@ -17,6 +17,7 @@ import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisi
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
+import { CHECK_REPORTED_REASON, reportCheckTicket } from "./after-merge-check-tickets.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { agentWipHold, oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
@@ -2240,6 +2241,10 @@ export function schedulerService(
       // A ticket finishing may make "waiting on it" notes and cards out of date (BOS-123).
       const [finished] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
       if (finished) await ownerActed(db, { companyId: finished.companyId, ticketIds: [ticketId], reason: "a ticket it waited on finished", now: now(), wake: (input) => this.notify(input.agentId, input) });
+      // BOS-1794: a check ticket writes its result on the criterion it was split out for before the parent is released,
+      // so the parent's "unblocked" note already reads the recorded verdict.
+      const reported = await reportCheckTicket(db, ticketId, now());
+      if (reported) await this.notify(reported.agentId, { ticketId: reported.ticketId, reason: CHECK_REPORTED_REASON, note: reported.note, causedByRunId });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
       for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
       // The wiki maintainer files what finished work produced (R73). One waiting run covers

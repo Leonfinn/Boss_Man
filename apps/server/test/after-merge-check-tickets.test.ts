@@ -1,0 +1,206 @@
+// BOS-1794: a check ticket split out of a merged ticket's after-merge criterion reports back when it closes.
+// Before: BOS-1622 passed and BOS-1600 sat Blocked with that criterion "not reported" for two days, since nothing
+// linked the two. On the old code create_ticket has no checksCriterion and closing the check writes and wakes nothing.
+import { randomBytes, randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { checkTicketLine, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { buildApp } from "../src/app.js";
+import { openPglite } from "../src/db/client.js";
+import { activity, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { issueRunToken } from "../src/mcp.js";
+import { appendLine, CHECK_REPORTED_REASON, checkTicketVerdict } from "../src/services/after-merge-check-tickets.js";
+import { wakeClass } from "../src/services/wake-classes.js";
+
+const BEFORE = "Health check returns 200";
+const LIVE = { text: "The update banner waits for a running merge check on the live server", after: "merge" as const };
+
+describe("check ticket results: the rules", () => {
+  it("the check line is read by its number, and a later verdict by the ticket's own author replaces it", () => {
+    const line = checkTicketLine("BOS-12", 2, "pass", LIVE.text, "Check: banner waits, 1 pass");
+    // One segment: no . ; or , that would split it, whatever the criterion or title held.
+    expect(line).not.toMatch(/[.;,]/);
+    expect(readVerdicts([BEFORE, LIVE], `1 pass. ${line}`).map((r) => r.verdict)).toEqual(["pass", "pass"]);
+    expect(unreportedAfterMerge([BEFORE, LIVE], `1 pass. ${line}`)).toEqual([]);
+    expect(readVerdicts([BEFORE, LIVE], `1 pass. ${line}. 2 fail: it showed the old wording`).map((r) => r.verdict)).toEqual(["pass", "fail"]);
+    const failed = checkTicketLine("BOS-12", 2, "fail", LIVE.text, "Check");
+    expect(readVerdicts([BEFORE, LIVE], `1 pass. ${failed}`).map((r) => r.verdict)).toEqual(["pass", "fail"]);
+    // Its title's words don't count as a verdict for criterion 1.
+    expect(readVerdicts([BEFORE, LIVE], checkTicketLine("BOS-12", 2, "pass", LIVE.text, "Health check returns 200 fail")).map((r) => r.verdict)).toEqual([null, "pass"]);
+  });
+
+  it("the check ticket's verdict: any fail fails, all pass passes, cancelled or unreported says nothing", () => {
+    const crit = ["Banner waits", "Wording matches"];
+    expect(checkTicketVerdict({ outcome: "completed", acceptanceCriteria: crit, stateNote: "1 pass; 2 pass" })).toBe("pass");
+    expect(checkTicketVerdict({ outcome: "completed", acceptanceCriteria: crit, stateNote: "1 pass; 2 fail: old text" })).toBe("fail");
+    expect(checkTicketVerdict({ outcome: "completed", acceptanceCriteria: crit, stateNote: "1 pass" })).toBeNull();
+    expect(checkTicketVerdict({ outcome: "cancelled", acceptanceCriteria: crit, stateNote: "1 pass; 2 pass" })).toBeNull();
+    expect(checkTicketVerdict({ outcome: "completed", acceptanceCriteria: [], stateNote: "all pass" })).toBeNull();
+  });
+
+  it("a long note gives way from the front, so the recorded line is never cut", () => {
+    const line = checkTicketLine("BOS-12", 2, "pass", LIVE.text, "Check");
+    const out = appendLine("x".repeat(3990), line);
+    expect(out.length).toBeLessThanOrEqual(4000);
+    expect(out.endsWith(line)).toBe(true);
+    expect(appendLine(null, line)).toBe(line);
+  });
+
+  it("the wake is never dropped", () => {
+    expect(wakeClass(CHECK_REPORTED_REASON)).toBe("waiting");
+  });
+});
+
+let server: Awaited<ReturnType<typeof boot>>;
+async function boot() {
+  const { db, close } = await openPglite();
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
+  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  return { built, db, close, base, cookie, companies: 0, clients: [] as Client[] };
+}
+beforeAll(async () => {
+  server = await boot();
+});
+afterAll(async () => {
+  await Promise.all(server.clients.map((c) => c.close()));
+  await server.built.app.close();
+  await server.close();
+});
+
+/** A company with a merged ticket, Blocked on its one after-merge criterion, assigned to Dev. */
+async function setup() {
+  const { built, db, base, cookie } = server;
+  const req = (method: "POST", url: string, payload: unknown) => built.app.inject({ method, url, headers: { cookie }, payload: payload as object });
+  const co = (await req("POST", "/api/companies", { name: `Check Co ${++server.companies}` })).json() as { company: { id: string }; ceo: { id: string } };
+  const dev = (await req("POST", `/api/companies/${co.company.id}/agents`, { name: "Dev" })).json() as { id: string };
+  const other = (await req("POST", `/api/companies/${co.company.id}/agents`, { name: "Other" })).json() as { id: string };
+  const project = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Customer app" })).json() as { id: string };
+  const [parent] = await db
+    .insert(tickets)
+    .values({ companyId: co.company.id, projectId: project.id, title: "Runner update banner", systemState: "blocked", assigneeAgentId: dev.id, mergeCommit: "a".repeat(40), acceptanceCriteria: [BEFORE, LIVE], stateNote: "1 pass. Waiting for a merge check to run on the live server" })
+    .returning();
+  const agent = async (agentId: string) => {
+    const token = await issueRunToken(db, { companyId: co.company.id, agentId, runId: randomUUID() });
+    const c = new Client({ name: "test", version: "0" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    server.clients.push(c);
+    return c;
+  };
+  const create = async (as: string, args: Record<string, unknown>) => {
+    const r = (await (await agent(as)).callTool({ name: "create_ticket", arguments: { title: "Check: banner waits for a merge", size: 1, noCode: true, project: "Customer app", ...args } })) as { content: Array<{ text: string }>; isError?: boolean };
+    return { text: r.content[0]!.text, isError: !!r.isError, id: /Created ticket ([0-9a-f-]{36})/.exec(r.content[0]!.text)?.[1] ?? null };
+  };
+  const row = async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
+  const reportWakes = async () => db.select().from(wakes).where(and(eq(wakes.agentId, dev.id), eq(wakes.reason, CHECK_REPORTED_REASON)));
+  return { db, work: built.work, scheduler: built.scheduler, co, dev, other, parent: parent!, create, row, reportWakes };
+}
+
+describe("check tickets: split out, then report back", () => {
+  it("the parent's assignee splits out a check with no CEO step; the parent waits on it and it carries the criterion", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    expect(made.isError, made.text).toBe(false);
+    expect(made.text).toContain("check for criterion 2");
+    const check = await c.row(made.id!);
+    expect(check.checksTicketId).toBe(c.parent.id);
+    expect(check.checksCriterion).toBe(2);
+    expect(check.acceptanceCriteria).toEqual([LIVE.text]);
+    const deps = await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, c.parent.id));
+    expect(deps.map((d) => [d.blockerTicketId, d.until])).toEqual([[check.id, "done"]]);
+  });
+
+  it("refuses someone else's ticket, a before-merge criterion and a criterion that isn't there", async () => {
+    const c = await setup();
+    const notMine = await c.create(c.other.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    expect(notMine.isError).toBe(true);
+    expect(notMine.text).toMatch(/assignee, the CEO or a manager/);
+    // The CEO may, for a ticket it doesn't hold.
+    expect((await c.create(c.co.ceo.id, { title: "CEO split", checksCriterion: { ticket: c.parent.id, criterion: 2 } })).isError).toBe(false);
+    const before = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 1 } });
+    expect(before.isError).toBe(true);
+    expect(before.text).toMatch(/only an after-merge criterion/);
+    expect((await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 3 } })).text).toMatch(/no criterion 3/);
+  });
+
+  it("a pass is recorded on the parent's criterion with the check's ref, and the wake says it can close now, once", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    await c.db.update(tickets).set({ stateNote: "1 pass: the merge records show the update waited" }).where(eq(tickets.id, made.id!));
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "completed", overLimit: true });
+    const check = await c.row(made.id!);
+    const parent = await c.row(c.parent.id);
+    expect(parent.stateNote).toMatch(new RegExp(`Check ticket [A-Z]+-${check.number} reported: 2 pass`));
+    // The earlier note is kept, and the done gate now has nothing unreported.
+    expect(parent.stateNote).toContain("1 pass");
+    expect(unreportedAfterMerge(parent.acceptanceCriteria, parent.stateNote)).toEqual([]);
+    const woke = await c.reportWakes();
+    expect(woke).toHaveLength(1);
+    expect(woke[0]!.ticketId).toBe(c.parent.id);
+    expect(woke[0]!.note).toContain("reported pass");
+    expect(woke[0]!.note).toContain("you can close it now");
+    // A second done hook for the same close writes and wakes nothing more.
+    await c.scheduler.onTicketDone(made.id!);
+    expect(await c.reportWakes()).toHaveLength(1);
+    expect((await c.row(c.parent.id)).stateNote).toBe(parent.stateNote);
+    const acts = await c.db.select().from(activity).where(and(eq(activity.ticketId, c.parent.id), eq(activity.kind, "after_merge_check")));
+    expect(acts).toHaveLength(1);
+  });
+
+  it("a fail is recorded as a fail, and the wake names the follow-up", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    await c.db.update(tickets).set({ stateNote: "1 fail: the update started while a merge check ran" }).where(eq(tickets.id, made.id!));
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "completed", overLimit: true });
+    const parent = await c.row(c.parent.id);
+    expect(readVerdicts(parent.acceptanceCriteria, parent.stateNote).map((r) => r.verdict)).toEqual(["pass", "fail"]);
+    const [woke] = await c.reportWakes();
+    expect(woke!.note).toContain("reported fail");
+    expect(woke!.note).toContain("follow-up");
+  });
+
+  it("a cancelled check records nothing, and the wake says the criterion is still not reported", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "cancelled", overLimit: true });
+    const parent = await c.row(c.parent.id);
+    expect(parent.stateNote).toBe(c.parent.stateNote);
+    expect(unreportedAfterMerge(parent.acceptanceCriteria, parent.stateNote)).toEqual([LIVE.text]);
+    const [woke] = await c.reportWakes();
+    expect(woke!.note).toContain("cancelled");
+    expect(woke!.note).toContain("still not reported");
+  });
+
+  it("with another after-merge criterion still open, the wake lists it instead of saying close", async () => {
+    const c = await setup();
+    const third = { text: "Owner sees the new wording on their phone", after: "merge" as const };
+    await c.db.update(tickets).set({ acceptanceCriteria: [BEFORE, LIVE, third] }).where(eq(tickets.id, c.parent.id));
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    await c.db.update(tickets).set({ stateNote: "1 pass" }).where(eq(tickets.id, made.id!));
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "completed", overLimit: true });
+    const [woke] = await c.reportWakes();
+    expect(woke!.note).toContain(`Still not reported: "${third.text}"`);
+    expect(woke!.note).not.toContain("close it now");
+  });
+
+  it("a check ticket made the old way, with no tie to a parent, closes as before and changes no parent", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, {});
+    expect(made.isError, made.text).toBe(false);
+    const check = await c.row(made.id!);
+    expect(check.checksTicketId).toBeNull();
+    await c.db.update(tickets).set({ stateNote: "1 pass" }).where(eq(tickets.id, made.id!));
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "completed", overLimit: true });
+    expect((await c.row(made.id!)).systemState).toBe("done");
+    const parent = await c.row(c.parent.id);
+    expect(parent.stateNote).toBe(c.parent.stateNote);
+    expect(parent.systemState).toBe("blocked");
+    expect(await c.reportWakes()).toEqual([]);
+    const acts = await c.db.select().from(activity).where(and(eq(activity.ticketId, c.parent.id), eq(activity.kind, "after_merge_check")));
+    expect(acts).toEqual([]);
+  });
+});

@@ -2,6 +2,8 @@
 // checked: when Boss Man can see from live rows that a card is dead, it closes it by itself, with the reason
 // in the card's history, instead of flagging it and leaving the owner to work it out. The first row that
 // matches wins:
+//   0. an owner-only question card (BOS-1755): never closed by this table; it stays open, labelled once its ticket
+//      is finished, merged or cancelled. The ticket itself can't finish while the card is open (openHoldingCard).
 //   1. its ticket is done or cancelled          4. a plan card, and the plan was approved on another card
 //   2. its ticket is merged                     5. a plan card, and a newer plan card replaces it
 //   3. a plan card, and the ticket is in review (clearsWhen, row 6, stays in alert-clearing.ts)
@@ -29,7 +31,7 @@ export const checkableCard = sql`(${decisions.raisedByAgentId} is not null and $
 
 type CardRow = { id: string; companyId: string; createdAt: Date; question: string; context: unknown };
 
-type Ctx = { type?: string; plan?: boolean; ticketId?: string; runId?: string; criterionIndexes?: unknown; steps?: unknown; setsUp?: unknown; engagementId?: string; ladder?: { ticketId?: string | null } };
+type Ctx = { type?: string; ownerOnly?: unknown; ownerMustDo?: unknown; keptOpen?: unknown; plan?: boolean; ticketId?: string; runId?: string; criterionIndexes?: unknown; steps?: unknown; setsUp?: unknown; engagementId?: string; ladder?: { ticketId?: string | null } };
 
 /** The same cards as `checkableCard`, for a row already in hand (answering and phone approve). */
 export function isCheckableCard(d: { raisedByAgentId: string | null; context: unknown }): boolean {
@@ -46,6 +48,15 @@ export async function holdsLiveRun(db: Db, context: unknown): Promise<boolean> {
   return !!run && !run.endedAt;
 }
 
+/**
+ * A question card marked as the owner's alone (ownerOnly kind or ownerMustDo), BOS-1755.
+ * Note: ownerMustDo cards are kept open here but do not hold a merge (ownerOnlyQuestionSql reads ownerOnly only),
+ * so a finished ticket's ownerMustDo card without steps now never closes on its own.
+ */
+export function isOwnerOnly(c: { type?: string; ownerOnly?: unknown; ownerMustDo?: unknown }): boolean {
+  return c.type === "question" && (!!c.ownerOnly || c.ownerMustDo === true);
+}
+
 /** The tickets a card is about: the one it names, else the ones it holds up. */
 async function cardTickets(db: Db, d: CardRow) {
   const named = (d.context as Ctx).ticketId ?? (d.context as Ctx).ladder?.ticketId;
@@ -53,7 +64,7 @@ async function cardTickets(db: Db, d: CardRow) {
     ? [named]
     : (await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id))).map((r) => r.id);
   if (!ids.length) return [];
-  return db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState, mergeCommit: tickets.mergeCommit, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(inArray(tickets.id, ids), eq(tickets.companyId, d.companyId)));
+  return db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, mergeCommit: tickets.mergeCommit, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(inArray(tickets.id, ids), eq(tickets.companyId, d.companyId)));
 }
 
 /**
@@ -71,6 +82,9 @@ export async function cardInvalidReason(db: Db, d: CardRow): Promise<string | nu
   if (await holdsLiveRun(db, d.context)) return null;
   const ts = await cardTickets(db, d);
   const afterMerge = !isPlan && (c.criterionIndexes !== undefined || c.steps !== undefined || c.setsUp !== undefined);
+  // BOS-1755: a card only the owner can answer is never closed because its ticket finished: the owner may be reading it
+  // (the Jenkins card vanished that way). It stays open until they answer; closeInvalidCards labels it.
+  if (isOwnerOnly(c)) return null;
   if (ts.length && !afterMerge) {
     if (ts.every((t) => t.state === "done")) return `its ticket "${ts[0]!.title}" is finished`;
     if (ts.every((t) => t.state === "done" || t.mergeCommit)) return `its ticket "${ts[0]!.title}" is merged`;
@@ -157,6 +171,23 @@ export async function closeCardBySystem(db: Db, d: { id: string; companyId: stri
 }
 
 /**
+ * BOS-1755: an owner-only card whose ticket has finished stays open; it is labelled once (context.keptOpen) so the
+ * screen can say the ticket is done but the owner's answer is still wanted. The ticket is not reopened.
+ */
+async function labelKeptOpen(db: Db, d: CardRow, deps: CloseDeps) {
+  const c = d.context as Ctx;
+  if (!isOwnerOnly(c) || c.keptOpen) return;
+  const ts = await cardTickets(db, d);
+  if (!ts.length || !ts.every((t) => t.state === "done" || t.mergeCommit)) return;
+  const at = (deps.now ?? (() => new Date()))();
+  const cancelled = ts.every((t) => t.state === "done" && t.outcome === "cancelled");
+  const note = cancelled
+    ? `Its ticket "${ts[0]!.title}" was cancelled, but this question is yours alone and nobody has answered it, so it stays open until you answer or dismiss it.`
+    : `Its ticket "${ts[0]!.title}" is finished, but this question is yours alone and nobody has answered it, so it stays open until you do.`;
+  await db.update(decisions).set({ context: mergeContext({ keptOpen: { note, at: at.toISOString() } }) }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
+}
+
+/**
  * BOS-1691: a card the owner could see that Boss Man closed leaves a "closed because…" line in Decisions for two hours
  * (the BOS-739 notice, which only setup cards had), and an owner who had it open in the last 30 minutes gets a feed note.
  * leaveClosedNotice skips a card that never reached the owner. Never fails the close.
@@ -186,6 +217,7 @@ export async function closeInvalidCards(db: Db, deps: CloseDeps = {}, input: { c
   for (const d of rows) {
     const reason = await cardInvalidReason(db, d);
     if (reason && (await closeCardBySystem(db, d, reason, deps))) closed++;
+    else if (!reason) await labelKeptOpen(db, d, deps);
   }
   return closed;
 }

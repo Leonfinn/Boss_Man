@@ -3,7 +3,7 @@ title: Troubleshooting
 navTitle: Troubleshooting
 description: Fixes for the things that most often go wrong when you install, run and update Boss Man, each with the guide it comes from.
 group: Questions
-order: 11
+order: 12
 lead: Find what you see in the list below. Each entry gives the fix and the guide it comes from.
 ---
 
@@ -90,7 +90,7 @@ From: [Guide 5](/guides/agents-and-models).
 
 ### OpenCode agents on Synthetic stop starting, and I got "Routine work paused".
 
-The plan's weekly credits reached your hold level (95% unless you changed it). Chats, reviews and Infinite-mode agents still run, and so do urgent tickets until the limit. Routine work starts again by itself once credits come back (2% at a time). If your Synthetic account has paid top-up credit, open **Funding** and set **I have top-up credit** on the plan's card to **Keep all work running on top-up credit**. To pause later instead, raise **Hold routine work at**.
+The plan's weekly credits reached your hold level (95% unless you changed it). Chats, reviews and Infinite-mode agents still run, and so do urgent tickets until the limit. Routine work starts again by itself once credits come back (2% at a time). If your Synthetic account has paid top-up credit, open **Settings > Funding** and set **I have top-up credit** on the plan's card to **Keep all work running on top-up credit**. To pause later instead, raise **Hold routine work at**.
 
 From: [Guide 5](/guides/agents-and-models).
 
@@ -112,7 +112,7 @@ Choose **Check the token against** your project. It tells you what your git host
 
 - "The host refused the token (HTTP 401)." or "The host refused the token (HTTP 403).": the token is wrong, has expired or lacks permission. Make a new one.
 - "The token can't see the repo": check the owner and name in **Git repo**, and that the token can reach that repository.
-- "The token can read the repo but not push to it": give the token write permission. On GitHub that is Contents, Pull requests and Workflows set to read and write, and Checks set to read so Boss Man can read CI results. On Gitea it is repository Read and Write.
+- "The token can read the repo but not push to it": give the token write permission. On GitHub that is Contents, Pull requests and Workflows set to read and write, and Actions set to read-only so Boss Man can read CI results. On Gitea it is repository Read and Write.
 
 For a Gitea server on your own network, also check the Boss Man machine can reach it.
 
@@ -140,7 +140,7 @@ From: [Guide 4](/guides/board-and-decisions) and [Guide 7](/guides/reviews-and-m
 
 ### Boss Man stopped a ticket and asks me what to do.
 
-The ticket went round in circles: the same review finding came back three times, it had more than three review rounds, or the same failure happened three times in two hours. Read the card on **Decisions** and choose an option, such as **Send it back anyway** or **Stop work on it**.
+The ticket went round in circles: the same review finding came back three times, it had more than three review rounds, or the same failure happened three times in two hours. Boss Man first asks the CEO or the Scrum Master. If they do not settle it, a card comes to you. Read the card on **Decisions** and choose an option, such as **Send it back anyway** or **Stop work on it**.
 
 From: [Guide 7](/guides/reviews-and-merge-queue).
 
@@ -175,7 +175,7 @@ From: [Guide 8](/guides/phone-notifications).
 
 ### Some notifications never reach my phone.
 
-Check **Notifications > How you're told**. During **Quiet hours**, pages and asks become flags, which do not go to your phone. **Per agent, per hour** turns an agent's flags and pages into notes after 6 in an hour. **To the phone** sets which levels are sent (pages and asks by default).
+Check **Notifications > How you're told**. During **Quiet hours**, pages and asks become flags, which do not go to your phone. **Per agent, per hour** turns an agent's flags and pages into notes after 6 in an hour. **Send to my phone** sets what reaches your phone: **Urgent only** (the default) or **All decisions**.
 
 From: [Guide 8](/guides/phone-notifications).
 
@@ -189,13 +189,13 @@ From: [Guide 10](/guides/updates-and-backups).
 
 ### The runner update seems to take a long time.
 
-Boss Man waits for the current runs to finish, then swaps each company's runner when it is idle. Follow it under **Settings > Server and runner**, in **Updates**. If you ran `scripts/update-runner.sh` yourself, nothing moves until you choose **Update runners (finish runs first)** there. With the host deployer set up, that button is under **For a hand-built runner image**. To stop, choose **Cancel the update**. To undo a finished update, run `scripts/update-runner.sh --rollback`.
+Boss Man waits for the current runs to finish, then swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. If you ran `scripts/update-runner.sh` yourself, nothing moves until you choose **Update runners (finish runs first)** there. With the host deployer set up, that button is under **For a hand-built runner image**. To stop, choose **Cancel the update**. To undo a finished update, run `scripts/update-runner.sh --rollback`.
 
 From: [Guide 10](/guides/updates-and-backups).
 
 ### An update from the web page does not apply a change.
 
-A server deploy updates the server only, never the runners. To update them, choose **Build and update runners**. The host deployer also will not apply changes to Compose files, `deploy/`, Dockerfiles, `.env` files, `.npmrc`, `.dockerignore` or the deploy scripts (`deploy.sh`, `rebuild-live.sh`, `update-runner.sh` and `host-deployer.sh`). Apply those by hand with `cd $B/src && scripts/deploy.sh`. The add-on files `deploy/penpot.yml`, `deploy/ntfy.yml` and `deploy/ntfy-bluegreen.yml` are the exception: a change to them does not stop a deploy, but Boss Man does not restart Penpot or ntfy either. To apply one, run that add-on's start command again ([Guide 8](/guides/phone-notifications) for ntfy, [Guide 9](/guides/add-ons) for Penpot).
+A server deploy updates the server only, never the runners. To update them, choose **Build and update runners**. The host deployer also will not apply changes to Compose files, `deploy/`, Dockerfiles, `.env` files, `.npmrc`, `.dockerignore` or the deploy scripts (`deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh` and `install-deployer.sh`). Boss Man shows a card for these: choose **Approve** to get a to-do with the steps, then run them on the machine. The add-on files `deploy/penpot.yml`, `deploy/ntfy.yml` and `deploy/ntfy-bluegreen.yml` are the exception: a change to them does not stop a deploy, but Boss Man does not restart Penpot or ntfy either. To apply one, run that add-on's start command again ([Guide 8](/guides/phone-notifications) for ntfy, [Guide 9](/guides/add-ons) for Penpot).
 
 From: [Guide 10](/guides/updates-and-backups).
 
@@ -213,7 +213,7 @@ From: [Guide 10](/guides/updates-and-backups).
 
 ### The disk is filling up.
 
-Check with `df -h $B` and `docker system df`. **Settings > Server and runner** shows the size of the runner's **Workspaces**. Each company has a disk limit, 20 GB by default. Boss Man tells you at most once a day while a company is over it. This is only a warning: nothing is stopped. To raise the limit, open **Settings > Server and runner > Workspace disk** and set **Most disk to use (GB)** higher. Boss Man also clears the workspaces of tickets that finished more than 7 days ago. Before it clears one, it keeps any uncommitted work as a patch, and the ticket's branch stays. Building runner images also uses space, so check `docker system df` before you remove anything.
+Check with `df -h $B` and `docker system df`. **Settings > Server and runner > Runner** shows the size of the runner's **Workspaces**. Each company has a disk limit, 20 GB by default. Boss Man tells you at most once a day while a company is over it. This is only a warning: nothing is stopped. To raise the limit, open **Settings > Server and runner > Runner**, and under **Workspace disk** set **Most disk to use (GB)** higher. Boss Man also clears the workspaces of tickets that finished more than 7 days ago. Before it clears one, it keeps any uncommitted work as a patch, and the ticket's branch stays. Building runner images also uses space, so check `docker system df` before you remove anything.
 
 From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md), Troubleshooting.
 
