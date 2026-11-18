@@ -48,7 +48,11 @@ export async function holdsLiveRun(db: Db, context: unknown): Promise<boolean> {
   return !!run && !run.endedAt;
 }
 
-/** A question card marked as the owner's alone (ownerOnly kind or ownerMustDo), BOS-1755. */
+/**
+ * A question card marked as the owner's alone (ownerOnly kind or ownerMustDo), BOS-1755.
+ * Note: ownerMustDo cards are kept open here but do not hold a merge (ownerOnlyQuestionSql reads ownerOnly only),
+ * so a finished ticket's ownerMustDo card without steps now never closes on its own.
+ */
 export function isOwnerOnly(c: { type?: string; ownerOnly?: unknown; ownerMustDo?: unknown }): boolean {
   return c.type === "question" && (!!c.ownerOnly || c.ownerMustDo === true);
 }

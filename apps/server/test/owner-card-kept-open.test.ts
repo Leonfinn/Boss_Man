@@ -111,6 +111,29 @@ describe("owner-only cards outlive their ticket (BOS-1755)", () => {
     }
   });
 
+  // Rex's review: a steps/setsUp card is an after-merge setup card the owner does once the code is live; holding the merge for it would deadlock.
+  for (const shape of [{ steps: ["Open the admin page", "Paste the key"] }, { setsUp: "the CI server" }]) {
+    it(`an owner-only card with ${Object.keys(shape)[0]} does not hold the merge or refuse done`, async () => {
+      const c = (ctx = await setup());
+      await c.app.listen({ host: "127.0.0.1", port: 0 });
+      const t = await c.ticket("Feature", false);
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      const q = await ownerChoice(c, t.id);
+      const row = await cardOf(c, q.id);
+      await c.db.update(decisions).set({ context: { ...(row.context as object), ...shape } }).where(eq(decisions.id, q.id));
+      expect(await mergeHolds(c.db, t.id)).toEqual([]);
+      const token = await issueRunToken(c.db, { companyId: c.company.id, agentId: c.worker.id, runId: randomUUID() });
+      const mcp = new Client({ name: "test", version: "0" });
+      await mcp.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(c.app.server.address() as { port: number }).port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+      try {
+        const r = await mcp.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Built." } });
+        expect((r as { content: Array<{ text: string }> }).content[0]?.text ?? "").not.toContain("is the owner's question");
+      } finally {
+        await mcp.close();
+      }
+    });
+  }
+
   it("a merged code ticket's unanswered owner-only card is not closed by the 'is merged' row", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Feature", false);

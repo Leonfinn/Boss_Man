@@ -196,9 +196,9 @@ export const holdsMergeSql = sql`(${decisions.context}->>'type' = 'review_loop' 
 
 /**
  * BOS-1755: a ticket's own owner-only question (owner_choice, owner_setup, secret...) that blocks it holds it in
- * "Passed, held" (a merge for a code ticket, closing for a no-code one) until the owner answers it. A plan card and an after-merge criterion card never hold (they are answered at other times).
+ * "Passed, held" (a merge for a code ticket, closing for a no-code one) until the owner answers it. A plan card and an after-merge card (criterion, steps or setsUp: the owner does those after the code is live) never hold, or the ticket would deadlock.
  */
-export const ownerOnlyQuestionSql = sql`(${decisions.context}->>'type' = 'question' and ${decisions.context}->>'ownerOnly' is not null and coalesce(${decisions.context}->>'plan', '') <> 'true' and ${decisions.context}->'criterionIndexes' is null)`;
+export const ownerOnlyQuestionSql = sql`(${decisions.context}->>'type' = 'question' and ${decisions.context}->>'ownerOnly' is not null and coalesce(${decisions.context}->>'plan', '') <> 'true' and ${decisions.context}->'criterionIndexes' is null and ${decisions.context}->'steps' is null and ${decisions.context}->'setsUp' is null)`;
 
 /** The ticket's own open owner-only question card that blocks it (ownerOnlyQuestionSql), or null. A ticket can't be closed as completed while one is open. */
 export async function openOwnerOnlyCard(db: Db, ticketId: string): Promise<string | null> {
