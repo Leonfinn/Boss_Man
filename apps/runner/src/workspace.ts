@@ -107,7 +107,7 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
 }
 
 /** A split merge's step (BOS-316; `base` / `expectBase` are the merge train's, BOS-1366), and the git host's CI publish around it (BOS-1070). */
-export type MergeStep = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string; carry?: boolean };
+export type MergeStep = { phase: "prepare"; base?: string; /** BOS-1820: the merge prepared earlier; answer whether its pass would carry. */ carryFrom?: { commit: string; tree: string } } |{ phase: "finish"; commit: string; tree: string; expectBase?: string; carry?: boolean };
 export type MergePhase = MergeStep | { phase: "publish"; commit: string } | { phase: "unpublish" };
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
@@ -2003,9 +2003,20 @@ export class Workspaces {
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
       if (problems.length) return { status: "migration_journal" as const, problems };
       if (phase.phase === "prepare") {
+        // BOS-1820: the gate asks, for a merge whose check still waits, whether a pass of the earlier merge could be carried onto
+        // this one by finish's rule. Read-only. A diff that fails counts as "can't carry" (the gate rebuilds, the safe side).
+        const from = phase.carryFrom;
+        const carry = from && from.tree !== tried.tree
+          ? await this.carryAcross(repo, from, tried).then(
+              (c) => (c.ok ? { ok: true as const } : { ok: false as const, why: c.why, ...(c.files ? { files: c.files.slice(0, 30) } : {}) }),
+              (err: Error) => ({ ok: false as const, why: `the carry check failed: ${err.message.slice(0, 200)}` }),
+            )
+          : undefined;
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
-        await this.git(["update-ref", keep, commit], { cwd: repo });
-        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
+        // With carryFrom the gate moves to the new merge only when the carry is refused; otherwise the earlier merge stays the
+        // one queued and published for CI, so the keep ref (which "publish" insists on) stays on it.
+        if (!from || carry?.ok === false) await this.git(["update-ref", keep, commit], { cwd: repo });
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}), ...(carry ? { carry } : {}) };
       }
       // The target moved to something whose merge differs from what was checked: check again, unless the passed merge may be
       // carried across the move (BOS-1762).

@@ -166,6 +166,50 @@ describe("carry a passed merge across a main move (BOS-1762)", () => {
   });
 });
 
+// BOS-1820: prepare with carryFrom (the merge a queued check still waits on) says whether that merge's pass could be carried
+// onto the fresh one, by the same rule as finish. The keep ref (which "publish" insists on) moves only on a refusal, the one
+// case the gate switches the job to the new merge.
+describe("prepare's carry answer for a queued merge (BOS-1820)", () => {
+  const kept = (dir: string) => git(dir, "rev-parse", `refs/bossman/merge/${A}`);
+  const repoOf = (ws: Workspaces) => (ws as unknown as { repoDir(id: string): string }).repoDir(project);
+
+  it("main changed a check script: carry refused, naming the file, and the new merge is kept", async () => {
+    const o = origin();
+    const { ws, spec } = await ticket(o, { "mine.txt": "mine\n" });
+    const p = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare" })) as Prepared;
+    o.pushChange({ "scripts/check-test-lines.mjs": "// new rule\n" });
+    const r = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare", carryFrom: { commit: p.commit, tree: p.tree } })) as Prepared & { carry?: unknown };
+    expect(r.status).toBe("prepared");
+    expect(r.tree).not.toBe(p.tree);
+    expect(r.carry).toEqual({ ok: false, why: "main changed dependencies, build, CI or migration files", files: ["scripts/check-test-lines.mjs"] });
+    expect(kept(repoOf(ws))).toBe(r.commit);
+  });
+
+  it("a file-disjoint main move: carry ok, and the queued merge stays the kept one", async () => {
+    const o = origin();
+    const { ws, spec } = await ticket(o, { "mine.txt": "mine\n" });
+    const p = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare" })) as Prepared;
+    o.pushChange({ "theirs.txt": "theirs\n" });
+    const r = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare", carryFrom: { commit: p.commit, tree: p.tree } })) as Prepared & { carry?: unknown };
+    expect(r.tree).not.toBe(p.tree);
+    expect(r.carry).toEqual({ ok: true });
+    expect(kept(repoOf(ws))).toBe(p.commit);
+  });
+
+  it("main unmoved: no carry answer, nothing to decide; without carryFrom the answer is today's", async () => {
+    const o = origin();
+    const { ws, spec } = await ticket(o, { "mine.txt": "mine\n" });
+    const p = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare" })) as Prepared;
+    const same = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare", carryFrom: { commit: p.commit, tree: p.tree } })) as Prepared & { carry?: unknown };
+    expect(same.tree).toBe(p.tree);
+    expect(same.carry).toBeUndefined();
+    o.pushChange({ "scripts/check-x.sh": "true\n" });
+    const plain = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare" })) as Prepared & { carry?: unknown };
+    expect(plain.carry).toBeUndefined();
+    expect(kept(repoOf(ws))).toBe(plain.commit);
+  });
+});
+
 describe("carryVerdict (BOS-1762)", () => {
   it("is ok only for disjoint files, no whole-repo files, and drift inside main's files", () => {
     expect(carryVerdict({ mine: ["a.ts"], theirs: ["b.ts"], drift: ["b.ts"] })).toEqual({ ok: true });

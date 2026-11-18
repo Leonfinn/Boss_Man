@@ -30,7 +30,7 @@ export function mergePhaseOf(c: Extract<RunnerCommand, { type: "workspace.merge"
     case undefined:
       return null;
     case "prepare":
-      return { phase: "prepare", ...(c.base ? { base: c.base } : {}) };
+      return { phase: "prepare", ...(c.base ? { base: c.base } : {}), ...(c.carryFrom ? { carryFrom: c.carryFrom } : {}) };
     case "unpublish":
       return { phase: "unpublish" };
     case "publish":

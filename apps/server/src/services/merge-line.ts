@@ -28,6 +28,9 @@
 //                  commits touched none of its files (from, to, commits, files: how many files main changed)
 //   rebuilt        BOS-1762: main moved after its check and GitHub passed, so it is built and tested again
 //                  (rebuilds: how many times this merge; why/files: why it couldn't be carried, when it was asked)
+//   refreshed      BOS-1820: with GitHub CI gating, main moved while its check waited for a slot in a way a pass couldn't
+//                  be carried across, so the queued job took the new merge (and a new GitHub run) before it started
+//                  (why/files: why no carry; refreshes: how many times this attempt)
 //   landing_turn   BOS-1762: its landing turn was taken | queued | ended | expired (rebuilds, capMin)
 //   left           it left review without merging (to: the state it moved to)
 //   takeover       a server took charge (by: the cause, see TakeoverCause; commit: the live commit). One row per
@@ -79,6 +82,8 @@ export type MergeLineEvent =
   | { event: "carried_across"; from: string; to: string; commits: number; files: number }
   /** BOS-1762: main moved after both passed, so the merge is built and tested again; `why`/`files`: why no carry. */
   | { event: "rebuilt"; rebuilds: number; why?: string; files?: string[] }
+  /** BOS-1820: main moved while its check still waited for a slot, in a way a pass couldn't be carried across, so the queued job took the new merge first (place kept). */
+  | { event: "refreshed"; why: string; files?: string[]; refreshes: number }
   | { event: "landing_turn"; action: "taken" | "queued" | "ended" | "expired"; rebuilds?: number; capMin?: number };
 
 /**
@@ -175,6 +180,7 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   takeover: (e) => `Merge line: a server took charge (${e.by}${e.commit ? `, ${e.commit.slice(0, 12)}` : ""})`,
   carried_across: (e) => `Merge line: main moved ${e.commits} commit${e.commits === 1 ? "" : "s"} since its tests passed, touching ${e.files} file${e.files === 1 ? "" : "s"}, none of this ticket's; landed without a new test`,
   rebuilt: (e) => `Merge line: main moved after its checks passed, so it is built and tested again (${e.rebuilds} time${e.rebuilds === 1 ? "" : "s"})${e.why ? `: ${e.why}${e.files?.length ? ` (${e.files.slice(0, 3).join(", ")}${e.files.length > 3 ? ", …" : ""})` : ""}` : ""}`,
+  refreshed: (e) => `Merge line: main changed since this merge was built (${e.why}${e.files?.length ? `: ${e.files.slice(0, 3).join(", ")}${e.files.length > 3 ? ", …" : ""}` : ""}), so it was rebuilt before its check started, keeping its place`,
   landing_turn: (e) =>
     e.action === "taken"
       ? `Merge line: took the landing turn after ${e.rebuilds} rebuilds; other merges wait to push for up to ${e.capMin} min`
