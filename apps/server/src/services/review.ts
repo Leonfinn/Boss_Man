@@ -13,7 +13,8 @@ import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
-import { CI_TIMING, CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop } from "./ci-publish.js";
+import { CI_TIMING, CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop, type FlakeAnswer } from "./ci-publish.js";
+import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts } from "./ci-flake.js";
 import { CI_BRANCH_PREFIX, GitHostError, type CiStatus, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
@@ -119,6 +120,10 @@ const MERGE_RETARGET_MS = Number(process.env.BOSSMAN_MERGE_RETARGET_MS) > 0 ? Nu
 /** The owner's off switch for refreshing a waiting merge (setting merge_retarget; on unless set to false). */
 export const MERGE_RETARGET_KEY = "merge_retarget";
 const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
+/** BOS-1733: the longest the gate waits for its re-run of GitHub's failed tests (queue and run); after it, no retry. */
+export const FLAKE_RERUN_MAX_MS = 45 * 60_000;
+/** BOS-1752: the flake re-run's answer on a copy that handed over (ciVerdict turns it into a quiet stop). */
+const HANDED_OVER_WHY = "this server copy handed over";
 /**
  * BOS-1515 (B2): a ticket waiting in the merge train tries a merge on main (read-only) when main has moved since its last try,
  * at most once per TRAIN_TRIAL_MIN_MS (each try holds the project's repo lock for a fetch and a merge-tree), and at least every
@@ -2424,6 +2429,8 @@ export function reviewService(
             },
             onWait: (s) => (s ? ciWaits.set(ticketId, s) : ciWaits.delete(ticketId)),
             touch,
+            // BOS-1733: only in server check-queue mode, where the gate can queue a job on the exact merge commit.
+            ...(serverChecks && deps.cancelCheck ? { flakeRetry: (s: CiStatus, st: CiStop) => flakeRetry(prep, s, st), announceFlakeRetry: (files: string[], accepted: boolean) => announceFlakeRetry(prep, files, accepted) } : {}),
           },
           prep,
           stop,
@@ -2471,6 +2478,93 @@ export function reviewService(
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub Actions runs" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : "It's in the owner's Decisions."}` });
         return { outcome: "check_stuck", delivered: null, detail: { ci: why, message } };
       };
+      // BOS-1733 (CI fix 2): GitHub failed in named tests this branch doesn't change. The decision table (ci-flake.ts) says
+      // whether to try; then the gate runs those tests once more on the exact merge commit, as a merge-kind job on the same
+      // commit and tree (so every reader of the ticket's merge jobs treats it as part of this merge: restart pick-up, the
+      // branch-moved cancel, its place in line). Failing there means the failure is real; passing buys one GitHub retry.
+      let flakeCounts = new Map<string, number>();
+      const flakeRetry = async (prep: { commit: string; tree: string }, s: CiStatus, stop: CiStop): Promise<FlakeAnswer> => {
+        // BOS-1752: a copy that handed over queues no re-run and asks GitHub for no retry; ciVerdict then ends it quietly.
+        if (deps.isLeader && !deps.isLeader()) return { retry: false, why: HANDED_OVER_WHY };
+        const found = await deps.gitHosts!.failures(ci!.cfg, ci!.token, s.failed).catch(() => []);
+        const named = namedTestFiles(s.failed.map((run) => ({ job: run.name, paths: found.find((f) => f.run === run)?.paths ?? null })));
+        const diff = await readDiff().catch(() => null);
+        const [proj] = await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, t.projectId));
+        const since = new Date(Date.now() - RETRY_WINDOW_MS);
+        const rows = await db.select({ sha: checkResults.sha, detail: checkResults.detail }).from(checkResults).where(and(eq(checkResults.companyId, t.companyId), eq(checkResults.kind, FLAKE_RETRY_KIND), gt(checkResults.at, since)));
+        flakeCounts = retryCounts(rows.map((r) => r.detail));
+        const d = flakeDecision({
+          billing: !!s.billing || found.some((f) => f.billing),
+          named,
+          changed: diff ? diff.files.map((f) => f.path) : null,
+          mainRed: proj?.s === "red",
+          retriedThisCommit: rows.some((r) => r.sha === prep.commit),
+          recent: flakeCounts,
+        });
+        if (d.act === "bounce") return { retry: false, why: d.why };
+        const files = d.files;
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI failed in ${files.join(", ")}, which this branch doesn't change. Boss Man is running ${files.length > 1 ? "them" : "it"} once more on the same merge commit (${prep.commit.slice(0, 12)}) before deciding. Nothing to do.` });
+        const { job } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "quick", commit: prep.commit, tree: prep.tree, command: gateRerunCommand(files), priority: checkPrio, requestedBy: null });
+        const deadline = Date.now() + FLAKE_RERUN_MAX_MS;
+        let cur = job;
+        while (cur.state === "queued" || cur.state === "running") {
+          // BOS-1752: handed over: leave the re-run job alone (the server now in charge reuses it for the same commit and tree).
+          if (deps.isLeader && !deps.isLeader()) return { retry: false, why: HANDED_OVER_WHY };
+          // The gate's own check failed meanwhile: its send-back is the answer, and the re-run's slot is given back.
+          if (stop.stopped || Date.now() > deadline) {
+            await deps.cancelCheck?.(cur.id, stop.stopped ? "Boss Man's own merge check failed first, so the re-run of GitHub's failed tests was stopped." : "The re-run of GitHub's failed tests took too long, so it was stopped.").catch(() => undefined);
+            return { retry: false, why: stop.stopped ? "Boss Man's own merge check failed first" : `the re-run at Boss Man's gate didn't finish within ${Math.round(FLAKE_RERUN_MAX_MS / 60_000)} minutes` };
+          }
+          await touch();
+          await new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
+          const [row] = await db.select().from(checkJobs).where(eq(checkJobs.id, cur.id));
+          if (!row) return { retry: false, why: "the re-run at Boss Man's gate disappeared from the check queue" };
+          cur = row;
+        }
+        if (cur.state === "passed") return { retry: true, files };
+        const tail = cur.logTail ?? "";
+        if (cur.state === "failed" && cur.exitCode !== CANT_RERUN_EXIT && !/timed out/i.test(cur.reason ?? "")) {
+          return { retry: false, why: `${files.join(", ")} failed again when Boss Man re-ran ${files.length > 1 ? "them" : "it"} on the same merge commit, so the failure is real`, gateOutput: tail.slice(-3000) };
+        }
+        const said = [...tail.matchAll(/^boss-man re-run: (.+)$/gm)].pop()?.[1];
+        return { retry: false, why: `Boss Man couldn't re-run ${files.length > 1 ? "them" : "it"} at its gate (${(cur.state === "failed" && cur.exitCode === CANT_RERUN_EXIT && said ? said : cur.reason ?? cur.state).slice(0, 200)})` };
+      };
+      // The one retry is recorded only once GitHub accepted it: the record is what the per-commit and per-week limits count.
+      const announceFlakeRetry = async (prep: { commit: string }, files: string[], accepted: boolean) => {
+        if (!accepted) {
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"}, but GitHub refused to re-run the failed jobs (the git token needs Actions: Read and write), so the ticket goes back as before.` });
+          return;
+        }
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: FLAKE_RETRY_KIND, passed: true, detail: files.join("\n") });
+        const counts = files.map((f) => `${f}: retry ${(flakeCounts.get(f) ?? 0) + 1} of ${RETRIES_PER_WEEK} this week`).join("; ");
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"} on the same merge commit, so Boss Man asked GitHub to re-run the failed jobs once (${counts}). Nothing to do.` });
+      };
+      // After a retried run passed: one "Flaky on GitHub: <file>" ticket per file for the CEO, reused while it is open.
+      const reportFlaky = async (files: string[], url: string | undefined, commit: string) => {
+        const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+        const ref = ticketRef(co?.prefix ?? null, t.number) ?? `"${t.title}"`;
+        const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+        for (const file of files) {
+          const n = (flakeCounts.get(file) ?? 0) + 1;
+          const line = `GitHub CI failed in \`${file}\` on the merge of ${ref} ("${t.title}", commit ${commit.slice(0, 12)}${url ? `, ${url}` : ""}). It passed when Boss Man re-ran it on the same commit, and again on GitHub's one retry, so ${ref} merged. Retry ${n} of ${RETRIES_PER_WEEK} this week for this file; after ${RETRIES_PER_WEEK}, a failure in it sends the ticket back until it is fixed.`;
+          const title = `Flaky on GitHub: ${file}`.slice(0, 200);
+          const [open] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, t.companyId), eq(tickets.title, title), ne(tickets.systemState, "done"))).limit(1);
+          if (open) {
+            await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId: open.id, author: "system", text: line });
+            continue;
+          }
+          const made = await deps.work.createTicket(t.projectId, {
+            title,
+            body: [`**Why:** ${line}`, "", `**Do:** find why \`${file}\` fails on GitHub's runners and not at Boss Man's gate, and fix the test (CLAUDE.md: "Writing tests: they must pass on GitHub's runners too"). Each further one-off failure is added here.`, "", "Opened by Boss Man's merge gate after a recorded GitHub retry (BOS-1733)."].join("\n"),
+            risk: "medium",
+            state: "ready",
+            overLimit: true,
+            assigneeAgentId: ceo?.id ?? null,
+            createdByAgentId: null,
+          });
+          await tellCeo(made, "flaky test on GitHub", `${line} Boss Man opened "${made.title}" for it. Assign it to whoever should fix the test.`).catch(() => undefined);
+        }
+      };
       // What a CI wait means for this attempt: null carries on to the merge, anything else ends it.
       const ciVerdict = async (o: CiOutcome, prep: { commit: string; tree: string }): Promise<LandOnceResult | null> => {
         // BOS-1752: a copy that handed over acts on no CI result: the server now in charge published its own merge commit and
@@ -2484,6 +2578,10 @@ export function reviewService(
               ciPassedTrees.add(prep.tree);
               if (ciPassedTrees.size > 500) ciPassedTrees.delete(ciPassedTrees.values().next().value!);
               await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: true, detail: null });
+            }
+            if (o.flaky?.length) {
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI passed on its one retry, so ${o.flaky.join(", ")} failed only once; Boss Man told the CEO about the flaky test. Nothing to do.` });
+              await reportFlaky(o.flaky, o.retryRunUrl, prep.commit).catch(() => undefined);
             }
             startCiWaiters();
             return null;
@@ -2539,8 +2637,14 @@ export function reviewService(
             await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: false, detail: (jobs.join(", ") || "workflow failed").slice(0, 500) });
             await keepBounce(ciBounceRecord({ commit: prep.commit, target: defaultBranch, body }));
             const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: body, what: "GitHub CI" });
+            // BOS-1733: what the gate tried before sending it back.
+            const tried = o.retried
+              ? "\n\nIt failed on GitHub twice: once, then again after Boss Man re-ran the failed jobs, so it isn't a one-off."
+              : o.why
+                ? `\n\nBoss Man didn't ask GitHub for a retry: ${o.why}.${o.gateOutput ? `\n\nBoss Man's re-run on the merge commit, last output:\n${o.gateOutput}` : ""}`
+                : "";
             const delivered = await sendBack(
-              `The review was approved, but GitHub CI failed on the merge of your branch with ${defaultBranch} (commit ${prep.commit.slice(0, 12)}), so it can't be merged yet. Failed:\n${body}\n\nFix it on your branch (merge origin/${defaultBranch} in if the failure comes from the two together), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`,
+              `The review was approved, but GitHub CI failed on the merge of your branch with ${defaultBranch} (commit ${prep.commit.slice(0, 12)}), so it can't be merged yet. Failed:\n${body}${tried}\n\nFix it on your branch (merge origin/${defaultBranch} in if the failure comes from the two together), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`,
               "ci failed",
             );
             return { outcome: "verify_failed", delivered, detail: { ci: "failed", jobs } };

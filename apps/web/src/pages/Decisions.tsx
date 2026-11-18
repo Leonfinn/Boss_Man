@@ -1159,9 +1159,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         </ol>
                         {/* The lint's findings (BOS-417): small, under the steps, never the headline. */}
                         {d.context.lint?.override && (
-                          <p className="muted" data-lint-override style={{ fontSize: 12 }}>
-                            Boss Man flagged {d.context.lint.override.findings.map((f) => `step ${f.step}: ${f.problem}`).join("; ")}. The CEO says: {d.context.lint.override.reason}
-                          </p>
+                          <div className="muted" data-lint-override style={{ fontSize: 12 }}>
+                            {(d.context.lint.override.entries ?? [{ reason: d.context.lint.override.reason, findings: d.context.lint.override.findings }]).map((e, i) => (
+                              <p key={i} style={{ margin: 0 }}>
+                                Boss Man flagged {e.findings.map((f) => `step ${f.step}${f.rule ? ` (${f.rule})` : ""}: ${f.problem}`).join("; ")}. The CEO says: {e.reason}
+                              </p>
+                            ))}
+                          </div>
                         )}
                         {!!d.context.lint?.warn.length && (
                           <p className="muted" data-lint-warn style={{ fontSize: 12 }}>

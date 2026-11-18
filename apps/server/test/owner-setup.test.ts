@@ -229,9 +229,24 @@ describe("setup steps are checked like an owner card when they are written (DR-0
     expect(textOf(await worker.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "x", ownerSetup: "Restart the notifications add-on", lintOverride: "It restarts by itself after the update." } }))).toMatch(/Only the CEO can pass lintOverride/);
     const ceo = await ceoAgent();
     await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Restart the notifications add-on", lintOverride: "It restarts by itself after the update.", reason: "Steps for the owner." } });
-    expect(await row(t.id)).toMatchObject({ ownerSetup: "Restart the notifications add-on", ownerSetupOverride: "It restarts by itself after the update." });
+    const stored = await row(t.id);
+    expect(stored.ownerSetup).toBe("Restart the notifications add-on");
+    expect(JSON.parse(stored.ownerSetupOverride!)).toEqual([{ steps: [1], rules: [expect.any(String)], reason: "It restarts by itself after the update." }]);
     await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Add funding source", reason: "Plainer steps." } });
     expect(await row(t.id)).toMatchObject({ ownerSetup: "Settings → Funding → Add funding source", ownerSetupOverride: null });
+  });
+
+  it("R35: update_ticket takes a list of overrides; a refused step it doesn't name stays refused, and a step edited later loses it", async () => {
+    const t = await ctx.ticket();
+    const ceo = await ceoAgent();
+    const two = "Restart the notifications add-on\nSettings → Funding → Add funding source\nRestart the other add-on";
+    const why = "Both add-ons restart by themselves.";
+    expect(textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: two, lintOverride: [{ steps: [1], reason: why }], reason: "Steps for the owner." } }))).toMatch(/Step 3: [\s\S]*isn't covered/);
+    expect((await row(t.id)).ownerSetup).not.toBe(two);
+    await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: two, lintOverride: [{ steps: [1, 3], reason: why }], reason: "Steps for the owner." } });
+    expect(JSON.parse((await row(t.id)).ownerSetupOverride!)).toEqual([{ steps: [1, 3], rules: [expect.any(String)], reason: why }]);
+    // Step 3 is rewritten without a new override: the override is gone, so step 1 is refused again.
+    expect(textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Restart the notifications add-on\nSettings → Funding → Add funding source\nRestart the third add-on", reason: "Edit." } }))).toMatch(/Step 1: /);
   });
 
   it("a merged ticket's steps stay frozen, except for the CEO while Boss Man's card to fix them is open", async () => {
