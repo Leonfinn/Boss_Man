@@ -255,6 +255,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
    * above this one in the line, oldest first; nothing is built, pushed or linked.
    */
   z.object({ type: z.literal("workspace.mergeLine"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), branches: z.array(z.object({ ticketId: Uuid, branch: z.string().min(1) })).max(500) }),
+  /**
+   * The target's newest first-parent commits after a fetch (BOS-1645): what landed on main, so the server can record a merge
+   * whose answer it never got. `filesFor`: commits (from an earlier answer) whose changed files to list too. Read-only.
+   */
+  z.object({ type: z.literal("workspace.mainLog"), requestId: z.string(), projectId: Uuid, target: z.string().min(1), max: z.number().int().min(1).max(200), filesFor: z.array(z.string().regex(/^[0-9a-f]{40}$/)).max(20).optional() }),
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
@@ -416,8 +421,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "ci-publish": workspace.merge's "publish" and "unpublish" phases and its expectTree (BOS-1070); an older runner would read an unknown phase as a plain merge, so the server only sends them to a runner that says this. "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. "ci-publish-scan" (BOS-1664): runs the secrets scan, with the owner's private-details list from workspace.merge's scanList, before a "publish" push; the early GitHub run (pre-flight) is offered only to a runner that says this. "merge-carry" (BOS-1762): honours workspace.merge's carry on finish; the server sends it only to a runner that says this. */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan", "merge-carry"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "ci-publish": workspace.merge's "publish" and "unpublish" phases and its expectTree (BOS-1070); an older runner would read an unknown phase as a plain merge, so the server only sends them to a runner that says this. "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. "ci-publish-scan" (BOS-1664): runs the secrets scan, with the owner's private-details list from workspace.merge's scanList, before a "publish" push; the early GitHub run (pre-flight) is offered only to a runner that says this. "main-log": answers workspace.mainLog (BOS-1645). "merge-carry" (BOS-1762): honours workspace.merge's carry on finish; the server sends it only to a runner that says this. */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan", "main-log", "merge-carry"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -601,6 +606,13 @@ export type MergeLineConflict = { ticketId: string; branch: string; ahead: boole
 
 /** The answer to workspace.mergeLine (BOS-1411): only the branches that really conflict, with their files. */
 export type MergeLineConflictsResult = { conflicts: MergeLineConflict[] };
+
+/**
+ * The answer to workspace.mainLog (BOS-1645): newest first. `at` is the committer time (ISO 8601); `files` only for the
+ * commits named in filesFor (against the first parent). Empty when the runner has no copy of the repo or no such target.
+ * `message`: the full message, trimmed; only it says which ticket a merge is (`subject` is the first paragraph, for display).
+ */
+export type MainLogResult = { commits: Array<{ sha: string; subject: string; message: string; at: string; files?: string[] }> };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
 export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "branch_moved"; head: string; pinned: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;

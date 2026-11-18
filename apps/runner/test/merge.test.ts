@@ -36,6 +36,7 @@ afterEach(async () => {
         break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY" || Date.now() >= deadline) throw err;
+        // test-lines-ok: retry pause inside a loop bounded by a 30 s deadline
         await new Promise((r) => setTimeout(r, 100));
       }
     }

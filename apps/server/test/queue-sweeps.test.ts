@@ -490,7 +490,8 @@ describe("stale blockers (R21)", () => {
     expect(row!.recommendedOption).toBe("Chase");
 
     await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Chase" });
-    const woken = await ctx.db.select().from(wakes);
+    // Only the chase matters here: 25 idle hours also bring R29's "nothing startable" wake and its stall alert.
+    const woken = await ctx.db.select().from(wakes).where(eq(wakes.reason, "chased"));
     expect(woken).toEqual([expect.objectContaining({ agentId: ctx.ceo.id, ticketId: domain.id, reason: "chased", priority: 3 })]);
     expect((await ctx.sweep()).staleBlockers.open).toBe(0);
 
@@ -1338,7 +1339,7 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
     // Same chain as the old whole-table walk.
     const legacyRaw = await legacyQueue(ctx.db, () => new Date());
-    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, projects: row.projects, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
     expect(mine).toEqual(old);
   });
 
@@ -1373,6 +1374,8 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
       rechecking: null,
       notRechecked: null,
       about: r.id === heldCards[0]!.id ? about(root[0]!.id) : r.id === heldCards[1]!.id ? about(branch[0]!.id) : [],
+      // The project of each ticket a card is about; the unrelated card names none, so it is company-wide.
+      projects: r.id === heldCards[0]!.id || r.id === heldCards[1]!.id ? [{ id: ctx.project.id, name: "Customer app" }] : [],
       // A Date in the old body, an ISO string over HTTP.
       createdAt: r.createdAt.toISOString(),
     }));
