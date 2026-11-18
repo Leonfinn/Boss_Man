@@ -9,11 +9,11 @@
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, checkJobLogs, checkJobs, checkWorkers, companies, projects, settings, tickets } from "../db/schema.js";
-import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
+import { BACKGROUND_LANE_AGE_KEY, checkPriority, isBackgroundLaneTitle, laneAgeMinutes, laneWords, readLaneAgeMinutes } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, firstFailingLine, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 import { softHold } from "./deploy-wait-hold.js";
-import { retierWaiting, trainView } from "./merge-train.js";
+import { agedTier, retierWaiting, setTrainLaneAge, trainView } from "./merge-train.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -336,6 +336,9 @@ export function checkQueue(db: Db) {
     if (queued.some((j) => j.kind === "merge" && !j.fixesMain) && (await train())) for (const j of queued) if (j.kind === "merge" && !views.has(j.projectId)) views.set(j.projectId, trainView(j.projectId));
     const marks = await tiers([...new Set([...queued.map((j) => j.ticketId), ...[...views.values()].flatMap((v) => v?.seated ?? [])])]);
     const prio = (j: CheckJob) => marks.get(j.ticketId) ?? j.priority;
+    // BOS-1803: a background-lane job that has waited the lane age ranks as ordinary, by its queue time (so it can't starve).
+    const ageMs = (await laneAgeMinutes(db)) * 60_000;
+    const ranked = (j: CheckJob) => agedTier(prio(j), now.getTime() - j.queuedAt.getTime(), ageMs);
     const trainHeld = new Set<string>();
     const seatOf = new Map<string, number>();
     const block = new Map<string, { front: number; tier: number; at: number }>();
@@ -364,7 +367,7 @@ export function checkQueue(db: Db) {
     const key = (j: CheckJob) => {
       const seat = seatOf.get(j.id);
       const b = seat === undefined ? undefined : block.get(j.projectId);
-      return b ? { front: b.front, tier: b.tier, at: b.at, seat: seat! } : { front: j.frontAt?.getTime() ?? 0, tier: prio(j), at: j.queuedAt.getTime(), seat: 0 };
+      return b ? { front: b.front, tier: b.tier, at: b.at, seat: seat! } : { front: j.frontAt?.getTime() ?? 0, tier: ranked(j), at: j.queuedAt.getTime(), seat: 0 };
     };
     const keys = new Map(queued.map((j) => [j.id, key(j)]));
     const order = queued
@@ -391,12 +394,14 @@ export function checkQueue(db: Db) {
    * of this project, by tier (0 when a live job was moved to the front, else the ticket's check priority), then place (its
    * earliest live merge job), then id. Queue time alone seated background-lane tickets right behind the head.
    */
-  async function liveMergeOrder(projectId: string): Promise<string[]> {
+  async function liveMergeOrder(projectId: string, now = new Date()): Promise<string[]> {
     const live = await db.select().from(checkJobs).where(and(eq(checkJobs.projectId, projectId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, [...LIVE])));
     const marks = await tiers([...new Set(live.map((j) => j.ticketId))]);
+    const ageMs = (await laneAgeMinutes(db)) * 60_000;
     const by = new Map<string, { tier: number; place: number }>();
     for (const j of live) {
-      const tier = j.frontAt ? 0 : (marks.get(j.ticketId) ?? j.priority);
+      // BOS-1803: an aged background-lane merge re-seats as ordinary, the way the train's own queue ranks it.
+      const tier = j.frontAt ? 0 : agedTier(marks.get(j.ticketId) ?? j.priority, now.getTime() - j.queuedAt.getTime(), ageMs);
       const cur = by.get(j.ticketId);
       by.set(j.ticketId, cur ? { tier: Math.min(cur.tier, tier), place: Math.min(cur.place, j.queuedAt.getTime()) } : { tier, place: j.queuedAt.getTime() });
     }
@@ -684,8 +689,19 @@ export function checkQueue(db: Db) {
     const held = live.filter((r) => r.job.state === "queued" && !orderIds.has(r.job.id)).map((r) => r.job);
     // "Slots busy" is per company: only this company's running jobs count against `limit`, since each company has its own runner slots.
     const full = runningJobs.length >= limit;
+    // BOS-1803: each waiting job's lane in words, and a seat waiter's place among the tickets waiting for a train seat.
+    const marks = await tiers([...new Set(live.map((r) => r.job.ticketId))]);
+    const ageMs = (await laneAgeMinutes(db)) * 60_000;
+    const seatQueues = new Map<string, string[]>();
+    const seatPlace = (j: CheckJob): number | null => {
+      if (!served.trainHeld.has(j.id)) return null;
+      if (!seatQueues.has(j.projectId)) seatQueues.set(j.projectId, trainView(j.projectId)?.waiting ?? []);
+      const i = seatQueues.get(j.projectId)!.indexOf(j.ticketId);
+      return i < 0 ? null : i + 1;
+    };
     const row = (j: CheckJob, position: number | null, heldBy: string | null) => {
       const r = info.get(j.id)!;
+      const waitedMs = now.getTime() - j.queuedAt.getTime();
       return {
         id: j.id,
         ticketId: j.ticketId,
@@ -702,6 +718,10 @@ export function checkQueue(db: Db) {
         heldBy,
         // BOS-1517: held because the ticket has no merge-train seat yet (its check isn't waiting for a slot at all).
         heldBySeat: j.state === "queued" && served.trainHeld.has(j.id),
+        // BOS-1803: place among the tickets waiting for a train seat (1 = seated next); null when not waiting for one.
+        seatPlace: j.state === "queued" ? seatPlace(j) : null,
+        // BOS-1803: "background lane: …" while it waits (null for ordinary work, an urgent one, or a moved-to-front one).
+        lane: j.state !== "queued" || j.frontAt || j.fixesMain ? null : laneWords(marks.get(j.ticketId) ?? j.priority, waitedMs, ageMs),
         // True only for checks a red main holds back; "all slots are busy" fills heldBy too but is plain queueing (BOS-1262).
         heldByMain: heldBy !== null && heldBy.startsWith("main is red"),
         // BOS-1435: where a running check runs: the company's runner, or a check worker by name.
@@ -753,7 +773,16 @@ export function checkQueue(db: Db) {
     await db.insert(settings).values({ key: MERGE_TRAIN_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
   }
 
+  /** BOS-1803: minutes a background-lane wait yields to newer ordinary work (0 = always yields). */
+  const laneAge = () => laneAgeMinutes(db);
+  async function setLaneAge(minutes: number): Promise<void> {
+    const value = readLaneAgeMinutes(minutes);
+    if (value !== minutes) throw new Error("The background lane wait must be a whole number of minutes from 0 to 1440.");
+    await db.insert(settings).values({ key: BACKGROUND_LANE_AGE_KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+    setTrainLaneAge(value * 60_000);
+  }
+
   const place = (ticketId: string) => mergePlace(db, ticketId);
 
-  return { list, mode, slots, setMode, setSlots, runnerPolicy, setRunnerPolicy, train, setTrain, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, failedJobs, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, runnerPolicy, setRunnerPolicy, train, setTrain, laneAge, setLaneAge, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, failedJobs, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
 }

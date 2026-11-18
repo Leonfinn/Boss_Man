@@ -175,8 +175,8 @@ describe("raise_decision against the record (BOS-1797)", () => {
   it("stillNeeded sends a settled question to the CEO first, even with steps, with the record line and the reason at its head", async () => {
     await ctx.put(PHONE_TEST_KEY, confirmed(PUBLIC));
     const why = "The owner said on BOS-1603 they removed Tailscale from the phone yesterday.";
-    const steps = ["Open the Notifications page and look at the box \"Boss Man's address on your phone\"."];
-    const r = await raise(CARD1, { stillNeeded: why, ownerMustDo: true, steps });
+    const steps = ["Open Settings → Server and runner → This host and look at the box \"Boss Man's address on your phone\"."];
+    const r = await raise(CARD1, { stillNeeded: why, ownerMustDo: true, steps, why: "Without it Boss Man pushes to an address the phone can't reach.", minutes: 1 });
     expect(textOf(r)).toMatch(/went to the CEO first/);
     const [d] = await openCards();
     expect(d!.tier).toBe("ceo");

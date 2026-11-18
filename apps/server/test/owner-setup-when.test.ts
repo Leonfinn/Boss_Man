@@ -136,6 +136,21 @@ describe("raiseOwnerSetup (BOS-1650)", () => {
     expect(card!.question).not.toContain("To start using it");
   });
 
+  it("fills a host token in the why line (BOS-1660) and sends the CEO a fix card, not the owner, when one has no value", async () => {
+    ctx = await setup();
+    const t = await ctx.ticket("Tunnel config");
+    const facts = { values: { "env.file": "/srv/bm/.env" }, serverHost: null, hosts: [] };
+    const row = await raiseOwnerSetup(ctx.db, { companyId: ctx.companyId, tickets: [{ ticketId: t.id, title: t.title, why: "The tunnel reads {{host.env.file}}.", ifSkipped: "Nothing breaks." }], steps: ["Open Settings → Server and runner and press Save."], commit: "a".repeat(40), facts });
+    expect(row).not.toBeNull();
+    expect((await cards(ctx))[0]!.question).toContain("Why: The tunnel reads /srv/bm/.env.");
+    const t2 = await ctx.ticket("Other config");
+    const bad = await raiseOwnerSetup(ctx.db, { companyId: ctx.companyId, tickets: [{ ticketId: t2.id, title: t2.title, why: "Reads {{host.paths.nope}}.", ifSkipped: "Nothing breaks." }], steps: ["Open Settings → Server and runner and press Save."], commit: "b".repeat(40), facts });
+    expect(bad).toBeNull();
+    const all = await cards(ctx);
+    expect(all.some((c) => c.question.includes("{{host.paths.nope}}") && c.tier !== "owner")).toBe(true);
+    expect(all.filter((c) => c.tier === "owner" && c.question.includes("{{"))).toEqual([]);
+  });
+
   it("a ticket written before the fields existed is still raised, with 'not given'", async () => {
     ctx = await setup();
     const t = await ctx.ticket("Old ticket");

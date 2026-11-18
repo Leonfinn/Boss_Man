@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, deployTargets, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, deployTargets, runners, settings, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { RELEASE_REASON, releaseLogService } from "../src/services/release-log.js";
 import { RUNNER_NEED_UNKNOWN_REASON } from "../src/services/runner-update-need.js";
 
@@ -74,11 +74,13 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(logTickets[0]).toMatchObject({ projectId, assigneeAgentId: rm!.id, noCode: true, systemState: "ready", title: `Release log: record ${B.slice(0, 8)}` });
     expect(logTickets[0]!.body).toContain(A);
     expect(logTickets[0]!.body).toContain(B);
+    expect(logTickets[0]!.body).toContain("republish the website");
     const [w] = await c.db.select().from(wakes).where(eq(wakes.ticketId, logTickets[0]!.id));
     expect(w).toMatchObject({ agentId: rm!.id, reason: RELEASE_REASON, ticketId: logTickets[0]!.id });
     expect(w!.note).toContain(A.slice(0, 8));
     expect(w!.note).toContain(B.slice(0, 8));
     expect(w!.note).toContain("the host deployer");
+    expect(w!.note).toContain("republish the website");
 
     // Another pass on the same status changes nothing: one ticket, one wake.
     await c.selfDeploy.sync();
@@ -167,6 +169,11 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(logTickets).toHaveLength(1);
     expect(logTickets[0]!.body).toContain(`New commit: ${B}`);
     expect(logTickets[0]!.body).toContain(`New commit: ${C}`);
+    // BOS-1809: the second release says to republish the site too, not just the first.
+    const [wakeToSecond] = await c.db.select().from(wakes).where(eq(wakes.ticketId, logTickets[0]!.id));
+    expect(wakeToSecond!.note).toContain("republish the website");
+    const said = (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, logTickets[0]!.id))).map((x) => x.text).join("\n");
+    expect(said).toContain("republish the website");
     // A repeat pass doesn't list the commit twice.
     await c.releaseLog.releaseManagerWakes("restarted");
     expect((await c.db.select().from(tickets).where(eq(tickets.id, logTickets[0]!.id)))[0]!.body!.split(`New commit: ${C}`)).toHaveLength(2);

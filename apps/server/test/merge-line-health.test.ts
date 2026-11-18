@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { companies } from "../src/db/schema.js";
 import { mergeJamService } from "../src/services/merge-jam.js";
-import { heldText, mergeLineHealth, slowText, type HealthInput } from "../src/services/merge-line-health.js";
+import { heldText, mergeLineHealth, pausedText, slowText, type HealthInput } from "../src/services/merge-line-health.js";
 
 // BOS-1594: the one verdict on the merge line. Stuck (nothing landing, or a fault) pages; over capacity (landing, slowly) never does.
 
@@ -156,5 +156,33 @@ describe("the jam alert reads the same verdict", () => {
     expect(c.sent[0]!.body).toContain("Fix: The CEO looks at the line and gets it moving.");
     // R43: the banner's words for the same figure (mergeQueue.behindIt).
     expect(c.sent[0]!.body).toContain("2 more behind it.");
+  });
+});
+
+describe("mergeLineHealth: a deliberate pause (R44)", () => {
+  const pause = { reason: "a server update", since: ago(120), until: new Date(NOW.getTime() + 3_600_000).toISOString() };
+  // The 08:52 case: work waiting for hours, nothing landing, 2 of 5 slots busy, new checks held on purpose.
+  const stalled = () => input({ slots: 5, waiting: queue(21), recent: [merged(300, 1)], running: [{ what: "merge_check", overLimit: true, phase: "checking", minutes: 90, ref: "X-1", title: "t" }, { what: "merge_check", overLimit: false, phase: "checking", minutes: 5, ref: "X-2", title: "u" }] as never });
+
+  it("without the pause the same line is stuck; with it the verdict is paused, with no stuck or slow state", () => {
+    expect(mergeLineHealth(stalled(), { now: NOW }).state).toBe("stuck");
+    const line = mergeLineHealth(stalled(), { now: NOW, pause });
+    expect(line).toEqual({ state: "paused", ...pause, inUse: 2, slots: 5 });
+    expect(pausedText(line as never, (iso) => (iso === pause.since ? "08:52" : "11:52"))).toBe("Paused for a server update since 08:52; new checks start once it is done, by 11:52 at the latest. 2 of 5 slots in use: new checks paused.");
+  });
+
+  it("the jam notifier raises nothing while paused", async () => {
+    const { db, close } = await openPglite();
+    const [co] = await db.insert(companies).values({ name: "Co", ticketPrefix: "X" } as never).returning({ id: companies.id });
+    const sent: unknown[] = [];
+    const service = mergeJamService(db, {
+      view: async () => ({ running: [], waiting: [], recent: [], line: { state: "paused", ...pause, inUse: 2, slots: 5 } }) as never,
+      notify: async (n) => (sent.push(n), { id: "n", level: n.level }),
+      now: () => NOW,
+    });
+    expect(await service.run()).toEqual({ alerted: 0, reminded: 0, cleared: 0 });
+    expect(sent).toHaveLength(0);
+    expect(co).toBeTruthy();
+    await close();
   });
 });

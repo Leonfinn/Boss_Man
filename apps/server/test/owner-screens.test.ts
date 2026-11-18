@@ -126,7 +126,7 @@ describe("R13: a field the owner fills in has its value", () => {
 
 describe("R8 and R13 in checkAsk", () => {
   it("refuse a card, and the CEO can override them with a reason", () => {
-    const base = { triedFirst: "Read the Secrets page in the web app code." };
+    const base = { triedFirst: "Read the Secrets page in the web app code.", why: "The owner finds the right screen.", minutes: 2 };
     const steps = ["Open Settings → Notifications and fill in Topic."];
     expect(checkAsk({ ...base, steps }).error).toMatch(/Notifications isn't under Settings/);
     const ceo = checkAsk({ ...base, steps, lintOverride: "Checked the screen by hand; the list is behind.", byCeo: true });

@@ -791,6 +791,60 @@ export function fillServerHost(steps: readonly string[], serverHost: string | nu
   return steps.map((s) => s.replace(FENCE_HOST_TOKEN, `$1sh host="${name}" as="$2"`).replace(FENCE_NO_HOST, `$1sh host="${name}" as="$2"`));
 }
 
+/** `{{…}}` tokens still in a text after filling: what R4 refuses (BOS-1660 runs it over every owner-visible field, not only the steps). */
+export function unfilledTokens(text: string): string[] {
+  return [...new Set([...text.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)].map((m) => `{{${m[1]}}}`))];
+}
+
+/** The same fill as `fillHostTokens`, for one free-text field (the question, an option, triedFirst). */
+export function fillHostTokensIn(text: string, values: Readonly<Record<string, string>>): { text: string; missing: string[] } {
+  const r = fillHostTokens([text], values);
+  return { text: r.steps[0]!, missing: r.missing };
+}
+
+const SITE_LABELS: Record<string, string> = { aws: "AWS", github: "GitHub", gitlab: "GitLab", godaddy: "GoDaddy", digitalocean: "DigitalOcean" };
+const capital = (s: string) => SITE_LABELS[s] ?? s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * BOS-1660: where one step happens, worked out from the step and never typed by the agent: a command block means the
+ * terminal on the host its fence names (R6); an outside site (R19) means that site in the owner's browser; a
+ * `Settings →` path (R8/R17) means Boss Man's settings; any other URL means a page in the browser. Null when the step
+ * says none of these, so the card is refused ("say where this step happens").
+ */
+export function stepPlace(text: string, serverHost?: string | null): string | null {
+  const { blockPieces, prose } = pieces(text);
+  if (blockPieces.length) return `terminal on ${blockPieces[0]!.where?.host ?? serverHost ?? "the server"}`;
+  const key = outsideSiteKeys(prose, serverHost)[0];
+  if (key) return `${capital(key)}, in your browser`;
+  if (SETTINGS_PATH.test(prose)) return "Boss Man, in Settings";
+  if (/https?:\/\//i.test(prose)) return "Boss Man, in your browser";
+  return null;
+}
+
+/** "Step 3", "Steps 3–6, 8": step numbers (1-based) as a short phrase. */
+function stepNumbers(nums: readonly number[]): string {
+  const runs: string[] = [];
+  for (let i = 0; i < nums.length; ) {
+    let j = i;
+    while (j + 1 < nums.length && nums[j + 1] === nums[j]! + 1) j++;
+    runs.push(j === i ? String(nums[i]) : j === i + 1 ? `${nums[i]}, ${nums[j]}` : `${nums[i]}–${nums[j]}`);
+    i = j + 1;
+  }
+  return `${nums.length === 1 ? "Step" : "Steps"} ${runs.join(", ")}`;
+}
+
+/** The generated "where" lines for a card's steps, one per place in the order first met, and the steps that name none. */
+export function ownerWhere(steps: readonly string[], serverHost?: string | null): { where: string[]; missing: number[] } {
+  const byPlace = new Map<string, number[]>(); // not state: scratch for one call
+  const missing: number[] = [];
+  steps.forEach((s, i) => {
+    const place = stepPlace(s, serverHost);
+    if (!place) missing.push(i + 1);
+    else byPlace.set(place, [...(byPlace.get(place) ?? []), i + 1]);
+  });
+  return { where: [...byPlace].map(([place, nums]) => `${stepNumbers(nums)}: ${place}`), missing };
+}
+
 /**
  * Checks an agent's owner steps the way the owner will read them (BOS-417, DR-008 Q1): refuse what can't work
  * as written, warn about what might not. R1 a pointer to another document instead of the action; R2 a shell
@@ -1588,4 +1642,4 @@ export function runnerUpdateFindings(step: number, text: string, commands: strin
 export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R10", "R14", "R15"]);
 
 /** One line per finding, for the agent's refusal or the CEO's list. */
-export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- Step ${f.step}: ${f.problem}.`).join("\n");
+export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- ${f.step > 0 ? `Step ${f.step}` : "The setup text"}: ${f.problem}.`).join("\n");

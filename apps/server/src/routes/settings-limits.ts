@@ -11,6 +11,7 @@ import { stagingReachable } from "../mcp-common.js";
 import { agents, companies, runners as runnersTable, settings } from "../db/schema.js";
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
 import { checkQueue, DEFAULT_CHECK_SLOTS, MACHINE_TAKES, MAX_CHECK_SLOTS } from "../services/check-queue.js";
+import { DEFAULT_BACKGROUND_LANE_AGE_MINUTES, MAX_BACKGROUND_LANE_AGE_MINUTES } from "../services/check-gate.js";
 import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, limitReason, memoryLine, readRunnerAgents } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import type { mainCiService } from "../services/main-ci.js";
@@ -152,6 +153,9 @@ export function settingsLimitsRoutes(
       // BOS-1366: the merge train switch (off by default) and the connected runners too old for it (they land one at a time).
       train: await checkQueueSvc.train(),
       runnersTooOldForTrain: live.filter((r) => !runners.can(r.id, "merge-base")).map((r) => r.company),
+      // BOS-1803: minutes a background-lane merge lets newer ordinary work go first (0 = always), and the default.
+      laneAgeMinutes: await checkQueueSvc.laneAge(),
+      defaultLaneAgeMinutes: DEFAULT_BACKGROUND_LANE_AGE_MINUTES,
       // BOS-1602: what the company runner takes and how many of its slots are kept for merges.
       runnerPolicy: await checkQueueSvc.runnerPolicy(),
       // BOS-1435: check workers, each with per company whether it takes checks and, if not, why.
@@ -163,7 +167,7 @@ export function settingsLimitsRoutes(
     // `train` is optional, so an older page that doesn't send it leaves the switch as it was.
     // BOS-1602: `runnerPolicy` is optional too (an older page leaves it as it was); kept for merges can't exceed the slots.
     const b = z
-      .object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional(), runnerPolicy: Policy.optional() })
+      .object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional(), runnerPolicy: Policy.optional(), laneAgeMinutes: z.number().int().min(0).max(MAX_BACKGROUND_LANE_AGE_MINUTES).optional() })
       .refine((v) => !v.runnerPolicy || v.runnerPolicy.mergeKept <= v.slots, { message: "Kept for merges can't be more than the runner's check slots." })
       .parse(req.body);
     const was = await checkQueueSvc.mode();
@@ -172,6 +176,8 @@ export function settingsLimitsRoutes(
     if (b.runnerPolicy) await checkQueueSvc.setRunnerPolicy(b.runnerPolicy);
     await checkQueueSvc.setMode(b.mode);
     if (b.train !== undefined) await checkQueueSvc.setTrain(b.train);
+    // Optional too: an older page leaves the background-lane wait as it was.
+    if (b.laneAgeMinutes !== undefined) await checkQueueSvc.setLaneAge(b.laneAgeMinutes);
     // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
     // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
     const applying = launch.enabled && b.slots !== slotsWere ? await pushToRunners() : false;

@@ -4,7 +4,7 @@
 import type { Decision, DecisionTally } from "../api";
 import { raisedAgo } from "../age";
 import type { MergeHealthView, SlowSummary, StuckSummary } from "./MergesStuckBanner";
-import { heldSummary, heldText, inLineOf, slowText, waitedText } from "./MergesStuckBanner";
+import { heldSummary, heldText, inLineOf, pausedSlotsText, pausedSummary, pausedText, slowText, waitedText } from "./MergesStuckBanner";
 // R43 (BOS-1716): each count in these panels is written with its one label from the shared list.
 import { figureText } from "@boss-man/shared";
 import { inForceHeadline, inForceReason, type LimitInForce } from "../limit-in-force";
@@ -61,6 +61,9 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
     mergesLine = { key: "merges", tone: "bad", symbol: "!", state: "Merges stuck", pill: "Merges stuck", text: `${stuck.title}.${behind}`, href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
   } else if (slow) {
     mergesLine = { key: "merges", tone: "warn", symbol: "…", state: "Merging, but slowly", pill: "Merging slowly", text: slowText(slow), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else if (pausedSummary(merges)) {
+    const p = pausedSummary(merges)!;
+    mergesLine = { key: "merges", tone: "warn", symbol: "‖", state: "Merges paused", pill: "Merges paused", text: `${pausedText(p)} ${pausedSlotsText(p)}.`, href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
   } else if (heldSummary(merges)) {
     // R28: calm amber, never the red "stuck" line: merges wait on the main fix on purpose.
     const h = heldSummary(merges)!;
