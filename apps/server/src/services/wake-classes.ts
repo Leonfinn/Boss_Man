@@ -35,6 +35,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "ticket moved off plan": "waiting",
   // A ticket parked by date three times in a row with no link (BOS-1679): the CEO must hear it. Never dropped.
   "parked by date again and again": "waiting",
+  // A split-out after-merge check ticket closed and its result was written on this ticket (BOS-1794). Never dropped.
+  "after-merge check reported": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",
