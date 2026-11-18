@@ -160,7 +160,7 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   rerun: (e) => `Merge line: failed check run once more${e.passed === true ? ": passed (a flaky failure)" : e.passed === false ? ": failed again" : ""}`,
   check_started: () => "Merge line: check started",
   check_ended: (e) => `Merge line: check ${e.passed === true ? "passed" : e.passed === false ? "failed" : "did not finish"}`,
-  hold_started: (e) => `Merge line: held (${e.hold})${e.note ? `: ${e.note}` : ""}`,
+  hold_started: (e) => (e.hold === "turn" ? `Merge line: waiting behind another ticket's landing turn${e.note ? `: ${e.note}` : ""}` : `Merge line: held (${e.hold})${e.note ? `: ${e.note}` : ""}`),
   hold_ended: (e) => `Merge line: hold (${e.hold}) ended after ${Math.round(e.heldMs / 60_000)} min`,
   merged: (e) => `Merge line: merged${e.commit ? ` as ${e.commit.slice(0, 12)}` : ""}`,
   attempt_failed: (e) => `Merge line: merge attempt failed (${e.reason})${e.note ? `: ${e.note}` : ""}`,
@@ -174,7 +174,7 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   left: (e) => `Merge line: left without merging (moved to ${e.to})`,
   takeover: (e) => `Merge line: a server took charge (${e.by}${e.commit ? `, ${e.commit.slice(0, 12)}` : ""})`,
   carried_across: (e) => `Merge line: main moved ${e.commits} commit${e.commits === 1 ? "" : "s"} since its tests passed, touching ${e.files} file${e.files === 1 ? "" : "s"}, none of this ticket's; landed without a new test`,
-  rebuilt: (e) => `Merge line: main moved after its checks passed, so it is built and tested again (${e.rebuilds} time${e.rebuilds === 1 ? "" : "s"})${e.why ? `: ${e.why}${e.files?.length ? ` (${e.files.slice(0, 3).join(", ")}${e.files.length > 3 ? ", …" : ""})` : ""}` : ""}`,
+  rebuilt: (e) => `Merge line: main moved after its checks passed, so it is built and tested again (${e.rebuilds} time${e.rebuilds === 1 ? "" : "s"})${e.why ? `; no carry, ${e.why}${e.files?.length ? ` (${e.files.slice(0, 3).join(", ")}${e.files.length > 3 ? ", …" : ""})` : ""}` : ""}`,
   landing_turn: (e) =>
     e.action === "taken"
       ? `Merge line: took the landing turn after ${e.rebuilds} rebuilds; other merges wait to push for up to ${e.capMin} min`
