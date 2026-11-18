@@ -174,7 +174,9 @@ describe("wake classes: scheduled wakes", () => {
     const b = await ctx!.agent("B");
     const ta = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Routine" })).json();
     const tb = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Urgent" })).json();
-    await ctx!.db.update(tickets).set({ urgent: true }).where(eq(tickets.id, tb.id));
+    await ctx!.db.update(tickets).set({ urgent: true, assigneeAgentId: b.id, systemState: "ready" }).where(eq(tickets.id, tb.id));
+    // Each ticket belongs to its agent: a wake on a parked or reassigned ticket is dropped (BOS-1791).
+    await ctx!.db.update(tickets).set({ assigneeAgentId: a.id, systemState: "ready" }).where(eq(tickets.id, ta.id));
     // Same stored priority and the routine one is older: without the urgent bonus it would start first.
     await ctx!.scheduler.wake({ agentId: a.id, ticketId: ta.id, reason: "assigned", priority: 2 });
     await ctx!.scheduler.wake({ agentId: b.id, ticketId: tb.id, reason: "assigned", priority: 2 });
@@ -205,6 +207,8 @@ describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-5
     const checker = await ctx!.agent("Checker");
     const watcher = await ctx!.agent("Watcher");
     const t1 = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Booked check" })).json();
+    // The check belongs to the checker's own ticket: a "check due" wake on a parked ticket is dropped (BOS-1791).
+    await ctx!.db.update(tickets).set({ assigneeAgentId: checker.id, systemState: "in_progress" }).where(eq(tickets.id, t1.id));
     // The one slot is taken, so everything below is held "at a concurrency limit".
     const [live] = await ctx!.db.insert(runs).values({ companyId: ctx!.company.id, agentId: busy.id, lastEventAt: new Date() }).returning();
     const engagement = await ctx!.scheduler.wake({ agentId: ctx!.ceo.id, reason: "engagement", note: "Engagement 443477d4: the server is back." });
@@ -293,6 +297,8 @@ describe("wake classes: watch wakes", () => {
     await ctx!.req("PATCH", `/api/projects/${ctx!.project.id}`, { ticketCostCapUsd: 1 });
     const t = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Watched" })).json();
     const worker = await ctx!.agent("Worker");
+    // The worker's own ticket: an "assigned" wake on an unassigned parked ticket is dropped (BOS-1791).
+    await ctx!.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "ready" }).where(eq(tickets.id, t.id));
     const fs = (await ctx!.req("POST" as never, "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json();
     const spend = async (origin: string | null, usd: number) => {
       const runId = randomUUID();

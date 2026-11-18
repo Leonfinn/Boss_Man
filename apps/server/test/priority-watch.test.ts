@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, checkJobs, notifications, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, checkJobs, notifications, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { closeHold, ensureSystemHold, openHold } from "../src/services/review-holds.js";
 import { HELD_AGENT } from "../src/services/fair-share.js";
 import { judge, OWNER_AFTER_MS, priorityWatchService, QUIET_AFTER_MS, stopped, type Facts } from "../src/services/priority-watch.js";
@@ -282,5 +282,22 @@ describe("priority watch: the sweep", () => {
     ctx.told.length = 0;
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, ticketId: t.id, startedAt: ago(MIN) });
     expect(await ctx.watch.run(true)).toMatchObject({ told: 0, cleared: 1 });
+  });
+
+  it("review -> blocked made by the merge (merged, waiting for go-live) raises nothing; the same move with no merge still alarms (BOS-1774)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const move = async (title: string, merged: boolean) => {
+      const t = await c.ticket(title);
+      await c.db.update(tickets).set({ urgent: true, systemState: "blocked", lastActivityAt: ago(MIN), goLiveWait: "server", goLiveWaitSince: ago(2 * MIN), ...(merged ? { mergedAt: ago(2 * MIN) } : {}) }).where(eq(tickets.id, t.id));
+      await c.db.insert(activity).values({ companyId: c.company.id, ticketId: t.id, kind: "state", summary: "review -> blocked", at: ago(2 * MIN) });
+      return t;
+    };
+    const mergedMove = await move("Merged, waiting", true);
+    const plainMove = await move("Blocked from review, no merge", false);
+    await c.watch.run(true);
+    expect(c.told.map((x) => x.ticketId)).toEqual([plainMove.id]);
+    expect(c.told[0]!.note).toContain("moved backwards (review -> blocked)");
+    expect(mergedMove.id).not.toBe(plainMove.id);
   });
 });

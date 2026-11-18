@@ -70,7 +70,7 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     const { host } = github([run(9, "completed", "failure")], {
       9: [job(5, "check", "failure", [{ number: 1, name: "Set up job", status: "completed", conclusion: "success" }, { number: 2, name: "Run tests", status: "completed", conclusion: "failure" }]), job(6, "images (amd64)", "success")],
     });
-    expect(await host.ciStatus(cfg("github"), "t", SHA)).toEqual({ state: "failed", failed: [{ id: 5, name: "check", url: "https://github.com/leon/site/actions/runs/9/job/5", step: "Run tests" }], waiting: [], billing: false });
+    expect(await host.ciStatus(cfg("github"), "t", SHA)).toEqual({ state: "failed", failed: [{ id: 5, name: "check", url: "https://github.com/leon/site/actions/runs/9/job/5", step: "Run tests", runId: 9 }], waiting: [], billing: false });
     expect((await github([]).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("none");
   });
 
@@ -86,12 +86,12 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
 
   it("a run that failed before any job is named by the run", async () => {
     const { host } = github([run(9, "completed", "startup_failure")]);
-    expect((await host.ciStatus(cfg("github"), "t", SHA)).failed).toEqual([{ id: 0, name: "CI", url: "https://github.com/leon/site/actions/runs/9" }]);
+    expect((await host.ciStatus(cfg("github"), "t", SHA)).failed).toEqual([{ id: 0, name: "CI", url: "https://github.com/leon/site/actions/runs/9", runId: 9 }]);
   });
 
   it("annotations refused (no Checks): the failed step is the line, never an error; a job GitHub never started is billing", async () => {
     const { host } = github([]);
-    expect(await host.failures(cfg("github"), "t", [{ id: 5, name: "check", url: "", step: "Run tests" }])).toEqual([{ run: { id: 5, name: "check", url: "", step: "Run tests" }, lines: ['failed at step "Run tests"'], billing: false }]);
+    expect(await host.failures(cfg("github"), "t", [{ id: 5, name: "check", url: "", step: "Run tests" }])).toEqual([{ run: { id: 5, name: "check", url: "", step: "Run tests" }, lines: ['failed at step "Run tests"'], billing: false, paths: null }]);
     expect((await host.failures(cfg("github"), "t", [{ id: 5, name: "check", url: "", unstarted: true }]))[0]!.billing).toBe(true);
   });
 
@@ -143,7 +143,33 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
         { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
       ],
     });
-    expect(await host.failures(cfg("github"), "t", [{ id: 5, name: "web-browser", url: "" }])).toEqual([{ run: { id: 5, name: "web-browser", url: "" }, lines: ["apps/web/test/a.test.ts:3: a > renders: expected 1 to be 2"], billing: false }]);
+    expect(await host.failures(cfg("github"), "t", [{ id: 5, name: "web-browser", url: "" }])).toEqual([{ run: { id: 5, name: "web-browser", url: "" }, lines: ["apps/web/test/a.test.ts:3: a > renders: expected 1 to be 2"], billing: false, paths: ["apps/web/test/a.test.ts"] }]);
+  });
+
+  it("a token refused the annotations asks once more without it (a public repo's need none), and a private repo stays refused (BOS-1733)", async () => {
+    const seen: Array<{ url: string; auth: boolean }> = [];
+    const host = (publicRepo: boolean) =>
+      gitHostService({
+        fetch: (async (u: string, init?: RequestInit) => {
+          const auth = !!(init?.headers as Record<string, string>)?.authorization;
+          seen.push({ url: u, auth });
+          if (auth) return json(403, { message: "Resource not accessible by personal access token" });
+          return publicRepo ? json(200, [{ annotation_level: "failure", path: "apps/x.test.ts", start_line: 1, message: "boom" }]) : json(404, { message: "Not Found" });
+        }) as unknown as typeof fetch,
+      });
+    expect(await host(true).failures(cfg("github"), "t", [{ id: 5, name: "check", url: "" }])).toEqual([{ run: { id: 5, name: "check", url: "" }, lines: ["apps/x.test.ts:1: boom"], billing: false, paths: ["apps/x.test.ts"] }]);
+    expect(seen.map((s) => s.auth)).toEqual([true, false]);
+    expect((await host(false).failures(cfg("github"), "t", [{ id: 5, name: "check", url: "", step: "Run tests" }]))[0]).toMatchObject({ lines: ['failed at step "Run tests"'], paths: null });
+  });
+
+  it("re-runs only a run's failed jobs, and reads a refusal or another host as false (BOS-1733)", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = (status: number) => gitHostService({ fetch: (async (u: string, init?: RequestInit) => (calls.push({ url: u, method: String(init?.method) }), json(status, {}))) as unknown as typeof fetch });
+    expect(await host(201).rerunFailedJobs(cfg("github"), "t", 9)).toBe(true);
+    expect(calls).toEqual([{ url: "https://host/api/repos/leon/site/actions/runs/9/rerun-failed-jobs", method: "POST" }]);
+    expect(await host(403).rerunFailedJobs(cfg("github"), "t", 9)).toBe(false);
+    expect(await host(201).rerunFailedJobs(cfg("gitea"), "t", 9)).toBe(false);
+    expect(await host(201).rerunFailedJobs(cfg("github"), "t", 0)).toBe(false);
   });
 
   it("the token check probes Actions runs and names only Actions: Read-only (and Metadata), never Checks", async () => {

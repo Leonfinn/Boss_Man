@@ -84,6 +84,8 @@ export type MergeHealthView = {
   stuckCount?: number;
   /** Absent from a server older than BOS-1594: then nothing is shown rather than a guess. */
   line?: MergeLine;
+  /** R47: absent from an older server, and null when a limit is set or the line has not grown. */
+  startBrakeOff?: BrakeOffSummary | null;
 };
 
 /** R43 mergeQueue.inLine: the one "N in the merge line" figure the badge, the Merges tab and the Dashboard show. */
@@ -124,8 +126,29 @@ export function slowText(s: SlowSummary): string {
   return `Merging, but slowly: ${slowLineCounts(s)}${eta}${last}.`;
 }
 
-export function MergesStuckBanner({ stuck, slow, paused, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; paused?: PausedSummary | null; companyId?: string }) {
+/** R47: the start brake has no limit and the line has grown for an hour; null when a limit is set (nothing is said then). */
+export type BrakeOffSummary = { waiting: number; suggestedLimit: number };
+export function brakeOffSummary(view: Pick<MergeHealthView, "startBrakeOff">): BrakeOffSummary | null {
+  return view.startBrakeOff ?? null;
+}
+export const brakeOffText = (b: BrakeOffSummary) => `Start brake off, ${b.waiting} waiting; suggested limit ${b.suggestedLimit}`;
+
+export function MergesStuckBanner({ stuck, slow, paused, brakeOff, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; paused?: PausedSummary | null; brakeOff?: BrakeOffSummary | null; companyId?: string }) {
   const href = companyId ? `#/merge-queue/${companyId}` : "#/merge-queue";
+  if (!stuck && !slow && !paused && brakeOff) {
+    return (
+      <div className="merges-banner merges-banner-slow" role="status">
+        <a className="merges-banner-link" href="#/settings">
+          <span className="merges-banner-sym" aria-hidden="true">…</span>
+          <span className="merges-banner-text">
+            <strong>{brakeOffText(brakeOff)}</strong>
+            <span>The merge line has grown for an hour and new starts are not held. Set "Hold new starts while this many merges are waiting" in Settings.</span>
+          </span>
+          <span className="merges-banner-go">Open Settings</span>
+        </a>
+      </div>
+    );
+  }
   if (paused) {
     return (
       <div className="merges-banner merges-banner-slow" role="status" data-merge-paused="true">
@@ -183,5 +206,5 @@ export function MergesStuckBannerFor({ companyId }: { companyId: string | undefi
     20_000,
     `merge-banner-${companyId}`,
   );
-  return <MergesStuckBanner stuck={view.data ? stuckSummary(view.data) : null} slow={view.data ? slowSummary(view.data) : null} paused={view.data ? pausedSummary(view.data) : null} companyId={companyId} />;
+  return <MergesStuckBanner stuck={view.data ? stuckSummary(view.data) : null} slow={view.data ? slowSummary(view.data) : null} paused={view.data ? pausedSummary(view.data) : null} brakeOff={view.data ? brakeOffSummary(view.data) : null} companyId={companyId} />;
 }
