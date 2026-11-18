@@ -8,7 +8,10 @@ import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, t
 import type { Db } from "../db/client.js";
 import { checkJobs, runners, tickets } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
-import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, type CheckJob, type MachineView } from "./check-queue.js";
+import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, type CheckDecline, type CheckJob, type MachineView } from "./check-queue.js";
+
+/** R46: one machine with a free check slot that is not taking a queued job it could take. */
+export type IdleSlot = CheckDecline & { companyId: string; machineKey: string; machine: string; since: Date; minutes: number };
 import type { Eligible } from "./check-workers.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 
@@ -182,6 +185,9 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     else if (job.runnerId) deps.send(job.runnerId, { type: "check.cancel", jobId: job.id });
   };
 
+  /** R46: a machine with a free slot that is not taking a queued job, since when and why. In memory: a restart starts the clock again. */
+  const idle = new Map<string, Omit<IdleSlot, "minutes">>();
+
   /** Start whatever the free slots allow. Safe to call any time: a job is never claimed twice. */
   async function pump(): Promise<void> {
     if ((await queue.mode()) !== "server") return;
@@ -189,13 +195,29 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     // jobs while its image commit equals the runner's (DR-042), and the swap is what changes the runner's commit.
     if (await deps.drainPending?.()) return;
     const queuedCompanies = await db.selectDistinct({ companyId: checkJobs.companyId }).from(checkJobs).where(eq(checkJobs.state, "queued"));
+    for (const k of [...idle.keys()]) if (!queuedCompanies.some((q) => q.companyId === idle.get(k)!.companyId)) idle.delete(k);
     for (const { companyId } of queuedCompanies) {
+      // R46: what each machine with a free slot said when it took nothing this pass; the second (non-dedicated) pass wins.
+      const declined = new Map<string, { machine: string; why: CheckDecline | null }>();
+      const settle = () => {
+        for (const [k, v] of [...idle]) if (v.companyId === companyId) idle.delete(k);
+        const t = new Date();
+        for (const [k, d] of declined) {
+          if (!d.why) continue;
+          const before = prior.get(k);
+          idle.set(k, { companyId, machineKey: k, machine: d.machine, ...d.why, since: before && before.jobId === d.why.jobId && before.code === d.why.code ? before.since : t });
+        }
+      };
+      const prior = new Map([...idle].filter(([, v]) => v.companyId === companyId));
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
       const runnerUp = !!runner && deps.isConnected(runner.id) && deps.can(runner.id);
       // BOS-1436: a worker gets the code only through the company runner, so with no runner able to pack it, no worker is used.
       const packer = runner && deps.bundles && deps.isConnected(runner.id) && deps.bundles.canPack(runner.id) ? runner.id : null;
       const workers = packer ? ((await deps.workers?.eligible(companyId)) ?? []) : [];
-      if (!runnerUp && !workers.length) continue;
+      if (!runnerUp && !workers.length) {
+        settle();
+        continue;
+      }
       // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
       const list = await scanList?.forScan();
       // BOS-1602: two passes. The first fills only slots set aside for one kind (kept for merges, a merges-only or a
@@ -206,20 +228,35 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       for (const dedicatedOnly of split ? [true, false] : [false]) {
         // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
         // limit is also capped by the slots it reported in hello.
-        if (runnerUp)
-          for (const job of await queue.claimNext(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly })) {
+        if (runnerUp) {
+          const r = await queue.claimNextWhy(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly });
+          if (!dedicatedOnly) declined.set(`runner:${runner!.id}`, { machine: "the company runner", why: r.declined });
+          for (const job of r.jobs) {
             const sent = deps.send(runner!.id, runCommand(job, list));
             if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
           }
+        }
         // BOS-1435: then each ready worker. A merge job carries the owner's list here too: a worker has the runner's trust for
         // checks (it already sees the source), the socket is TLS like the runner's, and the list is never logged.
         // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
         // never holds up the line); a job this worker couldn't get the code for is left to the others.
-        for (const w of workers)
-          for (const job of await queue.claimOn({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly }))
-            track(codeFor(job, w, list, packer!, false));
+        for (const w of workers) {
+          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly });
+          if (!dedicatedOnly) declined.set(`worker:${w.id}`, { machine: `check worker "${w.name}"`, why: r.declined });
+          for (const job of r.jobs) track(codeFor(job, w, list, packer!, false));
+        }
       }
+      // A job another machine took in this same pass is no longer waiting: only a job still queued counts as declined.
+      for (const [k, d] of declined) if (d.why && !(await stillQueued(d.why.jobId))) declined.set(k, { ...d, why: null });
+      settle();
     }
+  }
+
+  const stillQueued = async (jobId: string) => (await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "queued")))).length > 0;
+
+  /** R46: free check slots that did not take a queued job they could take, with how long (see `claimOnWhy`). */
+  function idleSlots(companyId?: string, now = new Date()): IdleSlot[] {
+    return [...idle.values()].filter((s) => !companyId || s.companyId === companyId).map((s) => ({ ...s, minutes: Math.max(0, Math.floor((now.getTime() - s.since.getTime()) / 60_000)) }));
   }
 
   /** BOS-1602: the company's ready machines with their limits and splits, for "why it waits" on the queue view. */
@@ -276,6 +313,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
 
   return {
     pump,
+    idleSlots,
     capacity,
     mergeCapacity,
     machines,

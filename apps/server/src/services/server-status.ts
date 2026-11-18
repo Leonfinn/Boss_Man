@@ -60,6 +60,8 @@ export type ServerStatusDeps = {
   mergeFailures?: (companyId: string) => Promise<unknown>;
   /** The merge train per project on this server: seats, who is seated and waits, tickets held to land alone, stall clocks (merge-stall.ts, BOS-1515). Absent: null. */
   mergeTrain?: (companyId: string) => Promise<unknown>;
+  /** R46: free check slots not taking a queued job, each with its reason ("free, not taking X because …"). */
+  idleCheckSlots?: (companyId: string) => unknown[];
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -242,7 +244,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         mergeTrain: deps.mergeTrain ? await deps.mergeTrain(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
         // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
-        checks: await checkQueue(db).status(companyId, at),
+        checks: { ...(await checkQueue(db).status(companyId, at)), idleSlots: deps.idleCheckSlots?.(companyId) ?? [] },
         migration: await latestMigration(db),
         runner: runner
           ? {
