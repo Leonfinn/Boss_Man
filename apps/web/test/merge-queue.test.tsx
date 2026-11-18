@@ -161,7 +161,7 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     expect(await screen.findByText("Behind the queue")).toBeTruthy();
     expect(screen.getByText(/Waiting for a check slot \(2 ahead\)\. Boss Man starts it as soon as a slot frees/)).toBeTruthy();
-    expect(screen.getByText("0 of 1 slot busy · flagged after an hour")).toBeTruthy();
+    expect(screen.getByText("0 of 1 merge slot busy · flagged after an hour")).toBeTruthy();
   });
 });
 
@@ -265,7 +265,7 @@ describe("merge queue attention layout (BOS-1239)", () => {
     serve({ ...calm, line }, noChecks);
     goTo("#/merge-queue/c1/checks");
     const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
-    await screen.findByText(/Main is red\./);
+    await screen.findByText(/Merges are held\./);
     expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/3 approved tickets are held until the fix \(APP-9, merged, waiting for the server update\)/);
     goTo("#/merge-queue/c1");
     cleanup();
@@ -322,17 +322,28 @@ describe("merge queue attention layout (BOS-1239)", () => {
     );
     render(<MergeQueue companies={[company]} companyId="c1" />);
     const merges = await screen.findByRole("tab", { name: /Merges/ });
-    await waitFor(() => expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2")).toBeTruthy());
+    await waitFor(() => expect(within(screen.getByRole("tab", { name: /Quick checks/ })).getByText("2")).toBeTruthy());
     // The badge counts every merge on the tab: 3 waiting + 1 running (BOS-1287), the server's lineCount (R43).
     expect(within(merges).getByText("4").className).toContain("warn");
     expect(within(merges).getByLabelText("4 in the merge line")).toBeTruthy();
-    expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2").className).toContain("warn");
+    expect(within(screen.getByRole("tab", { name: /Quick checks/ })).getByText("2").className).toContain("warn");
+  });
+
+  it("the Quick checks tab lists and counts only quick checks; merge checks stay on the Merges tab (BOS-1800)", async () => {
+    goTo("#/merge-queue/c1/checks");
+    serve(calm, { mode: "server", slots: 3, running: 2, rows: [checkRow({ id: "m1", ticketId: "tm", ref: "APP-70", kind: "merge", state: "running", position: null }), checkRow({ id: "q1", ticketId: "tq", ref: "APP-71", state: "running", position: null })] });
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("APP-71");
+    expect(screen.queryByText("APP-70")).toBeNull();
+    expect(container.querySelectorAll("[data-check-state]").length).toBe(1);
+    expect(within(screen.getByRole("tab", { name: /Quick checks/ })).getByText("1")).toBeTruthy();
+    expect(container.textContent).toContain("2 of 3 check slots busy, shared with merge checks");
   });
 
   it("tab counts are not amber when all is calm", async () => {
     serve({ ...calm, waitingCount: 2 }, { mode: "server", slots: 2, running: 0, rows: [checkRow({})] });
     render(<MergeQueue companies={[company]} companyId="c1" />);
-    const checks = await screen.findByRole("tab", { name: /Queued checks/ });
+    const checks = await screen.findByRole("tab", { name: /Quick checks/ });
     await waitFor(() => expect(within(checks).getByText("1")).toBeTruthy());
     expect(within(checks).getByText("1").className).not.toContain("warn");
     expect(within(screen.getByRole("tab", { name: /Merges/ })).getByText("2").className).not.toContain("warn");
@@ -364,8 +375,8 @@ describe("merge queue attention layout (BOS-1239)", () => {
     goTo("#/merge-queue/c1/checks");
     serve(calm, noChecks);
     render(<MergeQueue companies={[company]} companyId="c1" />);
-    const empty = await screen.findByText("No checks queued.");
-    expect(empty.parentElement!.textContent).toBe("No checks queued. When an agent or the merge gate asks for a check, it shows here until it finishes. Both slots are free.");
+    const empty = await screen.findByText("No quick checks queued.");
+    expect(empty.parentElement!.textContent).toBe("No quick checks queued. When an agent asks for a quick check, it shows here until it finishes. Merge checks are on the Merges tab. Both slots are free.");
     expect(screen.queryByText(/Main is failing/)).toBeNull();
   });
 
@@ -374,10 +385,10 @@ describe("merge queue attention layout (BOS-1239)", () => {
     const wording = async (slots: number, running: number) => {
       serve(calm, { mode: "server", slots, running, rows: [] });
       render(<MergeQueue companies={[company]} companyId="c1" />);
-      const empty = await screen.findByText("No checks queued.");
+      const empty = await screen.findByText("No quick checks queued.");
       const text = empty.parentElement!.textContent!;
       cleanup();
-      return text.replace(/^.*finishes\. /, "");
+      return text.replace(/^.*Merges tab\. /, "");
     };
     expect(await wording(3, 0)).toBe("All 3 slots are free.");
     expect(await wording(3, 2)).toBe("1 of 3 slots are free.");
@@ -399,12 +410,12 @@ describe("merge queue attention layout (BOS-1239)", () => {
     const merges = await screen.findByRole("tab", { name: /Merges/ });
     expect(merges.getAttribute("aria-selected")).toBe("true");
     expect(merges.getAttribute("aria-controls")).toBe("mq-panel-merges");
-    expect(screen.getByRole("tab", { name: /Queued checks/ }).getAttribute("tabindex")).toBe("-1");
+    expect(screen.getByRole("tab", { name: /Quick checks/ }).getAttribute("tabindex")).toBe("-1");
     fireEvent.keyDown(merges, { key: "ArrowRight" });
-    await waitFor(() => expect(screen.getByRole("tab", { name: /Queued checks/ }).getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: /Quick checks/ }).getAttribute("aria-selected")).toBe("true"));
     expect(window.location.hash).toBe("#/merge-queue/c1/checks");
     expect(document.activeElement?.id).toBe("mq-tab-checks");
-    fireEvent.keyDown(screen.getByRole("tab", { name: /Queued checks/ }), { key: "ArrowLeft" });
+    fireEvent.keyDown(screen.getByRole("tab", { name: /Quick checks/ }), { key: "ArrowLeft" });
     await waitFor(() => expect(screen.getByRole("tab", { name: /Merges/ }).getAttribute("aria-selected")).toBe("true"));
     expect(window.location.hash).toBe("#/merge-queue/c1");
   });

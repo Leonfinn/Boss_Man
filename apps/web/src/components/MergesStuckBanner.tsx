@@ -51,14 +51,14 @@ export function heldSummary(view: Pick<MergeHealthView, "line"> | null | undefin
 export function heldText(h: HeldSummary): string {
   const fixes = h.fixes.map((f) => `${f.ref ?? `"${f.title}"`} (${f.stateText})`).join(" and ");
   const end = h.fixes.some((f) => f.ownerUpdate) ? "They go on once the server update runs." : "They merge by themselves once it is merged and live.";
-  return `Main is red: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}. ${end}`;
+  return `Merges are held: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}. ${end}`;
 }
 
 /** The calm amber line (never the red "stuck" banner); links the fix tickets. */
 export function HeldBehindFixLine({ held }: { held: HeldSummary }) {
   return (
     <div className="mq-held-fix" role="status" data-held-behind-fix="true">
-      <strong>Main is red: {figureText("mergeQueue.heldBehindFix", held.held)} the fix</strong>{" "}
+      <strong>Merges are held: {figureText("mergeQueue.heldBehindFix", held.held)} the fix</strong>{" "}
       {held.fixes.map((f, i) => (
         <span key={f.ticketId}>
           {i > 0 ? " and " : ""}

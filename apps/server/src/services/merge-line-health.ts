@@ -263,7 +263,7 @@ export function slowText(s: SlowLine, clock: (iso: string) => string): string {
 export function heldText(h: HeldLine, clock: (iso: string) => string): string {
   const fixes = h.fixes.map(fixText).join(" and ");
   const owner = h.fixes.some((f) => f.ownerUpdate) ? " It goes on once you run the server update." : " They merge by themselves once it is merged and live.";
-  return `Main is red: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}.${owner}`;
+  return `Merges are held: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}.${owner}`;
 }
 
 /** The paused line as one plain sentence; `clock` turns a time into HH:MM (the server uses UTC). */

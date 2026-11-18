@@ -22,12 +22,12 @@ describe("mergeLineHealth: held behind a main fix (R28)", () => {
     expect(mergeLineHealth(held(), { now: NOW }).state).toBe("healthy");
     const line = mergeLineHealth(held(), { now: NOW, heldBehindFix: { held: 6, fixes: [fix()], since: ago(90) } });
     expect(line).toMatchObject({ state: "held_behind_fix", held: 6, since: ago(90) });
-    expect(heldText(line as never, () => "11:37")).toBe("Main is red: 6 approved tickets are held behind the fix X-9 (in review), since 11:37. They merge by themselves once it is merged and live.");
+    expect(heldText(line as never, () => "11:37")).toBe("Merges are held: 6 approved tickets are held behind the fix X-9 (in review), since 11:37. They merge by themselves once it is merged and live.");
   });
 
   it("says when only the owner's server update is left", () => {
     const line = mergeLineHealth(held(), { now: NOW, heldBehindFix: { held: 1, fixes: [fix({ stateText: "merged, waiting for the server update", ownerUpdate: true })], since: null } });
-    expect(heldText(line as never, () => "")).toBe("Main is red: 1 approved ticket is held behind the fix X-9 (merged, waiting for the server update). It goes on once you run the server update.");
+    expect(heldText(line as never, () => "")).toBe("Merges are held: 1 approved ticket is held behind the fix X-9 (merged, waiting for the server update). It goes on once you run the server update.");
   });
 
   it("a stalled fix is stuck (fix_stalled), not calm", () => {
