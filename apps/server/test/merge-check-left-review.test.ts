@@ -93,6 +93,41 @@ describe("merge check of a ticket that left review (BOS-1757)", () => {
     expect(row!.reason).toMatch(/newer commit/);
   });
 
+  // BOS-1816: a running quick check of a commit that is no longer the ticket's head is superseded, not failed, and frees its slot.
+  it("stops a running quick check once a quick check of a newer commit of the ticket is queued", async () => {
+    const s = await setup();
+    const t = await s.ticket("in_progress");
+    const [tk] = await s.db.select().from(tickets).where(eq(tickets.id, t));
+    const quick = async (tree: string) =>
+      (await checkQueue(s.db).enqueue({ companyId: tk!.companyId, projectId: tk!.projectId, ticketId: t, kind: "quick", scope: "quick", commit: `c-${tree}`, tree } as never)).job;
+    const old = await quick("old");
+    await s.d.pump();
+    expect(s.sent[0]!.command.jobId).toBe(old.id);
+    const fresh = await quick("new");
+    s.sent.length = 0;
+    await s.d.sweep();
+    const [row] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, old.id));
+    expect(row!.state).toBe("cancelled");
+    expect(row!.reason).toMatch(/newer commit/);
+    expect(s.sent.some((m) => m.command.type === "check.cancel" && m.command.jobId === old.id)).toBe(true);
+    expect(s.sent.some((m) => m.command.type !== "check.cancel" && m.command.jobId === fresh.id)).toBe(true);
+  });
+
+  it("leaves a running quick check alone when only another ticket has a newer one", async () => {
+    const s = await setup();
+    const a = await s.ticket("in_progress");
+    const b = await s.ticket("in_progress");
+    const [tk] = await s.db.select().from(tickets).where(eq(tickets.id, a));
+    const quick = async (ticketId: string, tree: string) =>
+      (await checkQueue(s.db).enqueue({ companyId: tk!.companyId, projectId: tk!.projectId, ticketId, kind: "quick", scope: "quick", commit: `c-${tree}`, tree } as never)).job;
+    const keep = await quick(a, "a1");
+    await s.d.pump();
+    await quick(b, "b1");
+    await s.d.sweep();
+    const [row] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, keep.id));
+    expect(row!.state).toBe("running");
+  });
+
   it("also drops a queued merge check of a ticket that left review", async () => {
     const s = await setup();
     await s.merge(await s.ticket("review"), "r1");
