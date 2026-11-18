@@ -23,6 +23,7 @@ import { CHECK_SLOTS_KEY, DEFAULT_CHECK_SLOTS } from "./check-queue.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
 import { HELD_AGENT } from "./fair-share.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
+import { heldTicketIds } from "./review-holds.js";
 
 export const PRIORITY_WATCH_REASON = "priority watch";
 /** The sweep runs on every pass; it does its work this often. */
@@ -69,6 +70,8 @@ export type Facts = {
   goLive?: { wait: string; since: Date | null } | null;
   /** BOS-1635: the ticket's wake waits on "this agent is busy"; who, since when, the run it waits behind, and the free foreground agents. */
   heldBusy?: { agent: string; since: Date; behind: string | null; free: string[]; key: string } | null;
+  /** BOS-1717: the ticket's hold is recorded: an open waits-on link or an open system hold. */
+  heldOnRecord?: boolean;
 };
 
 export type Verdict = {
@@ -80,6 +83,9 @@ export type Verdict = {
 
 /** Pure: what is under way and what to alarm on, from the facts. */
 export function judge(f: Facts, now: Date): Verdict {
+  // BOS-1717: an approved ticket held in review on a waits-on link or a system hold is waiting on purpose; its hold
+  // ending wakes its assignee, so no alarm (and no wake) is raised for it here.
+  if (f.state === "review" && f.heldOnRecord) return { underWay: ["held in review on a recorded waits-on link or system hold"], alarms: [] };
   const under: string[] = [];
   if (f.liveRuns.length) under.push(`a run is live (${f.liveRuns.map((r) => r.agent ?? "an agent").join(", ")})`);
   if (f.queuedWakes) under.push(`${f.queuedWakes} wake${f.queuedWakes === 1 ? "" : "s"} queued`);
@@ -261,6 +267,7 @@ export function priorityWatchService(
       lastRun: lastRun ? { id: lastRun.id, outcome: lastRun.outcome, endedAt: lastRun.endedAt } : null,
       movedBack,
       heldBusy,
+      heldOnRecord: openWaitsOn > 0 || (await heldTicketIds(db, [t.id])).has(t.id),
       goLive: t.goLiveWait ? { wait: t.goLiveWait, since: t.goLiveWaitSince } : null,
       left: leftRow ? { id: leftRow.id, to: (leftRow.detail as { to?: string }).to ?? "another state" } : null,
     };

@@ -37,7 +37,7 @@ describe("R17 vague host step: passing rows", () => {
     ["a command with the host token", "Remove the NTFY_IMAGE line from the stack's .env: `sed -i '/^NTFY_IMAGE=/d' {{host.env.file}}`. This prints nothing."],
     ["a restart with its command", "Restart the notifications add-on: `{{host.compose.cmd}} up -d ntfy`"],
     ["a restart by button path", "Restart the runner service from Settings → Server and runner"],
-    ["Boss Man's pointer when it doesn't know the folder", "Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This host shows it)"],
+    ["Boss Man's pointer when it doesn't know the folder", "Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This server shows it)"],
     ["no host thing at all", "Start using the new funding source"],
     ["a file that only looks like .env", "Leave .envrc and my.env alone"],
     ["a file named with nothing to do to it", "Your .env file needs nothing new."],
@@ -64,7 +64,7 @@ describe("host facts for setup steps (DR-052)", () => {
     // The card then says where to look it up instead of guessing.
     const filled = fillOwnerSetup(["Remove the NTFY_IMAGE line from {{host.env.file}}"], flat);
     expect(filled.generic).toBe(true);
-    expect(filled.steps[0]).toBe("Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This host shows it)");
+    expect(filled.steps[0]).toBe("Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This server shows it)");
   });
 
   it("compose.cmd is built from the checkout and the reported compose files", () => {

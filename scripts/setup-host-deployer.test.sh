@@ -79,6 +79,14 @@ echo req >"$D/inbox/request.json"; echo 'WEBHOOK_URL=x' >"$D/host.conf"; chmod 6
 printf 'FOO=bar\n' >"$B/src/.env"
 "$I" --timer cron --no-tick >/dev/null
 has "$B/src/.env" "COMPOSE_FILE=docker-compose.yml:deploy/truenas-deployer.yml"
+# --- changing runs in the same minute never overwrite an earlier backup ---
+baks=("$B"/src/.env.bak-*); n0=${#baks[@]}
+printf 'FIRST=1\n' >"$B/src/.env"; "$I" --timer cron --no-tick >/dev/null
+printf 'SECOND=1\n' >"$B/src/.env"; "$I" --timer cron --no-tick >/dev/null
+baks=("$B"/src/.env.bak-*)
+[[ ${#baks[@]} -eq $((n0 + 2)) ]] || fail "a repeat run overwrote an .env backup"
+grep -lx 'FIRST=1' "$B"/src/.env.bak-* >/dev/null || fail "first backup lost"
+grep -lx 'SECOND=1' "$B"/src/.env.bak-* >/dev/null || fail "second backup lost"
 # --- quoted COMPOSE_FILE is refused, not mangled ---
 printf 'COMPOSE_FILE="a.yml"\n' >"$B/src/.env"
 if "$I" --timer cron --no-tick >"$T/o"; then fail "quoted COMPOSE_FILE should fail"; fi

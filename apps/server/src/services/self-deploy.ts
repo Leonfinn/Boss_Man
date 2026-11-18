@@ -113,7 +113,7 @@ const DEPLOYER_COPY_GRACE_MS = 15 * 60_000;
 export type DeployerScriptState = { state: "current" | "behind" | "unknown" | "none"; since?: string };
 // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
 const NO_SRC = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
-const NO_HOST = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
+const NO_HOST = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This server and ask us on this ticket for the exact commands.";
 
 const short = (sha: string) => sha.slice(0, 8);
 /** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213): the ticket id, or null for any other commit. */
@@ -1260,7 +1260,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       missing ?? step("Keep a copy of the current script, then copy the new one into the deployer folder. Run this on the machine that runs Boss Man. It prints the one file it copied:", cmd(`cp -p ${file} ${file}.old && BOSSMAN_DEPLOYER=${deployer} ${src}/scripts/install-deployer.sh`)),
       missing ?? step("Check it. Run this on the same machine; it prints two lines, and the long code at the start of both should be the same:", cmd(`sha256sum ${src}/scripts/host-deployer.sh ${file}`)),
     ];
-    const check = "Within a couple of minutes this card closes by itself, once the host reports it runs the live script. Settings → Server and runner → This host then says \"Deployer script: current\".";
+    const check = "Within a couple of minutes this card closes by itself, once the host reports it runs the live script. Settings → Server and runner → This server then says \"Deployer script: current\".";
     const rollback = missing ?? step("To undo, put the old script back. Run this on the same machine:", cmd(`cp -p ${file}.old ${file}`));
     return { steps, check, rollback };
   }
@@ -1490,7 +1490,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     },
 
     /** What Settings shows. */
-    /** BOS-990: Settings → This host's "Deployer script" line. */
+    /** BOS-990: the "Deployer script" line. */
     deployerScript: () => deployerScriptState(),
 
     async overview() {

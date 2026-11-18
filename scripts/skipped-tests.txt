@@ -1,0 +1,3 @@
+# Script test files (scripts/*.test.mjs) that may skip at the merge gate, each with the reason (BOS-1729). scripts/check-no-skips.mjs
+# fails the gate when a test skips in a file not listed here. Format: `path relative to scripts | reason`.
+check-mem-guard.test.mjs | two tests need /proc (Linux) to read process memory

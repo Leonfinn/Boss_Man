@@ -874,6 +874,8 @@ export async function buildApp(opts: AppOptions) {
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // The run time limit stops a run through the Stop button's own cancel (BOS-846).
     cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
+    // BOS-1647: a push that landed but was never recorded is recorded, wherever the ticket sits now.
+    recordLanded: (ticketId) => review.recordLanded(ticketId).then((r) => !!r),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId, adopt) => review.startLanding(ticketId, adopt ? "Boss Man (the server restarted; carrying on with the merge check that is still running)" : "Boss Man (the server restarted during this merge; starting it again)", undefined, adopt ? { adopt } : undefined),

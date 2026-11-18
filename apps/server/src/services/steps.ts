@@ -9,8 +9,9 @@
 
 import { HOST_NAME, OWNER_CONTROLS, parseStep, recurringDutyHits, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+import { type ComposeFacts, type ComposeStep, composeFindings } from "./compose-steps.js";
 import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
-import { norm, screenFindings, type Pressed } from "./owner-screens.js";
+import { hasWalkingSettingsPath, norm, screenFindings, type Pressed } from "./owner-screens.js";
 import { WHEN_MARKER } from "./owner-setup-when.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
@@ -61,7 +62,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R20" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R20" | "R31" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -78,7 +79,7 @@ const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up"
  * up and that Boss Man has no record for yet (`newHost`, DR-046), the card's options, and the machine's own update
  * card for R15 (DR-036) with the drain in progress (`selfDeploy.hold`, for R16, DR-046 part 2). Each may be absent,
  * and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts; /** Ticket image id (lower case) → created-at, for R19's 30-day rule; absent when the caller couldn't look them up. */ images?: Record<string, string>; /** Sites (siteKey) whose docs misled the owner → when (ISO), for R19b; absent when the caller has no record to give. */ mismatchedSites?: Record<string, string>; /** The clock for R19; tests set it. */ now?: Date };
+export type LintFacts = { /** The host's compose files, blue/green state and live colour, for R31 (compose-steps.ts); absent: R31 stays quiet. */ compose?: ComposeFacts; addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts; /** Ticket image id (lower case) → created-at, for R19's 30-day rule; absent when the caller couldn't look them up. */ images?: Record<string, string>; /** Sites (siteKey) whose docs misled the owner → when (ISO), for R19b; absent when the caller has no record to give. */ mismatchedSites?: Record<string, string>; /** The clock for R19; tests set it. */ now?: Date };
 
 /**
  * The drain state R16 needs (DR-046 part 2): a runner image update or setting change that is waiting for runs to
@@ -449,7 +450,7 @@ const HOST_REMOVE = /\b(?:delete|remove)\b[^.;\n]{1,80}?\bfrom\s+(?:[\w-]+\s+){0
 /** A Boss Man button path: the owner does it in the app, so no command is needed. */
 const SETTINGS_PATH = /\bSettings\s*(?:→|->)\s*\S/;
 /** The pointer the go-live card writes in place of a host fact Boss Man hasn't been told yet (DR-052 point 5). */
-export const THIS_HOST_POINTER = "Settings → Server and runner → This host";
+export const THIS_HOST_POINTER = "Settings → Server and runner → This server";
 
 /**
  * R17: refuse a step that names a host file with no location, or asks for a host action with neither a command
@@ -473,7 +474,7 @@ function vagueHostFindings(step: number, prose: string, blocks: string[], refuse
   }
   const action = HOST_ACTION.exec(words) ?? HOST_REMOVE.exec(words);
   // One finding a step is enough: "delete X from .env" is already refused for the file.
-  if (action && refuse.length === before && !commands.length && !SETTINGS_PATH.test(words)) {
+  if (action && refuse.length === before && !commands.length && !(SETTINGS_PATH.test(words) && hasWalkingSettingsPath(words))) {
     refuse.push({ step, rule: "R17", problem: `says "${action[0]}" with no command and no Settings → path, so the owner can't tell how. Give the command (for a service in the stack: \`{{host.compose.cmd}} restart <service>\`, with the service's name from the compose file) or the button path in the app` });
   }
 }
@@ -820,6 +821,8 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   let hostStep = 0;
   let notSeenStep = 0;
   let anyOutside = false;
+  // not state: scratch for one call over one card; nothing is kept between calls.
+  const composeSteps: ComposeStep[] = [];
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
@@ -827,6 +830,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     // A ``` the parser couldn't pair would reach the owner as raw text, with no Copy button (BOS-550).
     if (stray !== null) refuse.push({ step, rule: "R3", problem: `has a \`\`\` that isn't a complete command block, so the owner would see it as raw text ("${stray.slice(0, 80)}"). Put the opening fence line, the command and a closing \`\`\` each on a line of its own` });
     const code = [...blocks, ...inline];
+    composeSteps.push({ prose, code });
     for (const [re, problem] of DOC_POINTERS) {
       const m = re.exec(prose);
       if (m) {
@@ -895,6 +899,8 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     const duty = recurringDutyHits(prose)[0];
     if (duty) warn.push({ step, rule: "warn", problem: `reads as something the owner must repeat ("${duty.slice(0, 80)}"); say how often, or make Boss Man do it so the owner needn't` });
   });
+  // R31 (BOS-1666): compose steps against the host's reported compose files and blue/green state.
+  refuse.push(...composeFindings(composeSteps, given.compose));
   // R19: a card built on a doc nobody saw on a screen must let the owner say the screen differs. Only checked when
   // the caller gave the card's options (a setup-steps check has none).
   if (notSeenStep && given.options && !given.options.some((o) => SCREEN_DIFFERENT.test(o))) {
@@ -1499,15 +1505,15 @@ function updateCardHint(facts: SelfDeployFacts): string {
 }
 
 /** The "Build and update runners" button, as a step names it (DR-046 part 2). Matched on the button's words in the
- * whole step, so a sentence that opens the path to it ("Settings → Server and runner → Updates → Build and update
- * runners") counts, not only one that says "press". */
+ * whole step, so a sentence that opens the path to it (Settings, Server and runner, Updates, then the button) counts,
+ * not only one that says "press". */
 const REBUILD_BUTTON = /\bbuild and update runners\b/i;
 /** A command that only looks at what Boss Man already shows (DR-046 part 4): it reads containers or images and prints them. */
 const LOOK_ONLY_DOCKER = /\bdocker\s+(?:ps|images|inspect)\b/;
 
 /**
- * R16 (DR-046 part 2): refuse a step that asks the owner to press Settings → Server and runner → Updates → Build and
- * update runners while a runner image update is already under way. Boss Man raised that update itself and swaps each
+ * R16 (DR-046 part 2): refuse a step that asks the owner to press "Build and update runners" (Settings, then Server and runner, then Updates)
+ * while a runner image update is already under way. Boss Man raised that update itself and swaps each
  * runner onto the new image as its company goes idle; asking the owner to press it again does nothing useful, and the
  * second ask is what Brian's card d8983eb1 did. A pending setting change (`kind: "settings"`) is not an image update,
  * so it doesn't refuse the button (the button only builds and swaps an image). A CEO can let it through with a reason

@@ -292,14 +292,17 @@ describe("runners through the launcher (R55)", () => {
   it("sends every launched company its allow list once at server start, and keeps the good entries next to a bad host", async () => {
     const c = (ctx = await setup());
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
-    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    // Each background sync sends exactly one allow call, so count them: the start's own, then one per patch. Waiting for a
+    // count (not a fixed sleep) means clearing the log below cannot race a sync that is still on its way.
+    const allowCalls = () => c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").length;
+    await vi.waitFor(() => expect(allowCalls()).toBe(1));
     const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
     const q = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Odd" })).json() as { id: string };
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.1.50:3003/team/site.git" });
+    await vi.waitFor(() => expect(allowCalls()).toBe(2));
     await c.req("PATCH", `/api/projects/${q.id}`, { repoUrl: "https://my_git.lan/o/r" });
-    // Wait for both patches' own syncs to land, so clearing the log doesn't race one of them into the syncAll assertions.
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.1.50:3003"], private: ["192.168.1.50:3003"] }));
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(allowCalls()).toBe(3));
+    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.1.50:3003"], private: ["192.168.1.50:3003"] });
     c.fake.calls.length = 0;
     await c.launcher.syncAll(1);
     expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.1.50:3003"], private: ["192.168.1.50:3003"] } })]);
@@ -308,7 +311,8 @@ describe("runners through the launcher (R55)", () => {
   it("start-up sync tries again while the launcher is coming up, and never throws", async () => {
     const c = (ctx = await setup());
     await c.req("POST", "/api/companies", { name: "App Co" });
-    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    // The start sends PUT /runners/app-co and then PUT /runners/app-co/allow; wait for both before clearing the log.
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT" && x.path === "/runners/app-co/allow")).toBe(true));
     c.fake.calls.length = 0;
     c.fake.fail(true);
     const done = c.launcher.syncAll(1, 3);
@@ -335,7 +339,7 @@ describe("runners through the launcher (R55)", () => {
   it("at server start, removes the runner and token the launcher keeps for a company that no longer exists (BOS-497)", async () => {
     const c = (ctx = await setup());
     await c.req("POST", "/api/companies", { name: "App Co" });
-    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT" && x.path === "/runners/app-co/allow")).toBe(true));
     // A leftover: the launcher still has a runner (and token file) for a company deleted from the database.
     await c.db.insert(settings).values({ key: `runner-slug:${randomUUID()}`, value: "gone-co" });
     c.fake.running.set("gone-co", "exited");

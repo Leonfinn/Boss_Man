@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { HOST_FACT_LABELS, fillOwnerSetup } from "../src/services/owner-setup-check.js";
 
-const POINTER = "Settings → Server and runner → This host";
+const POINTER = "Settings → Server and runner → This server";
 const label = (key: string) => `${HOST_FACT_LABELS[key]} (${POINTER} shows it)`;
 
 describe("fillOwnerSetup: a value the host reported", () => {

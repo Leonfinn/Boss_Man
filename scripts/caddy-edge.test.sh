@@ -44,11 +44,15 @@ node "$T/echo.mjs" "$b_ui" "$b_portal" & pids+=($!)
 BOSSMAN_CADDY_TRUSTED_PROXIES="127.0.0.2/32" "$CADDY" run --config "$T/caddy/Caddyfile" --adapter caddyfile >"$T/caddy.log" 2>&1 & pids+=($!)
 
 # Caddy marks a backend down until its first health check passes: wait until it proxies.
-for _ in $(seq 1 40); do
-  curl -fs -o /dev/null --interface 127.0.0.3 "http://127.0.0.1:$ui/api/ready" 2>/dev/null && break
-  sleep 0.5
+# The event is "a request through Caddy reaches the backend", polled until a deadline (a fixed 20 s was too short on a
+# slow GitHub runner, BOS-1726). It gives up at once if Caddy has exited, and on the deadline prints Caddy's log.
+# The deadline only decides how long a broken setup takes to fail; a working one returns on the first answer.
+deadline=$((SECONDS + 90))
+until curl -fs -o /dev/null --interface 127.0.0.3 "http://127.0.0.1:$ui/api/ready" 2>/dev/null; do
+  kill -0 "${pids[1]}" 2>/dev/null || { cat "$T/caddy.log"; fail "Caddy exited before it proxied to the backend"; }
+  ((SECONDS < deadline)) || { cat "$T/caddy.log"; fail "Caddy never proxied to the backend (waited 90 s)"; }
+  sleep 0.2
 done
-curl -fs -o /dev/null --interface 127.0.0.3 "http://127.0.0.1:$ui/api/ready" || { cat "$T/caddy.log"; fail "Caddy never proxied to the backend"; }
 
 # seen <source-ip> <port> <xff|-> <xfp|->: prints "xff|xfp" as the backend received them.
 seen() {
