@@ -235,5 +235,5 @@ export function heldText(h: HeldLine, clock: (iso: string) => string): string {
 
 /** The paused line as one plain sentence; `clock` turns a time into HH:MM (the server uses UTC). */
 export function pausedText(p: PausedLine, clock: (iso: string) => string): string {
-  return `Paused for ${p.reason} since ${clock(p.since)}; new checks start once it is done, by ${clock(p.until)} at the latest. ${p.inUse} of ${p.slots} ${plural(p.slots, "slot", "slots")} in use: new checks paused.`;
+  return `Paused for ${p.reason} since ${clock(p.since)}; new checks start once it is done, by ${clock(p.until)} at the latest. ${p.inUse} of ${p.slots} ${p.slots === 1 ? "slot" : "slots"} in use: new checks paused.`;
 }
