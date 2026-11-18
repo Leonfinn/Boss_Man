@@ -189,7 +189,7 @@ Boss Man says "Visitors now confirm by email."
 
 The tick box stays greyed out until both prerequisites are met, and the text under it says which one is missing:
 
-- "Set up outgoing email first (Settings → Server and runner → Outgoing email): the links are sent from it." Fill in [Boss Man's settings](#fill-in-boss-man-s-settings) and save.
+- "Set up outgoing email first (Settings → Server and runner → Email): the links are sent from it." Fill in [Boss Man's settings](#fill-in-boss-man-s-settings) and save.
 - "The links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide)." Set it as the install guide says, then recreate the server.
 
 To turn it off, clear the tick. Boss Man says "Visitors no longer need to confirm."
