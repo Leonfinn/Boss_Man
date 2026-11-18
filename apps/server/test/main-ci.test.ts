@@ -339,6 +339,46 @@ describe("the main-CI watcher", () => {
     expect(await ctx.failingTickets()).toHaveLength(2);
   });
 
+  // BOS-1703: main's red run 43981883165 was hidden by a newer finished run of the same workflow.
+  const redImagesRun = (c: Awaited<ReturnType<typeof setup>>) => {
+    c.gh.runs.unshift(run(41, "failure", sha("a")));
+    // Run 43981883165's shape: images (amd64) red; check, host-steps and web-browser skipped.
+    const skipped = (name: string): WorkflowJob => ({ ...job(name, []), conclusion: "skipped" });
+    c.gh.jobs[41] = [
+      skipped("check"),
+      skipped("host-steps"),
+      skipped("web-browser"),
+      job("images (amd64)", [["Set up", "success"], ["Shell script tests", "failure"]]),
+    ];
+  };
+
+  it("sees a red run that a newer cancelled run and a queued run sit on top of (BOS-1703)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs.unshift(run(40, "success", sha("9")));
+    await c.service.run(); // main is green; run 40 is recorded
+    redImagesRun(c);
+    c.gh.runs.unshift(run(42, "cancelled", sha("b")), run(43, null, sha("c"), { status: "queued" }));
+    await c.service.run();
+    const made = await c.failingTickets();
+    expect(made).toHaveLength(1);
+    expect(made[0]!.title).toBe("Main's CI is failing: CI / images (amd64) / Shell script tests");
+    await c.service.run();
+    expect(await c.failingTickets()).toHaveLength(1);
+  });
+
+  it("opens nothing new when a ticket for the same failure was opened by hand (BOS-1703)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs.unshift(run(40, "success", sha("9")));
+    await c.service.run();
+    await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "Main's CI is failing: images (amd64) Shell script tests", systemState: "in_progress", columnId: (await c.work.board(c.project.id)).columns[0]!.id });
+    redImagesRun(c);
+    await c.service.run();
+    expect(await c.failingTickets()).toHaveLength(1); // only the hand-made one
+    expect((await c.failingTickets())[0]!.title).not.toContain("CI / images");
+  });
+
   it("ignores pull request runs and runs that are still going", async () => {
     ctx = await setup();
     ctx.gh.runs.unshift(run(19, "failure", sha("a"), { event: "pull_request" }), run(20, null, sha("b")));
