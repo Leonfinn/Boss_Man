@@ -16,8 +16,10 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, checkJobs, checkResults, decisions, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
+import { createLeader } from "../src/leader.js";
 import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, GATE_RERUN_MARK } from "../src/services/ci-flake.js";
 import { landingTurns } from "../src/services/landing-turn.js";
+import { MERGE_LINE_KIND } from "../src/services/merge-line.js";
 import { holdView } from "../src/services/review-holds.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
 import { approveAndWait } from "./helpers.js";
@@ -129,7 +131,10 @@ function fakeGitHub() {
 async function setup(opts: { features?: string[]; holdVerify?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; changed?: string[] } = {}) {
   const gh = fakeGitHub();
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: gh.fetch, ciTiming: { pollMs: 10, graceMs: 60, ceilingMs: 3_000, retryMs: 5 } });
+  // In charge until a test hands over (BOS-1752): `lead.on = false` plays the blue/green switch on this copy.
+  const lead = { on: true };
+  const leader = { ...createLeader(), isLeader: () => lead.on };
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: gh.fetch, leader, ciTiming: { pollMs: 10, graceMs: 60, ceilingMs: 3_000, retryMs: 5 } });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -174,7 +179,7 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; workflow
   const merges = () => sent.filter((c): c is Extract<RunnerCommand, { type: "workspace.merge" }> => c.type === "workspace.merge").map((c) => c.phase ?? "plain");
   const events = async () => (await db.select({ kind: activity.kind, summary: activity.summary }).from(activity).where(eq(activity.ticketId, ticket.id))).filter((e) => e.kind === "merge_ci").map((e) => e.summary);
   const release = () => held.splice(0).forEach((r) => r());
-  return { ...built, db, close, req, company, worker, project, ticket, sent, gh, state, merges, events, release, held };
+  return { ...built, db, close, req, company, worker, project, ticket, sent, gh, state, merges, events, release, held, lead };
 }
 
 describe("the sweep of leftover CI branches (BOS-1749)", () => {
@@ -550,6 +555,96 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
     });
 
+    // BOS-1752: after a blue/green hand-over the old copy's merge loop kept polling the shared check job. It wrote a second
+    // check_started, then a check_ended while the job ran on (the new leader's CI push superseded its run), and acted on CI.
+    describe("a copy that handed over leaves the merge to the server now in charge (BOS-1752)", () => {
+      const lineEvents = async (c: NonNullable<typeof ctx>) =>
+        (await c.db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, MERGE_LINE_KIND)))).map((r) => (r.detail as { event: string }).event);
+      const landing = async (c: NonNullable<typeof ctx>) => (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing as { state?: string; outcome?: string } | undefined;
+      const jobs = (c: NonNullable<typeof ctx>) => c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      /** Approves, waits for the merge's check job to be queued, then hands over: this copy is no longer in charge. */
+      const approveThenHandOver = async (c: NonNullable<typeof ctx>, before?: () => Promise<void>) => {
+        await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+        await vi.waitFor(async () => expect(await jobs(c)).toHaveLength(1), { timeout: 5_000 });
+        await before?.();
+        c.lead.on = false;
+      };
+      /** What a standby must never leave: line rows past the hand-over, retries, cards, send-backs or a cancelled job. */
+      const leftNothing = async (c: NonNullable<typeof ctx>) => {
+        await vi.waitFor(async () => expect(await landing(c)).toMatchObject({ state: "finished", outcome: "check_stuck" }), { timeout: 5_000 });
+        expect((await lineEvents(c)).filter((e) => e === "check_ended" || e === "attempt_failed")).toEqual([]);
+        expect((await c.db.select({ kind: activity.kind }).from(activity).where(eq(activity.ticketId, c.ticket.id))).filter((a) => a.kind === "merge_check_lock_wait")).toEqual([]);
+        expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+        expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+        expect((await c.state()).systemState).toBe("review");
+        expect(c.merges()).not.toContain("finish");
+      };
+
+      it("the new leader's CI push supersedes this copy's run: no check_ended, no retry, and the job is left queued for the leader", async () => {
+        const c = (ctx = await setup());
+        await serverMode(c);
+        let handed = false;
+        c.gh.state.ci = (sha) => (sha === MERGE ? (handed ? cancelledRun() : running()) : green());
+        await approveThenHandOver(c, async () => {
+          c.gh.state.branchRuns = [
+            { id: 10, head_sha: "9".repeat(40), created_at: "2026-11-16T10:05:00Z", status: "in_progress", conclusion: null },
+            { id: 9, head_sha: MERGE, created_at: "2026-11-16T10:00:00Z", status: "completed", conclusion: "cancelled" },
+          ];
+          handed = true;
+        });
+        await leftNothing(c);
+        expect((await jobs(c)).map((j) => j.state)).toEqual(["queued"]);
+        expect(c.gh.state.reruns).toEqual([]);
+      });
+
+      it("a red CI read after the hand-over sends nothing back: the leader reads CI on its own commit", async () => {
+        const c = (ctx = await setup());
+        await serverMode(c);
+        let handed = false;
+        c.gh.state.ci = (sha) => (sha === MERGE ? (handed ? red([job("check", "failure", 4, "Run tests")]) : running()) : green());
+        await approveThenHandOver(c, async () => {
+          handed = true;
+        });
+        await leftNothing(c);
+        expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([]);
+      });
+
+      it("without CI: a job that passes after the hand-over is not landed or recorded by this copy", async () => {
+        const c = (ctx = await setup({ switchOn: false }));
+        await serverMode(c);
+        // No dispatcher runs here: the test plays it, starting the job while this copy is in charge and passing it right
+        // after the hand-over, before the copy's next poll (the race the real hand-over has).
+        await approveThenHandOver(c, async () => {
+          const [j] = await jobs(c);
+          await c.db.update(checkJobs).set({ state: "running", startedAt: new Date() }).where(eq(checkJobs.id, j!.id));
+          await vi.waitFor(async () => expect(await lineEvents(c)).toContain("check_started"), { timeout: 5_000 });
+        });
+        const [j] = await jobs(c);
+        await c.db.update(checkJobs).set({ state: "passed", exitCode: 0, endedAt: new Date() }).where(eq(checkJobs.id, j!.id));
+        await leftNothing(c);
+        expect((await lineEvents(c)).filter((e) => e === "check_started")).toHaveLength(1);
+      });
+
+      it("handed over while waiting for another ticket's landing turn (BOS-1762): this copy never pushes", async () => {
+        const c = (ctx = await setup({ features: ["carried-check", "ci-publish", "merge-carry"] }));
+        await serverMode(c);
+        const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Hot-file change", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+        landingTurns.rebuilt(c.project.id, other.id, 60 * 60_000);
+        expect(landingTurns.rebuilt(c.project.id, other.id, 60 * 60_000).turn).toBe("taken");
+        try {
+          await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          await vi.waitFor(async () => expect(await lineEvents(c)).toContain("hold_started"), { timeout: 20_000 });
+          c.lead.on = false;
+          await vi.waitFor(async () => expect(await landing(c)).toMatchObject({ state: "finished", outcome: "check_stuck" }), { timeout: 5_000 });
+          expect(c.merges()).not.toContain("finish");
+          expect((await c.state()).systemState).toBe("review");
+        } finally {
+          landingTurns.done(c.project.id, other.id);
+        }
+      });
+    });
+
     describe("carrying a passed merge across a main move (BOS-1762)", () => {
       const CARRY = ["carried-check", "ci-publish", "merge-carry"];
       const MERGE2 = "d".repeat(40);
@@ -854,6 +949,27 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find(isRerun)).toMatchObject({ state: "cancelled" });
         expect(c.gh.state.failedReruns).toEqual([]);
         expect((await authorWake(c))!.note).toContain("own check failed here");
+      });
+
+      it("handed over during the gate's re-run (BOS-1752): this copy asks GitHub for no retry, records none and leaves the re-run job alone", async () => {
+        const c = await flaky();
+        const res = approveAndWait(c.req, c.ticket.id);
+        const rerun = await vi.waitFor(
+          async () => {
+            const j = (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find(isRerun);
+            if (!j) throw new Error("no re-run queued yet");
+            return j;
+          },
+          { timeout: 5_000, interval: 20 },
+        );
+        c.lead.on = false;
+        expect((await res).json()).toMatchObject({ outcome: "check_stuck" });
+        expect(c.gh.state.failedReruns).toEqual([]);
+        expect(await retryRows(c)).toEqual([]);
+        expect(await authorWake(c)).toBeUndefined();
+        expect((await c.state()).systemState).toBe("review");
+        // Not cancelled: the server now in charge reuses it for the same commit and tree.
+        expect((await c.db.select().from(checkJobs).where(eq(checkJobs.id, rerun.id)))[0]!.state).toBe("queued");
       });
     });
   });
