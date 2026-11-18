@@ -122,8 +122,9 @@ describe("stuckSummary", () => {
 
 describe("slowSummary", () => {
   it("copies the over-capacity verdict and nothing else", () => {
-    expect(slowSummary({ line: { state: "over_capacity", waiting: 17, etaMinutes: 255, lastLandedAt: "2026-11-15T19:03:00.000Z", advice: "add a worker" } })).toEqual({
+    expect(slowSummary({ line: { state: "over_capacity", waiting: 17, inQueue: 20, etaMinutes: 255, lastLandedAt: "2026-11-15T19:03:00.000Z", advice: "add a worker" } })).toEqual({
       waiting: 17,
+      inQueue: 20,
       etaMinutes: 255,
       lastLandedAt: "2026-11-15T19:03:00.000Z",
       advice: "add a worker",
@@ -142,34 +143,49 @@ describe("slowText", () => {
   const base = { waiting: 17, etaMinutes: null, lastLandedAt: null, advice: null };
 
   it("says one check in the singular", () => {
-    expect(slowText({ ...base, waiting: 1 })).toBe("Merging, but slowly: 1 merge check waiting.");
+    expect(slowText({ ...base, waiting: 1 })).toBe("Merging, but slowly: 1 for Boss Man to merge, estimating the time to clear….");
   });
 
   it("says several checks in the plural, and zero too", () => {
-    expect(slowText(base)).toBe("Merging, but slowly: 17 merge checks waiting.");
-    expect(slowText({ ...base, waiting: 0 })).toBe("Merging, but slowly: 0 merge checks waiting.");
+    expect(slowText(base)).toBe("Merging, but slowly: 17 for Boss Man to merge, estimating the time to clear….");
+    expect(slowText({ ...base, waiting: 0 })).toBe("Merging, but slowly: 0 for Boss Man to merge, estimating the time to clear….");
   });
 
   it("adds the time to clear when there is an estimate", () => {
     expect(slowText({ ...base, etaMinutes: 255 })).toBe(
-      "Merging, but slowly: 17 merge checks waiting, about 4 h 15 min to clear at the current rate.",
+      "Merging, but slowly: 17 for Boss Man to merge, about 4 h 15 min to clear at the current rate.",
     );
     expect(slowText({ ...base, waiting: 1, etaMinutes: 0 })).toBe(
-      "Merging, but slowly: 1 merge check waiting, about 0 min to clear at the current rate.",
+      "Merging, but slowly: 1 for Boss Man to merge, about 0 min to clear at the current rate.",
     );
   });
 
   it("adds when the line last landed, using the viewer's clock", () => {
     const lastLandedAt = "2026-11-15T19:03:00.000Z";
     expect(slowText({ ...base, lastLandedAt })).toBe(
-      `Merging, but slowly: 17 merge checks waiting, last landed ${clock(lastLandedAt)}.`,
+      `Merging, but slowly: 17 for Boss Man to merge, estimating the time to clear…, last landed ${clock(lastLandedAt)}.`,
     );
   });
 
   it("puts the estimate before the last landing", () => {
     const lastLandedAt = "2026-11-15T19:03:00.000Z";
     expect(slowText({ ...base, etaMinutes: 45, lastLandedAt })).toBe(
-      `Merging, but slowly: 17 merge checks waiting, about 45 min to clear at the current rate, last landed ${clock(lastLandedAt)}.`,
+      `Merging, but slowly: 17 for Boss Man to merge, about 45 min to clear at the current rate, last landed ${clock(lastLandedAt)}.`,
     );
+  });
+
+  it("says how many are in the merge line when more wait there than on checks", () => {
+    expect(slowText({ ...base, inQueue: 20, etaMinutes: 45 })).toBe(
+      "Merging, but slowly: 17 for Boss Man to merge (20 in the merge line; the rest are merging now or with an agent or you), about 45 min to clear at the current rate.",
+    );
+    expect(slowText({ ...base, waiting: 1, inQueue: 2 })).toBe(
+      "Merging, but slowly: 1 for Boss Man to merge (2 in the merge line; the rest are merging now or with an agent or you), estimating the time to clear….",
+    );
+  });
+
+  it("leaves the merge-line note out when nothing extra is in the line", () => {
+    expect(slowText({ ...base, inQueue: 17 })).toBe("Merging, but slowly: 17 for Boss Man to merge, estimating the time to clear….");
+    expect(slowText({ ...base, inQueue: 5 })).toBe("Merging, but slowly: 17 for Boss Man to merge, estimating the time to clear….");
+    expect(slowText({ ...base, waiting: 0, inQueue: 0 })).toBe("Merging, but slowly: 0 for Boss Man to merge, estimating the time to clear….");
   });
 });
