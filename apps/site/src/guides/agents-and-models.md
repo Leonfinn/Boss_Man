@@ -12,9 +12,9 @@ lead: Each agent runs one of three agent programs, with a model and a thinking l
 
 | Agent program | Accounts it can use |
 |---|---|
-| Claude Code | a Claude Pro or Max plan (with a setup-token), an Anthropic API key, or an LLM gateway such as OpenRouter |
+| Claude Code | a Claude Pro or Max plan (with a setup-token), an Anthropic API key, an LLM gateway such as OpenRouter, Amazon Bedrock or Microsoft Foundry |
 | Codex | an OpenAI API key, or a ChatGPT plan |
-| OpenCode | an OpenRouter, Ollama Cloud or Synthetic key, an OpenAI or Anthropic key, or another OpenAI-compatible service |
+| OpenCode | an OpenRouter, Ollama Cloud or Synthetic key, an OpenAI or Anthropic key, an Ollama Cloud or Synthetic plan, or another OpenAI-compatible service |
 
 **Another OpenAI-compatible service.** OpenCode can use any service that speaks the OpenAI API. Add it under **Settings > Secrets** with the kind **Other**, named `OPENCODE_CONFIG_CONTENT`, whose value describes the service. **Settings > Funding > What the provider controls** shows an example for Ollama on your own machine. (Unverified: this route was not tried end to end for this guide, and the runner's network guard may refuse a service on your home network.)
 
@@ -33,14 +33,17 @@ For a Claude plan, run `claude setup-token` on your own computer and paste the t
 
 ## When a plan is nearly used up
 
-A plan (a Claude Pro or Max plan, or a Synthetic plan) has a usage allowance. Boss Man calls the pause near the end of it the quota hold. An API key has no hold: its runs just start.
+A plan (Claude, ChatGPT, Ollama Cloud or Synthetic) has a usage allowance. Boss Man calls the pause near the end of it the quota hold. An API key has no hold: its runs just start.
 
 Each plan's card on **Settings > Funding** has the hold settings, under **When the subscription is nearly used up**:
 
 - **Hold routine work at**: a percentage from 80 to 100. The default is 95. At this level Boss Man pauses routine work on the plan and tells you. Chats and reviews keep running.
 - **I have extra usage** (on a Synthetic plan, **I have top-up credit**): what happens once the plan is at the hold level.
+- **Which limits can trigger the hold**: untick a window so it never pauses work.
 
-| Choice | Routine work | Urgent tickets |
+In the choices below, urgent work means tickets marked **Priority 1**.
+
+| Choice | Routine work | Priority 1 tickets |
 |---|---|---|
 | **Hold everything at the limit** (the default) | waits | runs until the limit itself, then waits. It also waits if the plan is already using extra usage. |
 | **Keep urgent work running past the limit** (Synthetic: **Keep urgent work running on top-up credit**) | waits | carries on past the limit, paid from extra usage or top-up credit |
@@ -86,6 +89,8 @@ Open **Agents** and choose **Hire**. Pick a role under **Start from**, or **Blan
 - balanced model: Engineer, Researcher, Designer, QA, Writer, Product Manager, Data & Analytics
 - fast model: Scrum Master, Assistant, Release Manager, Support
 
+Choose what pays for it under **Paid from**.
+
 ## Choose a model
 
 The **Model** list starts with **Default**, which uses the agent program's own default. Below that are the models the runner reports for that agent program, and the models your API key offers. Choose **Other…** to type a model name yourself. If the list is empty, choose **Refresh models**.
@@ -96,4 +101,4 @@ The **Model** list starts with **Default**, which uses the agent program's own d
 
 ## Changes the CEO proposes
 
-The CEO can propose new hires and model changes. They come to Decisions and wait for you. For a hire, choose **Hire the ticked ones** or **Not now**. For a model change, choose **Approve**, **Edit** or **Reject**.
+The CEO can propose new hires and model changes. They come to Decisions and wait for you. For one hire, choose **Hire** or **Don't hire**. For a team, tick who you want and choose **Hire the ticked ones**, or **Not now**. For a model change, choose **Approve**, **Edit** or **Reject**.
