@@ -21,6 +21,7 @@ import { record } from "./services/activity.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
+import { GO_LIVE_UNMARKED, goLiveProofRefusal, rollbackLine, rollbackRefusal, sayGoLive } from "./services/go-live-card.js";
 import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
@@ -391,6 +392,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         ownerMustDo: z.boolean().optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional().describe(`The owner's steps, one per item. ${HOST_TOKEN_HELP} A vague host step (".env" with no path, "restart the add-on" with no command or Settings → path) is refused (R17). A step on someone else's website (a URL not on this server, or a vendor console such as Cloudflare or GitHub) must say where its clicks came from (R19): "seen: <ticket image id>" for a screenshot under 30 days old, or "not seen: <doc URL>, <YYYY-MM-DD>"; a card with a not-seen step must also offer the option "My screen looks different (I'll attach a screenshot)". Such a card opens with a checkpoint step naming something concrete the owner will see ('You should see "holidayhours" listed'), and offers that option as the stop. For 30 days after a site's docs didn't match the owner's screen, a not-seen step for that site is refused: ask the owner for one screenshot of their starting page first and use seen:.`),
         stillNeeded: z.string().max(500).optional(),
+        // R38: a card that asks the owner to put something live (publish, deploy, release, go live, production).
+        goLive: z.boolean().optional().describe("Set true when the card asks the owner to put something live (publish, deploy, release, go live, production). With blocksTicketId it is refused while that ticket's before-merge checks are unreported or a page clause lacks its cited screenshot. Needs rollback. Not for Boss Man's own server deploy cards."),
+        rollback: z.string().max(500).optional().describe("Required with goLive: the exact undo, starting \"tested: <when, how>\" or \"not tested: <docs URL>\". A not-tested undo shows the owner \"not tried yet\"; \"in seconds\" or \"instant\" is refused unless tagged tested."),
         lintOverride: lintOverrideSchema.optional().describe(LINT_OVERRIDE_HELP),
         setsUp: z.enum(ADDONS).optional(),
         // The host a CEO-raised card is setting up, which Boss Man has no record for yet (DR-046): only that one name may be unrecorded.
@@ -422,7 +426,25 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, goLive, rollback, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, why, minutes, criterion, optionVerdicts, clearsWhen }) => {
+      // R38: a go-live card states its undo with its source, and (below) waits for its ticket's preview proof.
+      if (goLive) {
+        const bad = rollbackRefusal(rollback);
+        if (bad) return fail(bad);
+        question = `${question}\n\n${rollbackLine(rollback!)}`;
+        if (question.length > 1500) return fail("The question plus the undo line is too long: shorten the question or the rollback.");
+        if (blocksTicketId) {
+          const [g] = await db.select({ criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+          if (g) {
+            const shots = await db.select({ id: ticketImages.id }).from(ticketImages).where(eq(ticketImages.ticketId, blocksTicketId));
+            const held = goLiveProofRefusal(readCriteria(g.criteria), g.note, shots.map((i) => i.id));
+            if (held) return fail(held);
+          }
+        }
+      } else if (rollback) {
+        return fail("rollback goes with goLive: true (a card that asks the owner to put something live).");
+      }
+      const unmarkedGoLive = !goLive && sayGoLive(question, ...(steps ?? [])) ? GO_LIVE_UNMARKED : "";
       let replaces: string | undefined;
       if (givenReplaces) {
         const r = await resolveCardId(db, scope.companyId, givenReplaces);
@@ -535,7 +557,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // Say now, not after the owner answers, whether this card's answer can settle an after-merge check (BOS-963):
       // the answer records against the criteria the card names, so a card worded differently would record nothing.
       const settle = blocksTicketId ? await afterMergeCardNote(db, blocksTicketId, question, options, criterionIndexes) : "";
-      const extra = `${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${settle ? `\n\n${settle}` : ""}${links ? `\n\n${links}` : ""}${askNotes ? `\n\n${askNotes}` : ""}`;
+      const extra = `${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${settle ? `\n\n${settle}` : ""}${links ? `\n\n${links}` : ""}${unmarkedGoLive ? `\n\n${unmarkedGoLive}` : ""}${askNotes ? `\n\n${askNotes}` : ""}`;
       if (d.withCeo) return text(`Decision ${d.id} went to the CEO first, because it needs none of the owner's hands, money, secrets or sign-off. If the CEO doesn't settle it within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it reaches the owner. ${OWNER_HANDS_HINT} You'll be woken with the answer; don't wait in this turn.${extra}`);
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${extra}`);
     },
