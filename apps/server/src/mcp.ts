@@ -455,7 +455,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (reviewWrite) return fail(reviewWrite);
         // BOS-1021: no owner card on a merged ticket until the merge is running. Judged from merge order, so a
         // ticket merged before the wait existed is covered too.
-        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, blocksTicketId));
+        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, deploysNothing: tickets.deploysNothing }).from(tickets).where(eq(tickets.id, blocksTicketId));
         const notLive = m ? await goLiveWaitOf(db, m) : null;
         // Only a card that settles an after-merge criterion is held (it can't pass before the merge runs; the
         // criterion check below holds it too). Any other card is posted with a server-written "not live" line.
