@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# A 2-5 minute check of what this branch changed, for authors and reviewers. Only the merge gate runs the full
-# scripts/check-all.sh. Prints one PASS/FAIL line per step (output of a failed step follows it) and exits 1 on any failure,
+# A 2-5 minute check of what this branch changed, for authors and reviewers. What runs at the merge gate depends on the
+# ticket's risk (deepChecks in packages/shared/src/risk.ts): high and critical get the full scripts/check-all.sh after this
+# script (BOSSMAN_FULL_CHECK_NEXT); trivial, low and medium get only this script, with BOSSMAN_MERGE_CHECK set, which adds the
+# whole-repo tests of each touched package (BOS-1732) and never skips related tests. GitHub CI is the first full run for those.
+# Prints one PASS/FAIL line per step (output of a failed step follows it) and exits 1 on any failure,
 # or 75 when nothing failed but the heavy phase never got a check slot (check-all exit 75; the merge gate retries).
 # BASE (default origin/main) is the branch to compare with. Tests stub the commands through PATH.
 # Typecheck and vitest are heavy (1-1.5 GB, up to an hour), so they run only while holding the merge gate's one-slot check lock
@@ -52,7 +55,7 @@ failed=0 skipped=0 partial=0
 # the same tree and base reuses it instead of running again; any change to the files or to the base runs it again.
 # A FORCE_RELATED run reuses only a coverage=all pass. The merge gate (BOSSMAN_MERGE_CHECK) never reuses, and
 # CHECK_QUICK_RERUN=1 runs anyway. The slot log is shared and writable by every agent, so a reused pass is a convenience,
-# not evidence: the merge gate's own full check is what decides a merge.
+# not evidence: the merge gate's own run decides a merge.
 slotlog=${CHECK_ALL_SLOT_LOG:-${CHECK_ALL_LOCK:-/tmp/bossman-check-all}.slotlog}
 clean_tree() { [ -z "$(git status --porcelain 2>/dev/null)" ] && git rev-parse 'HEAD^{tree}' 2>/dev/null; }
 tree="" base_commit=""
@@ -73,7 +76,7 @@ if [ -n "$tree" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_QUICK_RE
     cov=${prev#* coverage=}; cov=${cov%% *}
     echo "PASS  reused: this exact tree ($tree) already passed check-quick against $base at ${prev%% *} (coverage=$cov); not running it again (CHECK_QUICK_RERUN=1 runs it anyway)"
     quick_log quick-reuse "$cov"
-    echo "check-quick: all steps passed (the merge gate still runs the full check)"
+    echo "check-quick: all steps passed (the merge gate also runs the whole-repo tests of the packages you touched; high and critical tickets get the full check too)"
     return 0
   fi
 fi
@@ -114,37 +117,35 @@ fi
 # see a change to those files, so only an entry here makes the test run for it (BOS-881). Add an entry when a test reads
 # files by path; one line per test, its package and the path prefixes it reads:
 #   "<package dir> <test file under that package> <path prefix> [<path prefix>...]"
-path_reads=(
-  "apps/server test/owner-control-list.test.ts apps/web/src/pages/ apps/web/src/components/ packages/shared/src/owner-controls.ts"
-  # DR-050/BOS-972: the image-holds-no-Anthropic test reads the Dockerfile and package.json by path; the pack
-  # test reads apps/runner/claude-pack by path. Either changing must re-run its test.
-  "apps/runner test/no-anthropic-code.test.ts apps/runner/Dockerfile apps/runner/package.json"
-  "apps/runner test/claude-pack.test.ts apps/runner/claude-pack/"
-  # BOS-1613: main went red on the screen inventory three times (BOS-1177, 1427, 1612). It reads every page and component
-  # as text and imports none of them, so a page change never made it "related".
-  "apps/web test/screen-inventory.test.ts apps/web/src/ apps/web/test/screen-inventory.txt"
-  # Tests that read styles.css as text (no browser) are not related to it either. Browser-driven ones are left to the gate's
-  # full run, as before; add a test here when it reads src files by path and needs no browser.
-  "apps/web test/ticket-layout.test.ts apps/web/src/styles.css"
-  "apps/web test/ticket-details-style.test.ts apps/web/src/styles.css"
-  "apps/web test/board-bar-width.test.ts apps/web/src/styles.css apps/web/src/pages/Board.tsx"
-  "apps/web test/sidebar-height.test.ts apps/web/src/styles.css"
-  "apps/web test/phone-bar-height.test.ts apps/web/src/styles.css"
-  "apps/web test/scroll-wheel.test.ts apps/web/src/styles.css"
-)
-path_read_tests() { # path_read_tests <package dir>: the path-reading tests of that package whose paths the branch changed
-  local d=$1 f p hit
-  for entry in "${path_reads[@]}"; do
-    # shellcheck disable=SC2086  # split the entry into its words: package dir, test file, then its path prefixes
-    set -- $entry
-    [ "$1" = "$d" ] || continue
-    f=$2 hit=0
-    for p in "${@:3}"; do
-      if [ -d "$p" ]; then has "^${p%/}/" && hit=1
-      else has "^${p}$" && hit=1; fi
+#
+# BOS-1732: the hand list that stood here (about 10 tests) is gone. At the merge gate every "whole-repo" test of each package
+# the branch touches runs, found by what the test contains, so a new test of either kind is picked up with nothing to add:
+#   - it reads repo files by path: a read call (readFileSync, readdirSync, ...) and a way to find the repo (import.meta.url,
+#     __dirname, process.cwd()) in the same file: ratchets, inventories, lints;
+#   - it renders the built app in a browser (apps/web only): the file uses real-page, playwright or chromium.
+# Without that, main went red at our gate five times (BOS-1733) on tests that reach the code without importing it.
+# A hand run does not run them (up to about 100 files); CHECK_QUICK_WHOLE_REPO=1 runs them anyway.
+whole_repo_read='readFileSync|readdirSync|readFile\(|readdir\(|statSync|existsSync|git ls-files'
+whole_repo_locate='import\.meta\.(url|dirname)|__dirname|process\.cwd\(\)'
+whole_repo_browser='real-page|playwright|chromium'
+whole_repo_on() { [ -n "${BOSSMAN_MERGE_CHECK:-}" ] || [ -n "${CHECK_QUICK_WHOLE_REPO:-}" ]; }
+whole_repo_tests() { # whole_repo_tests <package dir>: its whole-repo test files, relative to the package, sorted
+  local d=$1 all helpers h
+  all="$(find "$d" -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) -print 2>/dev/null)" || all=""
+  [ -n "$all" ] || return 0
+  # A test may read through a helper in its test folder (screen-inventory.test.ts imports screen-scan.ts): the helper counts too.
+  helpers="$(find "$d/test" -maxdepth 2 -type f -name '*.ts' ! -name '*.test.ts' 2>/dev/null | { xargs -r grep -lE "$whole_repo_read" 2>/dev/null || true; } | { xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true; })" || helpers=""
+  {
+    # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+    { grep -lE "$whole_repo_read" $all 2>/dev/null || true; } | xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true
+    for h in $helpers; do
+      h="$(basename "$h" .ts)"
+      # shellcheck disable=SC2086
+      grep -lE "from [\"'](\./|\.\./)([^\"']*/)?$h(\.js)?[\"']" $all 2>/dev/null || true
     done
-    [ "$hit" -eq 1 ] && echo "$f"
-  done
+    # shellcheck disable=SC2086
+    [ "$d" != apps/web ] || grep -lE "$whole_repo_browser" $all 2>/dev/null || true
+  } | sort -u | sed "s#^$d/##"
   return 0
 }
 
@@ -156,12 +157,6 @@ done
 if has '^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*\.json)$' || has '^packages/shared/'; then
   pkgs=(apps/launcher apps/runner apps/server apps/web packages/shared)
 fi
-# A path-reading test lives in a package the branch may not have touched (the owner-controls test reads web pages from
-# apps/server), so its package joins the list whenever one of its paths changed.
-for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
-  [ -z "$(path_read_tests "$d")" ] && continue
-  [[ " ${pkgs[*]} " == *" $d "* ]] || pkgs+=("$d")
-done
 
   if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
   # The merge gate renumbers a branch's new migration when migration bookkeeping is the only clash (BOS-690, DR-037), so
@@ -256,14 +251,20 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     # shellcheck disable=SC2086  # one argument per file; paths have no spaces
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
   done
-  # A path-reading test the related list can't reach runs on its own, from its package (same slot, its setup files apply).
-  for d in "${pkgs[@]}"; do
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
+  # Whole-repo tests (BOS-1732) the related list can't reach: one vitest run per package, from its package folder (same slot,
+  # its setup files apply). Named files, so vitest-guard accepts it inside the slot.
+  if whole_repo_on; then
+    for d in "${pkgs[@]}"; do
+      files="$(whole_repo_tests "$d")"
+      [ -n "$files" ] || continue
       name="$(node -p "require('./$d/package.json').name")"
-      step "path-reading test ${f##*/} ($d)" pnpm --filter "$name" exec vitest related --run "$f"
-    done <<<"$(path_read_tests "$d")"
-  done
+      # The browser tests of apps/web open the built app (apps/web/dist) and skip when it is missing: build it first, here in
+      # the slot, so they really run. The build step after the slot wait is then left out (web_built_early).
+      if [ "$d" = apps/web ]; then step "build web (before the browser tests)" pnpm --filter @boss-man/web build; fi
+      # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+      step "whole-repo tests ($d, $(grep -c . <<<"$files") files)" pnpm --filter "$name" exec vitest run $files
+    done
+  fi
   return "$failed"
 fi
 
@@ -281,7 +282,6 @@ need_slot=0
 [ "${#pkgs[@]}" -eq 0 ] || need_slot=1
 for d in "${pkgs[@]}" apps/site; do
   files="$(related_files "$d")"
-  [ -n "$(path_read_tests "$d")" ] && need_slot=1
   [ -n "$files" ] || continue
   if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"; partial=1
   else need_slot=1; fi
@@ -312,11 +312,16 @@ if [ "$need_slot" -eq 1 ]; then
   elif [ "$rc" -ne 0 ]; then failed=1; fi
 fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
-if [ "$web_build" -eq 1 ]; then step "build web" pnpm --filter @boss-man/web build; fi
+# At the gate the heavy phase already built the web app when apps/web has whole-repo tests (web_built_early).
+web_built_early=0
+if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web)" ]; then
+  for d in "${pkgs[@]}"; do [ "$d" != apps/web ] || web_built_early=1; done
+fi
+if [ "$web_build" -eq 1 ] && [ "$web_built_early" -eq 0 ]; then step "build web" pnpm --filter @boss-man/web build; fi
 
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
-echo "check-quick: all steps passed (the merge gate still runs the full check)"
+echo "check-quick: all steps passed (the merge gate also runs the whole-repo tests of the packages you touched; high and critical tickets get the full check too)"
 # Recorded only when the files are still exactly the tree the run started on (nothing edited while it ran).
 [ -z "$tree" ] || [ "$(clean_tree)" != "$tree" ] || quick_log quick-pass "$([ "$partial" = 1 ] && echo partial || echo all)"
 return 0
