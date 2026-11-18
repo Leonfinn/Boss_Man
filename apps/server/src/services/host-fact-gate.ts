@@ -1,7 +1,7 @@
 // The close gate for after-merge criteria that name a host fact (BOS-1586). A ticket closed on its assignee's "pass"
 // while the This host panel still showed a failing check (BOS-986). The host's own newest report, taken after the
 // work went live, decides instead: neither a "pass" nor an owner card answer overrides it.
-import { allowsCardInstead, criterionText, evalFactClause, factClauses, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
+import { allowsCardInstead, criterionText, evalFactClause, factClauses, isAfterMerge, normQuote, pageClauses, readVerdicts, type Criterion } from "@boss-man/shared";
 import type { HostFactsRecord } from "./host-facts.js";
 
 const at = (iso: string): string => `${iso.slice(0, 16).replace("T", " ")} UTC`;
@@ -40,6 +40,35 @@ export function hostFactRefusal(
     }
   }
   return lines.length ? `The host's own report doesn't show this ticket's after-merge fact checks as met:\n${lines.join("\n")}\n${WAYS_OUT}` : null;
+}
+
+/**
+ * R37 (BOS-1682): the refusal for a done move whose "pass" on a page-clause criterion isn't backed by what a visitor
+ * sees, or null. The pass must cite (whole id or first 8 characters, like a card) an image attached to this ticket at
+ * or after `liveSince`, and quote each clause's text. A fail, or no verdict (the unreported gate answers that), is
+ * left alone. `images` are this ticket's own images; with no go-live time recorded any of them counts.
+ */
+export function pageShotRefusal(criteria: readonly Criterion[], images: ReadonlyArray<{ id: string; createdAt: Date }>, liveSince: Date | null, note: string): string | null {
+  const verdicts = readVerdicts(criteria, note);
+  const lower = note.toLowerCase();
+  const quoted = normQuote(note);
+  const fresh = images.filter((img) => !liveSince || img.createdAt.getTime() >= liveSince.getTime());
+  const cited = fresh.some((img) => lower.includes(img.id.toLowerCase()) || lower.includes(img.id.slice(0, 8).toLowerCase()));
+  const stale = !cited && images.some((img) => lower.includes(img.id.slice(0, 8).toLowerCase()));
+  const lines: string[] = [];
+  for (const [i, c] of criteria.entries()) {
+    if (!isAfterMerge(c) || verdicts[i]?.verdict !== "pass") continue;
+    const clauses = pageClauses(criterionText(c));
+    if (!clauses.length) continue;
+    const gaps: string[] = [];
+    if (!cited) gaps.push(stale ? `the screenshot cited was attached before this ticket went live${liveSince ? ` (${at(liveSince.toISOString())})` : ""}` : "no screenshot of this ticket taken since go-live is cited (attach one with attach_image and put its id in the note)");
+    const unquoted = clauses.filter((p) => !quoted.includes(normQuote(p.text)));
+    if (unquoted.length) gaps.push(`the note doesn't quote ${unquoted.map((p) => `"${p.text}"`).join(", ")} as seen on the page`);
+    if (gaps.length) lines.push(`"${criterionText(c)}": ${gaps.join("; ")}.`);
+  }
+  return lines.length
+    ? `A pass on a page criterion needs a screenshot: a status code and title can't show what a visitor sees.\n${lines.join("\n")}\nOpen the page in a real browser, attach the screenshot to this ticket, then give the pass with the image's id and the words the page shows. If the page doesn't show them, report the criterion as fail: the ticket still closes and Boss Man opens the follow-up.`
+    : null;
 }
 
 /** An id of an open card counts as cited when the note holds the whole id or its first 8 characters. */
