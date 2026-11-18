@@ -186,4 +186,21 @@ describe("check tickets: split out, then report back", () => {
     expect(woke!.note).toContain(`Still not reported: "${third.text}"`);
     expect(woke!.note).not.toContain("close it now");
   });
+
+  it("a check ticket made the old way, with no tie to a parent, closes as before and changes no parent", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, {});
+    expect(made.isError, made.text).toBe(false);
+    const check = await c.row(made.id!);
+    expect(check.checksTicketId).toBeNull();
+    await c.db.update(tickets).set({ stateNote: "1 pass" }).where(eq(tickets.id, made.id!));
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "completed", overLimit: true });
+    expect((await c.row(made.id!)).systemState).toBe("done");
+    const parent = await c.row(c.parent.id);
+    expect(parent.stateNote).toBe(c.parent.stateNote);
+    expect(parent.systemState).toBe("blocked");
+    expect(await c.reportWakes()).toEqual([]);
+    const acts = await c.db.select().from(activity).where(and(eq(activity.ticketId, c.parent.id), eq(activity.kind, "after_merge_check")));
+    expect(acts).toEqual([]);
+  });
 });
