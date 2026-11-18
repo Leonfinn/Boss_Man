@@ -490,7 +490,8 @@ describe("stale blockers (R21)", () => {
     expect(row!.recommendedOption).toBe("Chase");
 
     await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Chase" });
-    const woken = await ctx.db.select().from(wakes);
+    // Only the chase matters here: 25 idle hours also bring R29's "nothing startable" wake and its stall alert.
+    const woken = await ctx.db.select().from(wakes).where(eq(wakes.reason, "chased"));
     expect(woken).toEqual([expect.objectContaining({ agentId: ctx.ceo.id, ticketId: domain.id, reason: "chased", priority: 3 })]);
     expect((await ctx.sweep()).staleBlockers.open).toBe(0);
 

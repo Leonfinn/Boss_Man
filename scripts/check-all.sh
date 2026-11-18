@@ -164,7 +164,10 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
     took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
     if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
-    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
+    # One clock read: two `date` calls (now, and now as the default slot time) straddling a second boundary made the
+    # elapsed time -1 and let a retry through that the budget forbids (BOS-1702).
+    now=$(date +%s)
+    if [ "$n" -lt "$attempts" ] && [ $(( now - ${slot_at:-$now} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
       sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
@@ -195,7 +198,28 @@ if [ -z "$pre_done" ]; then
   # run that one command while holding it, and exit with its status. None of the full checks run.
   if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
     pnpm install --frozen-lockfile --prefer-offline >/dev/null
-    node --test scripts/*.test.mjs
+    # Print the failing subtests' "not ok" lines and their errors first: a log that is cut to its last lines shows only passes.
+    script_test_log=$(mktemp)
+    if ! node --test scripts/*.test.mjs >"$script_test_log" 2>&1; then
+      echo "script tests failed; failing subtests:"
+      grep -nE '^\s*not ok' "$script_test_log" || true
+      grep -nE -B2 -A12 '^\s*not ok' "$script_test_log" | head -150 || true
+      echo "script tests failed; full output:"
+      cat "$script_test_log"
+      rm -f "$script_test_log"
+      exit 1
+    fi
+    cat "$script_test_log"
+    rm -f "$script_test_log"
+    # One run per file, so a skip is tied to its file and checked against scripts/skipped-tests.txt (BOS-1729).
+    skipdir="$(mktemp -d)"
+    for f in scripts/*.test.mjs; do
+      # A failing test file was already reported by the full run above; here only the skip count matters. stderr stays visible.
+      node --test --test-reporter=junit "$f" >"$skipdir/r.xml" || true
+      # An empty or missing report fails inside check-no-skips.mjs (not here, so a stubbed node in check-all.test.sh still passes).
+      node scripts/check-no-skips.mjs --junit "$skipdir/r.xml" --file "${f#scripts/}" --root scripts --allow scripts/skipped-tests.txt
+    done
+    rm -rf "$skipdir"
     node scripts/lint-migrations.mjs
     node scripts/check-doc-numbers.mjs
   fi
@@ -243,6 +267,11 @@ if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COM
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
 step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
 step in-memory-state node scripts/check-in-memory-state.mjs
+# The list guards (BOS-1727) run before the long typecheck and build, so a missing line in a hand-kept list fails in the
+# first minutes with the line to add, not after 30 to 50. The full test run repeats them (cheap); nothing is loosened.
+step guard:wake-classes scripts/check-guards.sh wake-classes
+step guard:owner-controls scripts/check-guards.sh owner-controls
+step guard:screen-inventory scripts/check-guards.sh screen-inventory
 # Memory-safe on a shared runner (a 12 GB cgroup shared with other agents, two checks at once): one package at a time,
 # at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
 # and a capped heap for tsc only. Callers can override any of these.
@@ -278,7 +307,8 @@ step build pnpm build
 # The web suite must not skip anything at the gate (CI's web-browser job applies the same rule): a missing build, browser or Vite
 # fails here instead of passing quietly. BOSSMAN_SCRATCH points at a throwaway folder so the opt-in screenshot tests run too.
 web_tests() {
-  local d=$1 report shots rc=0 out
+  local d=$1 report shots rc=0 out skip_list=""
+  [ ! -f "$d/skipped-tests.txt" ] || skip_list="$d/skipped-tests.txt"  # the package's list of files allowed to skip (BOS-1729); none = no skip allowed
   report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-web.json}"
   [ -n "$report" ] || report="$(mktemp)"
   shots="$(mktemp -d)"
@@ -297,7 +327,7 @@ web_tests() {
   set -e
   rm -rf "$shots"
   if [ "$rc" -eq 0 ]; then
-    node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?
+    node "$(dirname "$self")/check-no-skips.mjs" "$report" --root "$d" ${skip_list:+--allow "$skip_list"} || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     echo "check-all: web test reasons (real-page lines, env):"
@@ -307,11 +337,24 @@ web_tests() {
   rm -f "$out"
   return "$rc"
 }
+# Every other package: vitest also writes a JSON report (the parent folds it into the result store, BOS-654), and a test that skipped
+# in a file missing from the package's skipped-tests.txt fails the step (BOS-1729). A skip on a GitHub runner and not here, or here
+# and not there, is how tests quietly stopped running; a new skip now needs a listed reason.
+pkg_tests() {
+  local d=$1 report rc=0 skip_list=""
+  [ ! -f "$d/skipped-tests.txt" ] || skip_list="$d/skipped-tests.txt"
+  report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json}"
+  [ -n "$report" ] || report="$(mktemp)"
+  pnpm --dir "$d" run test --reporter=default --reporter=json --outputFile.json="$report" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    node "$(dirname "$self")/check-no-skips.mjs" "$report" --root "$d" ${skip_list:+--allow "$skip_list"} || rc=$?
+  fi
+  return "$rc"
+}
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
   if [ "${d##*/}" = web ]; then step "test:web" web_tests "$d"; continue; fi
-  # BOSSMAN_TEST_TIMES_FILE makes vitest also write a JSON report, which the parent folds into the result store (BOS-654).
-  step "test:${d##*/}" env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_TEST_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json"} pnpm --dir "$d" run test
+  step "test:${d##*/}" pkg_tests "$d"
 done
 step shellcheck scripts/check-shell.sh
 step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh

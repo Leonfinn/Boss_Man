@@ -23,6 +23,7 @@ import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, plan
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds } from "./services/ticket-links.js";
+import { noteBlockedPark, refusalForNamedAgent } from "./services/blocked-who-acts.js";
 import { OWNER_WAIT_REFUSAL, WAIT_LINK_REFUSAL, ticketHasOpenCard, waitsForNote, waitsOnOwnerNote } from "./services/owner-todo.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
@@ -626,8 +627,14 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (ciHold) return fail(ciHold);
       }
       // A ticket waiting on the owner has to show in their Your review lane, which it only does through an open decision.
-      if (state === "blocked" && !(await blockedHolds(db, ticketId, { blockedUntil: until ?? null })).length) {
+      const blockedNow = state === "blocked" ? await blockedHolds(db, ticketId, { blockedUntil: until ?? null }) : [];
+      if (state === "blocked" && !blockedNow.length) {
         return fail(BLOCKED_REFUSAL);
+      }
+      // R36 (BOS-1679): a note that names a colleague needs a link to their ticket; a date only wakes this ticket's own agent.
+      if (state === "blocked") {
+        const named = await refusalForNamedAgent(db, { companyId: scope.companyId, agentId: scope.agentId, text: `${summary ?? ""}\n${blocked_reason ?? ""}`, holds: blockedNow });
+        if (named) return fail(named);
       }
       // BOS-1576: a note that says the ticket waits on the owner needs a card in their queue, in any state.
       if (state !== "done" && waitsOnOwnerNote(summary) && !(await ticketHasOpenCard(db, ticketId))) return fail(OWNER_WAIT_REFUSAL);
@@ -671,6 +678,16 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         for (const cardId of await openCardIds(db, ticketId)) {
           const [has] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerDecisionId, cardId))).limit(1);
           if (!has) await addTicketDependency(db, { companyId: scope.companyId, blockedTicketId: ticketId, blockerDecisionId: cardId, actor: { type: "agent", agentId: scope.agentId ?? null }, now: () => at }).catch(() => undefined);
+        }
+      }
+      // R36 (BOS-1679): the third date-only park in a row, with no link between, wakes the CEO once with the ticket and its note.
+      if (state === "blocked") {
+        const parks = await noteBlockedPark(db, { companyId: scope.companyId, ticketId, agentId: scope.agentId, holds: await blockedHolds(db, ticketId, { blockedUntil: until ?? null }), at }).catch(() => null);
+        if (parks && hooks.wake) {
+          const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, scope.companyId), eq(agents.role, "ceo")));
+          if (ceo && ceo.id !== scope.agentId) {
+            await Promise.resolve(hooks.wake(ceo.id, { reason: "parked by date again and again", ticketId, causedByRunId: scope.runId, note: `"${withCriteria.title}" has been parked by date ${parks} times in a row with no link to what settles it. Its note: ${summary?.trim() ?? "(none)"}. Whoever it waits on may not know. Find who acts, link their ticket (update_ticket waitsOn) or open one for them.` })).catch(() => undefined);
+          }
         }
       }
       // A state note is a post: the run's silence is measured from it (BOS-314).
@@ -749,7 +766,7 @@ async function conflictWarning(review: Services["review"], ticketId: string): Pr
 
 /** What Blocked accepts (BOS-1171); the refusal names every kind. Blocked tickets never count toward the in-progress limits. */
 export const BLOCKED_REFUSAL =
-  "Blocked is for a ticket that only waits. It is accepted when the ticket: (1) waits on another ticket, a decision or an engagement (update_ticket waitsOn, or create_ticket with parent set to this ticket); (2) has an open card on it, a plan card included (raise_decision with blocksTicketId, or a plan waiting for approval); (3) waits for a known time: pass blocked_until (a future ISO 8601 time within 30 days) with blocked_reason; or (4) is merged and has after-merge acceptance criteria not yet reported, or waits for its merge to go live. If you need the owner, call raise_decision with blocksTicketId first: a note in the summary does not reach them. Once blocked you can still use schedule_check to re-check later.";
+  "Blocked is for a ticket that only waits. It is accepted when the ticket: (1) waits on another ticket, a decision or an engagement (update_ticket waitsOn, or create_ticket with parent set to this ticket); (2) has an open card on it, a plan card included (raise_decision with blocksTicketId, or a plan waiting for approval); (3) waits for a known time: pass blocked_until (a future ISO 8601 time within 30 days) with blocked_reason; or (4) is merged and waits for its merge to go live (once it is live, its after-merge checks hold nothing: link what they wait on, or use a date). A date only wakes you: if a colleague has to act, link their ticket (you can add waitsOn to your own ticket; ask the CEO to open one for them if none exists), and a note that names them is refused without it. Parked by date 3 times in a row wakes the CEO. If you need the owner, call raise_decision with blocksTicketId first: a note in the summary does not reach them. Once blocked you can still use schedule_check to re-check later.";
 
 
 /**

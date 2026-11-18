@@ -76,9 +76,11 @@ test("a process under the ceiling is left alone, and the peak is still recorded"
     const child = spawn(process.execPath, ["-e", holder], { stdio: ["ignore", "pipe", "inherit"] });
     await new Promise((resolve) => child.stdout.once("data", resolve));
     const g = spawn(process.execPath, [guard, String(child.pid), "100000", peakFile], { stdio: "ignore" });
-    // Wait for the event, not a fixed time: the peak file appearing means the guard sampled the 300 MB holder.
+    // Wait for the event, not a fixed time: the peak file holding a number means the guard sampled the 300 MB holder.
+    // The file exists (empty) for a moment before the guard writes into it, so waiting on existsSync alone read "" as 0.
+    const peakMb = () => (existsSync(peakFile) ? Number(readFileSync(peakFile, "utf8") || 0) : 0);
     const deadline = Date.now() + 60000;
-    while (!existsSync(peakFile) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    while (peakMb() < 250 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
     const alive = (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })();
     g.kill();
     child.kill("SIGKILL");

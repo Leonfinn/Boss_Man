@@ -1,0 +1,20 @@
+# Test files that may skip at the merge gate, each with the reason (BOS-1729). scripts/check-no-skips.mjs fails the gate when a test
+# skips in a file not listed here. Format: `path relative to apps/runner | reason`. Listing a file is a decision: a test that skips
+# quietly here may run, and fail, on GitHub, so prefer fixing what makes it skip.
+test/canary.test.ts | needs the Claude adapter binary and CLAUDE_CODE_EXECUTABLE, an OpenCode binary, and a sandbox (Landlock) on the host
+test/check-job-cleanup.test.ts | needs the Landlock sandbox (kernel support), which a host or container may lack
+test/check-job-fence.test.ts | needs the Landlock sandbox
+test/check-job-slot.test.ts | needs the flock tool
+test/claude-check.test.ts | needs the Claude adapter binary and CLAUDE_CODE_EXECUTABLE
+test/clone-fence.test.ts | needs the Landlock sandbox
+test/fence-session.test.ts | needs the Landlock sandbox, and for one block the Claude adapter
+test/fence.test.ts | needs the Landlock sandbox, and for one test Landlock ABI 6 or newer
+test/guard-probe.test.ts | needs Linux with a default gateway in /proc/net/route
+test/models-probe.test.ts | needs the real Claude adapter binary
+test/opencode.test.ts | needs OPENCODE_BIN pointing at a real OpenCode binary
+test/plan-mode.test.ts | needs the Claude adapter binary
+test/resume-spike.test.ts | opt-in spike, runs only with RUN_SPIKES=1
+test/review-concurrent.test.ts | needs the Landlock sandbox
+test/review-deps.test.ts | needs the Landlock sandbox
+test/run-isolation.test.ts | needs the Landlock sandbox
+test/session-manager.test.ts | needs the Claude adapter binary

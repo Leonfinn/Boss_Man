@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { RUNNER_CODE_PATHS, touchesRunnerCode } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, companies, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, companies, decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { INFRA_RETRY_BASE_MS, setInfraRetryBase } from "../src/services/review.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
@@ -173,9 +173,19 @@ describe("after-merge checks wait for go-live", () => {
     await serverRuns(OLD);
     const c = await ctx.agent(ctx.dev.id);
     const ask = { question: "Is the new thing live?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: old, triedFirst: "Looked at it myself; only the owner sees their server.", ownerMustDo: false };
-    expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).toContain("isn't live yet");
+    // F2: a card that settles no after-merge criterion is posted, with a server-written "not live" line (BOS-1654).
+    const posted = textOf(await c.callTool({ name: "raise_decision", arguments: ask }));
+    expect(posted).toMatch(/Decision .* (is in the owner's queue|went to the CEO first)/);
+    const [row] = await ctx.db.select({ question: decisions.question }).from(decisions);
+    expect(row!.question).toContain("This ticket's code isn't live yet (waiting for");
+    // A card that names a criterion is still held.
+    const held = textOf(await c.callTool({ name: "raise_decision", arguments: { ...ask, question: "Does it show?", criterion: 1, optionVerdicts: { Yes: "pass", No: "fail" } } }));
+    expect(held).toContain("isn't live yet");
     await serverRuns(NEW);
-    expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).not.toContain("isn't live yet");
+    const live = textOf(await c.callTool({ name: "raise_decision", arguments: { ...ask, question: "Is it live now?" } }));
+    const rows = await ctx.db.select({ question: decisions.question }).from(decisions);
+    expect(rows.some((r) => r.question.startsWith("Is it live now?") && !r.question.includes("isn't live yet"))).toBe(true);
+    expect(live).not.toContain("isn't live yet");
   });
 
   // BOS-1094: a branch ticket whose changed files can't be read is not merged (it might change scripts/check-all.sh,

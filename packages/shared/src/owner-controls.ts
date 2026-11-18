@@ -134,7 +134,7 @@ export const OWNER_CONTROLS = {
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
-    "Review and deploy", "Check for updates now", "Build and update runners", "Cancel queued runner update", "Save", "Save add-ons","Cancel the update", "Update runners (finish runs first)",
+    "Review and deploy", "Check for updates now", "Build and update runners", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
@@ -252,7 +252,7 @@ export const OWNER_FIELDS = {
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
     "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
     "Visitors must click a link we email them before a post, comment or vote counts", "Link works for (hours)",
-    "Remember a confirmed browser for (days)",
+    "Remember a confirmed browser for (days)", "Open this portal at the public address itself",
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",

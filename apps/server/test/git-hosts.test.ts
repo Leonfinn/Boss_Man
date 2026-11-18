@@ -261,6 +261,23 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
     expect(await h.workflowRuns(cfg("gitea"), "t", "main")).toEqual([]);
   });
 
+  it("reads the workflow file of a run, and a compare's commits with parents and every changed file (BOS-1688)", async () => {
+    const h = host((p) =>
+      p.startsWith("/actions/runs?")
+        ? json(200, { workflow_runs: [{ id: 5, name: "CI", event: "push", status: "completed", conclusion: "failure", head_sha: "a".repeat(40), path: ".github/workflows/ci.yml@refs/heads/main" }] })
+        : json(200, {
+            commits: [{ sha: "b".repeat(40), commit: { message: "Merge y\n\nbody" }, parents: [{ sha: "a".repeat(40) }, { sha: "e".repeat(40) }] }],
+            files: [{ filename: "apps/server/test/a.test.ts" }, { filename: "new.ts", previous_filename: "old.ts" }],
+          }),
+    );
+    expect((await h.workflowRuns(cfg("github"), "t", "main"))[0]!.path).toBe(".github/workflows/ci.yml");
+    expect(await h.compareDetail(cfg("github"), "t", "a".repeat(40), "b".repeat(40))).toEqual({
+      commits: [{ sha: "b".repeat(40), message: "Merge y", parents: ["a".repeat(40), "e".repeat(40)] }],
+      files: ["apps/server/test/a.test.ts", "new.ts", "old.ts"],
+    });
+    await expect(host(() => json(403, { message: "Resource not accessible" })).compareDetail(cfg("github"), "t", "a", "b")).rejects.toMatchObject({ status: 403 });
+  });
+
   it("throws a GitHostError when the token can't read the runs", async () => {
     await expect(host(() => json(403, { message: "Resource not accessible" })).workflowRuns(cfg("github"), "t", "main")).rejects.toMatchObject({ status: 403 });
   });
