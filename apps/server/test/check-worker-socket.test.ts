@@ -225,6 +225,8 @@ describe("check worker socket (BOS-1435)", () => {
     const { job } = await checkQueue(db).enqueue({ companyId: ctx.companyId, projectId: p!.id, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: "c1000000", tree: "tree-1" } as never);
     const { id, token } = await ctx.addWorker();
     const w = await readyWorker(token);
+    // 20 s is a deadline for a slow GitHub runner, not a pace: the wait returns the moment the job arrives.
+    // It still catches a job that is never handed to a connected worker.
     await waitFor(w.runs, (r) => r.includes(job.id), 20_000);
     expect((await ctx.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]).toMatchObject({ state: "running", workerId: id });
     expect((await ctx.app.inject({ method: "DELETE", url: `/api/settings/check-workers/${id}`, headers: { cookie: ctx.cookie } })).statusCode).toBe(200);
