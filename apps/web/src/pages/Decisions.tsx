@@ -306,11 +306,23 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
 function CommandBlock({ command, where }: { command: string; where?: Where }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const pre = useRef<HTMLPreElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const alive = useRef(true);
+  // Clear the reset timer on unmount: a timer that outlives the page fires after the DOM is gone (BOS-1783).
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
   const copy = async () => {
     const ok = await copyText(command);
+    if (!alive.current) return;
     setState(ok ? "copied" : "failed");
     if (!ok) selectText(pre.current);
-    setTimeout(() => setState("idle"), 2000);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState("idle"), 2000);
   };
   const label = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select the text instead" : "Copy";
   return (
