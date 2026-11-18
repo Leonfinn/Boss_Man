@@ -44,7 +44,7 @@ describe("tokens", () => {
 describe("usage", () => {
   it("shows dollars for API-funded runs, zero when cost is missing", () => {
     expect(usage(run({ fundingKind: "api" as never, costMicros: 1_500_000 }))).toEqual({ text: "$1.50", title: undefined });
-    expect(usage(run({ fundingKind: "api" as never, costMicros: null }))).toEqual({ text: "$0.00", title: undefined });
+    expect(usage(run({ fundingKind: "api" as never, costMicros: undefined }))).toEqual({ text: "$0.00", title: undefined });
   });
   it("says Subscription when tokens weren't recorded", () => {
     const u = usage(run({ fundingKind: "subscription" as never, inputTokens: undefined, outputTokens: 5 }));
