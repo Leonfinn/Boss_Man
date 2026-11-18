@@ -22,7 +22,7 @@ const tmp = (prefix: string, base = tmpdir()) => {
   return d;
 };
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) // retries: git's detached auto-maintenance can still be writing (ENOTEMPTY);
 });
 
 /** A workspaces root with a bare copy of a one-commit repo, and that commit. */

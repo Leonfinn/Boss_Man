@@ -29,7 +29,7 @@ const tmp = (prefix: string) => {
 };
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) // retries: git's detached auto-maintenance can still be writing (ENOTEMPTY);
 });
 
 const ids = { project: "11111111-1111-4111-8111-111111111111", a: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", b: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
