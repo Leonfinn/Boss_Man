@@ -3,7 +3,7 @@
 // gate that stops can be seen rather than asked about. Reads only what the server already records:
 // the tickets in review, their latest check results, the one open merge card per ticket, and the
 // merges this process is running. Nothing here changes the queue.
-import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
@@ -12,7 +12,7 @@ import { softHold } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
 import { clashWords } from "./merge-line.js";
-import { mergeLineHealth, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
+import { mergeLineHealth, startBrakeOff, type StartBrakeOff, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { goLiveWaitWords } from "@boss-man/shared";
 
@@ -214,6 +214,8 @@ export type MergeQueueView = {
   stuckCount: number;
   /** BOS-1594: the one verdict on the line's health (healthy, stuck, or merging but slowly); the banner and the jam alert both read it. */
   line: MergeLineHealth;
+  /** R47: set while the start brake has no limit and the line has grown for an hour; the banner and the CEO's wake read it. */
+  startBrakeOff?: StartBrakeOff | null;
 };
 
 /** One plain line from a check's last output: the first error-looking line, or the last line. */
@@ -328,6 +330,12 @@ export const mergeQueueQueries = {
       .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), gte(tickets.stateChangedAt, since)))
       .orderBy(desc(tickets.stateChangedAt))
       .limit(RECENT_LIMIT * 2),
+  /** When tickets landed (merged) since a cut-off, for the landing rate (R47). */
+  landedSince: (db: Db, companyId: string, since: Date) =>
+    db
+      .select({ at: tickets.stateChangedAt })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), isNotNull(tickets.mergeCommit), gte(tickets.stateChangedAt, since))),
   /** Failed checks on finished tickets, through the company+time index (0105). */
   recentFailedChecks: (db: Db, companyId: string, since: Date) =>
     db
@@ -538,7 +546,7 @@ export function mergeQueueService(
     },
     async get(companyId: string): Promise<MergeQueueView> {
       const t = now();
-      const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+      const [company] = await db.select({ prefix: companies.ticketPrefix, brakeLimit: companies.holdStartsMergesWaiting }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
       const { live, slotOf, restarted, checkStart } = await liveMerges(companyId);
@@ -773,9 +781,13 @@ export function mergeQueueService(
       const workerReady = deps.workerReady ? await deps.workerReady(companyId).catch(() => undefined) : undefined;
       const heldBehindFix = await heldBehindFixOf(db, prefix, heldWaits, { running, waiting });
       const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix });
+      // R47: only read the landings when there is no limit, so a company with the brake on pays nothing.
+      const landed = company?.brakeLimit == null ? (await mergeQueueQueries.landedSince(db, companyId, new Date(t.getTime() - 24 * 3_600_000))).map((r) => r.at.getTime()) : [];
+      const brakeOff = startBrakeOff({ brakeLimit: company?.brakeLimit ?? null, waiting, landed, now: t });
       return {
         companyId,
         mode: queue?.mode ?? "legacy",
+        startBrakeOff: brakeOff,
         slots,
         running,
         waiting,

@@ -29,6 +29,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "merge line stalled": "waiting",
   // Line holder sent back (BOS-1669): a ticket others wait on to merge failed the gate; the CEO may have promised the owner word.
   "line holder sent back": "waiting",
+  // The start brake has no limit and the merge line has grown for an hour (R47): the CEO hears once per stretch. Never dropped.
+  "merge start brake off": "waiting",
   // Nothing can start (BOS-1662): free slots and idle agents, but every open ticket waits on another. The CEO must hear it.
   "nothing startable": "waiting",
   // A planned or urgent ticket was moved off its plan or backwards by someone else (BOS-1509). The CEO must hear it.
