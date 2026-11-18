@@ -185,7 +185,7 @@ export const releaseLogService = (
     }
     // A wake already waiting for this ticket is the one that will run: don't stack a second.
     // Creating the ticket queues its own "assigned" wake, which is reused rather than doubled.
-    const note = `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record it in the Releases/Release log, then finish this ticket.`;
+    const note = `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record it in the Releases/Release log, republish the website from ${short(to)} so this release's "What's new" entry is live, then finish this ticket.`;
     if (!ticket) {
       const projectId = await releasesProjectId(companyId);
       if (!projectId) return false;
@@ -193,6 +193,8 @@ export const releaseLogService = (
         `The live commit changed from ${short(from)} to ${short(to)}, and it went live by ${HOW_WORDS[how]}.`,
         "",
         `Update the Releases/Release log for ${short(to)}: add the entry, say what shipped since ${short(from)}, and say whether the owner has to do anything.`,
+        "",
+        `Then republish the website from ${short(to)} so this release's "What's new" entry is on the live page, and say in the log entry whether it was republished.`,
         "",
         `Old commit: ${from}`,
         `New commit: ${to}`,

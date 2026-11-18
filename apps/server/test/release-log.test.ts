@@ -74,11 +74,13 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(logTickets[0]).toMatchObject({ projectId, assigneeAgentId: rm!.id, noCode: true, systemState: "ready", title: `Release log: record ${B.slice(0, 8)}` });
     expect(logTickets[0]!.body).toContain(A);
     expect(logTickets[0]!.body).toContain(B);
+    expect(logTickets[0]!.body).toContain("republish the website");
     const [w] = await c.db.select().from(wakes).where(eq(wakes.ticketId, logTickets[0]!.id));
     expect(w).toMatchObject({ agentId: rm!.id, reason: RELEASE_REASON, ticketId: logTickets[0]!.id });
     expect(w!.note).toContain(A.slice(0, 8));
     expect(w!.note).toContain(B.slice(0, 8));
     expect(w!.note).toContain("the host deployer");
+    expect(w!.note).toContain("republish the website");
 
     // Another pass on the same status changes nothing: one ticket, one wake.
     await c.selfDeploy.sync();
