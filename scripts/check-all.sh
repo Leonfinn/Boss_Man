@@ -267,6 +267,7 @@ if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COM
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
 step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
 step in-memory-state node scripts/check-in-memory-state.mjs
+step test-lines node scripts/check-test-lines.mjs
 # The list guards (BOS-1727) run before the long typecheck and build, so a missing line in a hand-kept list fails in the
 # first minutes with the line to add, not after 30 to 50. The full test run repeats them (cheap); nothing is loosened.
 step guard:wake-classes scripts/check-guards.sh wake-classes

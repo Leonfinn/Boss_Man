@@ -42,6 +42,7 @@ A pass at the merge gate is not enough: GitHub CI runs every test again on main,
 - **No fixed sleeps standing in for "the other side is ready".** Wait for the event: the port answering, the line in the log, the file appearing, with a deadline.
 - **No hidden stderr** (`2>/dev/null`) on a step whose failure would end the test silently.
 - **A test that needs a build or a browser runs at the gate, not quietly skips there.** Make sure the gate (and CI) supply what it needs before relying on it.
+- **The ratchet.** `scripts/check-test-lines.mjs` (in check-quick, check-all and CI) counts four shapes per file: a bare sleep outside a polling loop, `expect(elapsed).toBeLessThan(n)`, a sum on a fresh `Date.now()` inside an `expect`, and `readFileSync(x).slice(0, n)`. The counts in `scripts/test-lines-baseline.json` may only go down: a new hit fails and prints file and line. Allowed: a sleep inside a `while`/`for` poll or a helper named waitFor, waitUntil, poll*, eventually, until*, retry*; a limit on a line naming `LIMIT_MS` or `baseline`; `// test-lines-ok: <why>` on or above a line. When you remove a hit, run `node scripts/check-test-lines.mjs --update`; never raise the baseline.
 - **Don't depend on git's version.** Tests that read git output must not rely on its ordering or on refs a newer git adds; sort, or ask for exactly the refs you need.
 
 ## Running a full check by hand
