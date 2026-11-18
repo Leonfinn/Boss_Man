@@ -26,6 +26,24 @@ test("writes an error annotation, and says so when no report exists", () => {
   assert.equal(annotation(path.join(dir, "missing.json"), "t"), "::error title=t::no JSON report was written");
 });
 
+test("a clean report (another package failed) gives a notice, not an error", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "annot-"));
+  const file = path.join(dir, "r.json");
+  writeFileSync(file, JSON.stringify({ success: true, testResults: [report.testResults[0]] }));
+  const out = annotation(file, "runner tests failed", "no runner test failed");
+  assert.match(out, /^::notice title=no runner test failed::/);
+  assert.doesNotMatch(out, /^::error/);
+});
+
+test("success:false with all files passed, or no files at all, stays an error", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "annot-"));
+  const file = path.join(dir, "r.json");
+  writeFileSync(file, JSON.stringify({ success: false, testResults: [report.testResults[0]] }));
+  assert.match(annotation(file, "runner tests failed", "no runner test failed"), /^::error title=runner tests failed::/);
+  writeFileSync(file, JSON.stringify({ success: true, testResults: [] }));
+  assert.match(annotation(file, "runner tests failed", "no runner test failed"), /^::error title=runner tests failed::/);
+});
+
 test("still posts an annotation when the JSON has no testResults", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "annot-"));
   const file = path.join(dir, "r.json");

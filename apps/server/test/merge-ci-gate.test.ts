@@ -15,7 +15,8 @@ vi.hoisted(() => {
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, checkJobs, checkResults, decisions, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, checkJobs, checkResults, decisions, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
+import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, GATE_RERUN_MARK } from "../src/services/ci-flake.js";
 import { landingTurns } from "../src/services/landing-turn.js";
 import { holdView } from "../src/services/review-holds.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
@@ -67,6 +68,11 @@ function fakeGitHub() {
     branchRuns: [] as Array<{ id: number; head_sha: string; created_at: string; status: string; conclusion: string | null }>,
     reruns: [] as string[],
     rerunStatus: 201,
+    /** BOS-1733: "re-run failed jobs" requests, and the status GitHub answers them with. */
+    failedReruns: [] as string[],
+    failedRerunStatus: 201,
+    /** BOS-1733: a public repo: annotations read without a token are answered even when the token has no Checks. */
+    publicRepo: false,
     ciBranches: new Map<string, number>(),
   };
   const last = new Map<number, WorkflowRun>();
@@ -86,7 +92,12 @@ function fakeGitHub() {
       return new Response(null, { status: 204 });
     }
     if (state.status) return json(state.status, { message: "Resource not accessible by personal access token" });
-    if (/\/check-runs|\/check-suites/.test(url) && !state.checks) return json(403, { message: "Resource not accessible by personal access token" });
+    const authed = !!(init?.headers as Record<string, string> | undefined)?.authorization;
+    if (/\/check-runs|\/check-suites/.test(url) && !state.checks && !(state.publicRepo && !authed)) return json(403, { message: "Resource not accessible by personal access token" });
+    if (/\/actions\/runs\/\d+\/rerun-failed-jobs$/.test(url)) {
+      state.failedReruns.push(url);
+      return state.failedRerunStatus === 201 ? json(201, {}) : json(state.failedRerunStatus, { message: "Resource not accessible by personal access token" });
+    }
     const runs = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(url);
     const jobs = /\/actions\/runs\/(\d+)\/jobs/.exec(url);
     const notes = /\/check-runs\/(\d+)\/annotations/.exec(url);
@@ -115,7 +126,7 @@ function fakeGitHub() {
   return { fetch, calls, state, reads };
 }
 
-async function setup(opts: { features?: string[]; holdVerify?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[] } = {}) {
+async function setup(opts: { features?: string[]; holdVerify?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; changed?: string[] } = {}) {
   const gh = fakeGitHub();
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: gh.fetch, ciTiming: { pollMs: 10, graceMs: 60, ceilingMs: 3_000, retryMs: 5 } });
@@ -137,7 +148,7 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; workflow
     reg.runnerId,
     (c) => {
       sent.push(c);
-      if (c.type === "workspace.diff") reply(c, { baseCommit: MAIN, head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "", truncated: false });
+      if (c.type === "workspace.diff") reply(c, { baseCommit: MAIN, head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: (opts.changed ?? ["src/a.ts"]).map((path) => ({ path, added: 1, removed: 0 })), diff: "", truncated: false });
       if (c.type === "workspace.carried") reply(c, { carried: [] });
       if (c.type === "workspace.migrations") reply(c, { needed: false, reason: "No other branch uses this ticket's migration numbers." });
       if (c.type === "workspace.verify") {
@@ -269,6 +280,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(res).toMatchObject({ outcome: "verify_failed" });
     expect(res.message).toMatch(/GitHub CI failed .*images \(arm64\)/);
     expect(c.merges()).toEqual(["prepare", "publish", "unpublish"]);
+    // BOS-1733: legacy check mode has no gate re-run, so no GitHub retry either: today's send-back.
+    expect(c.gh.state.failedReruns).toEqual([]);
     expect(await c.state()).toMatchObject({ systemState: "in_progress", mergeCommit: null });
     const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
     expect(wake!.note).toContain("images (arm64) (https://github.com/leon/site/actions/runs/9/job/7)");
@@ -701,6 +714,147 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       expect(c.gh.reads.get(MERGE)).toBeGreaterThan(0);
       const merges = c.sent.filter((m): m is Extract<RunnerCommand, { type: "workspace.merge" }> => m.type === "workspace.merge");
       expect(merges.some((m) => m.base || m.expectBase)).toBe(false);
+    });
+
+    // BOS-1733 (CI fix 2): GitHub fails in a named test the branch doesn't change. The gate re-runs it on the same merge
+    // commit first; only a pass there buys one recorded GitHub retry of the failed jobs.
+    describe("a GitHub failure in a test the branch didn't touch (BOS-1733)", () => {
+      const FILE = "apps/server/test/fence.test.ts";
+      const isRerun = (j: { command: string | null }) => !!j.command?.startsWith(GATE_RERUN_MARK);
+      /** Plays the dispatcher for one job: waits for an open job that matches, then ends it with the given patch. */
+      const finish = async (c: Awaited<ReturnType<typeof setup>>, match: (j: typeof checkJobs.$inferSelect) => boolean, patch: Record<string, unknown>) => {
+        const open = await vi.waitFor(
+          async () => {
+            const job = (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find((j) => (j.state === "queued" || j.state === "running") && match(j));
+            if (!job) throw new Error("no matching job was queued");
+            return job;
+          },
+          { timeout: 5_000, interval: 20 },
+        );
+        await c.db.update(checkJobs).set({ endedAt: new Date(), ...patch }).where(eq(checkJobs.id, open.id));
+        return open;
+      };
+      /** CI red on the merge commit with one annotation on FILE until GitHub was asked to re-run the failed jobs; then `after`. */
+      const flaky = async (opts: { after?: "green" | "red"; changed?: string[] } = {}) => {
+        const c = (ctx = await setup(opts.changed ? { changed: opts.changed } : {}));
+        await serverMode(c);
+        // The owner's token has no Checks permission, but the repo is public: the annotations are read without the token.
+        c.gh.state.publicRepo = true;
+        c.gh.state.ci = (sha) => (sha !== MERGE ? green() : c.gh.state.failedReruns.length && opts.after !== "red" ? green() : red([job("check", "success", 1), { ...job("check (server)", "failure", 4, "Run tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/4" }]));
+        c.gh.state.annotations.set(4, [
+          { annotation_level: "failure", path: FILE, start_line: 42, title: "fence > blocks a write", message: "AssertionError: expected 0 to be 1" },
+          { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
+        ]);
+        return c;
+      };
+      const retryRows = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(checkResults).where(eq(checkResults.kind, FLAKE_RETRY_KIND));
+      const authorWake = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id)))[0];
+
+      it("passes at the gate, then GitHub's one retry passes: merges, records the retry and opens one CEO ticket for the flaky file", async () => {
+        const c = await flaky();
+        // A ticket for this file is already open from an earlier flake: it gets a note instead of a second ticket.
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finish(c, (j) => !isRerun(j), { state: "passed", exitCode: 0 });
+        const rerun = await finish(c, isRerun, { state: "passed", exitCode: 0, logTail: "boss-man re-run: passed" });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        // The gate's re-run ran on the exact merge commit and tree, as a merge job, and named the file safely quoted.
+        expect(rerun).toMatchObject({ kind: "merge", commit: MERGE, tree: TREE, requestedBy: null });
+        expect(rerun.command).toContain(`rerun '${FILE}'`);
+        expect(c.gh.state.failedReruns).toEqual([`${API}/actions/runs/9/rerun-failed-jobs`]);
+        expect(await retryRows(c)).toEqual([expect.objectContaining({ ticketId: c.ticket.id, sha: MERGE, passed: true, detail: FILE })]);
+        const flakes = await c.db.select().from(tickets).where(eq(tickets.title, `Flaky on GitHub: ${FILE}`));
+        expect(flakes).toHaveLength(1);
+        expect(flakes[0]!.body).toContain("Retry 1 of 3 this week");
+        expect(flakes[0]!.body).toContain("https://github.com/leon/site/actions/runs/9/job/4");
+        const said = (await c.events()).join("\n");
+        expect(said).toMatch(/GitHub CI failed in apps\/server\/test\/fence\.test\.ts, which this branch doesn't change/);
+        expect(said).toMatch(/asked GitHub to re-run the failed jobs once \(apps\/server\/test\/fence\.test\.ts: retry 1 of 3 this week\)/);
+        expect(await authorWake(c)).toBeUndefined();
+      });
+
+      it("a second flaky merge of the same file adds to the open CEO ticket instead of opening another", async () => {
+        const c = await flaky();
+        const open = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: `Flaky on GitHub: ${FILE}`, state: "ready" })).json() as { id: string };
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finish(c, (j) => !isRerun(j), { state: "passed", exitCode: 0 });
+        await finish(c, isRerun, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        expect(await c.db.select().from(tickets).where(eq(tickets.title, `Flaky on GitHub: ${FILE}`))).toHaveLength(1);
+        const notes = await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, open.id));
+        expect(notes.some((m) => m.author === "system" && m.text.includes("It passed when Boss Man re-ran it on the same commit"))).toBe(true);
+      });
+
+      it("fails again at the gate: sent back with the gate's output, no GitHub retry, nothing recorded", async () => {
+        const c = await flaky();
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finish(c, isRerun, { state: "failed", exitCode: 1, logTail: "FAIL test/fence.test.ts > blocks a write\n Tests  1 failed" });
+        const out = (await res).json();
+        expect(out).toMatchObject({ outcome: "verify_failed" });
+        expect(c.gh.state.failedReruns).toEqual([]);
+        expect(await retryRows(c)).toEqual([]);
+        const wake = await authorWake(c);
+        expect(wake!.note).toContain("failed again when Boss Man re-ran it on the same merge commit, so the failure is real");
+        expect(wake!.note).toContain("FAIL test/fence.test.ts > blocks a write");
+      });
+
+      it("can't re-run at the gate (exit 78): sent back as before, with why, and no GitHub retry", async () => {
+        const c = await flaky();
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finish(c, isRerun, { state: "failed", exitCode: CANT_RERUN_EXIT, logTail: "boss-man re-run: no vitest for apps/server/test/fence.test.ts" });
+        expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+        expect(c.gh.state.failedReruns).toEqual([]);
+        expect((await authorWake(c))!.note).toContain("Boss Man couldn't re-run it at its gate (no vitest for apps/server/test/fence.test.ts)");
+      });
+
+      it("a test the branch changes: sent back at once, no gate re-run queued", async () => {
+        const c = await flaky({ changed: ["src/a.ts", FILE] });
+        expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+        expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).filter(isRerun)).toEqual([]);
+        expect(c.gh.state.failedReruns).toEqual([]);
+        expect((await authorWake(c))!.note).toContain(`Boss Man didn't ask GitHub for a retry: the branch changes ${FILE}`);
+      });
+
+      it("a file with 3 recorded retries this week gets no more: sent back, no gate re-run", async () => {
+        const c = await flaky();
+        for (let i = 0; i < 3; i++) await c.db.insert(checkResults).values({ companyId: c.company.id, ticketId: c.ticket.id, sha: `${i}`.repeat(40), kind: FLAKE_RETRY_KIND, passed: true, detail: FILE });
+        expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+        expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).filter(isRerun)).toEqual([]);
+        expect((await authorWake(c))!.note).toContain("has had 3 retries in 7 days; no more retries for it until it is fixed");
+      });
+
+      it("GitHub fails again after its one retry: sent back saying it failed twice", async () => {
+        const c = await flaky({ after: "red" });
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finish(c, isRerun, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+        expect(c.gh.state.failedReruns).toHaveLength(1);
+        expect((await authorWake(c))!.note).toContain("It failed on GitHub twice");
+        // The retry was spent and stays recorded, so this commit can't get another.
+        expect(await retryRows(c)).toHaveLength(1);
+      });
+
+      it("a token that can't re-run jobs: sent back as before, saying so, and the retry isn't recorded", async () => {
+        const c = await flaky();
+        c.gh.state.failedRerunStatus = 403;
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finish(c, isRerun, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+        expect(await retryRows(c)).toEqual([]);
+        expect((await authorWake(c))!.note).toContain("Actions: Read and write");
+      });
+
+      it("the gate's own check fails during the re-run: its send-back wins and the re-run job is cancelled", async () => {
+        const c = await flaky();
+        const res = approveAndWait(c.req, c.ticket.id);
+        // Wait until the re-run is queued, then fail the merge's own check.
+        for (let i = 0; i < 200 && !(await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).some(isRerun); i++) await new Promise((r) => setTimeout(r, 10));
+        await finish(c, (j) => !isRerun(j), { state: "failed", exitCode: 1, logTail: "own check failed here" });
+        expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+        for (let i = 0; i < 100 && (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find(isRerun)?.state !== "cancelled"; i++) await new Promise((r) => setTimeout(r, 10));
+        expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find(isRerun)).toMatchObject({ state: "cancelled" });
+        expect(c.gh.state.failedReruns).toEqual([]);
+        expect((await authorWake(c))!.note).toContain("own check failed here");
+      });
     });
   });
 

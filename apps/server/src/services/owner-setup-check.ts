@@ -8,6 +8,7 @@
 import { type CompanyFacts, fillCompanyFacts } from "./company-facts.js";
 import { composeFactsFrom } from "./compose-steps.js";
 import { type WhenFacts, branchingFindings, settleWhen } from "./owner-setup-when.js";
+import { type LintOverrideInput, type OverrideEntry, cleanOverride, overrideTooShort, resolveOverride, serializeOverride } from "./lint-override.js";
 import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
 
 /**
@@ -130,15 +131,20 @@ export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts
  * nothing needed one). `lintOverride` is the CEO's alone, with a reason of 10 characters or more, as on raise_decision
  * (DR-008); it can't let through a hard refusal.
  */
-export function ownerSetupWriteCheck(steps: readonly string[], facts: OwnerSetupFacts, o: { lintOverride?: string; byCeo: boolean }): { error: string } | { error: null; override: string | null } {
-  const override = o.lintOverride?.replace(/\s+/g, " ").trim();
+export function ownerSetupWriteCheck(steps: readonly string[], facts: OwnerSetupFacts, o: { lintOverride?: LintOverrideInput; byCeo: boolean; /** R35: false when re-checking an override stored earlier, where an entry whose refusal has since gone is just unused. */ strict?: boolean }): { error: string } | { error: null; override: string | null } {
+  const override = cleanOverride(o.lintOverride);
   if (override !== undefined && !o.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the setup steps instead." };
-  if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
+  if (override !== undefined && overrideTooShort(override)) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!steps.length) return { error: null, override: null };
   const c = checkOwnerSetup(steps, facts, "write");
   const head = "These owner setup steps can't go to the owner as written (one step per line):";
   const tail = `The owner pastes each command exactly as written and has no other document open. ${HOST_TOKEN_HELP}`;
   if (c.hard.length) return { error: `${head}\n${lintLines([...c.hard, ...c.soft])}\n${tail}` };
   if (c.soft.length && !override) return { error: `${head}\n${lintLines(c.soft)}\n${tail}${o.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
-  return { error: null, override: c.soft.length ? override! : null };
+  // R35: the override must name each refused step; one it doesn't name stays refused.
+  const resolved = resolveOverride(c.soft, override, { strict: o.strict !== false });
+  if (resolved.error !== null) return { error: `${head}\n${resolved.uncovered?.length ? lintLines(resolved.uncovered) : resolved.error}\n${resolved.uncovered?.length ? `${resolved.error}\n` : ""}${tail}` };
+  // What is stored is what was let through, step by step, so go-live reads the same scope.
+  const kept: OverrideEntry[] = resolved.covered.map((cv) => ({ steps: [...new Set(cv.findings.map((f) => f.step))].sort((a, b) => a - b), rules: [...new Set(cv.findings.map((f) => f.rule))], reason: cv.reason }));
+  return { error: null, override: kept.length ? serializeOverride(kept) : null };
 }

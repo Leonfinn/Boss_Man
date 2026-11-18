@@ -23,7 +23,7 @@ const tmp = (prefix: string) => {
   return d;
 };
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) // retries: git's detached auto-maintenance can still be writing (ENOTEMPTY);
 });
 
 /** A shared repo whose origin/main is the base, and a commit on top of it that adds `content` to notes.txt. */

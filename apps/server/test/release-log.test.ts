@@ -470,8 +470,23 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     await c.db.update(tickets).set({ ownerSetupOverride: "The add-on restarts by itself after the update." }).where(eq(tickets.id, t.id));
     await live(c, companyId);
     const [card] = await setupCards(c);
-    expect(card!.question).toContain("The CEO let these steps past Boss Man's card check: The add-on restarts by itself after the update.");
+    expect(card!.question).toMatch(/The CEO let these steps past Boss Man's card check:\nStep 1 \(R\d+\): The add-on restarts by itself after the update\./);
     expect(await fixCard(c, t.id)).toBeUndefined();
+  });
+
+  it("R35: a stored override that names only one of two refused steps leaves the other refused: the CEO gets the fix card, the owner none", async () => {
+    const c = (ctx = await setupApp());
+    await hostReport(c);
+    const { companyId, projectId } = await withReleaseManager(c);
+    const t = await doneTicket(c, projectId, { title: "Two vague steps", mergeCommit: B, ownerSetup: "Delete BOSSMAN_CHECK_SLOTS from .env\nRestart the notifications add-on", at: new Date("2026-11-03T12:00:00Z") });
+    await c.db.update(tickets).set({ ownerSetupOverride: JSON.stringify([{ steps: [2], reason: "The add-on restarts by itself after the update." }]) }).where(eq(tickets.id, t.id));
+    await live(c, companyId);
+    expect(await setupCards(c)).toHaveLength(0);
+    expect(await fixCard(c, t.id)).toMatchObject({ tier: "ceo", status: "open" });
+    // A plain reason (the old form) can't cover two refused steps either.
+    await c.db.update(tickets).set({ ownerSetupOverride: "The add-on restarts by itself after the update." }).where(eq(tickets.id, t.id));
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(0);
   });
 });
 

@@ -26,6 +26,7 @@ import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { ceoPlanText } from "./services/ceo-plan.js";
 import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_HANDS_HINT, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
+import { LINT_OVERRIDE_HELP, lintOverrideSchema } from "./services/lint-override.js";
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
@@ -388,7 +389,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         ownerMustDo: z.boolean().optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional().describe(`The owner's steps, one per item. ${HOST_TOKEN_HELP} A vague host step (".env" with no path, "restart the add-on" with no command or Settings → path) is refused (R17). A step on someone else's website (a URL not on this server, or a vendor console such as Cloudflare or GitHub) must say where its clicks came from (R19): "seen: <ticket image id>" for a screenshot under 30 days old, or "not seen: <doc URL>, <YYYY-MM-DD>"; a card with a not-seen step must also offer the option "My screen looks different (I'll attach a screenshot)". Such a card opens with a checkpoint step naming something concrete the owner will see ('You should see "holidayhours" listed'), and offers that option as the stop. For 30 days after a site's docs didn't match the owner's screen, a not-seen step for that site is refused: ask the owner for one screenshot of their starting page first and use seen:.`),
         stillNeeded: z.string().max(500).optional(),
-        lintOverride: z.string().max(500).optional(),
+        lintOverride: lintOverrideSchema.optional().describe(LINT_OVERRIDE_HELP),
         setsUp: z.enum(ADDONS).optional(),
         // The host a CEO-raised card is setting up, which Boss Man has no record for yet (DR-046): only that one name may be unrecorded.
         newHost: z.string().min(1).max(64).optional(),

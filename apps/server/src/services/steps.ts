@@ -121,7 +121,7 @@ export function parseProof(text: string): Proof | string {
 }
 
 /** What a raised card keeps from the lint: warnings, a CEO override with its reason and what it let through, and the proof (R11). */
-export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[] }; proof?: Proof };
+export type CardLint = { warn: LintFinding[]; override?: { reason: string; findings: LintFinding[]; /** R35: one entry per reason, with the findings it covers; `reason` and `findings` hold them all. */ entries?: Array<{ reason: string; findings: LintFinding[] }> }; proof?: Proof };
 
 /**
  * R10 (DR-024 D): commands that stop and wait for typed input. The owner reads every prompt as something to
