@@ -158,7 +158,7 @@ describe("charge-back (R26)", () => {
     const reg = (await ctx.req("POST", `/api/companies/${ctx.homelab.company.id}/runner`)).json() as { runnerId: string };
     const sent: RunnerCommand[] = [];
     ctx.runners.connect(reg.runnerId, (c) => (sent.push(c), true));
-    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Roll out v1.4", engagementId: e.id }).returning();
+    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Roll out v1.4", engagementId: e.id, assigneeAgentId: ctx.homelab.ceo.id }).returning();
     await ctx.db.delete(wakes);
     await ctx.scheduler.wake({ agentId: ctx.homelab.ceo.id, ticketId: t!.id, reason: "assigned" });
     await ctx.scheduler.tick();
