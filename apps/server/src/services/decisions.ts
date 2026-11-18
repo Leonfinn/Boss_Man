@@ -3,7 +3,7 @@
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
-import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
+import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, recheckBackBy as backByAt, recheckLine, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
 import { applyFenceAnswer, applyFenceUnavailableAnswer, applyGuardAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
@@ -65,6 +65,7 @@ import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
+import { composeFactsFrom } from "./compose-steps.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
@@ -87,8 +88,9 @@ import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similar
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
-import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
+import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun, RECHECK_AUTHOR_MS, RECHECK_CEO_MS } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
+import { heldTicketIds } from "./review-holds.js";
 import { runCapabilities } from "./run-capabilities.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -521,7 +523,7 @@ export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Wi
  * A plan card whose run is still alive stays: that run is waiting on its answer, and closing it would leave the run hanging.
  * Both shapes count: the plan an agent submits (a question card with plan) and ExitPlanMode's (a permission card with plan).
  */
-export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date; release?: (ticketId: string) => Promise<unknown>; /** Who wrote the new plan, named in the closed card's note (BOS-1219). */ author?: string | null; /** Called for each closed card the owner had asked the CEO about (BOS-1219): moves that request to the new card. */ carryAdvice?: (from: { id: string; advice: Advice }) => Promise<unknown> }) {
+export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date; release?: (ticketId: string) => Promise<unknown>; /** Who wrote the new plan, named in the closed card's note (BOS-1219). */ author?: string | null; /** The owner's feed, told when they had the old card open (BOS-1691). */ notify?: (n: NotifyInput) => Promise<unknown>; /** Called for each closed card the owner had asked the CEO about (BOS-1219): moves that request to the new card. */ carryAdvice?: (from: { id: string; advice: Advice }) => Promise<unknown> }) {
   const at = input.now ?? new Date();
   const rows = await db
     .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, context: decisions.context })
@@ -533,7 +535,7 @@ export async function supersedePlanCards(db: Db, input: { companyId: string; tic
   for (const r of rows) {
     // BOS-1193: the shared close path, so the old card's approve links are revoked and its ticket is released too.
     if (await holdsLiveRun(db, r.context)) continue;
-    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at, newer: { id: input.newCardId, author: input.author ?? null, at: at.toISOString() } })) {
+    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at, newer: { id: input.newCardId, author: input.author ?? null, at: at.toISOString() }, ...(input.notify ? { notify: input.notify } : {}) })) {
       cleared++;
       // BOS-1219: the owner's open "Ask the CEO" request moves to the new card. Only a request that was still open is moved.
       const advice = adviceOf(r.context);
@@ -865,7 +867,8 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
     return { error: "These steps use {{host}} to name the server Boss Man runs on, but the host deployer hasn't reported a name yet (it may not be set up). Write the server's name yourself, or wait for the host's report, then raise the card again." };
   }
   steps = fillServerHost(steps, a.serverHost);
-  const lint0 = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}), ...(a.images ? { images: a.images } : {}), ...(a.mismatchedSites ? { mismatchedSites: a.mismatchedSites } : {}) }, proof);
+  const compose = composeFactsFrom(a.hostValues);
+  const lint0 = lintOwnerSteps(steps, { ...(compose ? { compose } : {}), ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}), ...(a.images ? { images: a.images } : {}), ...(a.mismatchedSites ? { mismatchedSites: a.mismatchedSites } : {}) }, proof);
   const refuse = [...company.findings, ...lint0.refuse];
   const warn = lint0.warn;
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
@@ -952,6 +955,8 @@ export const CEO_HANDOVER_MINUTES = 5;
 
 /** How long a team question waits with the CEO before it moves to the owner (BOS-1318). Housekeeping isn't urgent, and nobody's run waits on it. */
 export const CEO_QUESTION_HANDOVER_MINUTES = 60;
+/** (R39) Said at raise time to the agent and to the CEO: a card that landed CEO-first reaches the owner only after the handover, so one that needs their hands is raised with steps or ownerOnly. No refusal by wording (BOS-1318). */
+export const OWNER_HANDS_HINT = `If the owner has to do something themselves (GitHub, the host, a secret, a payment), raise it again with steps or ownerOnly: this card reaches them only after ${CEO_QUESTION_HANDOVER_MINUTES} minutes.`;
 
 /**
  * The only reasons an agent's card stays on the owner's queue without steps (BOS-1318): a fixed list,
@@ -1288,6 +1293,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let wake: WakeHook | null = null;
   // DR-058: the feed note a withdrawn owner card sends; wired in app.ts. Without it the card still gets its notice.
   let notifyFeed: ((n: NotifyInput) => Promise<unknown>) | null = null;
+  /** BOS-1691: the same feed for a card Boss Man closes by itself, read at call time so a hook wired later still counts. */
+  const feed = (n: NotifyInput) => (notifyFeed ? notifyFeed(n) : Promise.resolve(undefined));
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
   let secondOpinion: SecondOpinionHook | null = null;
@@ -1596,6 +1603,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     const [author] = authorId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, authorId)) : [];
     return {
       author: author?.name ?? null,
+      notify: feed,
       carryAdvice: async (from: { id: string; advice: Advice }) => {
         const [moved] = await db
           .update(decisions)
@@ -2175,7 +2183,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // BOS-1193: the older card closes as superseded. Explicitly (replaces), or when the same agent asks the same thing
       // again on the same ticket (similarQuestion). Two different questions from one agent both stay open.
       if (!input.plan) {
-        const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now };
+        const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now, notify: feed };
         const note = `superseded by ${raised.id}`;
         if (replaced) await closeCardBySystem(db, replaced, note, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
         else if (input.agentId) {
@@ -2198,6 +2206,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           `A team question is waiting for you (decision ${raised.id}):\n${untrusted("agent's question", input.question.slice(0, 1000))}`,
           "An agent asked it, and it needs none of the owner's hands, money, secrets or sign-off, so it came to you before the owner. Settle it yourself: answer with the decisions tool (action answer, one of its options) and a note saying why. The agent is woken with your answer and the owner can read the note.",
           `If it really is the owner's call (product direction, a secret, money, a host step or a sign-off), escalate it at once (decisions tool, action escalate, with triedFirst). If you don't answer within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
+          `If the asker wanted the owner to act (GitHub, the host, a secret, a payment) and left out steps, escalate it with steps rather than waiting. ${OWNER_HANDS_HINT}`,
         ].join("\n").slice(0, 4000));
       }
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
@@ -2745,6 +2754,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // (BOS-1193) Cards in a live re-check, and which of them the owner must still see.
       const isRechecking = (r: (typeof sorted)[number]) => !!r.staleAt && (r.recheckStage === "author" || r.recheckStage === "ceo");
       const hiddenRechecks = await hiddenWhileRechecked(db, sorted);
+      const recheckBackBy = (r: (typeof sorted)[number]) => backByAt(r, RECHECK_AUTHOR_MS, RECHECK_CEO_MS);
       const waitingOf = (r: (typeof sorted)[number]): { reason: string } | null => {
         // (BOS-1159) A flagged card that still holds up a live ticket stays in the main list with its
         // answer buttons: the Board shows that ticket as waiting on the owner, and the raising agent may
@@ -2753,7 +2763,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // (BOS-1193, DR-054) A card being re-checked is folded away whatever it blocks: the Board agrees (it shows "card being
         // re-checked", not "Answer in Decisions"), and the card is back here, flagged as lapsed, if nobody settles it in an hour.
         // Urgent cards, a request holding a live run and merge/review-loop cards stay in the main list, marked.
-        if (hiddenRechecks.has(r.id)) return { reason: `Being re-checked by ${r.agentName ?? "the agent"} (${r.staleReason ?? "something it depends on changed"}). It comes back here if it is not confirmed or closed within the hour.` };
+        // BOS-1691: the line says who is checking it, after which of the owner's actions, and when it is back at the latest.
+        if (hiddenRechecks.has(r.id)) return { reason: recheckLine({ by: r.agentName ?? "the agent", reason: r.staleReason, backBy: recheckBackBy(r) }) };
         const c = contextOf(r);
         const t = cardTicket.get(r.id);
         if (aboutTicket(c) && t && t.state && AGENT_BACK_STATES.has(t.state)) {
@@ -2797,7 +2808,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         finalRows.map(async (r) => {
           // (BOS-1193) A card kept in the main list while it is re-checked says who is checking it; one that nobody re-checked in
           // time says plainly who failed to, not "may be out of date".
-          const rechecking = isRechecking(r) ? { by: r.agentName ?? "the agent", stage: r.recheckStage as "author" | "ceo" } : null;
+          const backBy = isRechecking(r) ? recheckBackBy(r) : null;
+          const rechecking = isRechecking(r) ? { by: r.agentName ?? "the agent", stage: r.recheckStage as "author" | "ceo", ...(backBy ? { backBy: backBy.toISOString() } : {}), hidden: hiddenRechecks.has(r.id) } : null;
           const notRechecked = r.staleAt && r.recheckStage === "lapsed" ? `Not re-checked: ${r.agentName ?? "the agent that raised it"} and the CEO didn't confirm this within an hour. Flagged because ${r.staleReason ?? "something it depends on changed"}.` : null;
           const withRefs = { ...r, refs: refs.get(r.id) ?? {}, rechecking, notRechecked };
           const w = waitingOf(r);
@@ -3216,7 +3228,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (isCheckableCard(d)) {
         const dead = await cardInvalidReason(db, d);
         if (dead) {
-          await closeCardBySystem(db, d, dead, { markRead: (cid, when) => markDecisionNotificationRead(db, cid, when), release: (tid) => releaseIfFree(tid, false), now });
+          await closeCardBySystem(db, d, dead, { markRead: (cid, when) => markDecisionNotificationRead(db, cid, when), release: (tid) => releaseIfFree(tid, false), now, notify: feed });
           throw new AnswerError(`This card is no longer valid (${dead}), so Boss Man closed it instead of taking the answer.`);
         }
       }
@@ -3352,7 +3364,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ctx.type !== "permission") {
         try {
           const about = await decisionTicketIds(db, d);
-          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId], notify: feed });
         } catch (err) {
           log(`answering decision ${id} was saved, but marking related cards out of date failed: ${(err as Error).message}`);
         }
@@ -3681,7 +3693,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         kept = [];
       }
+      // BOS-1717: a ticket held in review on a waits-on link or system hold isn't woken by an answer on another ticket's card.
+      const heldKept = kept.length ? await heldTicketIds(db, kept.map((t) => t.id)) : new Set<string>();
+      // A card with no ticket of its own (cardTicketId null) still wakes: nothing says it is someone else's.
+      const cardTicketId = (ctx as { ticketId?: string | null }).ticketId ?? null;
       for (const t of kept) {
+        if (heldKept.has(t.id) && cardTicketId && cardTicketId !== t.id) continue;
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
       }
       // BOS-1591 (R21): the owner's answer to a question may be what other parked tickets wait for in a note only. Tell the CEO once.

@@ -575,15 +575,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // close knows they may be part-way through its steps and also tells their feed. Best effort: a failed
   // call changes nothing on the page.
   const openedSent = useRef(new Set<string>());
+  const markOpened = (id: string) => {
+    if (openedSent.current.has(id)) return;
+    openedSent.current.add(id);
+    void api(`/api/decisions/${id}/opened`, { method: "POST", body: {} }).catch(() => undefined);
+  };
   useEffect(() => {
     for (const d of decisions) {
       const c = d.context;
       const handApply = (c?.type === "self_deploy" && c.handSteps?.length) || (c?.type === "owner_todo" && !!c.steps?.length);
-      if (!handApply || openedSent.current.has(d.id)) continue;
-      openedSent.current.add(d.id);
-      void api(`/api/decisions/${d.id}/opened`, { method: "POST", body: {} }).catch(() => undefined);
+      // (BOS-1691) Any card the owner opened by its link counts too: if it then leaves the list, they are told why.
+      if (handApply || d.id === linkedId) markOpened(d.id);
     }
-  }, [decisions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [decisions, linkedId]);
   const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
   const landingKey = landingIds.sort().join(",");
   useEffect(() => {
@@ -639,7 +644,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
   const queueCards = shown.filter((d) => !d.waiting);
-  const waitingCards = shown.filter((d) => !!d.waiting);
+  // (BOS-1691) A card folded away while its author re-checks it leaves a line in the main list, never a silent gap.
+  const recheckCards = shown.filter((d) => !!d.waiting && !!d.rechecking?.hidden);
+  const waitingCards = shown.filter((d) => !!d.waiting && !d.rechecking?.hidden);
+  // (BOS-1691) Cards that left the list in the last 2 hours say why in plain sight, not only inside the "Closed" fold.
+  const recentNotices = shownNotices.filter((n) => Date.parse(n.notice.until) > Date.now());
   // (BOS-969, BOS-996) The heading takes both numbers from the server tally, the same figure the menu
   // badge shows; it sends no numbers of its own. The app already polls that tally for the badge and
   // refreshes it on every answer, so the heading reads it from there and only asks itself if it is
@@ -788,7 +797,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           That card is not open any more: it was answered or withdrawn, or it belongs to another company. The Board stops showing it on its next refresh.
         </p>
       )}
-      {loaded && queueCards.length === 0 && waitingCards.length === 0 ? (
+      {loaded && queueCards.length === 0 && waitingCards.length === 0 && recheckCards.length === 0 ? (
         agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
             <p>{agentsWorking === 1 ? "1 agent is" : `${agentsWorking} agents are`} working. They'll raise a decision here when they need an answer, an approval or more budget.</p>
@@ -817,7 +826,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const checking = land?.state === "running" && !land.stale;
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
-                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
+                // (BOS-1691) Touching or typing in a card counts as having it open, so a later close or re-check tells the feed.
+                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} onPointerDown={() => markOpened(d.id)} onFocusCapture={() => markOpened(d.id)} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
                   <div className="body">
                     <div className="head-line">
                       {d.step ? (
@@ -1412,6 +1422,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           {typeof banner === "function" ? banner(true) : null}
           </>
           )}
+          {recheckCards.length > 0 && (
+            // (BOS-1691) In place of each card being re-checked: who has it, after what, and when it is back at the latest.
+            <ul data-testid="recheck-lines" style={{ listStyle: "none", padding: 0, margin: "12px 0" }}>
+              {recheckCards.map((d) => (
+                <li key={d.id} id={`decision-${d.id}`} role="status" className={`strip amber${d.id === linkedId ? " linked" : ""}`} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 6 }}>
+                  <TicketRefs about={d.about} />
+                  <strong>{d.question.split("\n")[0]}</strong>
+                  <div style={{ fontSize: 13 }}>
+                    Being re-checked by {d.rechecking!.by}
+                    {d.staleReason ? (/^the owner\b/i.test(d.staleReason) ? ` after ${fromYou(d.staleReason)}` : ` because ${d.staleReason}`) : ""}.{" "}
+                    {d.rechecking!.backBy ? `Back on your list by ${atTime(d.rechecking!.backBy)}` : "Back on your list within the hour"} unless it is confirmed or closed first; if it closes, this page says why.
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
           {waitingCards.length > 0 && (
             // (BOS-551) Cards whose ticket is back with an agent, or that the agent is re-checking: not the
             // owner's to do yet. Folded at the bottom so they never sit beside the cards that are ready.
@@ -1433,6 +1459,21 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       )}
       {/* (BOS-809) Outside the empty-queue ternary on purpose: a closed notice (kept steps, the link to
           the newer card) and the settled/withdrawn history must still show when nothing else is open. */}
+      {recentNotices.length > 0 && (
+        // (BOS-1691) Every card that left the owner's list in the last 2 hours, one line each with who and why, unfolded.
+        <section data-testid="left-your-list" style={{ marginTop: 16 }}>
+          <h3 style={{ fontSize: 15, margin: "0 0 6px" }}>Left your list recently</h3>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+            {recentNotices.map((n) => (
+              <li key={n.id} className="strip" style={{ fontSize: 14 }}>
+                <strong>{n.question.split("\n")[0]}</strong> <span className="muted">· {atTime(n.notice.at)}</span>
+                <div>{n.notice.text}</div>
+                {n.notice.newer && <a href={`#/decisions/${n.notice.newer.decisionId}`}>Open the newer card ›</a>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <ClosedGroup notices={shownNotices} advised={advised} />
     </>
   );

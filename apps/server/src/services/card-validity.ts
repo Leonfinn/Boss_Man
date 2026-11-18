@@ -17,6 +17,9 @@ import { openBlockers } from "./ticket-links.js";
 import { mergeContext } from "./decision-context.js";
 import { record } from "./activity.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
+import { leaveClosedNotice, systemClosedNotice } from "./closed-notice.js";
+import type { NotifyInput } from "./notifications.js";
+
 /** How long the author, then the CEO, has to settle a card that is being re-checked. */
 export const RECHECK_AUTHOR_MS = 30 * 60_000;
 export const RECHECK_CEO_MS = 30 * 60_000;
@@ -126,6 +129,8 @@ export type CloseDeps = {
   now?: () => Date;
   /** The card that replaced this one (BOS-1219), stored on the withdrawal so screens can name it without parsing the note. */
   newer?: { id: string; author: string | null; at: string };
+  /** Tells the owner's feed when they had the card open (BOS-1691); without it the Decisions notice is still left. */
+  notify?: (n: NotifyInput) => Promise<unknown>;
 };
 
 /** A ticket that waited only on closed cards, tickets and engagements goes back to ready (the same test as decisions.ts releaseIfFree). */
@@ -157,6 +162,7 @@ export async function closeCardBySystem(db: Db, d: { id: string; companyId: stri
   for (const f of freed) if (f.ticketId) await (deps.release ? deps.release(f.ticketId) : releaseWhenFree(db, f.ticketId, at));
   const ticketId = freed.find((f) => f.ticketId)?.ticketId;
   await record(db, { companyId: d.companyId, ...(ticketId ? { ticketId } : {}), kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at });
+  await leaveSystemNotice(db, d.id, note, deps, at);
   return true;
 }
 
@@ -175,6 +181,23 @@ async function labelKeptOpen(db: Db, d: CardRow, deps: CloseDeps) {
     ? `Its ticket "${ts[0]!.title}" was cancelled, but this question is yours alone and nobody has answered it, so it stays open until you answer or dismiss it.`
     : `Its ticket "${ts[0]!.title}" is finished, but this question is yours alone and nobody has answered it, so it stays open until you do.`;
   await db.update(decisions).set({ context: mergeContext({ keptOpen: { note, at: at.toISOString() } }) }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
+}
+
+/**
+ * BOS-1691: a card the owner could see that Boss Man closed leaves a "closed because…" line in Decisions for two hours
+ * (the BOS-739 notice, which only setup cards had), and an owner who had it open in the last 30 minutes gets a feed note.
+ * leaveClosedNotice skips a card that never reached the owner. Never fails the close.
+ */
+async function leaveSystemNotice(db: Db, id: string, note: string, deps: CloseDeps, at: Date) {
+  try {
+    const newerId = deps.newer?.id ?? /^superseded by ([0-9a-f-]{36})/i.exec(note)?.[1];
+    const [n] = newerId && UUID_RE.test(newerId) ? await db.select({ question: decisions.question }).from(decisions).where(eq(decisions.id, newerId)) : [];
+    const label = n?.question.split("\n")[0]?.slice(0, 120);
+    const notice = systemClosedNotice({ note, ...(newerId ? { newer: { id: newerId, author: deps.newer?.author ?? null, ...(label ? { label } : {}) } } : {}), now: at });
+    await leaveClosedNotice(db, id, notice, { notify: deps.notify ?? (async () => undefined), now: () => at, title: notice.why === "newer" ? "A card you had open was replaced" : "A card you had open was closed" });
+  } catch {
+    // The card is closed either way; the notice is a courtesy.
+  }
 }
 
 /**
