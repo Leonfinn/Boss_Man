@@ -2633,9 +2633,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
               milestoneTarget: milestones.targetDate,
               krPriority: objectives.priority,
               milestoneObjectiveId: milestones.objectiveId,
+              projectId: tickets.projectId,
+              projectName: projects.name,
             })
             .from(tickets)
             .innerJoin(companies, eq(companies.id, tickets.companyId))
+            .innerJoin(projects, eq(projects.id, tickets.projectId))
             .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
             .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
             .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
@@ -2649,7 +2652,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info = new Map(
         work.map((w) => {
           const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
-          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null, systemState: w.systemState, assigneeAgentId: w.assigneeAgentId } as const];
+          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), companyId: w.companyId, prefix: w.prefix, number: w.number, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null, systemState: w.systemState, assigneeAgentId: w.assigneeAgentId, projectId: w.projectId, projectName: w.projectName } as const];
         }),
       );
       // Only live tickets are in a chain; a done one (or a deleted one) is left out of the walk, and so
@@ -2693,6 +2696,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
         const about = aboutIds(d).flatMap((id) => { const r = info.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
+        // Each project the card's tickets belong to (empty = company-wide), so the web app can label and filter by it.
+        const cardProjects = [...new Map(aboutIds(d).flatMap((id) => { const r = info.get(id); return r && r.companyId === d.companyId ? [[r.projectId, { id: r.projectId, name: r.projectName }] as const] : []; })).values()];
         const aboutTicket = aboutIds(d).map((id) => info.get(id)).find((r) => r && r.companyId === d.companyId);
         cardTicket.set(d.id, { state: aboutTicket?.systemState ?? null, agent: aboutTicket?.assigneeAgentId ? (agentNameById.get(aboutTicket.assigneeAgentId) ?? null) : null });
         const c = d.context as DecisionContext;
@@ -2704,7 +2709,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           : facts && c.type === "risk_review"
             ? { ...c, ...facts }
             : d.context;
-        return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
+        return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, projects: cardProjects, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
       // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164). The one
