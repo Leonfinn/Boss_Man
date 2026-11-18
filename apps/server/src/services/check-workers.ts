@@ -23,6 +23,7 @@ type Tc = { fingerprint: string; tools: Record<string, string> };
 // shortcut: this process only (the leader holds the sockets); lost on restart, harmless because a worker redials.
 const liveWorkerIds = new Set<string>();
 export const onlineWorkerCount = () => liveWorkerIds.size;
+export const isWorkerOnline = (id: string) => liveWorkerIds.has(id);
 
 export type CheckWorker = typeof checkWorkers.$inferSelect;
 export type WorkerSender = (command: WorkerCommand) => boolean;
