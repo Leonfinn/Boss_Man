@@ -24,15 +24,15 @@ describe("the Merge queue badge (BOS-767)", () => {
 
   it("with three waiting and one stuck reads 1 stuck in the warning colour, not 3 waiting", () => {
     sidebar(3, 1);
-    const badge = within(mergeLink()).getByLabelText("1 stuck");
+    const badge = within(mergeLink()).getByLabelText("merge line stuck");
     expect(badge.textContent).toBe("1");
     expect(badge.className).toContain("warn");
-    expect(within(mergeLink()).queryByLabelText("3 waiting to merge")).toBeNull();
+    expect(within(mergeLink()).queryByLabelText("3 in the merge line")).toBeNull();
   });
 
-  it("with waiting items but none stuck keeps the plain waiting count, and no warning class anywhere, even collapsed", () => {
+  it("with waiting items but none stuck keeps the plain merge-line count, and no warning class anywhere, even collapsed", () => {
     sidebar(3, 0);
-    expect(within(mergeLink()).getByLabelText("3 waiting to merge").className).not.toContain("warn");
+    expect(within(mergeLink()).getByLabelText("3 in the merge line").className).not.toContain("warn");
     cleanup();
     sidebar(3, 0, true);
     expect(mergeLink().querySelector(".count-dot")).not.toBeNull();

@@ -655,7 +655,7 @@ function Count({ n, amber }: { n: number | undefined; amber?: boolean }) {
 const unreadLabel = (name: string, n: number | undefined) => (n ? `${name}, ${n > 99 ? "more than 99" : n} unread` : name);
 
 /** One row of toggle chips in three groups; a second press turns a chip off (BOS-1277). */
-function FilterBar({ filters, companies, counts, set }: { filters: Filters; companies: Company[]; counts: NoticeCounts | undefined; set: (patch: Partial<Filters>) => void }) {
+function FilterBar({ filters, companies, counts, unread, set }: { filters: Filters; companies: Company[]; counts: NoticeCounts | undefined; unread: number | undefined; set: (patch: Partial<Filters>) => void }) {
   const [help, setHelp] = useState(false);
   const sorted = [...companies].sort((a, b) => a.name.localeCompare(b.name));
   const showNone = filters.company === NO_COMPANY || (counts?.company[NO_COMPANY] ?? 0) > 0;
@@ -676,7 +676,8 @@ function FilterBar({ filters, companies, counts, set }: { filters: Filters; comp
     <div className="nf-wrap">
       <div className="nf-bar" role="search" aria-label="Filter notifications">
         <div className="nf-group" role="group" aria-label="Read or unread">
-          {chip("unread", filters.status === "unread", "Unread", () => toggleStatus("unread"), { count: counts ? Object.values(counts.level).reduce<number>((a, b) => a + (b ?? 0), 0) : undefined })}
+          {/* R43: the server's one unread figure, the sidebar badge's (notifications.unread), not a sum made here. */}
+          {chip("unread", filters.status === "unread", "Unread", () => toggleStatus("unread"), { count: counts ? unread : undefined })}
           {chip("read", filters.status === "read", "Read", () => toggleStatus("read"))}
         </div>
         <div className="nf-group" role="group" aria-label="Type">
@@ -788,7 +789,7 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
       {browserPermission === "denied" && <p className="muted">Notifications are blocked in this browser.</p>}
       <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
-      {!neverAny && <FilterBar filters={filters} companies={companies ?? []} counts={feed?.counts} set={setFilters} />}
+      {!neverAny && <FilterBar filters={filters} companies={companies ?? []} counts={feed?.counts} unread={feed?.unread} set={setFilters} />}
       {active && (
         <div role="status" className="nf-summary">
           <span className="muted">{summary}</span>

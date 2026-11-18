@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { MergeQueue, waitingLabel } from "../src/pages/MergeQueue";
+import { MergeQueue } from "../src/pages/MergeQueue";
 import { Sidebar } from "../src/components/Sidebar";
 
 afterEach(() => {
@@ -118,23 +118,21 @@ describe("merge queue screen (BOS-587)", () => {
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
   });
 
-  it("shows the waiting count as the side menu's badge", () => {
-    expect(waitingLabel(4)).toBe("4 waiting to merge");
-    expect(waitingLabel(0)).toBeNull();
+  it("shows the merge-line count as the side menu's badge", () => {
     const noop = () => {};
     render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} mergeStuck={0} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
     expect(link.getAttribute("href")).toBe("#/merge-queue");
     expect(link.getAttribute("aria-current")).toBe("page");
-    expect(within(link).getByLabelText("4 waiting to merge").textContent).toBe("4");
-    expect(within(link).getByLabelText("4 waiting to merge").className).not.toContain("warn");
+    expect(within(link).getByLabelText("4 in the merge line").textContent).toBe("4");
+    expect(within(link).getByLabelText("4 in the merge line").className).not.toContain("warn");
   });
 
   it("turns the badge into the stuck count in the warning colour when items are stuck (BOS-767)", () => {
     const noop = () => {};
     render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={5} mergeStuck={2} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
-    const badge = within(link).getByLabelText("2 stuck");
+    const badge = within(link).getByLabelText("merge line stuck");
     expect(badge.textContent).toBe("2");
     expect(badge.className).toContain("warn");
     expect(link.querySelector(".count-dot")?.className).toContain("warn");
@@ -234,7 +232,7 @@ describe("merge queue attention layout (BOS-1239)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     const list = await screen.findByRole("list", { name: "What needs attention" });
     const pills = within(list).getAllByRole("link").map((a) => a.textContent);
-    expect(pills).toEqual(["1 need you", "Main is red: 2 checks held", "1 check failed", "1 stuck over an hour"]);
+    expect(pills).toEqual(["1 for you to answer", "Main is red: 2 checks on hold", "1 with a failed check", "1 not moved for over an hour"]);
     expect(within(list).getByRole("link", { name: /Main is red/ }).getAttribute("href")).toBe("#/merge-queue/c1/checks");
     expect(screen.queryByText(/Nothing needs you/)).toBeNull();
     // The right-hand "waiting to merge" sentence is gone; the Merges tab carries the count.
@@ -279,7 +277,7 @@ describe("merge queue attention layout (BOS-1239)", () => {
   it("a pill on the Merges tab moves focus to its target", async () => {
     serve({ ...data, waitingCount: 1, waiting: [{ ...base, ticketId: "a", ref: "APP-1", title: "Sign me", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: "d1" }] }, noChecks);
     render(<MergeQueue companies={[company]} companyId="c1" />);
-    fireEvent.click(await screen.findByRole("link", { name: "1 need you" }));
+    fireEvent.click(await screen.findByRole("link", { name: "1 for you to answer" }));
     expect(document.activeElement?.id).toBe("mq-needs");
     expect(document.getElementById("mq-needs")?.getAttribute("tabindex")).toBe("-1");
   });
@@ -319,14 +317,15 @@ describe("merge queue attention layout (BOS-1239)", () => {
 
   it("tabs show counts, amber when something needs you or main is red", async () => {
     serve(
-      { ...data, waitingCount: 3, waiting: [{ ...base, ticketId: "a", ref: "APP-1", title: "Sign me", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: "d1" }] },
+      { ...data, waitingCount: 3, lineCount: 4, waiting: [{ ...base, ticketId: "a", ref: "APP-1", title: "Sign me", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: "d1" }] },
       { mode: "server", slots: 2, running: 1, rows: [checkRow({ state: "running", position: null }), checkRow({ id: "j2", heldBy: "main is red", position: null })] },
     );
     render(<MergeQueue companies={[company]} companyId="c1" />);
     const merges = await screen.findByRole("tab", { name: /Merges/ });
     await waitFor(() => expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2")).toBeTruthy());
-    // The badge counts every merge on the tab: 3 waiting + 1 running (BOS-1287).
+    // The badge counts every merge on the tab: 3 waiting + 1 running (BOS-1287), the server's lineCount (R43).
     expect(within(merges).getByText("4").className).toContain("warn");
+    expect(within(merges).getByLabelText("4 in the merge line")).toBeTruthy();
     expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2").className).toContain("warn");
   });
 
