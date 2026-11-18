@@ -225,6 +225,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         cpuReserve: (await deps.cpuReserve?.()) ?? null,
         // The owner's BOSSMAN_NETGUARD_ALLOW entries (BOS-770): what the launcher uses, what .env holds, which ones Boss Man covers anyway.
         netguardAllow: deps.netguardAllow ? await deps.netguardAllow().catch(() => null) : null,
+        // BOS-1472: what staging runs and how its last smoke checks went (the host's staging lane); null when the host doesn't report one.
+        staging: (deploy as { staging?: unknown } | null)?.staging ?? null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),

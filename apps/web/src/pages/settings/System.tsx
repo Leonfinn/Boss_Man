@@ -378,6 +378,47 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           </details>
         </div>
       )}
+      {v?.staging?.configured && (
+        <div data-testid="staging-lane" style={{ marginTop: 8 }}>
+          <p style={{ margin: "0 0 4px", fontSize: 14 }}>
+            <strong>Staging</strong>
+            {v.staging.last
+              ? v.staging.last.result === "deployed"
+                ? `: runs ${v.staging.last.commit.slice(0, 8)}${v.staging.last.runnerImage ? ` (runner image ${v.staging.last.runnerImage})` : ""}. Smoke checks: ${v.staging.last.smoke ?? "not run"}.`
+                : `: the last staging request ${v.staging.last.result === "running" || v.staging.last.result === "held" ? "is" : "was"} ${v.staging.last.result}. ${v.staging.last.message}`
+              : ": no staging deploy yet."}
+          </p>
+          {v.staging.last && v.staging.last.checks.length > 0 && (
+            <ul className="muted" style={{ margin: "0 0 4px", paddingLeft: 18, fontSize: 14 }}>
+              {v.staging.last.checks.map((c) => (
+                <li key={c.name}>
+                  {c.name}: {c.result}
+                  {c.result !== "pass" && c.why ? ` (${c.why})` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy || v.staging.pending || v.staging.last?.result === "running"}
+            title="Deploys main's newest commit to staging and runs the smoke checks. Staging isn't production: no card, nothing to approve."
+            onClick={() =>
+              act.run(async () => {
+                try {
+                  await api("/api/self-deploy/deploy-staging", { method: "POST", body: {} });
+                } catch (err) {
+                  if (err instanceof ApiError && err.status === 409) return err.message;
+                  throw err;
+                }
+                return "Staging deploy requested. The host picks it up within a minute; the result shows here.";
+              })
+            }
+          >
+            Deploy to staging
+          </button>
+        </div>
+      )}
     </Section>
   );
 }

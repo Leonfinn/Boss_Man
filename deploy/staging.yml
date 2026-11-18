@@ -6,6 +6,11 @@
 # script, boss-man-staging by default) keeps containers, volumes and networks apart; the ports, bind address, data folder
 # and secrets come from the staging folder's own .env and secrets/.
 services:
+  server:
+    build:
+      args:
+        # Set by scripts/deploy-staging.sh so /api/health shows the commit staging runs (BOS-1472).
+        BOSSMAN_COMMIT: ${BOSSMAN_COMMIT:-dev}
   launcher:
     image: boss-man-staging-launcher:current
     environment:

@@ -33,6 +33,15 @@
 #                          outbox/headroom.json, with the live server's own use (liveServerMb) beside it.
 #   DEPLOY_BUILD_MEMORY_MB what an image build needs (3072); the deployer logs the lowest free memory of each update to tune it
 #   DEPLOY_NEW_SERVER_MB   blue/green: what a freshly started server colour needs (4096)
+#   STAGING_DIR            the staging install folder (its own checkout, docs/22-staging.md). Empty = the staging lane is off.
+#                          With it set, inbox/staging-request.json (the same five-field format, target "staging") deploys a
+#                          commit that is on main to staging with scripts/deploy-staging.sh, runs scripts/smoke-staging.sh, and
+#                          writes outbox/staging-status.json and outbox/staging-lane.json. Never touches production's files.
+#   STAGING_RATE_LIMIT_SECONDS  min gap between two staging deploys (300)
+#   STAGING_TIMEOUT_SECONDS     longest a staging deploy may run before it is stopped (1800). The lane shares the deployer's one lock, so
+#                               a production request that arrives meanwhile waits for it (at most this long, and an urgent one too).
+# The smoke checks sign in with an optional smoke account: a file $BOSSMAN_DEPLOYER/smoke-credentials (same rules as host.conf:
+# plain file, owned by the user running this, mode 600) holding smoke_username=<name> and smoke_password=<password>. Without it those checks are skipped.
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
 # names deploy/truenas-bluegreen.yml, target "server" does a zero-downtime colour swap instead of deploy.sh.
@@ -49,6 +58,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron'
 D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
+STAGING_DIR="" STAGING_RATE_LIMIT_SECONDS=300 STAGING_TIMEOUT_SECONDS=1800 # the staging lane (BOS-1472); off while STAGING_DIR is empty
 BG_STOP_SECONDS="${BG_STOP_SECONDS:-60}" # a planned stop's grace before Docker sends SIGKILL (BOS-794); the server's shutdown drains work
 [[ $BG_STOP_SECONDS =~ ^[0-9]{1,4}$ ]] || BG_STOP_SECONDS=60
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
@@ -1493,6 +1503,138 @@ recover_interrupted() {
   finish failed "The ${TARGET:-deploy} run for ${COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way).$reset Check what runs before deploying again."
 }
 
+# ---- The staging lane (BOS-1472, docs/22-staging.md) ----
+# Staging has its own request, status and history files, so it never shares a slot with production's. It runs under the
+# same lock as everything else (one deployer run at a time), and only when no production request is waiting. It deploys
+# commits that are on main, with the staging checkout's own scripts/deploy-staging.sh, then the smoke checks. Nothing from
+# the request reaches a command line unchecked: the commit is 40 hex characters and must be an ancestor of origin/main.
+S_ID="" S_COMMIT="" S_STARTED="" S_KV=()
+write_staging_status() { # result message
+  ((DRY)) && { log "[dry-run] staging status: $1: $2"; return 0; }
+  local ended=""
+  case $1 in running | held) ;; *) ended="$(now)" ;; esac
+  json id="$S_ID" target=staging result="$1" message="$2" to_commit="$S_COMMIT" started="$S_STARTED" ended="$ended" at="${ended:-$S_STARTED}" ${S_KV[@]+"${S_KV[@]}"} >"$OUTBOX/staging-status.json.tmp"
+  chmod 644 "$OUTBOX/staging-status.json.tmp"
+  mv "$OUTBOX/staging-status.json.tmp" "$OUTBOX/staging-status.json"
+  [[ -z $ended ]] || cat "$OUTBOX/staging-status.json" >>"$OUTBOX/staging-history.jsonl"
+}
+staging_done() { log "staging $1: $2"; write_staging_status "$1" "$2"; return 0; } # result message: record the outcome; the tick goes on
+staging_lane_file() { # tells the server whether the lane is on, so it only offers a staging target when it can be used
+  ((DRY)) && return 0
+  local on=false origin=""; [[ -z $STAGING_DIR ]] || on=true
+  # Which repository the staging checkout follows (credentials, if any, dropped). The server offers the staging target only to a
+  # company whose project is this repository, so another company's fork can never ask this host to deploy (BOS-1472 review).
+  if [[ $on == true ]]; then origin="$(staging_git remote get-url origin 2>/dev/null | sed -E 's#//[^@/]*@#//#' | head -n 1 || true)"; fi
+  json configured="$on" origin="$origin" >"$OUTBOX/staging-lane.json.tmp"
+  chmod 644 "$OUTBOX/staging-lane.json.tmp"; mv "$OUTBOX/staging-lane.json.tmp" "$OUTBOX/staging-lane.json"
+}
+staging_git() { (umask 022; git -c safe.directory="$STAGING_DIR" -C "$STAGING_DIR" "$@"); }
+smoke_credentials_ok() { # the smoke account file: a plain file of ours, mode 600
+  local f="$D/smoke-credentials"
+  [[ -f $f && ! -L $f && $(stat -c %u "$f") == "$(id -u)" && $(stat -c %a "$f") =~ ^[0-7]00$ ]]
+}
+# A staging deploy that was cut off (host restart, killed deployer, out of memory) leaves staging-status.json at "running" for
+# ever, and the server then refuses every later staging request. Same rule as recover_interrupted: we hold the lock here, so
+# nothing is running; say so. Files only; no container is touched.
+recover_staging_interrupted() {
+  local sf="$OUTBOX/staging-status.json" st
+  [[ -f $sf && ! -L $sf ]] || return 0
+  st="$(cat "$sf")"
+  [[ $(jfield result <<<"$st") == running ]] || return 0
+  ((DRY)) && { log "[dry-run] the last staging run was cut off (status still 'running'); a real tick would mark it failed"; return 0; }
+  S_ID="$(jfield id <<<"$st")" S_COMMIT="$(jfield to_commit <<<"$st")" S_STARTED="$(jfield started <<<"$st")" S_KV=(smoke=skipped)
+  [[ -z $S_ID ]] && S_ID="interrupted-$(date +%s)"
+  staging_done failed "The staging deploy of ${S_COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way). Check what staging runs, then ask again; scripts/deploy-staging.sh --rollback in the staging folder puts the last good commit back."
+}
+staging_tick() {
+  local sreq="$INBOX/staging-request.json"
+  staging_lane_file
+  [[ -e $sreq || -L $sreq ]] || return 0
+  if [[ -z $STAGING_DIR ]]; then
+    # Lane off: answer once so the requester isn't left waiting, and drop the file.
+    S_ID="$(jfield id <"$sreq" 2>/dev/null || true)" S_COMMIT="" S_STARTED="$(now)"
+    ((DRY)) || rm -f "$sreq"
+    staging_done rejected "Rejected: staging is not configured on this host (STAGING_DIR in host.conf is empty)."; return 0
+  fi
+  [[ $STAGING_RATE_LIMIT_SECONDS =~ ^[0-9]{1,6}$ && $STAGING_TIMEOUT_SECONDS =~ ^[0-9]{1,6}$ ]] || { log "STAGING_RATE_LIMIT_SECONDS and STAGING_TIMEOUT_SECONDS must be whole numbers; the staging lane is skipped."; return 0; }
+  # Staging must not starve production: held while an update would not have the memory it needs (BOS-420's numbers).
+  if [[ -n ${MEM_AVAIL:-} && -n ${NEED_MB:-} ]] && ((MEM_AVAIL < NEED_MB)); then
+    S_ID="$(jfield id <"$sreq" 2>/dev/null || true)" S_COMMIT="" S_STARTED="$(now)"; S_KV=()
+    [[ -z $S_ID || ! $S_ID =~ ^[0-9a-fA-F-]{36}$ ]] && S_ID=""
+    write_staging_status held "Held: only $MEM_AVAIL MB of memory is free and an update needs $NEED_MB MB. The staging deploy runs when memory frees up."
+    return 0
+  fi
+  local mine="$STATE/staging-request.$$.json"
+  if ((DRY)); then cp -P "$sreq" "$mine"; else mv -T "$sreq" "$mine"; fi
+  S_STARTED="$(now)" S_ID="" S_COMMIT="" S_KV=()
+  local flat id commit target at by k
+  if [[ ! -f $mine || -L $mine ]] || (($(stat -c %s "$mine") > 4096)) || [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -ne $(stat -c %s "$mine") ]]; then
+    rm -f "$mine"; staging_done rejected "Rejected: the request file is not a plain file under 4 KB."; return 0
+  fi
+  flat="$(LC_ALL=C tr -d ' \t\r\n' <"$mine")"; rm -f "$mine"
+  local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9_.:+-]{0,64}"'
+  local ok=1
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || ok=0
+  if ((ok)); then for k in id target commit requestedAt approvedBy; do
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || ok=0
+  done; fi
+  id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
+  at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target == staging && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] || ok=0
+  if ((!ok)); then staging_done rejected "Rejected: the staging request file does not match the expected format."; return 0; fi
+  S_ID=$id S_COMMIT=$commit
+  if [[ -s $OUTBOX/staging-history.jsonl ]] && grep -qE "\"id\":[[:space:]]*\"$id\"" "$OUTBOX/staging-history.jsonl"; then
+    staging_done rejected "Rejected: this staging request was already handled."; return 0
+  fi
+  [[ -d $STAGING_DIR/.git || -f $STAGING_DIR/.git ]] || { staging_done failed "The staging folder (STAGING_DIR) is not a git checkout."; return 0; }
+  [[ -x $STAGING_DIR/scripts/deploy-staging.sh ]] || { staging_done failed "The staging checkout has no scripts/deploy-staging.sh to run."; return 0; }
+  # Only merged work: staging's launcher holds the host's Docker socket, so a commit nobody reviewed must not go there unasked.
+  staging_git fetch --quiet origin main || { staging_done rejected "Rejected: git fetch from GitHub failed in the staging checkout."; return 0; }
+  if ! staging_git cat-file -e "$commit^{commit}" 2>/dev/null || ! staging_git merge-base --is-ancestor "$commit" origin/main; then
+    staging_done rejected "Rejected: ${commit:0:8} is not on main. Staging only takes merged commits, because its launcher holds the host's Docker socket."; return 0
+  fi
+  # A commit from before the lane existed has no smoke script: it can't be checked, so it isn't deployed.
+  if ! staging_git cat-file -e "$commit:scripts/smoke-staging.sh" 2>/dev/null; then
+    staging_done rejected "Rejected: ${commit:0:8} is older than the staging lane (it has no scripts/smoke-staging.sh), so it can't be checked. Ask for a newer commit on main."; return 0
+  fi
+  local last wait
+  last="$(cat "$STATE/last-staging" 2>/dev/null || echo 0)"
+  wait=$((last + STAGING_RATE_LIMIT_SECONDS - $(date +%s)))
+  if ((wait > 0)); then staging_done rejected "Rejected: only one staging deploy every $((STAGING_RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."; return 0; fi
+  if ((DRY)); then log "[dry-run] staging checks passed: would run scripts/deploy-staging.sh ${commit:0:8} in the staging folder, then the smoke checks"; return 0; fi
+
+  printf '%s\n' "$(date +%s)" >"$STATE/last-staging"
+  write_staging_status running "Running: staging ${commit:0:8}"
+  log "Running the staging deploy for ${commit:0:8} (request $id)."
+  local before="" rc=0
+  have_docker && before="$(docker ps -q --filter "label=com.docker.compose.project=${SMOKE_PRODUCTION_PROJECT:-boss-man}" 2>/dev/null | sort | paste -sd, - || true)"
+  # BOSSMAN_PRODUCTION_DIRS: staging's isolation checks compare against production's folder, wherever it is.
+  (cd "$STAGING_DIR" && BOSSMAN_PRODUCTION_DIRS="$REPO" timeout "$STAGING_TIMEOUT_SECONDS" scripts/deploy-staging.sh "$commit") >>"$LOG" 2>&1 || rc=$?
+  if ((rc != 0)); then
+    S_KV=(smoke=skipped)
+    staging_done failed "The staging deploy of ${commit:0:8} stopped with an error (exit $rc). The deployer log on the host has the details. Staging was not rolled back: scripts/deploy-staging.sh --rollback in the staging folder does that."; return 0
+  fi
+  # The smoke checks, from the checkout just deployed (merged code, like the deploy script itself).
+  local sm="$STAGING_DIR/scripts/smoke-staging.sh" out="" src=0 name res why img="" failed=""
+  if [[ -x $sm ]]; then
+    if smoke_credentials_ok; then export SMOKE_CREDENTIALS="$D/smoke-credentials"; else unset SMOKE_CREDENTIALS; fi
+    out="$(SMOKE_PRODUCTION_BEFORE="$before" timeout 300 "$sm" "$STAGING_DIR" "$commit" 2>>"$LOG")" || src=$?
+    while IFS=$'\t' read -r name res why; do
+      [[ $name =~ ^[a-z_]{1,32}$ && $res =~ ^(pass|fail|skipped)$ ]] || continue
+      S_KV+=("check_$name=$res" "why_$name=${why:0:200}")
+      [[ $res != fail ]] || failed+="${failed:+, }$name"
+      if [[ $name == runner && $why =~ image\ ([A-Za-z0-9._-]{1,64})$ ]]; then img="${BASH_REMATCH[1]}"; fi
+    done <<<"$out"
+    if [[ -n $failed ]]; then S_KV=(smoke=failed failed_checks="$failed" "${S_KV[@]}")
+    elif ((src != 0)); then S_KV=(smoke=failed failed_checks=smoke-script "${S_KV[@]}")
+    else S_KV=(smoke=passed "${S_KV[@]}"); fi
+  else
+    S_KV=(smoke=skipped)
+  fi
+  [[ -z $img ]] || S_KV+=(runner_image="$img")
+  staging_done deployed "Staging runs ${commit:0:8}.${failed:+ Smoke checks failed: $failed.}"
+}
+
 # BOS-1004: "Create phone login". The server asks (inbox/phone-login.json) for the phone's read-only ntfy user; this
 # makes it inside the ntfy container and hands the password back sealed (RSA-OAEP) to a public key that only the
 # server's memory holds the private half of. The password is never written anywhere in the clear: not the inbox, the
@@ -1670,8 +1812,9 @@ main() {
   fi
   handle_phone_login
   recover_interrupted
+  recover_staging_interrupted
   if bluegreen_enabled; then soak_tick; fi
-  if [[ ! -e $req && ! -L $req ]]; then refresh_available; exit 0; fi
+  if [[ ! -e $req && ! -L $req ]]; then staging_tick || log "The staging lane stopped with an error; production is unaffected."; refresh_available; exit 0; fi
   # The floor: left in the inbox, so the next minute looks again.
   [[ -z $HOLDING ]] || exit 0
 

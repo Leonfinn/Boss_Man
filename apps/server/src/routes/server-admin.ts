@@ -116,6 +116,11 @@ export function serverAdminRoutes(
   });
 
   // A server update waiting for a quiet machine (BOS-420): what it waits for, and the owner's cancel.
+  // BOS-1472: "Deploy to staging": main's newest commit goes to the host's staging lane. Owner session only; agents use the deploy tool.
+  owner.post("/api/self-deploy/deploy-staging", async (_req, reply) => {
+    const r = await selfDeploy.deployStaging();
+    return "error" in r ? reply.code(409).send({ error: "staging_unavailable", message: r.error }) : r;
+  });
   owner.get("/api/self-deploy/wait", async () => deployWait.status());
   owner.post("/api/self-deploy/wait/cancel", async (_req, reply) => {
     const r = await deployWait.cancel(); // leader-only

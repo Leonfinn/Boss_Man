@@ -41,6 +41,8 @@ export type SelfDeployView = {
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
   available: { tip: string; deployed: string; checkedAt: string; commits?: { sha: string; subject?: string }[]; runnerChanged?: boolean; bluegreen?: boolean } | null;
+  /** BOS-1472: the host's staging lane: whether it is on, whether a request waits, and the last result with each smoke check. Absent from an older server. */
+  staging?: { configured: boolean; pending: boolean; last: { result: string; message: string; commit: string; runnerImage: string | null; smoke: string | null; checks: { name: string; result: string; why: string }[]; at: string } | null };
   /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
   deployer?: { reportedAt: string | null; late: boolean };
   lateAfterMinutes?: number;

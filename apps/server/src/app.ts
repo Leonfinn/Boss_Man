@@ -449,6 +449,8 @@ export async function buildApp(opts: AppOptions) {
     runners,
     alert: (input) => alerts.raise(input),
     log: (m) => app.log.warn(m),
+    // BOS-1472: the host deployer's staging lane (its own files; off until the host sets STAGING_DIR).
+    staging: { on: () => selfDeploy.stagingLane(), submit: (id, commit, by) => selfDeploy.writeStagingRequest(id, commit, by), origin: () => selfDeploy.stagingOrigin(), status: () => selfDeploy.stagingStatus(), pending: () => selfDeploy.stagingPending() },
     onShipped: async (ticketId) => {
       const [t] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(t?.featureId);
