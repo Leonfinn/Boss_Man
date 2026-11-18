@@ -25,7 +25,7 @@ import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesServi
 import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { ceoPlanText } from "./services/ceo-plan.js";
-import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_HANDS_HINT, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
@@ -44,7 +44,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
-import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, afterMergeLint, criteriaForCard, criterionOverlap, criteriaText, criterionText, failedAfterMerge, isAfterMerge, missingVerdicts, optionVerdictsRefusal, pageClauseRefusal, readCriteria, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, HISTORY_PAGE_MAX, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -521,7 +521,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // the answer records against the criteria the card names, so a card worded differently would record nothing.
       const settle = blocksTicketId ? await afterMergeCardNote(db, blocksTicketId, question, options, criterionIndexes) : "";
       const extra = `${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${settle ? `\n\n${settle}` : ""}${links ? `\n\n${links}` : ""}${askNotes ? `\n\n${askNotes}` : ""}`;
-      if (d.withCeo) return text(`Decision ${d.id} went to the CEO first, because it needs none of the owner's hands, money, secrets or sign-off. If the CEO doesn't settle it within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it reaches the owner. You'll be woken with the answer; don't wait in this turn.${extra}`);
+      if (d.withCeo) return text(`Decision ${d.id} went to the CEO first, because it needs none of the owner's hands, money, secrets or sign-off. If the CEO doesn't settle it within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it reaches the owner. ${OWNER_HANDS_HINT} You'll be woken with the answer; don't wait in this turn.${extra}`);
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${extra}`);
     },
   );
@@ -1501,6 +1501,8 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         assigneeAgentId = a.id;
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
+      const badPage = pageClauseRefusal(input.acceptanceCriteria ?? []);
+      if (badPage) return fail(badPage);
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);

@@ -60,6 +60,14 @@ describe("runner add-on tick boxes", () => {
     expect(await screen.findByText(/Not on the runner yet: press Build and update runners/)).toBeTruthy();
   });
 
+  it("holds the boxes and Save when the starting set is unknown (no record, runner offline)", async () => {
+    stub({ enabled: true, saved: null, built: null }, null);
+    render(<Runner company={company} />);
+    expect(await screen.findByText(/Can't tell which add-ons are on yet/)).toBeTruthy();
+    expect((screen.getByRole("checkbox", { name: "Browser (agent-browser)" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Save add-ons" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("without self-deploy the boxes are off and say why", async () => {
     stub({ enabled: false, saved: null, built: null }, null);
     render(<Runner company={company} />);

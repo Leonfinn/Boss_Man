@@ -21,6 +21,7 @@ beforeAll(async () => {
   shared = await sharedDatabase();
 });
 afterEach(async () => {
+  // test-lines-ok: lets background landing work settle before the next reset; no event to wait on (added by BOS-1723, before the ratchet)
   await new Promise((resolve) => setTimeout(resolve, 50));
 });
 afterAll(async () => {

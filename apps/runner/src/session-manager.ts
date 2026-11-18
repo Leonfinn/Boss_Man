@@ -36,7 +36,7 @@ export function mergePhaseOf(c: Extract<RunnerCommand, { type: "workspace.merge"
     case "publish":
       return c.commit ? { phase: "publish", commit: c.commit } : "invalid";
     case "finish":
-      return c.commit && c.tree ? { phase: "finish", commit: c.commit, tree: c.tree, ...(c.expectBase ? { expectBase: c.expectBase } : {}) } : "invalid";
+      return c.commit && c.tree ? { phase: "finish", commit: c.commit, tree: c.tree, ...(c.expectBase ? { expectBase: c.expectBase } : {}), ...(c.carry ? { carry: true } : {}) } : "invalid";
   }
 }
 
@@ -682,6 +682,21 @@ export class SessionManager {
         }
         (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
           .then((secrets) => ws.mergeLineConflicts({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.branches, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
+      case "workspace.mainLog": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.mainLog(command.projectId, command.target, command.max, command.filesFor ?? [], secrets))
           .then(
             (data) => reply(command.requestId, { ok: true, data }),
             (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),

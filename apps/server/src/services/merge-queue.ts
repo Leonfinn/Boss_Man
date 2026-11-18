@@ -203,8 +203,13 @@ export type MergeQueueView = {
   running: RunningNow[];
   waiting: WaitingRow[];
   recent: RecentRow[];
-  /** How many approved tickets are waiting to merge (the side menu's badge). */
+  /** How many approved tickets are waiting to merge, not counting running ones (the start hold's figure). */
   waitingCount: number;
+  /**
+   * R43 (BOS-1716), mergeQueue.inLine: everything in the merge line, waiting or running: the side menu's badge, the
+   * Merges tab and the Dashboard all show this one figure as "N in the merge line" (@boss-man/shared owner-figures).
+   */
+  lineCount: number;
   /** 1 while the merge line is stuck (the same verdict as `line`), else 0; slow-but-landing is not stuck (BOS-767, BOS-1594). */
   stuckCount: number;
   /** BOS-1594: the one verdict on the line's health (healthy, stuck, or merging but slowly); the banner and the jam alert both read it. */
@@ -779,6 +784,7 @@ export function mergeQueueService(
         waiting,
         recent: recentRows,
         waitingCount: waiting.length,
+        lineCount: waiting.length + running.length,
         // BOS-1594: the side-menu "stuck" badge follows the same verdict as the banner: 1 while the line is stuck, 0 when merging (even slowly) or healthy.
         stuckCount: line.state === "stuck" ? 1 : 0,
         line,

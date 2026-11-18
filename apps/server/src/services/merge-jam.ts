@@ -3,6 +3,7 @@
 // that merges are moving again when it clears. The jam is read from the Merge queue screen's own view,
 // so the alert can never disagree with what the owner sees there. A jam a card already covers is not
 // this sweep's business: the card has its own notification.
+import { figureText } from "@boss-man/shared";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, notifications, settings } from "../db/schema.js";
@@ -86,7 +87,8 @@ export function mergeJamService(
     const end = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`);
     return {
       title: s.title,
-      body: `${end(s.reason)} Fix: ${end(s.fix)}${s.others > 0 ? ` ${s.others === 1 ? "One other piece of work is" : `${s.others} other pieces of work are`} waiting behind it.` : ""}`,
+      // R43: the banner's own words for this figure (mergeQueue.behindIt).
+      body: `${end(s.reason)} Fix: ${end(s.fix)}${s.others > 0 ? ` ${figureText("mergeQueue.behindIt", s.others)}.` : ""}`,
     };
   }
 

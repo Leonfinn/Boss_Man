@@ -10,7 +10,8 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
-import { HeldBehindFixLine, heldSummary, pausedSlotsText, pausedSummary, pausedText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
+import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
+import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; statusLine?: StatusLine };
@@ -21,15 +22,10 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; line?: MergeLine };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
-
-/** "4 waiting to merge" for the side menu's badge, or null when nothing waits. */
-export function waitingLabel(n: number): string | null {
-  return n > 0 ? `${n} waiting to merge` : null;
-}
 
 /** "12m", "1h 20m", "3h". */
 function waited(minutes: number): string {
@@ -466,18 +462,20 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
     el.scrollIntoView?.({ block: "start" });
   };
   const pills = [
-    needsYou.length > 0 && { key: "needs", tone: "amber", text: `${needsYou.length} need you`, href: tab === "merges" ? undefined : base, onClick: jump("mq-needs", "merges") },
-    heldChecks > 0 && { key: "red", tone: "red", text: `Main is red: ${heldChecks} ${heldChecks === 1 ? "check" : "checks"} held`, href: `${base}/checks`, onClick: undefined },
+    // R43 (BOS-1716): each pill's count is one figure under its one label from the shared list; none says "need you"
+    // (the Decisions figure) or "stuck" (the badge's line-stuck flag).
+    needsYou.length > 0 && { key: "needs", tone: "amber", text: figureText("mergeQueue.forYou", needsYou.length), href: tab === "merges" ? undefined : base, onClick: jump("mq-needs", "merges") },
+    heldChecks > 0 && { key: "red", tone: "red", text: `Main is red: ${figureText("checkQueue.onHold", heldChecks)}`, href: `${base}/checks`, onClick: undefined },
     // R28: the other "main is red": approved tickets held behind a marked fix, before any check was queued. One pill per red.
-    heldBehind && heldChecks === 0 && { key: "red-fix", tone: "amber", text: `Main is red: ${heldBehind.held} ${heldBehind.held === 1 ? "ticket" : "tickets"} held behind ${heldBehind.fixes.map((f) => f.ref ?? f.title).join(" and ")}`, href: tab === "merges" ? undefined : base, onClick: jump("mq-held-fix", "merges") },
-    failed > 0 && { key: "failed", tone: "red", text: `${failed} check failed`, href: tab === "merges" ? undefined : base, onClick: jump("mq-first-failed", "merges") },
-    stuck > 0 && { key: "stuck", tone: "red", text: `${stuck} stuck over an hour`, href: tab === "merges" ? undefined : base, onClick: jump("mq-first-stuck", "merges") },
+    heldBehind && heldChecks === 0 && { key: "red-fix", tone: "amber", text: `Main is red: ${figureText("mergeQueue.heldBehindFix", heldBehind.held)} ${heldBehind.fixes.map((f) => f.ref ?? f.title).join(" and ")}`, href: tab === "merges" ? undefined : base, onClick: jump("mq-held-fix", "merges") },
+    failed > 0 && { key: "failed", tone: "red", text: figureText("mergeQueue.checkFailed", failed), href: tab === "merges" ? undefined : base, onClick: jump("mq-first-failed", "merges") },
+    stuck > 0 && { key: "stuck", tone: "red", text: figureText("mergeQueue.overAnHour", stuck), href: tab === "merges" ? undefined : base, onClick: jump("mq-first-stuck", "merges") },
   ].filter(Boolean) as { key: string; tone: string; text: string; href: string | undefined; onClick: ((e: MouseEvent<HTMLAnchorElement>) => void) | undefined }[];
 
-  const tabButton = (t: Tab, label: string, count: number | null, warn: boolean) => (
+  const tabButton = (t: Tab, label: string, count: number | null, figure: OwnerFigureName, warn: boolean) => (
     <button key={t} type="button" role="tab" id={`mq-tab-${t}`} aria-selected={tab === t} aria-controls={`mq-panel-${t}`} tabIndex={tab === t ? 0 : -1} onClick={() => pick(t)} onKeyDown={onKey}>
       {label}
-      {count !== null && <span className={`tab-count${warn ? " warn" : ""}`}>{count}</span>}
+      {count !== null && <span className={`tab-count${warn ? " warn" : ""}`} aria-label={figureText(figure, count)} title={figureText(figure, count)}>{count}</span>}
     </button>
   );
 
@@ -504,8 +502,8 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
           <p className="muted mq-calm">Nothing needs you. Everything here is moving by itself.</p>
         ))}
       <div className="tabs" role="tablist" aria-label="Merge queue views">
-        {tabButton("merges", "Merges", data ? data.waitingCount + data.running.length : null, needsYou.length > 0)}
-        {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, heldChecks > 0)}
+        {tabButton("merges", "Merges", data ? inLineOf(data) : null, "mergeQueue.inLine", needsYou.length > 0)}
+        {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, "checkQueue.queued", heldChecks > 0)}
       </div>
       {tab === "checks" ? (
         <div role="tabpanel" id="mq-panel-checks" aria-labelledby="mq-tab-checks">

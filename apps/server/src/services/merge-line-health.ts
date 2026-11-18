@@ -5,6 +5,7 @@
 // The Merge queue view carries the answer (`line`), and the Dashboard/Decisions banner and the jam notifier both read it,
 // so they can never disagree. Before this, any approved ticket that had waited an hour counted as "stuck", so a line
 // that landed every 15 to 30 minutes with 17 tickets behind 3 slots paged the owner.
+import { figureText, slowLineCounts } from "@boss-man/shared";
 import type { MergeQueueView } from "./merge-queue.js";
 import { PHASE_LABEL, waitedText } from "./merge-queue.js";
 
@@ -64,7 +65,7 @@ export type StuckLine = {
 export type SlowLine = {
   state: "over_capacity";
   waiting: number;
-  /** All tickets in the merge line (the sidebar badge); only present when more than `waiting` (the rest wait on an agent or the owner). */
+  /** Everything in the merge line, waiting or running (the sidebar badge, `lineCount`); only present when more than `waiting` (the rest are merging now, or wait on an agent or the owner). */
   inQueue?: number;
   /** Minutes to clear the queue at the current landing rate; null when the rate can't be told yet (too few recent landings over too short a time). */
   etaMinutes: number | null;
@@ -118,7 +119,6 @@ const SYSTEM_WAIT_STATES = new Set(["waiting_for_check_capacity", "waiting_for_s
 
 const upFirst = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 const refOf = (r: { ref: string | null; title: string }) => r.ref ?? `"${r.title}"`;
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 /** Pure. The state of the merge line, from the Merge queue read and (optionally) the train and worker facts. */
 export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineHealth {
@@ -167,7 +167,7 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
       state: "stuck",
       cause: "empty_seat",
       title: `A merge-train seat has been empty for ${waitedText(Math.round((nowMs - opts.emptySeatSince) / 60_000))}`,
-      reason: `${mergeable.length} ${plural(mergeable.length, "ticket is", "tickets are")} waiting while a seat sits unused`,
+      reason: `${figureText("mergeQueue.forBossMan", mergeable.length)} while a seat sits unused`,
       fix: "The CEO sends back or moves the ticket that is in the way, so the seat fills.",
       others: mergeable.length - 1,
     };
@@ -178,8 +178,8 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
     return {
       state: "stuck",
       cause: "no_landing",
-      title: sinceLandingMin === null ? `Nothing has merged lately, and ${mergeable.length} ${plural(mergeable.length, "ticket is", "tickets are")} waiting` : `Nothing has merged for ${waitedText(sinceLandingMin)}`,
-      reason: `${mergeable.length} ${plural(mergeable.length, "ticket is", "tickets are")} waiting and none has landed in that time${running.length ? "; the running check is not finishing" : "; no check is running"}`,
+      title: sinceLandingMin === null ? `Nothing has merged lately, with ${figureText("mergeQueue.forBossMan", mergeable.length)}` : `Nothing has merged for ${waitedText(sinceLandingMin)}`,
+      reason: `${figureText("mergeQueue.forBossMan", mergeable.length)}, and none has landed in that time${running.length ? "; the running check is not finishing" : "; no check is running"}`,
       fix: "The CEO looks at the line (seats, running checks, runner) and gets it moving.",
       others: mergeable.length - 1,
     };
@@ -194,7 +194,7 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
         state: "stuck",
         cause: "fix_stalled",
         title: `The fix for main, ${fixName(stalled)}, has stalled`,
-        reason: `${hb.held} approved ${plural(hb.held, "ticket is", "tickets are")} held behind it, and ${stalled.stalled!.reason}`,
+        reason: `${figureText("mergeQueue.heldBehindFix", hb.held)} it, and ${stalled.stalled!.reason}`,
         fix: `The CEO looks at ${fixName(stalled)}.`,
         others: hb.held,
       };
@@ -210,8 +210,10 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
   if (mergeable.length && ((eta !== null && eta > SLOW_AFTER_MIN) || oldestWait >= SLOW_AFTER_MIN)) {
     // Capacity is only advised when it would add something: a check worker, on an install with none connected.
     const advice = opts.workerReady === false ? "A check worker would add check slots: Settings → Server and runner → Checks → Check workers." : null;
-    // inQueue: the sidebar badge's figure (every approved ticket in the line); `waiting` is only those Boss Man itself has to move.
-    return { state: "over_capacity", waiting: mergeable.length, ...(waiting.length !== mergeable.length ? { inQueue: waiting.length } : {}), etaMinutes: eta, lastLandedAt: lastLanded === null ? null : new Date(lastLanded).toISOString(), advice };
+    // inQueue: the sidebar badge's figure, mergeQueue.inLine (R43: everything on the Merges tab, waiting or running);
+    // `waiting` is mergeQueue.forBossMan, only those Boss Man itself has to move.
+    const inLine = waiting.length + (view.running ?? []).length;
+    return { state: "over_capacity", waiting: mergeable.length, ...(inLine !== mergeable.length ? { inQueue: inLine } : {}), etaMinutes: eta, lastLandedAt: lastLanded === null ? null : new Date(lastLanded).toISOString(), advice };
   }
   return { state: "healthy" };
 }
@@ -220,15 +222,15 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
 export function slowText(s: SlowLine, clock: (iso: string) => string): string {
   const eta = s.etaMinutes === null ? ", estimating the time to clear…" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
   const last = s.lastLandedAt ? `, last landed ${clock(s.lastLandedAt)}` : "";
-  const of = s.inQueue && s.inQueue > s.waiting ? ` (${s.inQueue} in the queue; the other ${s.inQueue - s.waiting} wait on an agent or you)` : "";
-  return `Merging, but slowly: ${s.waiting} merge ${plural(s.waiting, "check", "checks")} waiting${of}${eta}${last}.${s.advice ? ` ${s.advice}` : ""}`;
+  // R43: the counts in the shared words the web's banner also uses.
+  return `Merging, but slowly: ${slowLineCounts(s)}${eta}${last}.${s.advice ? ` ${s.advice}` : ""}`;
 }
 
 /** The held line as one plain sentence; `clock` turns the start into HH:MM (the server uses UTC). Amber, never "stuck". */
 export function heldText(h: HeldLine, clock: (iso: string) => string): string {
   const fixes = h.fixes.map(fixText).join(" and ");
   const owner = h.fixes.some((f) => f.ownerUpdate) ? " It goes on once you run the server update." : " They merge by themselves once it is merged and live.";
-  return `Main is red: ${h.held} approved ${plural(h.held, "ticket is", "tickets are")} held behind the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}.${owner}`;
+  return `Main is red: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}.${owner}`;
 }
 
 /** The paused line as one plain sentence; `clock` turns a time into HH:MM (the server uses UTC). */

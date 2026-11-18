@@ -5,6 +5,8 @@
 //  - over capacity: merges land, but slowly. Calm blue-grey, no alarm, says how long the queue will take.
 //  - healthy: no banner.
 // No dismiss button: it leaves when the problem does.
+// Every count here is written with its one label from @boss-man/shared owner-figures (R43, BOS-1716).
+import { figureText, slowLineCounts } from "@boss-man/shared";
 import { api } from "../api";
 import { usePoll } from "../hooks";
 
@@ -49,14 +51,14 @@ export function heldSummary(view: Pick<MergeHealthView, "line"> | null | undefin
 export function heldText(h: HeldSummary): string {
   const fixes = h.fixes.map((f) => `${f.ref ?? `"${f.title}"`} (${f.stateText})`).join(" and ");
   const end = h.fixes.some((f) => f.ownerUpdate) ? "They go on once the server update runs." : "They merge by themselves once it is merged and live.";
-  return `Main is red: ${h.held} approved ${h.held === 1 ? "ticket is" : "tickets are"} held behind the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}. ${end}`;
+  return `Main is red: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}. ${end}`;
 }
 
 /** The calm amber line (never the red "stuck" banner); links the fix tickets. */
 export function HeldBehindFixLine({ held }: { held: HeldSummary }) {
   return (
     <div className="mq-held-fix" role="status" data-held-behind-fix="true">
-      <strong>Main is red: {held.held} approved {held.held === 1 ? "ticket is" : "tickets are"} held behind the fix</strong>{" "}
+      <strong>Main is red: {figureText("mergeQueue.heldBehindFix", held.held)} the fix</strong>{" "}
       {held.fixes.map((f, i) => (
         <span key={f.ticketId}>
           {i > 0 ? " and " : ""}
@@ -77,10 +79,17 @@ export function HeldBehindFixLine({ held }: { held: HeldSummary }) {
 /** The part of the Merge queue read the banner and the Dashboard's Merges line need. */
 export type MergeHealthView = {
   waitingCount: number;
+  /** R43 mergeQueue.inLine: waiting and running, the badge's figure; absent from an older server (use waitingCount). */
+  lineCount?: number;
   stuckCount?: number;
   /** Absent from a server older than BOS-1594: then nothing is shown rather than a guess. */
   line?: MergeLine;
 };
+
+/** R43 mergeQueue.inLine: the one "N in the merge line" figure the badge, the Merges tab and the Dashboard show. */
+export function inLineOf(view: Pick<MergeHealthView, "waitingCount" | "lineCount">): number {
+  return view.lineCount ?? view.waitingCount;
+}
 
 export type StuckSummary = { title: string; reason: string; fix: string; others: number };
 export type SlowSummary = { waiting: number; inQueue?: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null };
@@ -108,12 +117,11 @@ export function slowSummary(view: Pick<MergeHealthView, "line">): SlowSummary | 
   return l?.state === "over_capacity" ? { waiting: l.waiting, inQueue: l.inQueue, etaMinutes: l.etaMinutes, lastLandedAt: l.lastLandedAt, advice: l.advice } : null;
 }
 
-/** "Merging, but slowly: 17 waiting, about 4 h to clear at the current rate, last landed 19:03." */
+/** "Merging, but slowly: 17 for Boss Man to merge, about 4 h to clear at the current rate, last landed 19:03." */
 export function slowText(s: SlowSummary): string {
   const eta = s.etaMinutes === null ? ", estimating the time to clear…" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
   const last = s.lastLandedAt ? `, last landed ${clock(s.lastLandedAt)}` : "";
-  const of = s.inQueue && s.inQueue > s.waiting ? ` (${s.inQueue} in the queue; the other ${s.inQueue - s.waiting} wait on an agent or you)` : "";
-  return `Merging, but slowly: ${s.waiting} merge ${s.waiting === 1 ? "check" : "checks"} waiting${of}${eta}${last}.`;
+  return `Merging, but slowly: ${slowLineCounts(s)}${eta}${last}.`;
 }
 
 export function MergesStuckBanner({ stuck, slow, paused, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; paused?: PausedSummary | null; companyId?: string }) {
@@ -133,7 +141,7 @@ export function MergesStuckBanner({ stuck, slow, paused, companyId }: { stuck: S
     );
   }
   if (stuck) {
-    const behind = stuck.others > 0 ? ` ${stuck.others === 1 ? "1 more is" : `${stuck.others} more are`} waiting behind it.` : "";
+    const behind = stuck.others > 0 ? ` ${figureText("mergeQueue.behindIt", stuck.others)}.` : "";
     return (
       <div className="merges-banner" role="status">
         <a className="merges-banner-link" href={href}>
