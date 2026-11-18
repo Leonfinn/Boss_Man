@@ -124,6 +124,7 @@ export type BranchFailure = { job: string; step?: string; files: string[] };
  */
 export function knownRedOnly(failed: BranchFailure[], reds: OpenFailure[]): OpenFailure[] | null {
   if (!failed.length) return null;
+  // not state: a local of one call.
   const matched = new Set<OpenFailure>();
   for (const f of failed) {
     const red = reds.find(

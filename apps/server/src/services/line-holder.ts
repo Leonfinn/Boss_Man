@@ -92,6 +92,7 @@ const ESCALATED_KEY = (ticketId: string) => `line_holder_escalated:${ticketId}`;
  */
 export async function quarantineOrRevert(db: Db, fix: { id: string; projectId: string }): Promise<string> {
   const suspects = (await mainCiFailures(db, fix.projectId)).filter((o) => o.ticketId === fix.id).flatMap((o) => o.suspects ?? []);
+  // not state: a local of one call.
   const seen = new Set<string>();
   const top = suspects.filter((s) => !seen.has(s.sha) && seen.add(s.sha)).slice(0, 3);
   const quarantine = "Quarantine: set the failing test aside with a linked ticket to fix it properly, then clear the fix's merge-check mark so the line moves.";

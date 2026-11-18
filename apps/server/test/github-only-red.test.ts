@@ -129,7 +129,8 @@ describe("a main fix that keeps failing wakes the CEO once with quarantine-or-re
     expect(c.wakes[1]!.note).toContain(`Or revert ${"c".repeat(8)} "Merge test change" (changed test/page.test.tsx)`);
     expect(c.wakes[2]!.note).not.toContain("Quarantine");
     // The 2-hour sweep finds it already escalated: still one choice in all.
-    expect(await escalateStuckLineHolders(c.db, new Date(Date.now() + 3 * HOUR), c.wake)).toBe(0);
+    const later = new Date(Date.now() + 3 * HOUR);
+    expect(await escalateStuckLineHolders(c.db, later, c.wake)).toBe(0);
   });
 
   it("held over 2 hours: wakes the CEO once, offers no revert without a suspect, and not before 2 hours", async () => {
@@ -137,8 +138,10 @@ describe("a main fix that keeps failing wakes the CEO once with quarantine-or-re
     const fixId = await c.fix();
     const web = await c.approved("Web change", ["apps/web/src/page.tsx"]);
     await ensureSystemHold(c.db, web, [fixId], "Waits on the merge-check fix.");
-    expect(await escalateStuckLineHolders(c.db, new Date(Date.now() + HOUR), c.wake)).toBe(0);
-    const later = new Date(Date.now() + 3 * HOUR);
+    const now = Date.now();
+    const soon = new Date(now + HOUR);
+    expect(await escalateStuckLineHolders(c.db, soon, c.wake)).toBe(0);
+    const later = new Date(now + 3 * HOUR);
     expect(await escalateStuckLineHolders(c.db, later, c.wake)).toBe(1);
     expect(await escalateStuckLineHolders(c.db, later, c.wake)).toBe(0);
     expect(c.wakes).toHaveLength(1);

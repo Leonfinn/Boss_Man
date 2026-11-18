@@ -369,6 +369,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/stale-requests.ts": CHECKS_OUTCOME + " (a dropped check is skipped)",
     "services/review-holds.ts": NEVER_DROPPED,
     "services/sweeps.ts": NEVER_DROPPED,
+    "services/line-holder.ts": NEVER_DROPPED + " (line holder sent back and line holder stuck are waiting reasons)",
     "services/owner-replies.ts": CHECKS_OUTCOME + " (a dropped re-wake still counts as the one try; the 10-minute ask does not need it to land)",
     "services/ticket-chat.ts": NEVER_DROPPED,
     "services/merge-stall.ts": NEVER_DROPPED + " (merge line stalled is a waiting reason; deps.notify is the owner's notification, not a wake)",
