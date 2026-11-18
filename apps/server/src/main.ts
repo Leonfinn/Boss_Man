@@ -100,6 +100,8 @@ const bg = createBackground(
     { name: "main CI watch", everyMs: Number(env.BOSSMAN_MAIN_CI_MS ?? 10 * 60_000), run: async () => { await mainCi.run(); } },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).
     { name: "pull request sync", everyMs: Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000), run: () => review.syncPullRequests() },
+    // Merges on main the gate never recorded (BOS-1645): a runner swap between push and record. Recorded within minutes.
+    { name: "missed merges", everyMs: Number(env.BOSSMAN_MISSED_MERGES_MS ?? 3 * 60_000), run: () => review.recordMissedMerges() },
     // Project briefs whose branch moved on the git host, merges made outside Boss Man included.
     { name: "brief upkeep", everyMs: Number(env.BOSSMAN_BRIEF_UPKEEP_MS ?? 30 * 60_000), run: briefUpkeep },
     // What the host deployer reports: raises "Deploy?" when main moves and tells the owner how a deploy went. // leader-only

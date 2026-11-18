@@ -6,7 +6,7 @@ import { Decisions } from "../src/pages/Decisions";
 import { Sidebar } from "../src/components/Sidebar";
 
 // The Decisions badge counts only what the owner can act on now (BOS-969): not the cards folded into
-// "Waiting, nothing to do yet". Both the menu badge and the page heading take their number from the
+// "N with the team, nothing to do yet". Both the menu badge and the page heading take their number from the
 // same server figure, so the tests pin that they show it, and that a card in the waiting group cannot
 // make the badge read higher than the page's own "to do".
 
