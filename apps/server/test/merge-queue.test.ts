@@ -615,5 +615,8 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     expect(waitingMerges).toHaveLength(4);
     for (const w of waitingMerges) expect(w.label).toMatch(/server restarted/);
     expect(new Set(data.running.map((r) => r.slot)).size).toBe(data.running.length);
+    // R43: the badge and Merges tab figure is everything on the tab, waiting and running; the start hold's stays waiting only.
+    expect(data.lineCount).toBe(data.waiting.length + data.running.length);
+    expect(data.waitingCount).toBe(data.waiting.length);
   });
 });

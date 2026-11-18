@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
+import { figureText, HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -797,18 +797,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {counts.open === 1 ? "1 needs you" : `${counts.open} need you`}
-            {counts.waiting > 0 ? ` · ${counts.waiting} with the team` : ""}
+            {figureText("decisions.needYou", counts.open)}
+            {counts.waiting > 0 ? ` · ${figureText("decisions.withTeam", counts.waiting)}` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (
             <p className="sub">
-              Also waiting:{" "}
+              {/* R43: the other companies' own "needs you" figure, the one the company switcher shows (it counted every open card). */}
+              Also:{" "}
               {elsewhere.map((c, i) => (
                 <span key={c.id}>
                   {i > 0 && ", "}
                   <button type="button" className="linkish" onClick={() => onPickCompany?.(c.id)}>
-                    {c.count} in {c.name}
+                    {figureText("decisions.needYou", c.count)} in {c.name}
                   </button>
                 </span>
               ))}
@@ -1512,7 +1513,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             // owner's to do yet. Folded at the bottom so they never sit beside the cards that are ready.
             // A link to one of these (BOS-1159) opens the fold and marks the card, so it is never hidden behind a closed group.
             <details className="sub" open={waitingCards.some((d) => d.id === linkedId) || undefined}>
-              <summary>Waiting, nothing to do yet ({waitingCards.length})</summary>
+              <summary>{figureText("decisions.withTeam", waitingCards.length)}, nothing to do yet</summary>
               <ul>
                 {waitingCards.map((d) => (
                   <li key={d.id} id={`decision-${d.id}`} className={d.id === linkedId ? "linked" : undefined} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 8 }}>
