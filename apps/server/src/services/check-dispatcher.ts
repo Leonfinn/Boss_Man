@@ -8,7 +8,7 @@ import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, t
 import type { Db } from "../db/client.js";
 import { checkJobs, runners, tickets } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
-import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, type CheckJob, type MachineView } from "./check-queue.js";
+import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, SUPERSEDED_TEXT, type CheckJob, type MachineView } from "./check-queue.js";
 import type { Eligible } from "./check-workers.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 
@@ -438,6 +438,19 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
           const newer = live.some((n) => n.ticketId === j.ticketId && n.id !== j.id && n.kind === "merge" && n.commit !== j.commit && (n.state === "queued" || (!!n.startedAt && !!j.startedAt && n.startedAt > j.startedAt))); // a later merge job inherits the earlier one's queuedAt (BOS-1328), so queuedAt can't order them
           if (newer) await cancelJob(j.id, NEWER_COMMIT_TEXT).catch(() => null);
         }
+      }
+      // BOS-1816: the same for a running quick (pre-review) check. When the ticket has a later check of the same kind and command
+      // queued, or started after it, for another commit, the running one is for a head that is gone: stop it on its machine (runner
+      // or worker), record it as superseded (cancelled, not failed), and free the slot.
+      const liveQuick = await db
+        .select()
+        .from(checkJobs)
+        .where(and(inArray(checkJobs.state, ["queued", "running"]), ne(checkJobs.kind, "merge")));
+      for (const j of liveQuick.filter((q) => q.state === "running")) {
+        const newer = liveQuick.some(
+          (n) => n.ticketId === j.ticketId && n.id !== j.id && n.kind === j.kind && (j.scope === "quick" || n.scope === "full") && (n.command ?? null) === (j.command ?? null) && n.commit !== j.commit && (n.state === "queued" ? n.queuedAt > j.queuedAt : !!n.startedAt && !!j.startedAt && n.startedAt > j.startedAt),
+        );
+        if (newer) await cancelJob(j.id, SUPERSEDED_TEXT).catch(() => null);
       }
       // BOS-1436: bundles whose job no longer runs on a worker (ended, re-queued, or left by a crash) go.
       if (deps.bundles) {
