@@ -675,7 +675,7 @@ export function reviewService(
       .where(eq(tickets.id, t.id));
     // BOS-1021: the merge is not running yet (server not updated, or runner code the runners lack): the checks
     // can't pass, so nobody is woken and no owner card is asked for. Boss Man wakes the assignee at go-live.
-    const waitsFor = commit ? await goLiveWaitOf(db, { companyId: t.companyId, mergeCommit: commit, touchesRunner: files ? touchesRunnerCode(files) : true, liveMarkedAt: null }) : null;
+    const waitsFor = commit ? await goLiveWaitOf(db, { companyId: t.companyId, mergeCommit: commit, touchesRunner: files ? touchesRunnerCode(files) : true, liveMarkedAt: null, deploysNothing: files ? deploysNothing(files) : null }) : null;
     // BOS-1171: while the checks only wait for go-live the ticket sits in Blocked, so it holds no in-progress slot;
     // releaseGoLiveWaiters moves it to in progress when it wakes the assignee.
     if (repoUrl?.repoUrl) await deps.work.updateTicket(t.id, { state: waitsFor ? "blocked" : "in_progress", overLimit: true, internal: true, noCode: true });

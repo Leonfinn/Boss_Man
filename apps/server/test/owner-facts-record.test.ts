@@ -4,10 +4,10 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkWorkers, settings } from "../src/db/schema.js";
+import { checkWorkers, projects, settings } from "../src/db/schema.js";
 import { buildBrief } from "../src/services/brief.js";
 import { checkAsk } from "../src/services/decisions.js";
-import { fillOwnerSetupTokens, ownerFactHeld, ownerSetupFacts, workersLine } from "../src/services/owner-record.js";
+import { fillOwnerSetupTokens, gitTokenActionsProbe, ownerFactHeld, ownerFactHeldLive, ownerSetupFacts, workersLine, type GitTokenProbe } from "../src/services/owner-record.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 async function setup() {
@@ -88,6 +88,53 @@ describe("contradiction hold", () => {
     expect(await ownerFactHeld(ctx.db, ctx.companyId, undefined, "")).toBeNull();
     await ctx.addWorker(new Date());
     expect(await ownerFactHeld(ctx.db, ctx.companyId, IDLE)).toBeNull();
+  });
+});
+
+describe("git token fact (R34, BOS-1670)", () => {
+  const OFFER = "Do you want to give the GitHub token Actions access so Boss Man can read CI test logs?";
+  const yes: GitTokenProbe = async () => "yes";
+
+  it("holds an offer to change the token while the live probe says it can read Actions", async () => {
+    const held = await ownerFactHeldLive(ctx.db, ctx.companyId, yes, [OFFER]);
+    expect(held).toMatch(/^Not sent/);
+    expect(held).toContain("can read GitHub Actions runs");
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, yes, ["The token has no Actions permission, so CI can't be read."])).toMatch(/Not sent/);
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, yes, ["Give Actions: Read access to the token."])).toMatch(/Not sent/);
+  });
+
+  it("lets the ask through when the probe says no, can't tell, or is absent", async () => {
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, async () => "no", [OFFER])).toBeNull();
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, async () => "unknown", [OFFER])).toBeNull();
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, async () => { throw new Error("boom"); }, [OFFER])).toBeNull();
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, undefined, [OFFER])).toBeNull();
+  });
+
+  it("lets true statements and unrelated token talk through, and doesn't call the probe for them", async () => {
+    let calls = 0;
+    const probe: GitTokenProbe = async () => (calls++, "yes");
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, probe, ["The token can read Actions runs and CI logs."])).toBeNull();
+    expect(await ownerFactHeldLive(ctx.db, ctx.companyId, probe, ["Please paste a new database password."])).toBeNull();
+    expect(calls).toBe(0);
+  });
+
+  it("the real probe reads GitHub once, caches the answer, and says unknown when the read is refused", async () => {
+    await ctx.db.insert(projects).values({ companyId: ctx.companyId, name: "Site", repoUrl: "https://github.com/example/site", gitHost: "github", gitApiBase: "https://api.github.com" });
+    let reads = 0;
+    let result: { ok: boolean; canReadChecks?: boolean } = { ok: true, canReadChecks: true };
+    let at = 1_000_000;
+    const probe = gitTokenActionsProbe({ db: ctx.db, gitHosts: { checkAccess: async () => (reads++, result) }, gitToken: async () => "ghp_made_up", now: () => new Date(at) });
+    expect(await probe(ctx.companyId)).toBe("yes");
+    expect(await probe(ctx.companyId)).toBe("yes");
+    expect(reads).toBe(1); // cached
+    at += 11 * 60_000;
+    result = { ok: true, canReadChecks: false };
+    expect(await probe(ctx.companyId)).toBe("no");
+    at += 11 * 60_000;
+    result = { ok: false };
+    expect(await probe(ctx.companyId)).toBe("unknown");
+    const noToken = gitTokenActionsProbe({ db: ctx.db, gitHosts: { checkAccess: async () => result }, gitToken: async () => undefined });
+    expect(await noToken(ctx.companyId)).toBe("unknown");
   });
 });
 

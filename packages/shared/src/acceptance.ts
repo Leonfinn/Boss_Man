@@ -68,7 +68,16 @@ function numberedVerdicts(count: number, segments: readonly string[]): Map<numbe
  * cardAnswerLine writes it with no . ; or , in it, so it is always one segment. A later verdict the ticket's
  * own author reports for the same criterion replaces it; the card line never counts as the author's words.
  */
-const CARD_LINE = /^Owner answered .*?\) ?: ((?:\d{1,2} (?:pass|fail)(?: and )?)+)/;
+const CARD_LINE = /^(?:Owner answered .*?\) ?|Check ticket [A-Za-z0-9-]{1,40} reported): ((?:\d{1,2} (?:pass|fail)(?: and )?)+)/;
+
+/**
+ * The note line for a split-out check ticket that closed (BOS-1794): `Check ticket BOS-12 reported: 3 pass — "criterion" — "check title"`.
+ * Read like a card answer: by its number, standing in until the ticket's own author reports that criterion again.
+ */
+export function checkTicketLine(ref: string, n: number, verdict: "pass" | "fail", criterion: string, title: string): string {
+  const plain = (s: string) => s.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim();
+  return `Check ticket ${plain(ref).replace(/\s/g, "")} reported: ${n} ${verdict} — "${plain(criterion)}" — "${plain(title).slice(0, 120)}"`;
+}
 
 /** What an option means for the criteria its card settles (BOS-1155). */
 export type OptionVerdicts = Record<string, "pass" | "fail" | "none">;

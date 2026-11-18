@@ -44,6 +44,7 @@ import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { deployWaitService } from "./services/deploy-wait.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
+import { gitTokenActionsProbe } from "./services/owner-record.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
 import { releaseLogService } from "./services/release-log.js";
@@ -1152,9 +1153,9 @@ export async function buildApp(opts: AppOptions) {
     view: (companyId) => mergeQueue.get(companyId),
     notify: (input) => notes.notify(input),
     // A card holding an approved merge that looks stale goes to the CEO once (BOS-1078).
-    tellCeo: async ({ companyId, ticketId, note }) => {
+    tellCeo: async ({ companyId, ticketId, note, reason }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (ceo) await scheduler.notify(ceo.id, { reason: "merge held by a stale card", ticketId, priority: 2, note });
+      if (ceo) await scheduler.notify(ceo.id, { reason: reason ?? "merge held by a stale card", ticketId, priority: 2, note });
     },
     now: opts.now,
   });
@@ -1264,7 +1265,7 @@ export async function buildApp(opts: AppOptions) {
   ciSweepFirst.unref();
   ciSweepEvery.unref();
   app.addHook("onClose", async () => { clearTimeout(ciSweepFirst); clearInterval(ciSweepEvery); });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId) }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId), gitTokenProbe: gitTokenActionsProbe({ db, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN, now: opts.now }) }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
 

@@ -2,7 +2,7 @@
 title: Outgoing email
 description: Let Boss Man send email through Proton Mail or Cloudflare Email Service, with the SPF, DKIM and DMARC records that keep it out of spam, then have feedback portal visitors confirm their posts by email.
 group: Set it up your way
-order: 14
+order: 11
 lead: Boss Man can send email through any mail service that offers authenticated SMTP. This guide sets it up with Proton Mail or Cloudflare Email Service, adds the DNS records that keep the mail out of spam, and sends a test.
 time: About 30 minutes, plus time for DNS changes to spread. You need your own domain and access to its DNS settings.
 ---
@@ -19,7 +19,7 @@ The short version:
 
 1. Pick a sender and get its SMTP details: [Proton Mail](#proton-mail) or [Cloudflare Email Service](#cloudflare-email-service).
 2. Add the [SPF, DKIM and DMARC records](#spf-dkim-and-dmarc) for the sending domain.
-3. Fill in **Settings → Server and runner → Outgoing email** in Boss Man and [send a test email](#fill-in-boss-man-s-settings).
+3. Fill in **Settings → Server and runner → Email** in Boss Man and [send a test email](#fill-in-boss-man-s-settings).
 
 ## Choose a sender
 
@@ -113,7 +113,7 @@ Replace `example.com` with your sending domain. For Cloudflare, also check `cf-b
 
 ## Fill in Boss Man's settings
 
-1. In Boss Man, open **Settings → Server and runner** and go to **Outgoing email**. You can jump there from the list at the top of the page.
+1. In Boss Man, open **Settings → Server and runner → Email**.
 2. Fill in the fields as the table below shows.
 3. Choose **Save**. The button stays greyed out until **Server**, **Port** and **From address** are filled in.
 
@@ -214,7 +214,7 @@ A link that was already used, or has run out, opens "This link doesn't work any 
 
 If one address asks for more than 3 links in an hour, Boss Man stops sending and saves nothing, but the visitor sees the same "Check your email" message. That way the form cannot be used to flood someone's inbox or to find out which addresses get mail.
 
-If no email arrives, check the visitor's spam folder, then send yourself a test from **Settings → Server and runner → Outgoing email**. A failed send is not logged, so the test is the way to see the mail server's answer.
+If no email arrives, check the visitor's spam folder, then send yourself a test from **Settings → Server and runner → Email**. A failed send is not logged, so the test is the way to see the mail server's answer.
 
 ## A portal behind a reverse proxy
 

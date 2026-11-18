@@ -18,15 +18,15 @@ lead: Every change an agent makes is reviewed by another agent, then checked and
 | High | you | Senior developer | yes |
 | Critical | you | Senior developer | yes |
 
-If the company has no senior developer, the CEO reviews instead. A ticket with no risk level counts as medium. High and critical work also runs the project's deeper check before merging.
+If the company has no senior developer, the CEO reviews instead. A ticket with no risk level counts as medium. High and critical work also runs the project's deeper check before merging, and gets a security review, by the CEO unless you name someone else.
 
-The table is a starting point. In **Settings > Reviews and CEO**, under **Reviews**, you can change who approves the plan and who reviews the code at each level, and turn on extra reviews: **Security review**, **Infra review** and **Adversarial review**. Each can name one agent or several. All the reviews a ticket needs must approve before it merges. You can also give one project its own rules under **Reviews for this project**.
+The table is a starting point. In **Settings > Reviews**, you can change who approves the plan and who reviews the code at each level, and turn on extra reviews: **Security review**, **Infrastructure review** and **Adversarial review**. Each can name one agent or several. All the reviews a ticket needs must approve before it merges. To give one project its own rules, open it on the **Projects** page and use **Reviews for this project**.
 
 ## What a review checks
 
 Before an agent can ask for review, it must report pass or fail against each Done when line. The reviewer reads the change, the line-by-line diff and the Done when results. Then it approves or sends the ticket back with comments.
 
-If you review a ticket yourself, open it and choose **Approve and merge** or **Request changes**. With changes requested, you can add a one-line lesson. The CEO decides whether it goes into the project's brief, and you are told the outcome.
+If you review a ticket yourself, open it and choose **Approve and merge** (or **Approve and open a pull request**), or **Request changes**. With changes requested, you can add a one-line lesson. The CEO decides whether it goes into the project's brief, and you are told the outcome.
 
 ## When reviews go round in circles
 
@@ -46,18 +46,19 @@ The top of the page says what needs attention, as coloured labels you can choose
 
 - **2 need you**: work that waits on your answer
 - **Main is red: 3 checks held**: the main branch is failing its check (see [Queued checks](#queued-checks))
+- If a fix for main is on its way, approved tickets wait behind it. The label names the fix.
 - **1 check failed**: a merge check failed and Boss Man is trying again
 - **1 stuck over an hour**: work that has not moved for over an hour
 
 If none of these apply, it says "Nothing needs you. Everything here is moving by itself."
 
-Each tab shows a count: **Merges** counts the work waiting to merge, and **Queued checks** counts the checks. The count turns amber when something on that tab needs you or is held.
+Each tab shows a count: **Merges** counts work waiting to merge or being checked, and **Queued checks** counts the checks. The count turns amber when something on that tab needs you or is held.
 
 The **Merges** tab shows:
 
 - **Needs you**: only when something waits on you. Each item has a button straight to its card, such as **Open the sign-off** or **Open the stopped check**.
 - **Running now**: the checks in progress, and how many check slots are busy. A check running for over an hour is marked **over an hour**.
-- **Waiting to merge**: in the order they will go, urgent work first, then the longest wait
+- **Waiting to merge**: in the order they will go, Priority 1 work first, then the longest wait. Choose **Move to front** to put a waiting merge next in line.
 - **Recently finished**: the last three, each marked **merged** or **check failed**. Choose **Show 2 more** (or however many there are) to see the rest.
 
 Each row in Waiting to merge has one state word:
@@ -73,7 +74,7 @@ Each row in Waiting to merge has one state word:
 
 The row then says what is happening and who is acting. If a card holds the work, the row names the card and who raised it, with a link to open it.
 
-Boss Man runs the command you chose under **Before merging, Boss Man will** on each ticket. If it passes, Boss Man merges the branch or opens a pull request, as your project is set. If you chose **Nothing: merge after review only**, it merges straight after the review.
+On each ticket, Boss Man runs the check you chose for the project under **Before merging, Boss Man will**. If it passes, Boss Man merges the branch or opens a pull request, as your project is set. If you chose **Nothing: merge after review only**, it merges straight after the review.
 
 ### Queued checks
 
@@ -88,7 +89,7 @@ When the main branch is failing its check (main is red), new checks are **Held**
 
 When nothing is queued, the tab says "No checks queued" and how many slots are free.
 
-The line at the top says how many check slots are in use. You set the number under **Settings > Server and runner > Checks**, in **Checks at once**. The tab is read-only.
+The line at the top says how many check slots are in use. You set the number under **Settings > Server and runner > Limits and checks**, in **Checks at once**. The tab is read-only.
 
 The full list needs **Boss Man runs them** under **Who runs the checks** in the same place. With **Each agent runs its own**, the tab shows only the checks Boss Man already knows about.
 

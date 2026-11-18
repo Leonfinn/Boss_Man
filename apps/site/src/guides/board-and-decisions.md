@@ -38,16 +38,18 @@ An agent cannot move a ticket to Blocked unless one of these is true. Blocked ti
 
 ## In-progress limits
 
-An in-progress limit stops agents starting more work than they can finish. There are two, under **Settings > Server and runner**, in **Tickets in progress**:
+An in-progress limit stops agents starting more work than they can finish. Open **Settings > Server and runner > Limits and checks**. Find **Tickets in progress**. There are two limits:
 
 - **Tickets in progress per agent**: 2 by default, one being worked and one waiting on its check
 - **Tickets in progress, whole company**: off by default
 
 Leave a box empty for no limit.
 
+You can also hold new starts while the merge line or the quick-check queue is long. Both are off by default.
+
 When an agent is at its limit, a new ticket for it waits in Ready. Its note says, for example, "Waiting: Soo is at the limit of 2 in-progress tickets; starts when one finishes." It starts by itself when one of that agent's tickets moves to Review, Done or Blocked.
 
-The limit never holds work that was already started, such as a ticket sent back with changes requested. An urgent ticket may start even when the agent is at its limit.
+The limit never holds work that was already started, such as a ticket sent back with changes requested. A **Priority 1** ticket may start even when the agent is at its limit.
 
 Some tickets in In progress cannot move, so they do not count. Each one shows the reason on the board:
 
@@ -75,13 +77,13 @@ If the ticket waits on cards from you, they are listed at the top under "Waiting
 
 On the ticket page you can also:
 
-- tick **Urgent**, which puts it first in the merge queue. An urgent ticket also keeps running when Boss Man pauses routine work because a subscription plan is nearly used up (the quota hold).
+- tick **Priority 1**. The ticket goes first in the check queue and the merge line, and keeps running when a plan is nearly used up (the quota hold). You get one alert when it is ready to go live.
 - tick **Doesn't need code changes** for research, wiki or docs work, so it can close with no change to the repository
-- write steps under **After it goes live, you'll need to**, for something you must do once the change is live
+- under **After it goes live**, write what you must do once the change is live, one step per line
 
 ## Decisions
 
-Open **Decisions** in the sidebar. The number beside it counts only the cards that need you now. Cards in "Waiting, nothing to do yet" are not in that number: the page heading shows them separately, for example "3 decisions to do · 2 waiting".
+Open **Decisions** in the sidebar. The number beside it counts only the cards that need you now. Cards in "Waiting, nothing to do yet" are not in that number: the page heading shows them separately, for example "3 need you · 2 with the team". Alerts the team is still handling are folded under **Being handled by the team**.
 
 Each card shows what kind it is (Plan, Permission, Approval, Question, Stale blocker, Stalled run and others), what is being asked and the options.
 
