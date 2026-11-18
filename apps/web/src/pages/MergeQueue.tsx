@@ -10,7 +10,8 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
-import { HeldBehindFixLine, heldSummary, type HeldSummary, type MergeLine } from "../components/MergesStuckBanner";
+import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
+import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; statusLine?: StatusLine };
@@ -21,15 +22,10 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; line?: MergeLine };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
-
-/** "4 waiting to merge" for the side menu's badge, or null when nothing waits. */
-export function waitingLabel(n: number): string | null {
-  return n > 0 ? `${n} waiting to merge` : null;
-}
 
 /** "12m", "1h 20m", "3h". */
 function waited(minutes: number): string {
@@ -156,10 +152,10 @@ function SectionHead({ title, fact }: { title: string; fact: string }) {
   );
 }
 
-function Running({ rows, slots }: { rows: RunningNow[]; slots: number }) {
+function Running({ rows, slots, paused }: { rows: RunningNow[]; slots: number; paused?: PausedSummary | null }) {
   return (
     <section>
-      <SectionHead title="Running now" fact={`${rows.length} of ${slotsText(slots)} busy · flagged after an hour`} />
+      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} of ${slotsText(slots)} busy · flagged after an hour`} />
       {!rows.length ? (
         <p className="muted">Nothing is checking or merging right now.</p>
       ) : (
@@ -345,7 +341,7 @@ function Recent({ rows }: { rows: RecentRow[] }) {
   );
 }
 
-type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null };
+type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null; seatPlace?: number | null; lane?: string | null };
 type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
@@ -417,7 +413,9 @@ export function QueuedChecks({ data, heldBehind }: { data: CheckQueueData; heldB
                 {/* BOS-1435: only a check on a check worker says where; the company runner is the usual place. */}
                 {r.ranOn && r.ranOn !== "company runner" ? <span data-check-ran-on="worker"> Running on the check worker {r.ranOn}.</span> : null}
                 {/* BOS-1602: why a waiting check waits, e.g. "waiting for a merge slot: 2 of 2 busy". */}
-                {r.state === "waiting" && r.heldBy ? <span className="muted" data-check-wait-why=""> {upFirst(r.heldBy)}.</span> : null}
+                {r.state === "waiting" && r.heldBy ? <span className="muted" data-check-wait-why=""> {upFirst(r.heldBy)}{r.seatPlace ? ` (${r.seatPlace === 1 ? "next for a seat" : `${r.seatPlace - 1} ahead for a seat`})` : ""}.</span> : null}
+                {/* BOS-1803: a background-lane wait says so, and for how long newer ordinary work still goes first. */}
+                {r.lane ? <span className="muted" data-check-lane=""> {upFirst(r.lane)}.</span> : null}
               </p>
             </article>
           ))}
@@ -445,6 +443,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
   const stuck = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck).length : 0;
   const heldChecks = cq ? cq.rows.filter((r) => r.heldByMain).length : 0;
   const heldBehind = heldSummary(data);
+  const pausedLine = pausedSummary(data);
   const base = `#/merge-queue/${companyId}`;
 
   const pick = (t: Tab) => go(t === "checks" ? `merge-queue/${companyId}/checks` : `merge-queue/${companyId}`);
@@ -465,18 +464,20 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
     el.scrollIntoView?.({ block: "start" });
   };
   const pills = [
-    needsYou.length > 0 && { key: "needs", tone: "amber", text: `${needsYou.length} need you`, href: tab === "merges" ? undefined : base, onClick: jump("mq-needs", "merges") },
-    heldChecks > 0 && { key: "red", tone: "red", text: `Main is red: ${heldChecks} ${heldChecks === 1 ? "check" : "checks"} held`, href: `${base}/checks`, onClick: undefined },
+    // R43 (BOS-1716): each pill's count is one figure under its one label from the shared list; none says "need you"
+    // (the Decisions figure) or "stuck" (the badge's line-stuck flag).
+    needsYou.length > 0 && { key: "needs", tone: "amber", text: figureText("mergeQueue.forYou", needsYou.length), href: tab === "merges" ? undefined : base, onClick: jump("mq-needs", "merges") },
+    heldChecks > 0 && { key: "red", tone: "red", text: `Main is red: ${figureText("checkQueue.onHold", heldChecks)}`, href: `${base}/checks`, onClick: undefined },
     // R28: the other "main is red": approved tickets held behind a marked fix, before any check was queued. One pill per red.
-    heldBehind && heldChecks === 0 && { key: "red-fix", tone: "amber", text: `Main is red: ${heldBehind.held} ${heldBehind.held === 1 ? "ticket" : "tickets"} held behind ${heldBehind.fixes.map((f) => f.ref ?? f.title).join(" and ")}`, href: tab === "merges" ? undefined : base, onClick: jump("mq-held-fix", "merges") },
-    failed > 0 && { key: "failed", tone: "red", text: `${failed} check failed`, href: tab === "merges" ? undefined : base, onClick: jump("mq-first-failed", "merges") },
-    stuck > 0 && { key: "stuck", tone: "red", text: `${stuck} stuck over an hour`, href: tab === "merges" ? undefined : base, onClick: jump("mq-first-stuck", "merges") },
+    heldBehind && heldChecks === 0 && { key: "red-fix", tone: "amber", text: `Main is red: ${figureText("mergeQueue.heldBehindFix", heldBehind.held)} ${heldBehind.fixes.map((f) => f.ref ?? f.title).join(" and ")}`, href: tab === "merges" ? undefined : base, onClick: jump("mq-held-fix", "merges") },
+    failed > 0 && { key: "failed", tone: "red", text: figureText("mergeQueue.checkFailed", failed), href: tab === "merges" ? undefined : base, onClick: jump("mq-first-failed", "merges") },
+    stuck > 0 && { key: "stuck", tone: "red", text: figureText("mergeQueue.overAnHour", stuck), href: tab === "merges" ? undefined : base, onClick: jump("mq-first-stuck", "merges") },
   ].filter(Boolean) as { key: string; tone: string; text: string; href: string | undefined; onClick: ((e: MouseEvent<HTMLAnchorElement>) => void) | undefined }[];
 
-  const tabButton = (t: Tab, label: string, count: number | null, warn: boolean) => (
+  const tabButton = (t: Tab, label: string, count: number | null, figure: OwnerFigureName, warn: boolean) => (
     <button key={t} type="button" role="tab" id={`mq-tab-${t}`} aria-selected={tab === t} aria-controls={`mq-panel-${t}`} tabIndex={tab === t ? 0 : -1} onClick={() => pick(t)} onKeyDown={onKey}>
       {label}
-      {count !== null && <span className={`tab-count${warn ? " warn" : ""}`}>{count}</span>}
+      {count !== null && <span className={`tab-count${warn ? " warn" : ""}`} aria-label={figureText(figure, count)} title={figureText(figure, count)}>{count}</span>}
     </button>
   );
 
@@ -503,8 +504,8 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
           <p className="muted mq-calm">Nothing needs you. Everything here is moving by itself.</p>
         ))}
       <div className="tabs" role="tablist" aria-label="Merge queue views">
-        {tabButton("merges", "Merges", data ? data.waitingCount + data.running.length : null, needsYou.length > 0)}
-        {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, heldChecks > 0)}
+        {tabButton("merges", "Merges", data ? inLineOf(data) : null, "mergeQueue.inLine", needsYou.length > 0)}
+        {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, "checkQueue.queued", heldChecks > 0)}
       </div>
       {tab === "checks" ? (
         <div role="tabpanel" id="mq-panel-checks" aria-labelledby="mq-tab-checks">
@@ -523,7 +524,10 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
                 </div>
               )}
               <NeedsYou rows={needsYou} />
-              <Running rows={data.running} slots={data.slots} />
+              {pausedLine && (
+                <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong></p>
+              )}
+              <Running rows={data.running} slots={data.slots} paused={pausedLine} />
               <Waiting rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />
             </>

@@ -26,13 +26,13 @@ Under **When work is approved**, choose **Merge into the default branch** or **O
 
 ## 3. The runner
 
-Wait for the runner to say **Connected**. It shows **Starting…** first, and can take up to a minute. If it says **Not started**, choose **Start runner**.
+Wait for the runner to say **Connected**. This can take up to a minute. If it says **Not connected**, choose **Start the runner**.
 
 ## 4. Claude
 
-On your own computer, run `claude setup-token`. It prints a long-lived token for your Claude plan. In the wizard, choose **Claude setup-token** under **Add**, paste the token into **Value**, and save. Then choose **Check with Claude**, which runs one tiny prompt on the runner.
+On your own computer, run `claude setup-token`. It prints a long-lived token for your Claude plan. In the wizard, paste the token into **Claude setup token** and choose **Save the token**. This also sets up what pays for the CEO.
 
-Using another account? Under **Add**, choose its kind instead, such as **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key**, paste the key and save. In step 7, pick the matching provider.
+Using another account? Open **Use an API key instead**, choose its kind under **Add**, such as **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key**, paste the key and save. In step 7, pick the matching provider. If it is not a Claude account, change the CEO's agent to OpenCode or Codex on the **Agents** page.
 
 Paste tokens only into these forms. Never paste one into a chat, a ticket or the wiki, because agents can read those.
 
@@ -40,7 +40,7 @@ Paste tokens only into these forms. Never paste one into a chat, a ticket or the
 
 Choose **Git token (GitHub or Gitea)** under **Add**.
 
-- On GitHub, make a fine-grained personal access token for only the repositories this company works on, with Contents, Pull requests and Workflows set to read and write, and Checks set to read.
+- On GitHub, make a fine-grained personal access token for only the repositories this company works on, with Contents, Pull requests and Workflows set to read and write, and Actions set to read-only.
 - On Gitea, open **Settings > Applications > Generate New Token** and give it repository Read and Write.
 
 Paste it, save, and choose **Check the token against** your project. You should see "The token can read and push to the repo."
@@ -51,7 +51,7 @@ Under **Before merging, Boss Man will**, choose the command Boss Man runs before
 
 ## 7. What pays for the CEO
 
-Under **Funding sources**, name your plan, for example "Claude Max", and choose the kind **Subscription (setup-token)**. Choose **Add**, then pick it under "The CEO runs on". Boss Man uses this to track cost and quota.
+If you saved a Claude token in step 4, this step is already done, and **Next** skips it. Otherwise, under **Funding sources**, name your plan, for example "Claude Max", and choose a **Kind**. Choose **Add funding source**, then pick it under "The CEO runs on". Boss Man uses this to track cost and quota.
 
 ## 8. A first task
 
@@ -75,7 +75,7 @@ The CEO needs someone to hand work to.
 6. Choose **Hire**. The button shows the name you typed, for example **Hire Sam**.
 
 :::worked
-The agent shows on the Agents page with **Pause** and **Edit** buttons.
+The agent shows on the Agents page with a **Pause** button. To change it later, open the ⋯ menu and choose **Edit**.
 :::
 
 ## Add more tasks and features
@@ -117,4 +117,4 @@ Add a task directly when you already know what you want and can write the Done w
 
 ## If nothing starts
 
-Check that the agent is not paused, and that **Settings > Server and runner** says the runner is **Connected**.
+Check that the agent is not paused, and that **Settings > Server and runner > Runner** says **Connected**.

@@ -35,7 +35,9 @@ export const OWNER_AFTER_MS = 15 * 60_000;
 /** An event (a move back, a cut-off run, leaving the line) older than this is no longer news. */
 export const EVENT_WINDOW_MS = 15 * 60_000;
 
-const RANK: Record<string, number> = { backlog: 0, ready: 1, in_progress: 2, review: 3 };
+/** BOS-1774: a review -> blocked state row this close to the ticket's merge time is the merge's own move. */
+const MERGE_MOVE_WINDOW_MS = 10 * 60_000;
+const RANK:Record<string, number> = { backlog: 0, ready: 1, in_progress: 2, review: 3 };
 const CUT_OFF = /^(interrupted|cancelled|lost:|error:|stopped)/i;
 
 /** BOS-1547: a merged ticket waiting for go-live this long (the update card or deploy still open) tells the CEO. */
@@ -211,7 +213,7 @@ export function priorityWatchService(
     const line = last && d && d.event !== "merged" && d.event !== "left" ? { event: d.event, hold: d.hold, at: last.at } : null;
     const leftRow = lineRows.find((r) => (r.detail as { event: string }).event === "left" && r.at >= since);
     const stateRows = await db
-      .select({ id: activity.id, summary: activity.summary })
+      .select({ id: activity.id, summary: activity.summary, at: activity.at })
       .from(activity)
       .where(and(eq(activity.ticketId, t.id), eq(activity.kind, "state"), gte(activity.at, since)))
       .orderBy(desc(activity.at));
@@ -219,6 +221,9 @@ export function priorityWatchService(
     for (const r of stateRows) {
       const m = /^(\w+) -> (\w+)/.exec(r.summary);
       if (!m) continue;
+      // BOS-1774: review -> blocked made by the merge itself (merged, waiting for go-live or after-merge checks) is
+      // Boss Man's own step, not a move backwards. It is recorded within minutes of the ticket's merge time.
+      if (m[1] === "review" && m[2] === "blocked" && t.mergedAt && Math.abs(r.at.getTime() - t.mergedAt.getTime()) <= MERGE_MOVE_WINDOW_MS) continue;
       const from = RANK[m[1]!];
       // Blocked counts as a move back only from review; in_progress -> blocked is a normal wait.
       const to = m[2] === "blocked" ? (m[1] === "review" ? -1 : undefined) : RANK[m[2]!];

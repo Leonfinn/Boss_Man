@@ -19,11 +19,16 @@ export type CiTiming = typeof CI_TIMING;
 
 /** BOS-1070: how a wait for the git host's CI ended. "stopped": the gate's own check failed first, so CI no longer mattered. */
 export type CiOutcome =
-  | { kind: "passed"; reused?: boolean }
+  /** `flaky` (BOS-1733): test files that failed once, passed at the gate and then passed GitHub's one retry. */
+  | { kind: "passed"; reused?: boolean; flaky?: string[]; retryRunUrl?: string }
   | { kind: "none" }
   | { kind: "no_workflows" }
   | { kind: "stopped" }
-  | { kind: "failed"; status: CiStatus }
+  /**
+   * BOS-1733: `retried`: GitHub's one retry was spent and it failed again. `why`: why no retry was given (one line).
+   * `gateOutput`: the end of the gate's own re-run of the named tests, when that failed too.
+   */
+  | { kind: "failed"; status: CiStatus; retried?: boolean; why?: string; gateOutput?: string }
   | { kind: "refused"; message: string }
   | { kind: "error"; message: string }
   | { kind: "timeout"; waiting: string[] }
@@ -42,7 +47,13 @@ export class CiPublishError extends Error {}
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export type CiTarget = { cfg: GitHostConfig; token: string };
-type Hosts = Pick<ReturnType<typeof gitHostService>, "ciStatus" | "workflowRuns" | "rerunRun">;
+type Hosts = Pick<ReturnType<typeof gitHostService>, "ciStatus" | "workflowRuns" | "rerunRun"> & Partial<Pick<ReturnType<typeof gitHostService>, "rerunFailedJobs">>;
+
+/**
+ * BOS-1733: what the gate decided about a GitHub failure. `retry`: the named tests passed at the gate, so GitHub may re-run its
+ * failed jobs once; `files` are those tests. Otherwise `why` says why not, and `gateOutput` carries the gate's failing re-run.
+ */
+export type FlakeAnswer = { retry: true; files: string[] } | { retry: false; why: string; gateOutput?: string };
 
 /**
  * One read of CI on a commit; a temporary failure (5xx, timeout) is asked again 3 times with a growing pause.
@@ -77,7 +88,17 @@ export type PublishDeps = {
   touch?: () => PromiseLike<unknown>;
   /** Trees CI already passed; the same tree on new parents keeps its pass (P11a). */
   passedTrees?: Set<string>;
+  /**
+   * BOS-1733: asked once per wait when CI fails. The merge gate (server check queue) passes it; the pre-flight doesn't, so a
+   * failure there ends the wait as before. Called while the gate's own check may still run; `stop` says when it failed.
+   */
+  flakeRetry?: (s: CiStatus, stop: CiStop) => Promise<FlakeAnswer>;
+  /** Says in the ticket's activity that GitHub was asked to re-run the failed jobs, or refused. */
+  announceFlakeRetry?: (files: string[], accepted: boolean) => Promise<void>;
 };
+
+/** BOS-1733: the token couldn't re-run the failed jobs. */
+export const RERUN_REFUSED = "the git token can't re-run GitHub jobs (it needs Actions: Read and write)";
 
 /** Pushes the commit for CI and waits for the run to end. The merge gate and the pre-flight both call it. */
 export async function publishAndWait(deps: PublishDeps, prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> {
@@ -94,13 +115,34 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
   // A cancelled run is never a failure (nothing was tested). One re-run is tried when no newer run replaced it; the
   // run's state is read as still pending for a few polls after, as GitHub takes a moment to show it queued again.
   let rerunAt: number | null = null;
+  // BOS-1733: the one retry of failed jobs for a flaky test: when it was asked for, and the test files it was for.
+  let flakeAt: number | null = null;
+  let flaky: string[] | null = null;
+  let retryRunUrl: string | undefined;
   try {
     for (;;) {
       if (stop.stopped) return { kind: "stopped" };
       const s = await readCi(deps.hosts, deps.target, prep.commit, stop, deps.timing);
       if ("kind" in s) return s;
-      if (s.state === "passed") return { kind: "passed" };
-      if (s.state === "failed") return { kind: "failed", status: s };
+      if (s.state === "passed") return flaky ? { kind: "passed", flaky, ...(retryRunUrl ? { retryRunUrl } : {}) } : { kind: "passed" };
+      // Right after the retry GitHub may still show the old failed attempt for a moment: read it as pending, as for rerunAt.
+      const inGrace = flakeAt !== null && Date.now() - flakeAt < deps.timing.pollMs * 3;
+      if (s.state === "failed" && !inGrace) {
+        if (flaky) return { kind: "failed", status: s, retried: true };
+        if (!deps.flakeRetry || !deps.hosts.rerunFailedJobs) return { kind: "failed", status: s };
+        const a = await deps.flakeRetry(s, stop);
+        // The gate's own check failed while the named tests were re-run: its send-back is the one the agent gets.
+        if (stop.stopped) return { kind: "stopped" };
+        if (!a.retry) return { kind: "failed", status: s, why: a.why, ...(a.gateOutput ? { gateOutput: a.gateOutput } : {}) };
+        const runIds = [...new Set(s.failed.map((r) => r.runId).filter((id): id is number => !!id))];
+        let accepted = runIds.length > 0;
+        for (const id of runIds) if (!(await deps.hosts.rerunFailedJobs(deps.target.cfg, deps.target.token, id))) accepted = false;
+        await deps.announceFlakeRetry?.(a.files, accepted);
+        if (!accepted) return { kind: "failed", status: s, why: RERUN_REFUSED };
+        flaky = a.files;
+        flakeAt = Date.now();
+        retryRunUrl = s.failed[0]?.url || undefined;
+      }
       if (s.state === "cancelled" && !(rerunAt !== null && Date.now() - rerunAt < deps.timing.pollMs * 3)) {
         const mine = s.cancelled![0]!;
         const branchRuns = await deps.hosts.workflowRuns(deps.target.cfg, deps.target.token, pub.branch).catch(() => []);
@@ -116,7 +158,8 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
       }
       const waited = Date.now() - since;
       if (s.state === "none" && waited >= deps.timing.graceMs) return { kind: "none" };
-      if (waited >= deps.timing.ceilingMs) return { kind: "timeout", waiting: s.waiting };
+      // After the flaky retry the ceiling counts from the retry: the retried jobs get the same time the first run had.
+      if (Date.now() - (flakeAt ?? since) >= deps.timing.ceilingMs) return { kind: "timeout", waiting: s.waiting };
       deps.onWait?.({ since, waiting: s.waiting });
       await deps.touch?.();
       await sleep(deps.timing.pollMs);

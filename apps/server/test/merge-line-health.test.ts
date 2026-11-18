@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { companies } from "../src/db/schema.js";
 import { mergeJamService } from "../src/services/merge-jam.js";
-import { heldText, mergeLineHealth, slowText, type HealthInput } from "../src/services/merge-line-health.js";
+import { heldText, mergeLineHealth, pausedText, slowText, type HealthInput } from "../src/services/merge-line-health.js";
 
 // BOS-1594: the one verdict on the merge line. Stuck (nothing landing, or a fault) pages; over capacity (landing, slowly) never does.
 
@@ -40,11 +40,19 @@ describe("mergeLineHealth: banner and sidebar badge agree (BOS-1715)", () => {
   it("31 in the queue, 10 of them held by an agent: the banner names both figures, and no clear time from one landing", () => {
     const waiting = [...queue(21), ...queue(10, { state: "held", actor: "agent", stuck: false })];
     const line = mergeLineHealth(input({ waiting, recent: [merged(3, 1)] }), { now: NOW });
-    // The badge shows waiting.length (waitingCount); the banner must carry that same 31.
+    // The badge shows lineCount (waiting + running, here no running); the banner must carry that same 31.
     expect(line).toMatchObject({ state: "over_capacity", waiting: 21, inQueue: waiting.length, etaMinutes: null });
     const text = slowText(line as never, () => "08:13");
-    expect(text).toContain("21 merge checks waiting (31 in the queue; the other 10 wait on an agent or you)");
+    // R43: each figure under its own label; neither says "waiting".
+    expect(text).toContain("21 for Boss Man to merge (31 in the merge line; the rest are merging now or with an agent or you)");
+    expect(text).not.toMatch(/\bwaiting\b/);
     expect(text).toContain("estimating the time to clear…");
+  });
+
+  it("R43: the merge-line figure counts running merges too, as the badge and Merges tab do", () => {
+    const running = [{ ticketId: "r1", ref: "X-90", title: "r", phase: "checking", startedAt: ago(5), startedBy: null, minutes: 5, what: "merge_check", slot: 1, overLimit: false }];
+    const line = mergeLineHealth(input({ waiting: queue(17), running: running as never, recent: [merged(7, 1), merged(27, 2), merged(47, 3), merged(67, 4)] }), { now: NOW });
+    expect(line).toMatchObject({ state: "over_capacity", waiting: 17, inQueue: 18 });
   });
 
   it("landings bunched into a few minutes (just after a restart) give no estimate", () => {
@@ -57,7 +65,7 @@ describe("mergeLineHealth", () => {
   it("17 tickets behind 3 slots, landing every 20 minutes: over capacity, not stuck (the 15 Nov case)", () => {
     const line = mergeLineHealth(input({ waiting: queue(17), recent: [merged(7, 1), merged(27, 2), merged(47, 3), merged(67, 4)] }), { now: NOW });
     expect(line).toEqual({ state: "over_capacity", waiting: 17, etaMinutes: 340, lastLandedAt: ago(7), advice: null });
-    expect(slowText(line as never, () => "19:03")).toBe("Merging, but slowly: 17 merge checks waiting, about 5 h 40 min to clear at the current rate, last landed 19:03.");
+    expect(slowText(line as never, () => "19:03")).toBe("Merging, but slowly: 17 for Boss Man to merge, about 5 h 40 min to clear at the current rate, last landed 19:03.");
   });
 
   it("names a check worker only when none is connected", () => {
@@ -133,7 +141,7 @@ describe("the jam alert reads the same verdict", () => {
     await c.service.run();
     expect(c.sent).toHaveLength(1);
     expect(c.sent[0]).toMatchObject({ level: "note", title: "Merging, but slowly" });
-    expect(c.sent[0]!.body).toContain("Merging, but slowly: 17 merge checks waiting, about 4 h 15 min to clear at the current rate, last landed 19:03 UTC.");
+    expect(c.sent[0]!.body).toContain("Merging, but slowly: 17 for Boss Man to merge, about 4 h 15 min to clear at the current rate, last landed 19:03 UTC.");
     c.advance(2 * 3_600_000);
     await c.service.run();
     expect(c.sent).toHaveLength(2);
@@ -146,6 +154,35 @@ describe("the jam alert reads the same verdict", () => {
     expect(await c.service.run()).toMatchObject({ alerted: 1 });
     expect(c.sent[0]).toMatchObject({ level: "flag", title: "Merges are stuck: Nothing has merged for 1 h 40 min" });
     expect(c.sent[0]!.body).toContain("Fix: The CEO looks at the line and gets it moving.");
-    expect(c.sent[0]!.body).toContain("2 other pieces of work are waiting behind it.");
+    // R43: the banner's words for the same figure (mergeQueue.behindIt).
+    expect(c.sent[0]!.body).toContain("2 more behind it.");
+  });
+});
+
+describe("mergeLineHealth: a deliberate pause (R44)", () => {
+  const pause = { reason: "a server update", since: ago(120), until: new Date(NOW.getTime() + 3_600_000).toISOString() };
+  // The 08:52 case: work waiting for hours, nothing landing, 2 of 5 slots busy, new checks held on purpose.
+  const stalled = () => input({ slots: 5, waiting: queue(21), recent: [merged(300, 1)], running: [{ what: "merge_check", overLimit: true, phase: "checking", minutes: 90, ref: "X-1", title: "t" }, { what: "merge_check", overLimit: false, phase: "checking", minutes: 5, ref: "X-2", title: "u" }] as never });
+
+  it("without the pause the same line is stuck; with it the verdict is paused, with no stuck or slow state", () => {
+    expect(mergeLineHealth(stalled(), { now: NOW }).state).toBe("stuck");
+    const line = mergeLineHealth(stalled(), { now: NOW, pause });
+    expect(line).toEqual({ state: "paused", ...pause, inUse: 2, slots: 5 });
+    expect(pausedText(line as never, (iso) => (iso === pause.since ? "08:52" : "11:52"))).toBe("Paused for a server update since 08:52; new checks start once it is done, by 11:52 at the latest. 2 of 5 slots in use: new checks paused.");
+  });
+
+  it("the jam notifier raises nothing while paused", async () => {
+    const { db, close } = await openPglite();
+    const [co] = await db.insert(companies).values({ name: "Co", ticketPrefix: "X" } as never).returning({ id: companies.id });
+    const sent: unknown[] = [];
+    const service = mergeJamService(db, {
+      view: async () => ({ running: [], waiting: [], recent: [], line: { state: "paused", ...pause, inUse: 2, slots: 5 } }) as never,
+      notify: async (n) => (sent.push(n), { id: "n", level: n.level }),
+      now: () => NOW,
+    });
+    expect(await service.run()).toEqual({ alerted: 0, reminded: 0, cleared: 0 });
+    expect(sent).toHaveLength(0);
+    expect(co).toBeTruthy();
+    await close();
   });
 });

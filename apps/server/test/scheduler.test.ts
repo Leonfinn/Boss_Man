@@ -438,6 +438,39 @@ describe("scheduler", () => {
     expect(ctx.commands[0]!.prompt).toContain("Still wanted");
   });
 
+  it("drops a wake for a ticket that was unassigned and parked in Backlog; it stays there and no run starts (BOS-1791)", async () => {
+    ctx = await setup({ agent: 5 });
+    const a = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer A" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Parked work", assigneeAgentId: a.id })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "assigned", priority: 2, note: "Queued before the park." });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "check due", priority: 2, note: "Queued before the park." });
+    await ctx.db.update(tickets).set({ assigneeAgentId: null, systemState: "backlog" }).where(eq(tickets.id, t.id));
+
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 2 });
+    const rows = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(rows.every((w) => w.status === "dropped" && /parked or unassigned/.test(w.statusReason ?? ""))).toBe(true);
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("backlog");
+    expect(ctx.commands).toHaveLength(0);
+  });
+
+  it("drops an old agent's wake once the ticket is reassigned to another agent (BOS-1791)", async () => {
+    ctx = await setup({ agent: 5 });
+    const a = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer A" })).json();
+    const b = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer B" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Handed over", assigneeAgentId: a.id })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "assigned", priority: 2, note: "For A." });
+    await ctx.db.update(tickets).set({ assigneeAgentId: b.id }).where(eq(tickets.id, t.id));
+
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 1 });
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(w!.status).toBe("dropped");
+    expect(w!.statusReason).toContain("another agent");
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("backlog");
+    expect(ctx.commands).toHaveLength(0);
+  });
+
   it("drops a ticketless nudge that waited over two hours, but starts a fresh one (BOS-1136)", async () => {
     ctx = await setup({ agent: 5 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();

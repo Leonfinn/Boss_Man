@@ -13,7 +13,7 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, decisions, settings } from "../db/schema.js";
-import { CANCEL_UPDATE, KEEP_WAITING_MORE, UPDATE_NOW_ANYWAY, markDecisionNotificationRead } from "./decisions.js";
+import { AnswerError, CANCEL_UPDATE, KEEP_WAITING_MORE, UPDATE_NOW_ANYWAY, markDecisionNotificationRead } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import type { Available, DeployStatus, Headroom } from "./self-deploy.js";
 import { DEPLOY_WAIT_KEY, SOFT_HOLD_MAX_MS, quietRuns as envQuietRuns, softHold } from "./deploy-wait-hold.js";
@@ -90,6 +90,8 @@ export type DeployWaitDeps = {
   /** The runner update's full hold (maintenance.ts) is on: it takes over from here. */
   drainOn: () => Promise<boolean>;
   notify: (n: NotifyInput) => Promise<unknown>;
+  /** BOS-1805: tells the CEO an owner's approved update was not sent (self-deploy's tellCeo); absent in tests that don't need it. */
+  tellCeo?: (note: string) => Promise<unknown>;
   /** The hold lifted: start parked checks and held runs now rather than at their next poll. */
   released?: () => Promise<unknown> | unknown;
   quietRuns?: number;
@@ -253,7 +255,22 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
      */
     async begin(input: { decisionId: string; commit: string; fromCommit: string; origin?: "approve" | "hand"; thenRunners?: boolean }): Promise<DeployWait> {
       const have = await get();
-      if (have) return have;
+      if (have) {
+        if (have.decisionId === input.decisionId) return have;
+        // BOS-1805: a second approval used to be dropped here without a word (the card read "Deploy", nothing was sent).
+        // An earlier approval still waiting for quiet is replaced by this newer one: it keeps its place in the wait, and
+        // the host deploys the newest checked commit from the approved one either way (BOS-753).
+        if (have.phase === "waiting" && have.origin === "approve" && (input.origin ?? "approve") === "approve") {
+          const next: DeployWait = { ...have, decisionId: input.decisionId, commit: input.commit, fromCommit: input.fromCommit, ...(have.thenRunners || input.thenRunners ? { thenRunners: true } : {}) };
+          await save(next);
+          deps.log?.(`deploy wait: approval for ${short(input.commit)} replaces the waiting one for ${short(have.commit)}`);
+          return next;
+        }
+        // Anything further along can't take a second update now: the answer is refused with the reason, so the card
+        // stays open and the owner reads why at once.
+        const where = have.phase === "sent" ? "is with the host now" : have.phase === "waiting" ? "is waiting for you to apply it by hand" : "is live and in its standby window, where the host takes no other update";
+        throw new AnswerError(`Not sent: the update to ${short(have.commit)} ${where}. Boss Man takes one server update at a time, so this card stays open: answer it again once that one has finished (Settings → Server and runner → Updates shows it).`);
+      }
       const t = now();
       const w: DeployWait = { decisionId: input.decisionId, commit: input.commit, fromCommit: input.fromCommit, approvedAt: t.toISOString(), phase: "waiting", deadline: new Date(t.getTime() + WAIT_MINUTES * 60_000).toISOString(), minutes: WAIT_MINUTES, origin: input.origin ?? "approve", ...(input.thenRunners ? { thenRunners: true } : {}) };
       const q = await measure();
@@ -295,16 +312,17 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
             ? `The update to ${short(w.commit)} never found a quiet machine, so it was not sent. Merge checks and runs are back to normal. Approve it again from Settings → Server and runner → Updates when the machine is quieter, or look at what keeps it busy.`
             : `The update to ${short(w.commit)} kept merge checks and runs held back for 3 hours, which is too long, so the hold was lifted. Check Settings → Server and runner → Updates for how the update went.`,
         });
+        // BOS-1805: an approval that was never sent leaves the server as it was: the CEO hears it too, with the reason.
+        if (unsent) await deps.tellCeo?.(`The owner's approved server update to ${short(w.commit)} was not sent: it waited 3 hours and never found a quiet machine (${(w.quiet?.why ?? []).join("; ") || "no reason recorded"}). The live server is unchanged. Find what kept the machine busy, then tell the owner when to approve it again.`).catch((err) => deps.log?.(`deploy wait: telling the CEO failed: ${(err as Error).message}`));
         return null;
       }
 
       if (w.phase === "waiting") {
         const a = await deps.available();
-        if (w.origin === "approve" && a?.tip && a.tip !== w.commit) {
-          // The host only deploys the tip, and the approved commit is pinned (BOS-124): this approval can't be used.
-          await end("main moved on", { level: "note", title: `Update to ${short(w.commit)} not sent: main moved on`, body: `While it waited for a quiet machine, main moved on to ${short(a.tip)}. Approve the new update when it is offered.` });
-          return null;
-        }
+        // BOS-1805: main moving on no longer voids the approval. It did before BOS-753, when the host only deployed the
+        // pinned commit; since then the request names the approved commit and the host deploys the newest checked commit
+        // on main from it, which is what the card promises. The lapse (with only a quiet note) is what threw away the
+        // owner's 18 Nov 14:37 "Deploy": a busy machine waited, BOS-1762 reached main, and nothing was ever sent.
         if (w.origin === "hand" && a?.deployed && a.deployed !== w.fromCommit) {
           // The owner applied it by hand: the hold stays through the standby window, as for a sent update.
           await afterDeployed(w);

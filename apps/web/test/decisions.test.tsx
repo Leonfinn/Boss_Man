@@ -307,7 +307,7 @@ describe("decision queue", () => {
     // Another company's decisions are named, one click from switching to it.
     const onPick = vi.fn();
     const other = render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} elsewhere={[{ id: "c2", name: "HolidayHours", count: 9 }]} onPickCompany={onPick} />);
-    fireEvent.click(screen.getByRole("button", { name: "9 in HolidayHours" }));
+    fireEvent.click(screen.getByRole("button", { name: "9 need you in HolidayHours" }));
     expect(onPick).toHaveBeenCalledWith("c2");
     other.unmount();
     const { rerender } = render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);

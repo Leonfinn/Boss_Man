@@ -5,6 +5,7 @@
 // as missing. Shared so the server's review gate and the web's checklist agree exactly.
 import { z } from "zod";
 import { factClauses, namesHostFact } from "./host-facts.js";
+import { namesPage, pageClauses } from "./page-clause.js";
 
 /** A criterion as stored: a plain string, checked before merge (old rows stay strings), or the
  * `{ text, after: "merge" }` form for a check only a real host can settle (DR-024 #5). */
@@ -67,7 +68,16 @@ function numberedVerdicts(count: number, segments: readonly string[]): Map<numbe
  * cardAnswerLine writes it with no . ; or , in it, so it is always one segment. A later verdict the ticket's
  * own author reports for the same criterion replaces it; the card line never counts as the author's words.
  */
-const CARD_LINE = /^Owner answered .*?\) ?: ((?:\d{1,2} (?:pass|fail)(?: and )?)+)/;
+const CARD_LINE = /^(?:Owner answered .*?\) ?|Check ticket [A-Za-z0-9-]{1,40} reported): ((?:\d{1,2} (?:pass|fail)(?: and )?)+)/;
+
+/**
+ * The note line for a split-out check ticket that closed (BOS-1794): `Check ticket BOS-12 reported: 3 pass — "criterion" — "check title"`.
+ * Read like a card answer: by its number, standing in until the ticket's own author reports that criterion again.
+ */
+export function checkTicketLine(ref: string, n: number, verdict: "pass" | "fail", criterion: string, title: string): string {
+  const plain = (s: string) => s.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim();
+  return `Check ticket ${plain(ref).replace(/\s/g, "")} reported: ${n} ${verdict} — "${plain(criterion)}" — "${plain(title).slice(0, 120)}"`;
+}
 
 /** What an option means for the criteria its card settles (BOS-1155). */
 export type OptionVerdicts = Record<string, "pass" | "fail" | "none">;
@@ -244,6 +254,12 @@ export function afterMergeLint(criteria: readonly Criterion[]): string {
   if (unclaused.length) {
     const names = unclaused.map((c) => `"${criterionText(c)}"`).join(", ");
     parts.push(`${names} names something the host reports, but has no fact clause, so the ticket could close on a "pass" while the host still shows it failing. Add one to the criterion, e.g. "(fact: repo.probe = ok)" or "(fact: no failing check)": the ticket then closes only when the host's newest report taken after it went live agrees. This is a warning only.`);
+  }
+  // R37: an after-merge criterion about a live page needs the page clause the done move checks.
+  const pageless = criteria.filter((c) => isAfterMerge(c) && namesPage(criterionText(c)) && !pageClauses(criterionText(c)).length);
+  if (pageless.length) {
+    const names = pageless.map((c) => `"${criterionText(c)}"`).join(", ");
+    parts.push(`${names} is about a live page but has no page clause: add (page: https://example.com/path shows "words only the working page shows") or this can close on a status code. With it, a pass must cite a screenshot attached after go-live and quote those words. This is a warning only.`);
   }
   return parts.join("\n");
 }

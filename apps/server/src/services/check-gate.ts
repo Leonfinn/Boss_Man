@@ -32,6 +32,45 @@ export function checkPriority(t: { urgent?: boolean | null; fixesMergeCheck?: bo
   return t.background ? 2 : 1;
 }
 
+/**
+ * BOS-1803: how long a background-lane merge (tier 2) lets newer ordinary work go first before it ranks as ordinary (tier 1,
+ * by its own queue time). Without it an approved lane merge waited 8 h+ behind a steady stream of newer ordinary merges.
+ * An owner setting in minutes; 0 turns the ageing off (the BOS-1403 order as it was).
+ */
+export const BACKGROUND_LANE_AGE_KEY = "background_lane_age_minutes";
+export const DEFAULT_BACKGROUND_LANE_AGE_MINUTES = 120;
+export const MAX_BACKGROUND_LANE_AGE_MINUTES = 24 * 60;
+
+/** The setting's value in minutes: a whole number from 0 to the max, anything else reads as the default. */
+export function readLaneAgeMinutes(v: unknown): number {
+  const n = Number(v);
+  return v !== null && v !== undefined && v !== "" && Number.isInteger(n) && n >= 0 && n <= MAX_BACKGROUND_LANE_AGE_MINUTES ? n : DEFAULT_BACKGROUND_LANE_AGE_MINUTES;
+}
+
+export async function laneAgeMinutes(db: Db): Promise<number> {
+  const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, BACKGROUND_LANE_AGE_KEY));
+  return readLaneAgeMinutes(row?.value);
+}
+
+/**
+ * BOS-1803: the lane in the owner's words for a waiting check or merge, or null for an ordinary one. Shown on the Merge queue
+ * page and the ticket, so a lane merge that waits isn't read as a lost attempt.
+ */
+export function laneWords(tier: number, waitedMs: number, ageMs: number): string | null {
+  if (tier !== 2) return null;
+  if (ageMs <= 0) return "background lane: newer ordinary work goes first";
+  if (waitedMs >= ageMs) return `background lane, waited over ${spanWords(ageMs)}, so now in line by when it joined`;
+  return `background lane: newer ordinary work goes first for up to ${spanWords(ageMs - waitedMs)} more`;
+}
+
+function spanWords(ms: number): string {
+  const m = Math.max(1, Math.ceil(ms / 60_000));
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  return r ? `${h} h ${r} min` : `${h} h`;
+}
+
 /** checkPriority for a ticket row, looking up the assignee's job title for the lane. */
 export async function ticketCheckPriority(db: Db, t: { urgent?: boolean | null; fixesMergeCheck?: boolean | null; title?: string | null; assigneeAgentId?: string | null }): Promise<number> {
   let background = false;
