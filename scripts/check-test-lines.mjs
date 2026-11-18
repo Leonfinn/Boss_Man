@@ -8,11 +8,21 @@
 // baseline (existing lines stay until touched); a lower count passes with a hint to run `--update`, so two branches that each
 // remove a hit don't conflict on a failing check. Usage: check-test-lines.mjs [--update] [--root <dir>]
 //
+// The scan works on code, not on lines of text (BOS-1758): comments and the insides of strings are blanked first, so a word in a
+// comment (`baseline`, `LIMIT_MS`, `for (`) switches nothing off, and a statement that prettier wrapped over several lines is
+// matched as one. Hits are reported on the line where the statement starts.
+//
+// Also counted: a sleep with a variable delay (`sleep(DELAY)`, `setTimeout(r, DELAY)`, unless the name is a parameter of the
+// helper being defined), `function (r) { setTimeout(r, n) }`, an elapsed limit on a difference or a timing name
+// (`expect(t1 - t0)`, `expect(ms)`), `new Date().getTime() - n` in an expect, and a read file sliced to a fixed length in a
+// later statement (`const t = readFileSync(f); ... t.slice(0, 200)`) or `(await readFile(p)).slice(0, n)`.
+//
 // Allowed, never counted:
-//   - a sleep inside a polling loop (a `while`/`for` on the same line or within 3 lines above) or inside a helper named
-//     waitFor, waitUntil, poll*, eventually, until*, retry* (the helper itself is the one place that may sleep);
-//   - an elapsed limit on a line that mentions LIMIT_MS or baseline (the two documented forms in CLAUDE.md);
-//   - any line, or the line below a comment, carrying `test-lines-ok: <why>`.
+//   - a sleep inside a polling loop (a `while`, `do` or counting `for (;;)` on the same line or within 3 lines above; a `for...of`
+//     or `for...in` is not a poll) or inside a helper named waitFor, waitUntil, poll*, eventually, until*, retry* (the helper
+//     itself is the one place that may sleep);
+//   - an elapsed limit in a statement whose code mentions LIMIT_MS or baseline (the two documented forms in CLAUDE.md);
+//   - a statement with `test-lines-ok: <why>` in a comment on its line or the line above.
 // Prefer: `vi.waitFor`, `expect.poll`, the file's own waitFor helper, `vi.useFakeTimers()` for time, one `now` constant read once.
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -22,50 +32,179 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const DOC = "CLAUDE.md, section \"Writing tests: they must pass on GitHub's runners too\"";
 
-const LOOP = /\b(?:while|for)\s*\(|\bdo\s*\{/;
+// A `for` that counts or spins is a poll; `for (x of xs)` / `for (k in o)` is not.
+const LOOP = /\bwhile\s*\(|\bdo\s*\{|\bfor\s*\((?![^)]*\b(?:of|in)\b)/;
 const POLL_HELPER = /(?:function\s+|const\s+|let\s+)(?:waitFor|waitUntil|poll\w*|eventually|until\w*|retry\w*)\b/i;
-// A literal, non-zero delay only: `setTimeout(r, 0)` just yields to the event loop, and `setTimeout(r, ms)` is the sleep helper's own definition (its callers are caught).
-const SLEEP = /new Promise\(\s*\(?\s*\w+\s*\)?\s*=>\s*(?:setTimeout|globalThis\.setTimeout)\(\s*\w+\s*,\s*[1-9][\d_]*\s*\)\s*\)|\b(?:await\s+)?(?:sleep|delay|wait|pause|nap)\(\s*[1-9][\d_]*\s*\)/;
 
 export const RULES = {
-  "bare-sleep": {
-    fix: "wait for the event instead (vi.waitFor, expect.poll, or a waitFor helper with a deadline), or use vi.useFakeTimers()",
-    test: (line, ctx) => SLEEP.test(line) && !LOOP.test(line) && !ctx.above(3).some((l) => LOOP.test(l)) && !ctx.above(8).some((l) => POLL_HELPER.test(l)) && !POLL_HELPER.test(line),
-  },
-  "elapsed-limit": {
-    fix: "time the work against a baseline run in turn on the same machine, or give GitHub its own LIMIT_MS and say what it still catches",
-    test: (line) =>
-      !/LIMIT_MS|baseline/i.test(line) &&
-      (/expect\(\s*[\w.]*(?:elapsed|duration|took|spent|latency|millis)\w*\s*\)\s*\.toBeLessThan(?:OrEqual)?\(/i.test(line) ||
-        /expect\(\s*(?:Date\.now|performance\.now)\(\)\s*-[^)]*\)\s*\.toBeLessThan(?:OrEqual)?\(/.test(line)),
-  },
-  "fresh-date-sum": {
-    fix: "read Date.now() once into a constant and compare to that, or use vi.useFakeTimers() and vi.setSystemTime()",
-    test: (line) => /\bexpect\(/.test(line) && /Date\.now\(\)\s*[-+]|[-+]\s*Date\.now\(\)/.test(line) && !/LIMIT_MS|baseline/i.test(line),
-  },
-  "fixed-length-read": {
-    fix: "read the whole file, or match the one line or marker you mean, so the test doesn't depend on where the text happens to fall",
-    test: (line) => /\b(?:readFileSync|readFile)\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)(?:\.toString\([^)]*\))?\.(?:slice|substring|substr)\(\s*-?\d/.test(line),
-  },
+  "bare-sleep": { fix: "wait for the event instead (vi.waitFor, expect.poll, or a waitFor helper with a deadline), or use vi.useFakeTimers()" },
+  "elapsed-limit": { fix: "time the work against a baseline run in turn on the same machine, or give GitHub its own LIMIT_MS and say what it still catches" },
+  "fresh-date-sum": { fix: "read Date.now() once into a constant and compare to that, or use vi.useFakeTimers() and vi.setSystemTime()" },
+  "fixed-length-read": { fix: "read the whole file, or match the one line or marker you mean, so the test doesn't depend on where the text happens to fall" },
 };
+
+// ---- code view: comments and string insides blanked, newlines kept ----
+/** @returns {{ code: string, markers: Set<number> }} markers = 0-based lines covered by a comment carrying test-lines-ok */
+export function sanitize(src) {
+  let out = "";
+  const markers = new Set();
+  let line = 0, recent = "", i = 0;
+  const n = src.length;
+  const blank = (ch) => { out += ch === "\n" ? "\n" : " "; if (ch === "\n") line++; };
+  const code = (ch) => { out += ch; if (ch === "\n") line++; else if (!/\s/.test(ch)) recent = (recent + ch).slice(-12); };
+  while (i < n) {
+    const c = src[i], d = src[i + 1];
+    if (c === "/" && d === "/") {
+      let j = src.indexOf("\n", i); if (j < 0) j = n;
+      if (/test-lines-ok:/.test(src.slice(i, j))) markers.add(line);
+      out += " ".repeat(j - i); i = j; continue;
+    }
+    if (c === "/" && d === "*") {
+      let j = src.indexOf("*/", i + 2); j = j < 0 ? n : j + 2;
+      const cm = src.slice(i, j), has = /test-lines-ok:/.test(cm);
+      for (const ch of cm) { if (has) markers.add(line); blank(ch); }
+      if (has) markers.add(line);
+      i = j; continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      out += c; i++;
+      while (i < n && src[i] !== c) {
+        if (src[i] === "\\") { blank(src[i]); if (i + 1 < n) blank(src[i + 1]); i += 2; continue; }
+        if (c !== "`" && src[i] === "\n") break;
+        blank(src[i]); i++;
+      }
+      if (src[i] === c) { out += c; i++; }
+      recent = (recent + '"').slice(-12);
+      continue;
+    }
+    if (c === "/" && /(?:^|[(,=:[!&|?{};+\-*%<>~^]|\breturn)$/.test(recent)) {
+      // regex literal: copy it as code but blank its body so quotes inside don't open a string
+      let j = i + 1, cls = false;
+      while (j < n && src[j] !== "\n" && (cls || src[j] !== "/")) { if (src[j] === "\\") j++; else if (src[j] === "[") cls = true; else if (src[j] === "]") cls = false; j++; }
+      if (src[j] === "/") { out += "/" + " ".repeat(j - i - 1) + "/"; i = j + 1; while (/[a-z]/.test(src[i] ?? "")) { out += " "; i++; } recent = (recent + "/").slice(-12); continue; }
+    }
+    code(c); i++;
+  }
+  return { code: out, markers };
+}
+
+/** End offset of the statement starting at `start`: a `;`, a closing bracket, or a newline not followed by `.chain`. */
+function stmtEnd(code, start) {
+  let depth = 0;
+  for (let i = start; i < code.length; i++) {
+    const c = code[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") { if (depth === 0) return i; depth--; }
+    else if (c === ";" && depth === 0) return i;
+    else if (c === "\n" && depth === 0) { const nx = /^\s*(\S)/.exec(code.slice(i + 1, i + 200)); if (!nx || (nx[1] !== "." && nx[1] !== "?")) return i; }
+  }
+  return code.length;
+}
+
+/** The text inside the parenthesis opened at `open` (code[open] === "("). */
+function parenBody(code, open) {
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === "(") depth++;
+    else if (code[i] === ")" && --depth === 0) return code.slice(open + 1, i);
+  }
+  return code.slice(open + 1);
+}
+
+const CLOCK = String.raw`(?:Date\.now\(\s*\)|new\s+Date\(\s*\)\s*\.getTime\(\s*\)|performance\.now\(\s*\))`;
+const CLOCK_RE = new RegExp(CLOCK);
+const FRESH_SUM = new RegExp(String.raw`${CLOCK}\s*[-+]|[-+]\s*${CLOCK}`);
+const TIME_NAME = /^(?:[\w.]*(?:[Ee]lapsed|[Dd]uration|[Tt]ook|[Ss]pent|[Ll]atency|[Mm]illis|[Mm]sec)\w*|ms|time|dt|delta|diff|t\d*|\w*Ms)$/;
+const TIME_OPERAND = /^(?:t\d*|(?:start|end|begin|before|after|now|finish|stop|tick|then)\w*|\w*(?:Start|End|Time|At|Ms)|[\w.]*(?:elapsed|duration)\w*)$/;
+const lastSeg = (s) => s.trim().replace(/\(\s*\)$/, "").split(".").pop();
+
+function isTimingSubject(s) {
+  s = s.trim();
+  if (TIME_NAME.test(lastSeg(s)) && /^[\w.]+$/.test(s)) return true;
+  if (CLOCK_RE.test(s) && /[-]/.test(s)) return true;
+  const m = /^(.+?)\s-\s(.+)$/s.exec(s);
+  return !!m && [m[1], m[2]].some((side) => CLOCK_RE.test(side) || TIME_OPERAND.test(lastSeg(side)));
+}
+
+const BAL = String.raw`(?:[^()]|\((?:[^()]|\([^()]*\))*\))*`;
+const SLICE = String.raw`\.(?:slice|substring|substr)\(\s*-?\d`;
+const DIRECT_READ = new RegExp(String.raw`(?:await\s+)?[\w.]*\breadFile(?:Sync)?\s*\(${BAL}\)\s*\)?(?:\s*\.toString\([^)]*\))?\s*${SLICE}`, "g");
+const READ_DECL = /\b(?:const|let|var)\s+(\w+)\s*(?::[^=;]+)?=/g;
+const SLEEP_ARGS = String.raw`(?:\(\s*\w*\s*\)|\w+|function\s*\w*\s*\(\s*\w*\s*\))\s*(?:=>)?\s*\{?\s*(?:return\s+)?(?:globalThis\.|window\.)?setTimeout\(\s*(?:\(\s*\)\s*=>\s*)?\w+(?:\(\s*\))?\s*,\s*([\w$.]+)\s*,?\s*\)\s*;?\s*\}?\s*,?\s*\)`;
+const SLEEP_PROMISE = new RegExp(String.raw`new\s+Promise\(\s*${SLEEP_ARGS}`, "g");
+// Not a definition (`function pause(ms) {`, `async pause(id) {`): the call must not be followed by a body.
+const SLEEP_CALL = /(?<!\b(?:function|async|get|set|static)\s+)\b(?:await\s+)?(?:\w+\.)?(sleep|delay|nap|pause|wait)(?:Ms|Millis)?\(\s*([\w$.]+)\s*\)(?!\s*(?::[^=;{()]*)?\{)/g;
+
+const isLiteral = (a) => /^\d[\d_]*$/.test(a);
+const isZero = (a) => /^0[\d_]*$/.test(a);
+/** `id` is a parameter of a function defined just above: then the call is the sleep helper itself, whose callers are counted. */
+function isParam(code, idx, id) {
+  const before = code.slice(Math.max(0, idx - 400), idx);
+  const e = id.replace(/[$.]/g, "\\$&");
+  return new RegExp(String.raw`(?:\([^()]*\b${e}\b[^()]*\)\s*(?::[^=;{]*)?=>|\b${e}\s*=>|function\s*\w*\s*\([^()]*\b${e}\b)`).test(before);
+}
+
+/** @returns {{ rule: string, line: number, text: string }[]} */
+export function scanText(text) {
+  const { code, markers } = sanitize(text);
+  const raw = text.split("\n"), lines = code.split("\n");
+  const starts = [0];
+  for (let i = 0; i < code.length; i++) if (code[i] === "\n") starts.push(i + 1);
+  const lineOf = (idx) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= idx) lo = mid; else hi = mid - 1; } return lo; };
+  const ruleNames = Object.keys(RULES);
+  /** @type {Map<number, string>} 0-based line -> rule, one hit per line (first rule in RULES order wins) */
+  const found = new Map();
+  const add = (rule, idx, endIdx = idx) => {
+    const l = lineOf(idx);
+    if (markers.has(l - 1)) return;
+    for (let k = l; k <= lineOf(endIdx); k++) if (markers.has(k)) return; // a marker anywhere on the statement's lines
+
+    const prev = found.get(l);
+    if (!prev || ruleNames.indexOf(rule) < ruleNames.indexOf(prev)) found.set(l, rule);
+  };
+  const above = (l, n) => lines.slice(Math.max(0, l - n), l);
+
+  // bare-sleep
+  const sleepAt = (idx, delay, endIdx) => {
+    if (isZero(delay)) return; // setTimeout(r, 0) only yields to the event loop
+    if (!isLiteral(delay) && isParam(code, idx, delay)) return; // the sleep helper's own definition
+    const l = lineOf(idx);
+    if (LOOP.test(lines[l]) || POLL_HELPER.test(lines[l]) || above(l, 3).some((x) => LOOP.test(x)) || above(l, 8).some((x) => POLL_HELPER.test(x))) return;
+    add("bare-sleep", idx, endIdx);
+  };
+  for (const m of code.matchAll(SLEEP_PROMISE)) sleepAt(m.index, m[1], m.index + m[0].length);
+  for (const m of code.matchAll(SLEEP_CALL)) {
+    if (m[1] === "wait" && !isLiteral(m[2])) continue; // `wait(promise)` is too common a name to guess at
+    sleepAt(m.index, m[2], m.index + m[0].length);
+  }
+
+  // elapsed-limit, fresh-date-sum
+  for (const m of code.matchAll(/\bexpect(?:\.\w+)*\s*\(/g)) {
+    const open = m.index + m[0].length - 1;
+    const stmt = code.slice(m.index, stmtEnd(code, m.index));
+    if (/LIMIT_MS|baseline/i.test(stmt)) continue;
+    if (/\.toBeLessThan(?:OrEqual)?\s*\(/.test(stmt) && isTimingSubject(parenBody(code, open))) add("elapsed-limit", m.index, m.index + stmt.length);
+    else if (FRESH_SUM.test(stmt)) add("fresh-date-sum", m.index, m.index + stmt.length);
+  }
+
+  // fixed-length-read
+  for (const m of code.matchAll(DIRECT_READ)) add("fixed-length-read", m.index);
+  for (const m of code.matchAll(READ_DECL)) {
+    const end = stmtEnd(code, m.index + m[0].length);
+    const rhs = code.slice(m.index + m[0].length, end);
+    if (!/\breadFile(?:Sync)?\s*\(/.test(rhs) || /\.(?:split|match|matchAll|map|filter)\s*\(|\bJSON\.parse\b|\bparse\w*\(/.test(rhs)) continue;
+    // both ends literal: `t.slice(0, 200)`, not `t.slice(0, start)` (a position the test computed)
+    const use = new RegExp(String.raw`\b${m[1]}\s*\.(?:toString\([^)]*\)\s*\.)?(?:slice|substring|substr|subarray)\(\s*-?\d[\d_]*\s*(?:,\s*(?:-?\d[\d_]*|[A-Z][A-Z0-9_]+)\s*)?\)`, "g");
+    use.lastIndex = end;
+    for (const u of code.matchAll(use)) if (u.index >= end) add("fixed-length-read", u.index);
+  }
+
+  return [...found].sort((a, b) => a[0] - b[0]).map(([l, rule]) => ({ rule, line: l + 1, text: raw[l].trim() }));
+}
 
 const TEST_FILE = /(?:^|\/)test\/.*\.(?:ts|tsx|mjs|js)$|\.(?:test|spec)\.(?:ts|tsx|mjs|js)$/;
 // This lint's own tests quote the patterns on purpose.
 const SKIP_FILE = /^scripts\/check-test-lines\.test\.mjs$/;
-
-/** @returns {{ rule: string, line: number, text: string }[]} */
-export function scanText(text) {
-  const lines = text.split("\n");
-  const hits = [];
-  lines.forEach((text, i) => {
-    if (/test-lines-ok:/.test(text) || (i > 0 && /test-lines-ok:/.test(lines[i - 1]))) return;
-    const ctx = { above: (n) => lines.slice(Math.max(0, i - n), i) };
-    for (const [rule, r] of Object.entries(RULES)) {
-      if (r.test(text, ctx)) { hits.push({ rule, line: i + 1, text: text.trim() }); break; }
-    }
-  });
-  return hits;
-}
 
 export function scanRepo(root) {
   const listed = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 64 << 20 }).split("\0").filter(Boolean);
