@@ -363,6 +363,8 @@ export type OwnerAskCheck = {
   refusal: string | null;
   /** Earlier owner answers close to the ask but not counted as the same one: shown to the asker, not refused. */
   related: OwnerAnswerHit[];
+  /** Answered owner step cards with nearly the same ask (R34): a warning to check the live state first, never a refusal. */
+  doneSteps?: OwnerAnswerHit[];
   /** Whether meaning search took part, and why not when it couldn't. */
   meaning: OwnerAnswerSearch["meaning"];
 };
@@ -394,18 +396,32 @@ export async function checkOwnerAsk(
   const counts = (h: OwnerAnswerHit) => h.kind !== "card" || fact.get(h.sourceId) === true;
   const repeat = hits.find((h) => isRepeat(h) && counts(h));
   const related = hits.filter((h) => h !== repeat && counts(h) && Math.max(h.score, h.sameQuestion, h.meaning ?? 0) >= 0.5).slice(0, 3);
-  if (!repeat) return { refusal: null, related, meaning };
+  // R34 (BOS-1670): an answered step card is never a refusal (a step can need redoing), but the raiser is shown it,
+  // so the ask isn't made without checking the live state first.
+  const stepIds = new Set(
+    ctxs
+      .filter((d) => {
+        const c = (d.context as { settled?: unknown; plan?: boolean; ownerMustDo?: boolean; steps?: unknown[] } | null) ?? {};
+        return !c.settled && !c.plan && (c.ownerMustDo === true || !!c.steps?.length);
+      })
+      .map((d) => d.id),
+  );
+  const doneSteps = hits.filter((h) => h.kind === "card" && stepIds.has(h.sourceId) && Math.max(h.sameQuestion, h.meaning ?? 0) >= REPEAT_SAME_QUESTION).slice(0, 3);
+  if (!repeat) return { refusal: null, related, doneSteps, meaning };
   const what = repeat.question ? `"${clip(repeat.question, 160)}"` : "this";
   const where = `${KIND_LABEL[repeat.kind]} ${repeat.sourceId}${repeat.ticketRef ? ` on ${repeat.ticketRef}` : ""}`;
   const said = repeat.kind === "note" && repeat.ownerNote ? `${clip(repeat.ownerNote, 300)} (${clip(repeat.answer, 200)})` : clip(repeat.answer, 300);
   const note = repeat.kind === "card" && repeat.ownerNote ? `; their note: "${clip(repeat.ownerNote, 200)}"` : "";
-  return { refusal: `The owner already answered ${what} (${where}) on ${day(repeat.at)} UTC: "${said}"${note}`, related, meaning };
+  return { refusal: `The owner already answered ${what} (${where}) on ${day(repeat.at)} UTC: "${said}"${note}`, related, doneSteps, meaning };
 }
 
 /** The lines added to a raise or notice that went through: related earlier answers, and a word on meaning search when it couldn't help. */
 export function askCheckNotes(c: OwnerAskCheck): string {
   const out: string[] = [];
   if (c.related.length) out.push(`Possibly related earlier owner answers (not the same question, so this went through; withdraw it if one of these settles it):\n${c.related.map(describeOwnerAnswer).join("\n")}`);
+  if (c.doneSteps?.length) {
+    out.push(`The owner already did these steps on an earlier card. Check the live state first (the thing itself, not the answer); this went through, but if the step is done, withdraw it. If it must be redone, say why:\n${c.doneSteps.map((h) => `- the owner did this on card ${h.sourceId.slice(0, 8)}${h.ticketRef ? ` on ${h.ticketRef}` : ""} at ${day(h.at)} UTC (asked: "${clip(h.question ?? "", 160)}"; they answered: "${clip(h.answer, 120)}")`).join("\n")}`);
+  }
   if (typeof c.meaning === "object") out.push(`Meaning search was unavailable (${clip(c.meaning.unavailable, 160)}), so only word search checked whether the owner already answered this.`);
   return out.join("\n\n");
 }
