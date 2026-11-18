@@ -23,6 +23,12 @@ export type SnapTicket = {
   unblockedAt?: Date | null;
   /** Send-backs so far. */
   bounces: number;
+  /**
+   * BOS-1760: the ticket's checks on its current head and its merges, from the check queue: queued at `from`, ended at `to`
+   * (null while queued or running). An in-progress ticket waits on these, so it is not chased while one is live, and its
+   * idle clock restarts when the last one ends. Absent in the backtest, which has no check history.
+   */
+  checks?: Array<{ from: Date; to: Date | null }>;
 };
 
 export type SnapRun = { id: string; ticketId: string; agentId: string | null; startedAt: Date; endedAt: Date | null; outcome: string | null };
@@ -120,6 +126,12 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
     if (x.state === "in_progress") {
       // A scheduled check (waiting on CI, a deploy) or a queued wake is a plan, not a stall.
       if (x.awaitingPlan || x.scheduled) continue;
+      // BOS-1760: a quick check queued or running on its head, or its merge running, is a wait nobody can act on
+      // (the queue can be 40 deep). The clock restarts when the check ends: `waitEnd` stands in for a run's end
+      // below, so a delivered result with no run after it is flagged at the usual limits, counted from the result.
+      const checks = (x.checks ?? []).filter((c) => c.from.getTime() <= t);
+      if (checks.some((c) => !c.to || c.to.getTime() > t)) continue;
+      const waitEnd = Math.max(-Infinity, ...checks.map((c) => c.to!.getTime()).filter((e) => e > since));
       const mine = runs.filter((r) => r.agentId === x.assigneeAgentId);
       const last = mine.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0];
       // Rule 1 of the idle-capacity rules (BOS-659): the agent is idle on an in-progress ticket and nothing
@@ -131,28 +143,31 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
       //     follow-up). A crash keeps its own rule and grace, because Boss Man's free recovery goes first; a
       //     run that straddles or precedes the move stays the long rules' shape, so one idle spell is one flag.
       if (!last) {
-        const idle = t - since;
+        const idle = t - Math.max(since, waitEnd);
         if (idle >= s.idleAgentMinutes * 60_000) add("idle_agent", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
         continue;
       }
-      if (last.endedAt && !isCrash(last.outcome) && since < last.startedAt.getTime() && t - last.endedAt.getTime() < RUN_ENDED_GRACE_MS) {
-        const idle = t - last.endedAt.getTime();
+      // When the agent last had something going on it: its run's end, or a later check's (BOS-1760).
+      const end = last.endedAt ? Math.max(last.endedAt.getTime(), waitEnd) : null;
+      if (end !== null && !isCrash(last.outcome) && since < last.startedAt.getTime() && t - end < RUN_ENDED_GRACE_MS) {
+        const idle = t - end;
         if (idle >= s.idleAgentMinutes * 60_000) add("idle_agent", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
         continue;
       }
       // Inside the grace after a run, Boss Man's own free fixes go first; nothing is flagged yet.
-      if (last?.endedAt && t - last.endedAt.getTime() < RUN_ENDED_GRACE_MS) continue;
-      if (last?.endedAt) {
+      if (end !== null && t - end < RUN_ENDED_GRACE_MS) continue;
+      if (end !== null) {
         if (isCrash(last.outcome)) {
-          add("run_crashed", { runId: last.id, runOutcome: last.outcome, idleMs: t - last.endedAt.getTime() });
+          add("run_crashed", { runId: last.id, runOutcome: last.outcome, idleMs: t - end });
           continue;
         }
         if (since < last.startedAt.getTime()) {
-          add("run_ended_unmoved", { runId: last.id, runOutcome: last.outcome, idleMs: t - last.endedAt.getTime() });
+          add("run_ended_unmoved", { runId: last.id, runOutcome: last.outcome, idleMs: t - end });
           continue;
         }
       }
-      const idle = t - since - covered(mine.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()]), since, t);
+      const busy = [...mine.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()] as [number, number]), ...checks.map((c) => [c.from.getTime(), c.to!.getTime()] as [number, number])];
+      const idle = t - since - covered(busy, since, t);
       if (idle >= s.inProgressHours * H) add("stale_in_progress", { idleMs: idle, limitMs: s.inProgressHours * H });
     } else if (x.state === "ready") {
       // Rule 2 of the idle-capacity rules (BOS-659): every ticket it waited on is done or cancelled (so
