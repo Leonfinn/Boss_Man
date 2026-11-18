@@ -338,15 +338,60 @@ describe("deploy wait (BOS-420)", () => {
     expect(w.notes).toEqual([]); // self-deploy reports how a deploy ended
   });
 
-  it("main moving on while it waits makes the approval lapse", async () => {
+  // BOS-1805 (18 Nov 14:37): this used to end the wait with a quiet "main moved on" note, so the owner's "Deploy" was
+  // never sent and the live server stayed where it was. Since BOS-753 the host deploys the newest checked commit on main
+  // from the approved one, which is what the card promises, so the approval stands.
+  it("main moving on while it waits keeps the approval, and it is sent once the machine is quiet", async () => {
     const { w, deps } = world();
     w.checks = 1;
     const svc = deployWaitService(db, deps);
     await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
     w.tip = C;
+    expect((await svc.step())?.phase).toBe("waiting");
+    expect(w.notes.some((n) => /main moved on/.test(n.title))).toBe(false);
+    w.checks = 0;
+    expect((await svc.step())?.phase).toBe("sent");
+    expect(w.sent).toEqual([{ id: ID, override: false }]);
+  });
+
+  it("a second approval while one waits replaces it instead of being dropped (BOS-1805)", async () => {
+    const { w, deps } = world();
+    w.checks = 1;
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    const ID2 = "22222222-2222-4222-8222-222222222222";
+    w.tip = C;
+    const r = await svc.begin({ decisionId: ID2, commit: C, fromCommit: A });
+    expect(r).toMatchObject({ decisionId: ID2, commit: C, phase: "waiting" });
+    w.checks = 0;
+    await svc.step();
+    expect(w.sent).toEqual([{ id: ID2, override: false }]);
+  });
+
+  it("a second approval while an update is with the host or in its window is refused with the reason, never dropped (BOS-1805)", async () => {
+    const { w, deps, host } = world();
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    const again = () => svc.begin({ decisionId: "22222222-2222-4222-8222-222222222222", commit: C, fromCommit: B });
+    await expect(again()).rejects.toThrow(/Not sent: the update to bbbbbbbb is with the host now.*this card stays open/);
+    host("deployed");
+    w.trialUntil = new Date(t0 + 17 * MIN).toISOString();
+    expect((await svc.step())?.phase).toBe("window");
+    await expect(again()).rejects.toThrow(/is live and in its standby window/);
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it("an approval the 3-hour cap never sent is told to the CEO with the reason (BOS-1805)", async () => {
+    const { w, deps } = world();
+    const told: string[] = [];
+    deps.tellCeo = async (note) => void told.push(note);
+    w.checks = 2;
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    offset += 3 * 60 * MIN + MIN;
     expect(await svc.step()).toBeNull();
-    expect(w.sent).toEqual([]);
-    expect(w.notes.at(-1)?.title).toMatch(/main moved on/);
+    expect(told).toHaveLength(1);
+    expect(told[0]).toMatch(/was not sent: it waited 3 hours.*2 merge checks are running.*live server is unchanged/);
   });
 
   it("the soft hold lifts itself after 3 hours with a page", async () => {

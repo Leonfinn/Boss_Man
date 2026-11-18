@@ -63,6 +63,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "runner update: can't tell": "scheduled",
   // The live commit still can't be placed after the missed-merge sweep (BOS-1645): once per commit, never dropped.
   "live commit not placed": "scheduled",
+  // The owner's approved server update left the live commit unchanged (BOS-1805): once per deploy, never dropped.
+  "deploy left the server unchanged": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

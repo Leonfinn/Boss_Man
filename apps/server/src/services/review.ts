@@ -2811,6 +2811,18 @@ export function reviewService(
         }
         return { status: "passed" };
       };
+      /**
+       * BOS-1805: main moved, so the next round builds a new merge and queues a new 30-50 min check. A merge-check fix that
+       * merged (or was marked) after this attempt began holds every other merge until it is live (mergeWaits), but the hold
+       * was only read when an attempt started or failed, so an attempt already in flight kept rebuilding and re-queuing
+       * checks past it (18 Nov, after BOS-1762 merged). Read it again before each rebuild: held, the attempt ends as
+       * "Passed, held" (ReviewHeldError), with nothing queued.
+       */
+      const heldBeforeRebuild = async (round: number) => {
+        if (round === 0) return;
+        const waiting = await holdForWaits(ticketId);
+        if (waiting) throw waiting;
+      };
       type ServerMergeEnd = MergeResult | Stuck | { status: "job_superseded" } | { status: "left_review" } | { status: "handed_over" };
       // Merge train: the check that failed once, then passed its one re-run (a flaky test), named on the landing's result.
       let flakyCheck: string | null = null;
@@ -2823,6 +2835,7 @@ export function reviewService(
         let adopted = ci ? undefined : opts?.adopt;
         // BOS-1762: a ticket that took the landing turn gets one more round, so the turn it earned isn't wasted on the round cap.
         for (let round = 0; round < 3 || (round < 4 && landingTurns.holds(t.projectId, ticketId)); round++) {
+          await heldBeforeRebuild(round);
           const prep: MergeResult = adopted ? { status: "prepared", commit: adopted.commit, tree: adopted.tree, targetSha: "" } : await prepare();
           if (prep.status !== "prepared") return prep;
           const wasAdopted = !!adopted;
@@ -2849,6 +2862,7 @@ export function reviewService(
       // checks test the branch, not the merge, so a rebuilt merge (main moved) doesn't run them again.
       const legacyCiMerge = async (): Promise<MergeResult | Early | { status: "left_review" }> => {
         for (let round = 0; round < 3 || (round < 4 && landingTurns.holds(t.projectId, ticketId)); round++) {
+          await heldBeforeRebuild(round);
           const prep = await prepare();
           if (prep.status !== "prepared") return prep;
           const r = await alongsideCi(prep, async (stop): Promise<Early | null> => {

@@ -3467,6 +3467,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           } catch (err) {
             // Nothing reached the host, so the question stays open for another try.
             await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+            // BOS-1805: a refusal with its own reason (another update already under way) is said as it is.
+            if (err instanceof AnswerError) throw err;
             throw new AnswerError(`The request could not be written for the host deployer: ${(err as Error).message}`);
           }
         }
