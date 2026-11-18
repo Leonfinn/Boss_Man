@@ -1717,9 +1717,11 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 
 /* (BOS-1825) Strips that hold a title, a time and a link: on a narrow screen they stack instead of squeezing each part into its own column. */
 .strip.stack-narrow .strip-title { overflow-wrap: anywhere; }
-@media (max-width: 900px) {
+/* Wide mouse screens keep the row, but its time and link never wrap. A narrow or touch screen (a phone, in either orientation) stacks it. */
+.strip.stack-narrow .strip-when, .strip.stack-narrow > a { white-space: nowrap; flex: none; }
+.strip.stack-narrow .strip-title { min-width: 0; }
+@media (max-width: 900px), (pointer: coarse) {
   .strip.stack-narrow { display: block; }
   .strip.stack-narrow .strip-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-weight: 600; }
-  .strip.stack-narrow .strip-when { white-space: nowrap; display: block; }
-  .strip.stack-narrow a { white-space: nowrap; }
+  .strip.stack-narrow .strip-when { display: block; }
 }
