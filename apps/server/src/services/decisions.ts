@@ -65,6 +65,7 @@ import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
+import { type LintOverrideInput, cleanOverride, overrideLines, overrideTooShort, parseStoredOverride, resolveOverride } from "./lint-override.js";
 import { composeFactsFrom } from "./compose-steps.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
@@ -645,11 +646,14 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
   // DR-057: other companies' records are read here, per card, by the server (an agent can't see them).
   const company = t.facts?.company ?? (await loadCompanyFacts(db, t.companyId, t.steps));
   const check = checkOwnerSetup(t.steps, { ...(t.facts ?? {}), ...(company ? { company } : {}) }, "raise");
-  const override = t.override?.trim() || null;
-  if (check.hard.length || (check.soft.length && !override)) {
+  // R35: the stored override covers only the steps it names; a refused step it doesn't name (or one whose text was
+  // edited, which clears the override on the ticket) goes to the CEO to fix, never to the owner.
+  const resolved = resolveOverride(check.soft, parseStoredOverride(t.override), { strict: false });
+  if (check.hard.length || resolved.error !== null) {
     await raiseOwnerSetupFix(db, { companyId: t.companyId, tickets: t.tickets, findings: [...check.hard, ...check.soft], commit: t.commit });
     return null;
   }
+  const covered = resolved.covered;
   // BOS-1650: every step was a `[when <fact>]` step whose fact is false, so there is nothing for the owner to do.
   // No card; the ticket says why. (The pass runs again at the next go-live, which settles the facts afresh.)
   if (!check.steps.length && check.dropped.length) {
@@ -657,7 +661,7 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
     return null;
   }
   const unknownHost = check.generic ? `\n\nBoss Man doesn't know this server's folders yet, so where a step needs one it says where to look it up (${THIS_HOST_POINTER}).` : "";
-  const overridden = check.soft.length && override ? `\n\nThe CEO let these steps past Boss Man's card check: ${override}` : "";
+  const overridden = covered.length ? `\n\nThe CEO let these steps past Boss Man's card check:\n${overrideLines(covered)}` : "";
   const heading =
     others.length === 0
       ? `"${first.title}" is live.`
@@ -816,7 +820,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
  * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string; company?: CompanyFacts; images?: Record<string, string>; mismatchedSites?: Record<string, string> }): { error: string; lint?: undefined; steps?: undefined; stepSources?: undefined } | { error: null; lint?: CardLint; steps?: string[]; stepSources?: Array<StepSource | null> } {
+export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: LintOverrideInput; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string; company?: CompanyFacts; images?: Record<string, string>; mismatchedSites?: Record<string, string> }): { error: string; lint?: undefined; steps?: undefined; stepSources?: undefined } | { error: null; lint?: CardLint; steps?: string[]; stepSources?: Array<StepSource | null> } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -824,9 +828,9 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
   if (a.ownerMustDo && !a.steps?.length) {
     return { error: "The owner has to do something, so give steps: a short numbered list in plain words, with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners) and how to undo it. Prefer an in-app button over host commands." };
   }
-  const override = a.lintOverride?.replace(/\s+/g, " ").trim();
+  const override = cleanOverride(a.lintOverride);
   if (override !== undefined && !a.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the steps instead, or ask the CEO to raise the card." };
-  if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
+  if (override !== undefined && overrideTooShort(override)) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!a.steps?.length) return { error: null };
   const proof = a.proof?.trim() ? parseProof(a.proof) : undefined;
   if (typeof proof === "string") return { error: `The ${proof}.` };
@@ -875,8 +879,12 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
   if (hard.length) return { error: `These steps can't go to the owner as written:\n${lintLines(refuse)}\n${tail}${override ? " lintOverride can't let through a command that isn't copy-safe, a value Boss Man doesn't have, or a command that waits for typed input, opens a pager or never returns." : ""}` };
-  if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
-  const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}), ...(proof ? { proof } : {}) };
+  if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride naming the step and the reason; the owner sees it on the card." : ""}` };
+  // R35: the override must name each refused step; one it doesn't name stays refused.
+  const resolved = resolveOverride(soft, override, { strict: true });
+  if (resolved.error !== null) return { error: `These steps can't go to the owner as written:\n${resolved.uncovered?.length ? lintLines(resolved.uncovered) : resolved.error}\n${resolved.uncovered?.length ? `${resolved.error}\n` : ""}${tail}` };
+  const covered = resolved.covered;
+  const lint: CardLint = { warn, ...(covered.length ? { override: { reason: covered.map((c) => c.reason).join(" "), findings: covered.flatMap((c) => c.findings), entries: covered } } : {}), ...(proof ? { proof } : {}) };
   // BOS-1665: the checker read the tags above; the owner's steps leave here without them, and the source of each step
   // is kept beside them for the muted "Written from…" line. No screen or push has to remember to strip a tag.
   const owner = splitOwnerSteps(steps, a.images);

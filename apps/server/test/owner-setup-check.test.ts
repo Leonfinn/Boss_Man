@@ -130,10 +130,35 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: false, lintOverride: "the add-on restarts itself" }).error).toMatch(/Only the CEO/);
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: true, lintOverride: "short" }).error).toMatch(/at least 10/);
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: true })).toMatchObject({ error: expect.stringContaining("pass lintOverride") });
-    expect(ownerSetupWriteCheck(vague, {}, { byCeo: true, lintOverride: "The add-on restarts by itself on the update." })).toEqual({ error: null, override: "The add-on restarts by itself on the update." });
+    // R35: a plain reason on one refused step is stored with the step it covers.
+    const stored = ownerSetupWriteCheck(vague, {}, { byCeo: true, lintOverride: "The add-on restarts by itself on the update." });
+    expect(stored).toEqual({ error: null, override: expect.any(String) });
+    expect(JSON.parse((stored as { override: string }).override)).toEqual([{ steps: [1], rules: [expect.any(String)], reason: "The add-on restarts by itself on the update." }]);
     // Nothing to let through: nothing is stored.
     expect(ownerSetupWriteCheck(["Settings → Funding → Add funding source"], {}, { byCeo: true, lintOverride: "not needed at all here" })).toEqual({ error: null, override: null });
     // A command that isn't copy-safe is never let through.
     expect(ownerSetupWriteCheck(["Run `mkdir <your-folder>`"], {}, { byCeo: true, lintOverride: "The owner knows which folder." }).error).toMatch(/placeholder/);
+  });
+
+  it("R35: the override names the steps it covers; a refused step it leaves out stays refused (fails on the old code)", () => {
+    const two = ["Restart the notifications add-on", "Settings → Funding → Add funding source", "Restart the other add-on"];
+    const why = "Both add-ons restart by themselves.";
+    // One reason can't cover refusals on two steps.
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: why }).error).toMatch(/name the steps it covers/);
+    // Naming one leaves the other refused.
+    const one = ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1], reason: why }] });
+    expect(one.error).toMatch(/Step 3: /);
+    expect(one.error).toMatch(/isn't covered/);
+    // Naming a step with no refusal is itself refused.
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1, 2, 3], reason: why }] }).error).toMatch(/override for step 2 matches nothing/);
+    // Naming both is stored with its scope, and a re-check of the stored value (not strict) passes.
+    const both = ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1, 3], reason: why }] });
+    expect(both).toEqual({ error: null, override: expect.any(String) });
+    const stored = JSON.parse((both as { override: string }).override);
+    expect(stored).toEqual([{ steps: [1, 3], rules: [expect.any(String)], reason: why }]);
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: stored, strict: false })).toEqual({ error: null, override: expect.any(String) });
+    // Step 3 edited to something else: the stored override no longer covers a new refusal there, and an entry whose refusal went is only unused.
+    expect(ownerSetupWriteCheck(["Restart the notifications add-on", "Settings → Funding → Add funding source", "Restart the other add-on"], {}, { byCeo: true, lintOverride: [{ steps: [1], reason: why }], strict: false }).error).toMatch(/Step 3/);
+    expect(ownerSetupWriteCheck(["Restart the notifications add-on", "Settings → Funding → Add funding source", "Settings → Funding → Add funding source"], {}, { byCeo: true, lintOverride: stored, strict: false })).toMatchObject({ error: null });
   });
 });
