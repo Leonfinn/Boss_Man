@@ -37,10 +37,11 @@ git clone -q "$T/origin.git" "$T/src" 2>/dev/null
 push() { # file: change a file and push main; prints the new sha
   mkdir -p "$(dirname "$T/w/$1")"; echo "$RANDOM" >"$T/w/$1"
   git -C "$T/w" add -A; git -C "$T/w" commit -qm "change $1"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
-  # Exactly one 40-char sha, or stop here naming the helper (BOS-1817): a stray line or an empty value
-  # would otherwise only show up later as the deployer rejecting the request's shape.
+  # Exactly one 40-char sha, or end the whole test naming the helper (BOS-1817): a stray line or an empty
+  # value would otherwise only show up later as the deployer rejecting the request's shape. push runs in a
+  # $(...) subshell, where exit would end only the subshell, so signal the main script ($$ is the parent).
   local sha; sha="$(git -C "$T/w" rev-parse HEAD)"
-  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: push($1) did not give one 40-char sha, got: [$sha]" >&2; exit 1; }
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: push($1) did not give one 40-char sha, got: [$sha]" >&2; kill -TERM "$$"; exit 1; }
   echo "$sha"
 }
 c1="$(push apps/server/a)"
