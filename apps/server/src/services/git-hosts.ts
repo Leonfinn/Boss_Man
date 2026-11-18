@@ -15,7 +15,7 @@ export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; fa
  * id (so its annotations can be asked for). `step`: the step that failed. `unstarted`: the job failed without running a
  * step or getting a runner, which is how GitHub's jobs data shows a job it refused to start (BOS-1630).
  */
-export type CiRun = { id: number; name: string; url: string; step?: string; unstarted?: boolean };
+export type CiRun = { id: number; name: string; url: string; step?: string; unstarted?: boolean; /** BOS-1733: the workflow run the job is in, for a re-run of its failed jobs. */ runId?: number };
 /**
  * What the merge gate reads before it merges (BOS-1070). `waiting`: jobs not finished yet. `billing`: a job didn't start
  * because of the account's spending limit or payments, which isn't the agent's to fix.
@@ -129,8 +129,11 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       ? { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }
       : { authorization: `token ${token}`, accept: "application/json" };
 
-  async function call(cfg: GitHostConfig, token: string, method: string, path: string, body?: unknown) {
-    const headers = authHeaders(cfg, token);
+  /** A GET with no token (BOS-1733): a public GitHub repo's annotations and runs need none. */
+  const anonymousGet = (cfg: GitHostConfig, path: string) => call(cfg, null, "GET", path);
+
+  async function call(cfg: GitHostConfig, token: string | null, method: string, path: string, body?: unknown) {
+    const headers: Record<string, string> = token === null ? { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" } : authHeaders(cfg, token);
     if (body !== undefined) headers["content-type"] = "application/json";
     const res = await http(`${cfg.apiBase}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}${path}`, {
       method,
@@ -263,10 +266,10 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           continue;
         }
         // A run that failed before any job (a broken workflow file) is named by the run itself.
-        if (!bad.length) failed.push({ id: 0, name: nameOf(r), url: String(r.html_url ?? "") });
+        if (!bad.length) failed.push({ id: 0, name: nameOf(r), url: String(r.html_url ?? ""), runId: Number(r.id) });
         for (const j of bad) {
           const step = j.steps.find((s) => FAILED_CONCLUSIONS.includes(String(s.conclusion)));
-          failed.push({ id: j.id, name: j.name, url: j.url, ...(step ? { step: step.name } : {}), ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}) });
+          failed.push({ id: j.id, name: j.name, url: j.url, runId: Number(r.id), ...(step ? { step: step.name } : {}), ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}) });
         }
       }
       const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : cancelled.length ? "cancelled" : "passed";
@@ -320,17 +323,22 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
      * Annotations sit behind the Checks permission, so they are optional (BOS-1630): a refused read gives the failed step
      * instead, and a job GitHub never started is taken as its billing refusal, the one reason that leaves no step and no runner.
      */
-    async failures(cfg: GitHostConfig, token: string, runs: CiRun[], per = 10): Promise<Array<{ run: CiRun; lines: string[]; billing: boolean }>> {
+    async failures(cfg: GitHostConfig, token: string, runs: CiRun[], per = 10): Promise<Array<{ run: CiRun; lines: string[]; billing: boolean; paths: string[] | null }>> {
       if (cfg.kind !== "github") return [];
-      const out: Array<{ run: CiRun; lines: string[]; billing: boolean }> = [];
+      const out: Array<{ run: CiRun; lines: string[]; billing: boolean; paths: string[] | null }> = [];
       for (const run of runs.slice(0, 5)) {
-        const res = run.id ? await call(cfg, token, "GET", `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null) : null;
+        let res = run.id ? await call(cfg, token, "GET", `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null) : null;
+        // BOS-1733: a fine-grained token has no Checks permission (BOS-1630), but a public repo's annotations need no token at
+        // all, so a refused read is asked once more without it. A private repo answers that with 404, as before.
+        if (run.id && (res?.status === 401 || res?.status === 403)) res = await anonymousGet(cfg, `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null);
         if (!res?.ok || !Array.isArray(res.json)) {
-          out.push({ run, lines: run.step ? [`failed at step "${run.step}"`] : [], billing: !!run.unstarted });
+          out.push({ run, lines: run.step ? [`failed at step "${run.step}"`] : [], billing: !!run.unstarted, paths: null });
           continue;
         }
         const rows = res.json;
         const failing = rows.filter((a) => a.annotation_level === "failure");
+        // The files the failures point at (BOS-1733), without GitHub's own job-level line (".github", "Process completed").
+        const paths = failing.filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? ""))).map((a) => (typeof a.path === "string" && a.path && a.path !== ".github" ? a.path : ""));
         // Only GitHub's account-level note counts (no file, or ".github"): a test's annotation always names its file.
         const billing = failing.some((a) => (!a.path || a.path === ".github") && billingRefusal(`${String(a.title ?? "")} ${String(a.message ?? "")}`)) || (!failing.length && !!run.unstarted);
         const lines = failing
@@ -341,9 +349,19 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
             return `${where}${title}${String(a.message ?? "").split("\n")[0]}`.slice(0, 300);
           })
           .slice(0, per);
-        out.push({ run, lines, billing });
+        out.push({ run, lines, billing, paths });
       }
       return out;
+    },
+
+    /**
+     * BOS-1733: ask GitHub to run only the failed jobs of a workflow run again (needs Actions: Read and write). False when it
+     * refuses or off GitHub; the gate then sends the ticket back as before and says why.
+     */
+    async rerunFailedJobs(cfg: GitHostConfig, token: string, runId: number): Promise<boolean> {
+      if (cfg.kind !== "github" || !runId) return false;
+      const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun-failed-jobs`).catch(() => null);
+      return !!res?.ok;
     },
 
     /**

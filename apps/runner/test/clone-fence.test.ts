@@ -104,7 +104,7 @@ describe.skipIf(!live)("the runner's git in a clone, fenced (BOS-323)", () => {
     git(dir, "--git-dir", evilGit, "config", "filter.planted.clean", `sh -c 'touch ${outside}/filter; cat'`);
     writeFileSync(path.join(evilGit, "info", "attributes"), "* filter=planted\n");
     writeFileSync(path.join(dir, "left.txt"), "uncommitted\n");
-    rmSync(path.join(dir, ".git"), { recursive: true, force: true });
+    rmSync(path.join(dir, ".git"), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     writeFileSync(path.join(dir, ".git"), `gitdir: ${evilGit}\n`);
     await ws.checkpoint(spec, "after a turn").catch(() => undefined);
     await ws.diff(spec).catch(() => undefined);

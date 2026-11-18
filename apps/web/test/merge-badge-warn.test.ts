@@ -13,12 +13,12 @@ const shell = (opts: { collapsed?: boolean; stuck: number; waiting: number }) =>
 <nav class="side${opts.collapsed ? " collapsed" : ""}" aria-label="Main">
 <div class="side-bar"><div class="brand"><span>Boss Man</span></div><button class="side-collapse">x</button></div>
 <div id="nav-groups" class="nav-groups"><section><h2>Work</h2><ul>
-<li><a class="nav" href="#/merge-queue"><span class="nav-label">Merge queue</span><span class="count warn" aria-label="${opts.stuck} stuck">${opts.stuck}</span><span class="count-dot warn" aria-hidden="true"></span></a></li>
+<li><a class="nav" href="#/merge-queue"><span class="nav-label">Merge queue</span><span class="count warn" aria-label="merge line stuck">${opts.stuck}</span><span class="count-dot warn" aria-hidden="true"></span></a></li>
 </ul></section></div></nav>
 <main><h1>Page</h1></main></div>`;
 
 const normal = (waiting: number) => `<div class="app"><nav class="side" aria-label="Main"><div class="nav-groups"><section><h2>Work</h2><ul>
-<li><a class="nav" href="#/merge-queue"><span class="nav-label">Merge queue</span><span class="count" aria-label="${waiting} waiting to merge">${waiting}</span><span class="count-dot" aria-hidden="true"></span></a></li>
+<li><a class="nav" href="#/merge-queue"><span class="nav-label">Merge queue</span><span class="count" aria-label="${waiting} in the merge line">${waiting}</span><span class="count-dot" aria-hidden="true"></span></a></li>
 </ul></section></div></nav><main></main></div>`;
 
 const html = (body: string) => `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body>${body}</body></html>`;
@@ -72,7 +72,7 @@ describe.skipIf(!browser)("merge queue badge warning colour in a real browser (B
       await page.setContent(html(shell({ stuck: 2, waiting: 5 })), { waitUntil: "load" });
       const b = await page.evaluate(badge);
       expect(b.text).toBe("2");
-      expect(b.label).toBe("2 stuck");
+      expect(b.label).toBe("merge line stuck");
       expect(b.bg).toBe(AMBER);
     } finally {
       await page.close();

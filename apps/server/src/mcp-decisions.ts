@@ -8,6 +8,7 @@ import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { AnswerError, OPENING_WHY_MAX, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
+import { LINT_OVERRIDE_HELP, lintOverrideSchema } from "./services/lint-override.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { ReviewError, type HoldInput } from "./services/review.js";
@@ -70,7 +71,7 @@ export function registerDecisionTools(
         /** reissue of a card linked to after-merge criteria (BOS-1155): what each option means, pass, fail or none. */
         optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
-        lintOverride: z.string().max(500).optional(),
+        lintOverride: lintOverrideSchema.optional().describe(LINT_OVERRIDE_HELP),
         setsUp: z.enum(ADDONS).optional(),
         newHost: z.string().min(1).max(64).optional(),
         proof: z.string().max(300).optional(),

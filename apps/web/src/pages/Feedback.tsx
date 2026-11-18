@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { figureText } from "@boss-man/shared";
 import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
@@ -580,7 +581,8 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                 {TABS.map((t) => (
                   <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
                     {t.label}
-                    {t.id === "unprocessed" && counts.data?.[company.id] ? <span className="tab-count">{counts.data[company.id]}</span> : null}
+                    {/* R43: the sidebar Feedback badge's figure and label (feedback.toProcess). */}
+                    {t.id === "unprocessed" && counts.data?.[company.id] ? <span className="tab-count" aria-label={figureText("feedback.toProcess", counts.data[company.id]!)} title={figureText("feedback.toProcess", counts.data[company.id]!)}>{counts.data[company.id]}</span> : null}
                   </button>
                 ))}
               </div>

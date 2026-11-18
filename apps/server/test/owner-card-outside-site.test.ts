@@ -112,6 +112,36 @@ describe("R19b: a site whose docs misled the owner needs a screenshot", () => {
     expect(lint([notSeenStep], { ...OPT, mismatchedSites: { cloudflare: "2026-10-01T09:00:00Z" } })).toEqual([]);
   });
 
+  // BOS-1653: only the first step on the site must be seen; later ones are not seen with their own checkpoint.
+  it("one seen first step lets later not seen steps through, each with its own checkpoint", () => {
+    const first = `Open https://dash.cloudflare.com (seen: ${IMG}). You should see "holidayhours" listed.`;
+    const f = { ...OPT, ...mismatch, images: { [IMG]: "2026-11-11T00:00:00Z" } };
+    const later = `Open https://dash.cloudflare.com/profile/api-tokens ${NOT_SEEN}. You should see "API Tokens" at the top.`;
+    expect(all([first, later, later], f)).toEqual([]);
+    const bare = all([first, notSeenStep], f);
+    expect(bare).toHaveLength(1);
+    expect(bare[0]!.problem).toContain("its own checkpoint");
+  });
+
+  it("a not seen first step on a misled site is still refused, even if a seen step follows", () => {
+    const f = { ...OPT, ...mismatch, images: { [IMG]: "2026-11-11T00:00:00Z" } };
+    const first = `Open https://dash.cloudflare.com ${NOT_SEEN}. You should see "holidayhours" listed.`;
+    const r = all([first, `Open https://dash.cloudflare.com/profile (seen: ${IMG}).`], f);
+    expect(r).toHaveLength(1);
+    expect(r[0]!.step).toBe(1);
+  });
+
+  it("refuses a screenshot ask right after a token-bearing action", () => {
+    const secret = (steps: string[]) => all(steps, OPT).filter((x) => /shows a token/.test(x.problem));
+    const create = `Open https://dash.cloudflare.com ${NOT_SEEN}, press Create Tunnel and name it. You should see "holidayhours" listed.`;
+    expect(secret([create, "Send a screenshot of the page you land on."])).toHaveLength(1);
+    expect(secret([`Open https://github.com/settings/tokens ${NOT_SEEN}, press Create token. You should see "tokens" listed. Take a screenshot of the result.`])).toHaveLength(1);
+    // A screenshot before the action, or two steps on, is fine, and so is the stop option.
+    expect(secret(["Send a screenshot of your starting page.", create])).toEqual([]);
+    expect(secret([create, "Press Done in Boss Man.", "Send a screenshot of the tunnel list."])).toEqual([]);
+    expect(secret([create, "If it differs press My screen looks different (I'll attach a screenshot)."])).toEqual([]);
+  });
+
   it("keys one vendor the same however it is written", () => {
     expect(siteKey("dash.cloudflare.com")).toBe("cloudflare");
     expect(siteKey("Cloudflare")).toBe("cloudflare");

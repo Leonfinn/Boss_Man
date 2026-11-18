@@ -20,6 +20,7 @@ import { agents, companies, decisions, runs, watchdogActions } from "../db/schem
 import { record } from "./activity.js";
 import type { ClearWhen } from "./alert-clearing.js";
 import { adviceOf, CANCEL_RUN, checkAsk } from "./decisions.js";
+import type { LintOverrideInput } from "./lint-override.js";
 import type { HostFacts } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { mergeContext } from "./decision-context.js";
@@ -626,7 +627,7 @@ export function alertLadder(
     },
 
     /** The CEO can't settle it: it goes to the owner with what was tried and the steps (the raise_decision rules). */
-    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; /** The owner must act now (BOS-1097): the card also reaches their phone. */ urgentWhy?: string; steps?: string[]; /** BOS-1660: the opening of a card with steps. */ why?: string; minutes?: number; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
+    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; /** The owner must act now (BOS-1097): the card also reaches their phone. */ urgentWhy?: string; steps?: string[]; /** BOS-1660: the opening of a card with steps. */ why?: string; minutes?: number; ownerMustDo?: boolean; lintOverride?: LintOverrideInput; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
       const [ceo] = await db.select().from(agents).where(and(eq(agents.id, ceoId), eq(agents.companyId, companyId), eq(agents.role, "ceo")));
       if (!ceo) throw new WatchdogError(403, "Only the CEO passes cards to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);

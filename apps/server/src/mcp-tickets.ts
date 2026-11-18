@@ -4,11 +4,12 @@
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { addsUsabilityCriterion, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
+import { addsUsabilityCriterion, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
-import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
+import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, ticketImages, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { FIXES_LIVE_MAX, fixesLiveProblem, ownerSetupFixKey } from "./services/decisions.js";
+import { LINT_OVERRIDE_HELP, type LintOverrideInput, lintOverrideSchema, parseStoredOverride } from "./services/lint-override.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, SETUP_LINE_MAX, ownerSetupFacts, ownerSetupShapeProblem, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
 import { loadCompanyFacts } from "./services/company-facts.js";
 import { splitSteps } from "./services/runner-image.js";
@@ -21,7 +22,7 @@ import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
-import { CARD_CITE_REFUSAL, hostFactRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, hostFactRefusal, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent } from "./services/blocked-who-acts.js";
 import { OWNER_WAIT_REFUSAL, WAIT_LINK_REFUSAL, ticketHasOpenCard, waitsForNote, waitsOnOwnerNote } from "./services/owner-todo.js";
@@ -38,7 +39,7 @@ const runTicketNoter = (scope: Scope, hooks: McpHooks) => (ticketId: string) => 
 
 /** The words every ownerSetup field adds to its help (DR-052). */
 const SETUP_HELP = `${HOST_TOKEN_HELP} Each step is checked like an owner card when you write it; a vague host step (".env" with no path, "restart the add-on" with no command or button path) is refused. lintOverride (CEO only) lets a wrong finding through with a reason. With steps, also give ownerSetupWhy (what it changes for the owner) and ownerSetupIfSkipped (what happens if they skip it, or "nothing breaks"): the go-live card opens with them. No "If …", "Only if …", "Unless …" or "nothing to do" in a step: start a step that applies only sometimes with [when <fact>] (known facts: network guard allow line can go) and Boss Man keeps or drops it from its own record at go-live.`;
-const LINT_OVERRIDE = z.string().max(500).optional().describe("CEO only: the reason, for the owner, to let ownerSetup past a card-check finding you judge wrong. It can't let through a command that isn't copy-safe or a value Boss Man doesn't have.");
+const LINT_OVERRIDE = lintOverrideSchema.optional().describe(`${LINT_OVERRIDE_HELP} The reason is for the owner, to let ownerSetup past a card-check finding you judge wrong. It can't let through a command that isn't copy-safe or a value Boss Man doesn't have. Rewriting the steps without it clears it.`);
 
 /** BOS-1650: the two one-line fields the go-live card opens with. Required whenever a ticket has setup steps. */
 const SETUP_WHY = z.string().max(SETUP_LINE_MAX).optional().describe("Required with ownerSetup: one line on what the setup changes for the owner (the go-live card opens with it).");
@@ -59,7 +60,7 @@ async function setupShapeFail(db: Db, ticketId: string | null, w: { ownerSetup?:
  * DR-052 point 1: the card check on a ticket's owner setup steps, as they are written. Blank steps (none) pass.
  * Returns the refusal, or the CEO override to store with the steps (null when none was needed).
  */
-async function checkSetupWrite(db: Db, hostFacts: Services["hostFacts"] | undefined, scope: Scope, ownerSetup: string | null | undefined, lintOverride: string | undefined) {
+async function checkSetupWrite(db: Db, hostFacts: Services["hostFacts"] | undefined, scope: Scope, ownerSetup: string | null | undefined, lintOverride: LintOverrideInput | undefined) {
   const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
   const steps = splitSteps(ownerSetup ?? "");
   return ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride, byCeo: me?.role === "ceo" });
@@ -174,6 +175,8 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       const waitsOn = [...new Set(typeof waitsOnGiven === "string" ? [waitsOnGiven] : (waitsOnGiven ?? []))];
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
+      const badPage = pageClauseRefusal(acceptanceCriteria ?? []);
+      if (badPage) return fail(badPage);
       const setup = await checkSetupWrite(db, hostFacts, scope, ownerSetup, lintOverride);
       if (setup.error !== null) return fail(setup.error);
       const shapeFail = await setupShapeFail(db, null, { ownerSetup, why: ownerSetupWhy, ifSkipped: ownerSetupIfSkipped });
@@ -362,6 +365,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       },
     },
     async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, ownerSetupWhy, ownerSetupIfSkipped, lintOverride, urgent, fixesLive, size, fixesMergeCheck, acceptanceCriteria, waitsOn, ceoPlan, ceoPlanDeadline, markLive, reason, expected_version }) => {
+      const badPage = acceptanceCriteria ? pageClauseRefusal(acceptanceCriteria) : null;
+      if (badPage) return fail(badPage);
       const manager = await isManager();
       const otherChange = project !== undefined || featureId !== undefined || parentTicketId !== undefined || title !== undefined || body !== undefined || assignee !== undefined || noCode !== undefined || ownerSetup !== undefined || urgent !== undefined || fixesLive !== undefined || size !== undefined || acceptanceCriteria !== undefined || ceoPlan !== undefined || ceoPlanDeadline !== undefined || fixesMergeCheck !== undefined;
       // BOS-1345: marking a merge live is its own call, CEO only: it ends the go-live wait of a company that puts its own work live.
@@ -585,7 +590,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (!setup && state === "review" && !sameState) {
         const [stored] = await db.select({ ownerSetup: tickets.ownerSetup, override: tickets.ownerSetupOverride }).from(tickets).where(eq(tickets.id, ticketId));
         const steps = splitSteps(stored?.ownerSetup ?? "");
-        const again = steps.length ? ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride: stored?.override ?? undefined, byCeo: true }) : null;
+        const again = steps.length ? ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride: parseStoredOverride(stored?.override), byCeo: true, strict: false }) : null;
         if (again && again.error !== null) return fail(`${again.error}\nFix them with set_ticket_state ownerSetup, then move to review again.`);
       }
       const note = summary ?? withCriteria.current;
@@ -605,6 +610,12 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           const [live] = await db.select({ liveAt: tickets.liveAt, liveMarkedAt: tickets.liveMarkedAt, mergedAt: tickets.mergedAt }).from(tickets).where(eq(tickets.id, ticketId));
           if (hostFacts && withCriteria.criteria.some((c) => isAfterMerge(c))) {
             const refusal = hostFactRefusal(withCriteria.criteria, await hostFacts.sync(), live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? null, reported ?? "");
+            if (refusal) return fail(refusal);
+          }
+          // R37: a pass on a page-clause criterion must cite a screenshot attached since go-live and quote the page's words.
+          if (withCriteria.criteria.some((c) => isAfterMerge(c) && pageClauses(criterionText(c)).length)) {
+            const shots = await db.select({ id: ticketImages.id, createdAt: ticketImages.createdAt }).from(ticketImages).where(eq(ticketImages.ticketId, ticketId));
+            const refusal = pageShotRefusal(withCriteria.criteria, shots, live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? null, reported ?? "");
             if (refusal) return fail(refusal);
           }
           const uncited = uncitedCardPasses(withCriteria.criteria, `${withCriteria.current ?? ""}\n${note ?? ""}`, await openCardIds(db, ticketId));
