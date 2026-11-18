@@ -1077,7 +1077,8 @@ export async function buildApp(opts: AppOptions) {
       // BOS-1435: slots across the runner and ready check workers (the slots setting when there are none).
       return { mode: mode as CheckQueueMode, slots: await checks.capacity(companyId), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
     },
-    places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
+    // BOS-1803: seat waiters (no check-queue place yet) come along too, for their train-seat place and lane.
+    places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && (r.position || r.heldBySeat)).map((r) => [r.ticketId, { place: r.position, why: r.why, seatPlace: r.seatPlace, lane: r.lane }])),
     // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
     runnerConnected: async (companyId) => {
       const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));

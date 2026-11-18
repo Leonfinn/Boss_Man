@@ -2997,7 +2997,8 @@ export function reviewService(
        */
       const trainMerge = async (): Promise<ServerMergeEnd | Early> => {
         // BOS-1435: seats grow with ready check workers; a worker that drops shrinks them, and admit never evicts a seated member.
-        const { train, created } = trainFor(t.projectId, deps.checkCapacity ? await deps.checkCapacity(t.companyId) : await queue.slots());
+        // BOS-1803: the background-lane age is re-read on every landing (the owner's save also sets it at once).
+        const { train, created } = trainFor(t.projectId, deps.checkCapacity ? await deps.checkCapacity(t.companyId) : await queue.slots(), (await queue.laneAge()) * 60_000);
         if (created) {
           // BOS-1289: the first landing after a server start seeds the old order from the merge jobs still live, ordered the way
           // admit orders (tier, then place: BOS-1504), so a background-lane ticket isn't seated right behind the head.

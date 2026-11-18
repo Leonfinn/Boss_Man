@@ -668,7 +668,9 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[]; runnerPolicy?: SlotPolicy };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[]; runnerPolicy?: SlotPolicy; laneAgeMinutes?: number; defaultLaneAgeMinutes?: number };
+/** BOS-1803: the server's MAX_BACKGROUND_LANE_AGE_MINUTES (a day); the server refuses anything above it. */
+const MAX_LANE_AGE_MINUTES = 1440;
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -760,14 +762,17 @@ export function PrivateDetails() {
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
-  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy } | null>(null);
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy; laneAge: string } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train, policy: d.runnerPolicy ?? DEFAULT_POLICY };
+  const hasLaneAge = d.laneAgeMinutes !== undefined;
+  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train, policy: d.runnerPolicy ?? DEFAULT_POLICY, laneAge: String(d.laneAgeMinutes ?? "") };
   const n = Number(v.slots);
-  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots && policyValid(v.policy, n);
+  const lane = Number(v.laneAge);
+  const laneValid = !hasLaneAge || (v.laneAge.trim() !== "" && Number.isInteger(lane) && lane >= 0 && lane <= MAX_LANE_AGE_MINUTES);
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots && policyValid(v.policy, n) && laneValid;
   const was = d.runnerPolicy ?? DEFAULT_POLICY;
-  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train || v.policy.takes !== was.takes || v.policy.mergeKept !== was.mergeKept;
+  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train || v.policy.takes !== was.takes || v.policy.mergeKept !== was.mergeKept || (hasLaneAge && lane !== d.laneAgeMinutes);
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -839,6 +844,16 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      {/* BOS-1803: how long a background-lane merge lets newer ordinary work go first, then it waits by when it joined. */}
+      {hasLaneAge && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label htmlFor="check-lane-age">Background lane gives way for (minutes, 0 to {MAX_LANE_AGE_MINUTES})</label>
+          <input id="check-lane-age" type="number" min={0} max={MAX_LANE_AGE_MINUTES} value={v.laneAge} onChange={(e) => setEdit({ ...v, laneAge: e.target.value })} style={{ width: 80 }} />
+          <p className="muted" style={{ fontSize: 14 }}>
+            Approved work from background-lane agents lets newer ordinary work merge first for this long; after that it takes its place by when it joined the line (default {d.defaultLaneAgeMinutes ?? 120}). 0 means it always goes after ordinary work.
+          </p>
+        </div>
+      )}
       <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
@@ -850,7 +865,7 @@ export function CheckQueueSetting() {
           disabled={act.busy || !valid || !changed}
           onClick={() =>
             void act.run(async () => {
-              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train, ...(d.runnerPolicy ? { runnerPolicy: v.policy } : {}) } });
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train, ...(d.runnerPolicy ? { runnerPolicy: v.policy } : {}), ...(hasLaneAge ? { laneAgeMinutes: lane } : {}) } });
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
