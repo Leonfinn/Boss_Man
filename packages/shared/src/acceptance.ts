@@ -5,6 +5,7 @@
 // as missing. Shared so the server's review gate and the web's checklist agree exactly.
 import { z } from "zod";
 import { factClauses, namesHostFact } from "./host-facts.js";
+import { namesPage, pageClauses } from "./page-clause.js";
 
 /** A criterion as stored: a plain string, checked before merge (old rows stay strings), or the
  * `{ text, after: "merge" }` form for a check only a real host can settle (DR-024 #5). */
@@ -253,6 +254,12 @@ export function afterMergeLint(criteria: readonly Criterion[]): string {
   if (unclaused.length) {
     const names = unclaused.map((c) => `"${criterionText(c)}"`).join(", ");
     parts.push(`${names} names something the host reports, but has no fact clause, so the ticket could close on a "pass" while the host still shows it failing. Add one to the criterion, e.g. "(fact: repo.probe = ok)" or "(fact: no failing check)": the ticket then closes only when the host's newest report taken after it went live agrees. This is a warning only.`);
+  }
+  // R37: an after-merge criterion about a live page needs the page clause the done move checks.
+  const pageless = criteria.filter((c) => isAfterMerge(c) && namesPage(criterionText(c)) && !pageClauses(criterionText(c)).length);
+  if (pageless.length) {
+    const names = pageless.map((c) => `"${criterionText(c)}"`).join(", ");
+    parts.push(`${names} is about a live page but has no page clause: add (page: https://example.com/path shows "words only the working page shows") or this can close on a status code. With it, a pass must cite a screenshot attached after go-live and quote those words. This is a warning only.`);
   }
   return parts.join("\n");
 }
