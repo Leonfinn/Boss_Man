@@ -12,7 +12,9 @@ Release step: adding to this file is part of every release (Release Manager, on 
    or "after you update the runners" when that applies. Leave out tests, CI, internal tooling, our own server's details,
    agent names and ticket numbers (the site build refuses a ticket number such as BOS-123).
 4. Nothing to notice in this release? Add nothing.
-5. Once it is merged, redeploy the website so the page shows it.
+5. Once it is merged, redeploy the website so the page shows it. This is part of the release, not a separate job:
+   the release wake ("Release log: record") runs on every live commit, so republish from that commit before you finish it,
+   and say in the log entry whether the site was republished.
 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
