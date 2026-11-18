@@ -30,7 +30,13 @@ export function annotation(file, title, cleanTitle = "no failed test") {
   } catch {
     return `::error title=${title}::the JSON report had no test results`;
   }
-  if (!summary) return `::notice title=${cleanTitle}::no failed test in this report; a test in another package failed`;
+  if (!summary) {
+    // Only a report that says success, with files in it, proves this package passed. A report with
+    // success:false (unhandled errors, collection failures) or no files names no test but is not clean.
+    const clean = report.success === true && report.testResults.length > 0;
+    if (clean) return `::notice title=${cleanTitle}::the runner report shows no failed test; look at the other packages' test output`;
+    return `::error title=${title}::the runner report says it failed (or has no test files) but names no failed test`;
+  }
   return `::error title=${title}::${summary}`;
 }
 
