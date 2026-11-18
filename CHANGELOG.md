@@ -17,6 +17,17 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 17 November 2026
+
+- Settings → Server and runner → Updates now says a runner update is "needed" or "not needed", never "may be needed".
+- A go-live setup card opens with a short "Why:" line and an "If you skip it:" line, so you can see what a step buys you before you do it.
+- Fewer cards with the wrong walk-through: a card's menu path ("Settings → …") must point at a real screen, or Boss Man refuses it.
+- On a short window, the Settings side list folds the other groups to one row each, so the page you are on stays in view.
+- The Plan page header takes less room on a touch screen, so the chart and button are easier to reach.
+- Approved work that is held behind a fix now lets go by itself once that fix is live, and a removed hold no longer needs a hand release.
+- The Go-live line no longer says "not live" for a change a later update carried, and the "Waiting for …" refusal on Build and update runners clears itself.
+- Fewer stale cards: agents can now withdraw their own out-of-date cards.
+
 ## 16 November 2026
 
 - A new "Priority 1" switch on tasks and features. It shows on the board, moves the work up the merge line, and tells you once when the work is ready to go live.

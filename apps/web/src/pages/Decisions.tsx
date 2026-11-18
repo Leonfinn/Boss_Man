@@ -192,6 +192,35 @@ function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string |
   );
 }
 
+/** BOS-1744: the project filter value for "no project": hires, model changes and other company-wide cards. */
+export const COMPANY_WIDE = "company-wide";
+const PROJECT_FILTER_KEY = "bossman.decisions.projectFilter";
+
+/** The projects a card is for, by name; a card with none is company-wide. */
+export function cardProjects(d: Pick<Decision, "projects">): Array<{ id: string; name: string }> {
+  return d.projects ?? [];
+}
+
+/** Whether a card shows under a project filter (null = all, COMPANY_WIDE, or a project id). */
+export function inProjectFilter(d: Pick<Decision, "projects">, pf: string | null): boolean {
+  if (!pf) return true;
+  const ps = cardProjects(d);
+  return pf === COMPANY_WIDE ? ps.length === 0 : ps.some((p) => p.id === pf);
+}
+
+function readProjectFilter(): string | null {
+  try { return localStorage.getItem(PROJECT_FILTER_KEY) || null; } catch { return null; }
+}
+
+function ProjectLabel({ d }: { d: Pick<Decision, "projects"> }) {
+  const ps = cardProjects(d);
+  return (
+    <span className="tag project-tag" title="The project this card is for">
+      {ps.length ? ps.map((p) => p.name).join(", ") : "Company-wide"}
+    </span>
+  );
+}
+
 const shortSha = (sha: string) => sha.slice(0, 8);
 
 const HAND_EFFECT: Record<NonNullable<DeployUpdate["handEffect"]>, string> = {
@@ -277,11 +306,23 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
 function CommandBlock({ command, where }: { command: string; where?: Where }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const pre = useRef<HTMLPreElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const alive = useRef(true);
+  // Clear the reset timer on unmount: a timer that outlives the page fires after the DOM is gone (BOS-1783).
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
   const copy = async () => {
     const ok = await copyText(command);
+    if (!alive.current) return;
     setState(ok ? "copied" : "failed");
     if (!ok) selectText(pre.current);
-    setTimeout(() => setState("idle"), 2000);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState("idle"), 2000);
   };
   const label = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select the text instead" : "Copy";
   return (
@@ -517,6 +558,11 @@ function useLinkedCard(): string | null {
 
 export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
+  const [savedProject, setSavedProject] = useState<string | null>(readProjectFilter);
+  const pickProject = (v: string | null) => {
+    setSavedProject(v);
+    try { if (v) localStorage.setItem(PROJECT_FILTER_KEY, v); else localStorage.removeItem(PROJECT_FILTER_KEY); } catch { /* private browsing: the choice just isn't kept */ }
+  };
   // A link straight to one card (#/decisions/<id>, BOS-1078: the Merge queue names the card holding a merge):
   // that card is scrolled to and marked once it is on the page.
   const linkedId = useLinkedCard();
@@ -639,7 +685,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     }
   };
 
-  const shown = decisions.filter((d) => !filter || d.companyId === filter);
+  // Project chips come from the open cards, so a new project appears as soon as a card names it. A remembered
+  // project that no card names any more falls back to "All projects" rather than hiding everything.
+  const projectOptions = [...new Map(decisions.filter((d) => !filter || d.companyId === filter).flatMap((d) => cardProjects(d).map((p) => [p.id, p.name] as const))).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const hasCompanyWide = decisions.some((d) => (!filter || d.companyId === filter) && cardProjects(d).length === 0);
+  const projectFilter = savedProject && ((savedProject === COMPANY_WIDE && hasCompanyWide) || projectOptions.some(([id]) => id === savedProject)) ? savedProject : null;
+  const shown = decisions.filter((d) => (!filter || d.companyId === filter) && inProjectFilter(d, projectFilter));
   const shownNotices = closedNotices.filter((n) => !filter || n.companyId === filter);
   // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
@@ -664,7 +715,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const answeredQueue = answeredHere.filter((d) => !d.waiting).length;
   const answeredWaiting = answeredHere.filter((d) => !!d.waiting).length;
   // Until the first tally arrives, the cards themselves stand in, so the heading is never blank.
-  const counted = tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
+  // With a project chosen the server's tally (all projects) no longer fits, so the count comes from the visible cards.
+  const counted = projectFilter ?{ open: queueCards.length, waiting: waitingCards.length } : tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
   const counts = {
     open: Math.max(counted.open - answeredQueue, 0),
     waiting: Math.max(counted.waiting - answeredWaiting, 0),
@@ -775,6 +827,23 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             ))}
           </div>
         )}
+        {(projectOptions.length > 0 || hasCompanyWide) && (projectOptions.length + (hasCompanyWide ? 1 : 0) > 1 || projectFilter) && (
+          <div role="group" aria-label="Filter by project" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button type="button" className="chip" aria-pressed={projectFilter === null} onClick={() => pickProject(null)}>
+              All projects
+            </button>
+            {projectOptions.map(([id, name]) => (
+              <button type="button" key={id} className="chip" aria-pressed={projectFilter === id} onClick={() => pickProject(id)}>
+                {name}
+              </button>
+            ))}
+            {hasCompanyWide && (
+              <button type="button" className="chip" aria-pressed={projectFilter === COMPANY_WIDE} onClick={() => pickProject(COMPANY_WIDE)}>
+                Company-wide
+              </button>
+            )}
+          </div>
+        )}
       </header>
       {typeof banner === "function" ? (queueCards.length > 0 ? null : banner(false)) : banner}
       {withTeam.length > 0 && (
@@ -835,6 +904,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           Step {d.step}
                         </span>
                       ) : null}
+                      <ProjectLabel d={d} />
                       <span className={`tag ${k.tone}`}>{k.label}</span>
                       {d.about?.map((t) => (
                         <a key={t.ticketId} className="ref-chip mono" href={`#/tickets/${t.ticketId}`} title={t.title}>{t.ref ?? "Ticket"}</a>
@@ -1447,6 +1517,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               <ul>
                 {waitingCards.map((d) => (
                   <li key={d.id} id={`decision-${d.id}`} className={d.id === linkedId ? "linked" : undefined} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 8 }}>
+                    <ProjectLabel d={d} />
                     <TicketRefs about={d.about} />
                     <strong>{d.question.split("\n")[0]}</strong>
                     {d.waiting ? <div className="muted" style={{ fontSize: 13 }}>{d.waiting}</div> : null}
