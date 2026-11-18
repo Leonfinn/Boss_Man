@@ -180,7 +180,7 @@ export const releaseLogService = (
       const add = [...lines, `New commit: ${to}`].filter((l, i, all) => !have.has(l) && all.indexOf(l) === i);
       if (add.length) {
         await db.update(tickets).set({ body: `${primary.body ?? ""}\n${add.join("\n")}`.trim(), version: sql`${tickets.version} + 1` }).where(eq(tickets.id, primary.id));
-        await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record ${short(to)} too.` });
+        await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record ${short(to)} too, and republish the website from it so this release's "What's new" entry is live.` });
       }
     }
     // A wake already waiting for this ticket is the one that will run: don't stack a second.
