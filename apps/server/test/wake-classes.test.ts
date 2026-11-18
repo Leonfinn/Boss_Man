@@ -47,6 +47,8 @@ describe("wake classes: the table", () => {
     "runner offline",
     "not_found",
     "foreign_agent",
+    // The merge line's pause reason (R44, merge-queue.ts), not a wake's reason.
+    "a server update",
     "agent or company gone",
     "a ticket it waited on finished",
     "the owner wrote on this ticket",
