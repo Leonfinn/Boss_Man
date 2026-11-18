@@ -123,7 +123,7 @@ describe("go-live resolves for every merge the live commit contains (BOS-1640)",
     await merged(c, PREV, "2026-11-16T10:44:00Z");
     // Recorded today, before this fix: the unrecorded commit is live with nothing known about what it contains.
     await c.db.insert(settings).values({ key: `live_release:${c.companyId}`, value: { old: LOST, new: LOST } });
-    expect(await goLiveLine(c.db, early)).toContain("live on the server: no");
+    expect(await goLiveLine(c.db, early)).toContain("live on the server: can't tell (");
     await hostReports(c, { from: PREV, to: LOST });
     expect(await record(c)).toMatchObject({ new: LOST, contains: [PREV] });
     expect(await goLiveLine(c.db, early)).toContain("live on the server: yes");
@@ -138,9 +138,10 @@ describe("go-live resolves for every merge the live commit contains (BOS-1640)",
     await merged(c, PREV, "2026-11-16T10:44:00Z");
     await c.db.insert(settings).values({ key: `live_release:${c.companyId}`, value: { old: LOST, new: LOST } });
     await writeFile(path.join(c.dir, "outbox", "available.json"), JSON.stringify({ checkedAt: new Date().toISOString(), deployed: LOST, tip: LOST, commits: [], paths: [], infraPaths: [], runnerChanged: false }));
+    // Boss Man can't place the running commit: that is "can't tell", not "not live" (BOS-1644), so the guard does not
+    // refuse with the BOS-1467 "waiting to go live" message. (The update may still queue behind the server's trial.)
     const before = await c.req("POST", "/api/self-deploy/update-runners");
-    expect(before.statusCode).toBe(409);
-    expect(before.json().message).toContain("to go live: it fixes the runner update itself.");
+    expect(before.json().message ?? "").not.toContain("to go live: it fixes the runner update itself.");
 
     await hostReports(c, { from: PREV, to: LOST });
     const after = await c.req("POST", "/api/self-deploy/update-runners");
@@ -157,6 +158,9 @@ describe("go-live resolves for every merge the live commit contains (BOS-1640)",
     const r = await record(c);
     expect(r.new).toBe(LOST);
     expect(r.contains).toBeUndefined();
-    expect(await goLiveLine(c.db, early)).toContain("live on the server: no");
+    // The running commit can't be placed: "can't tell" (BOS-1644), never "yes", and never a wrong "no".
+    const line = await goLiveLine(c.db, early);
+    expect(line).toContain("live on the server: can't tell (");
+    expect(line).not.toContain("live on the server: yes");
   });
 });

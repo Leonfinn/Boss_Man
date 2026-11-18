@@ -171,10 +171,22 @@ jobs:
           node --test scripts/*.test.mjs
           node scripts/lint-migrations.mjs
           node scripts/check-in-memory-state.mjs
+          node scripts/check-test-lines.mjs
       - run: pnpm -r --no-bail typecheck
       # Runs even when typecheck failed, so one run reports every fault (BOS-1661).
-      - if: ${{ !cancelled() }}
-        run: pnpm -r --no-bail test
+      # --reporter-hide-prefix: vitest prints "::error file=…,title=<test>" for each failure, but GitHub only turns a
+      # line into an annotation when it starts with "::", and pnpm -r puts "apps/<pkg> test: " in front. Without the
+      # flag no failure in this step ever named its test (52 of 52, BOS-1720); with it the public check-run
+      # annotations, and so Boss Man's bounce text, name it (BOS-1721). apps/server/test/ci-names-failing-test.test.ts.
+      - id: unit-tests
+        if: ${{ !cancelled() }}
+        env:
+          BOSSMAN_RUNNER_TEST_REPORT: ${{ runner.temp }}/runner-tests.json
+        run: pnpm -r --no-bail --reporter-hide-prefix test
+      # A red test step names its failing runner tests in a public error annotation (BOS-1705).
+      # Guarded on that step's own outcome, so a typecheck-only failure doesn't print a "no report" note.
+      - if: ${{ !cancelled() && steps.unit-tests.outcome == 'failure' }}
+        run: node scripts/annotate-vitest-failures.mjs "$RUNNER_TEMP/runner-tests.json" "runner tests failed"
       - run: pnpm build
       - name: Migrations match the schema
         run: |
@@ -349,7 +361,9 @@ jobs:
           id=$(docker create caddy:2.11.7)
           docker cp "$id:/usr/bin/caddy" "$RUNNER_TEMP/caddy"
           docker rm "$id"
-          CADDY="$RUNNER_TEMP/caddy" scripts/caddy-edge.test.sh
+          # Through test-shell.sh, which puts the failing file and its last lines (the FAIL line names the case) in an
+          # annotation; run bare, a failure here left only "exit code 1" (BOS-1720 row: images step 24, 2 of 2 unnamed).
+          CADDY="$RUNNER_TEMP/caddy" scripts/test-shell.sh scripts/caddy-edge.test.sh
       - name: Shell script tests (deploy.sh, the host deployer, backup and Penpot)
         if: matrix.arch == 'amd64'
         run: |
@@ -406,7 +420,7 @@ jobs:
             -e CI=1 -e GITHUB_ACTIONS=true -e NODE_ENV=test -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
               pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
               pnpm -r --no-bail typecheck; tc=$?;
-              pnpm -r --no-bail test; ts=$?;
+              pnpm -r --no-bail --reporter-hide-prefix test; ts=$?;
               [ "$tc" = 0 ] && [ "$ts" = 0 ]' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
           rc=${PIPESTATUS[0]}
           if [ "$rc" != 0 ]; then

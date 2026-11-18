@@ -17,7 +17,7 @@ import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
-import { allMergeOrder, commitIsLive, liveServerRecord, serverContains } from "./go-live-wait.js";
+import { allMergeOrder, commitIsLive, liveServerRecord, serverContains, serverHas } from "./go-live-wait.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
@@ -482,22 +482,34 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * nothing recorded about what runs, is never waited for.
    */
   async function runnerUpdateFix(): Promise<string | null> {
+    return (await runnerUpdateFixCheck()).refusal;
+  }
+
+  /**
+   * BOS-1644 (R26): refuses (`refusal`) only on a definite "not live". When Boss Man can't tell (the live commit or the
+   * merge can't be placed) the update goes ahead and `note` says why it couldn't confirm. "Can't tell" is never "no".
+   */
+  async function runnerUpdateFixCheck(): Promise<{ refusal: string | null; note: string | null }> {
+    const none = { refusal: null, note: null };
     const companyId = await homeCompany();
-    if (!companyId) return null;
+    if (!companyId) return none;
     const rows = await db
       .select({ number: tickets.number, mergeCommit: tickets.mergeCommit, prefix: companies.ticketPrefix })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
       .where(and(eq(tickets.companyId, companyId), eq(tickets.touchesRunnerUpdate, true), isNotNull(tickets.mergeCommit)))
       .orderBy(asc(sql`coalesce(${tickets.mergedAt}, ${tickets.stateChangedAt})`));
-    if (!rows.length) return null;
+    if (!rows.length) return none;
     const { live, contains } = await liveServerRecord(db, companyId);
-    if (!live) return null;
     const order = await allMergeOrder(db, companyId);
-    const waiting = rows.find((r) => !serverContains(live, r.mergeCommit!, order, contains) && order.includes(r.mergeCommit!.toLowerCase()));
-    if (!waiting) return null;
-    const ref = ticketRef(waiting.prefix, waiting.number) ?? "A merged change";
-    return `Waiting for ${ref} to go live: it fixes the runner update itself.`;
+    let unsure: { ref: string; reason: string } | null = null;
+    for (const r of rows) {
+      const ref = ticketRef(r.prefix, r.number) ?? "A merged change";
+      const has = serverHas(live, r.mergeCommit!, order, contains);
+      if (has.state === "no") return { refusal: `Waiting for ${ref} to go live: it fixes the runner update itself.`, note: null };
+      if (has.state === "unknown" && !unsure) unsure = { ref, reason: has.reason };
+    }
+    return { refusal: null, note: unsure ? `Boss Man couldn't confirm that ${unsure.ref}, a fix to the runner update itself, is live (${unsure.reason}), so the update went ahead anyway.` : null };
   }
 
   async function runnerBlocker(a: Available | null): Promise<string | null> {
@@ -1436,7 +1448,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // with a plain reason if the server update is switched back, and the owner can cancel it. A server update only
       // waiting for the owner's answer does not count (it never blocks the runners).
       // BOS-1467: refused, not queued, while a merged fix to the runner update itself isn't live: the press would run the old script and fail.
-      const fix = await runnerUpdateFix();
+      const { refusal: fix, note: unconfirmed } = await runnerUpdateFixCheck();
       if (fix) return { error: fix } as const;
       const trial = await trialState(a);
       const notNow = await runnerBlocker(a);
@@ -1446,13 +1458,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         await putSetting(RUNNER_DUE, { commit: old?.commit ?? a.deployed, fromCommit: old?.fromCommit ?? a.deployed, after: trial ? trial.endsAt : old?.after ?? pressed, offer: true, needs: old?.needs ?? a.deployed, pressed, priorOffer: old?.pressed ? old.priorOffer ?? false : old?.offer ?? false } satisfies RunnerDue);
         await putSetting(QUEUE_CANCELLED, null);
         const message = trial ? `Runners will update at ${clock(trial.endsAt)}, when this server update's ${trialWords(soakSeconds(a))} trial ends. You don't need to press again.` : `${notNow![0]!.toUpperCase()}${notNow!.slice(1)} The runner update is queued and starts by itself as soon as that is over.`;
-        return { queued: true, startsAt: trial?.endsAt ?? null, message } as const;
+        return { queued: true, startsAt: trial?.endsAt ?? null, message: unconfirmed ? `${message} ${unconfirmed}` : message } as const;
       }
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
       if (open) {
         // BOS-1010: the card for the live version is already there; still make sure it is the only open runner card.
         await withdrawOtherRunnerCards(open.id, a.deployed);
-        return { decisionId: open.id } as const;
+        return { decisionId: open.id, ...(unconfirmed ? { note: unconfirmed } : {}) } as const;
       }
       // The plain key when no card for this commit is open (DR-042 point 5). Only if an answered card still holds it
       // (the owner said "Not now" before) does the button fall back to a keyed copy, so the ask is not silently dropped.
@@ -1460,7 +1472,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // card anyway, and it says why and when it can run; and every raise here withdraws any earlier runner card.
       const r = (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true })) ?? (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true, again: true }));
       if (!r || "blocked" in r) return { error: "Create a company first: decisions belong to one." } as const;
-      return { decisionId: r.row.id } as const;
+      return { decisionId: r.row.id, ...(unconfirmed ? { note: unconfirmed } : {}) } as const;
     },
 
     /**

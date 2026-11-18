@@ -3,7 +3,7 @@
 // matters to that person. Features are scored on demand (from their insights) and on the
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalShows, PORTAL_STATUSES, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
@@ -22,8 +22,8 @@ export class FeedbackError extends Error {
   }
 }
 
-export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; confirmByEmail: boolean; confirmLinkHours: number; rememberAddressDays: number };
-const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, portalBackUrl: null, portalBackText: null, hasLogo: false, confirmByEmail: false, confirmLinkHours: 24, rememberAddressDays: 90 };
+export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; confirmByEmail: boolean; confirmLinkHours: number; rememberAddressDays: number; portalAtBareAddress: boolean };
+const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, portalBackUrl: null, portalBackText: null, hasLogo: false, confirmByEmail: false, confirmLinkHours: 24, rememberAddressDays: 90, portalAtBareAddress: false };
 
 /** A note that counts: unconfirmed portal posts (BOS-1388) are hidden from everyone and score nothing. */
 const counted = isNull(feedbackNotes.confirmTokenHash);
@@ -82,8 +82,18 @@ export function feedbackService(
   const note = (id: string, companyId?: string) => own(db.select().from(feedbackNotes).where(and(eq(feedbackNotes.id, id), counted)), companyId, "note");
 
   async function settings(companyId: string): Promise<FeedbackSettings> {
-    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, portalBackUrl: feedbackSettings.portalBackUrl, portalBackText: feedbackSettings.portalBackText, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null`, confirmByEmail: feedbackSettings.confirmByEmail, confirmLinkHours: feedbackSettings.confirmLinkHours, rememberAddressDays: feedbackSettings.rememberAddressDays }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
+    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, portalBackUrl: feedbackSettings.portalBackUrl, portalBackText: feedbackSettings.portalBackText, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null`, confirmByEmail: feedbackSettings.confirmByEmail, confirmLinkHours: feedbackSettings.confirmLinkHours, rememberAddressDays: feedbackSettings.rememberAddressDays, portalAtBareAddress: feedbackSettings.portalAtBareAddress }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
     return row ?? { ...DEFAULTS };
+  }
+
+  /** The enabled portal whose settings row matches `where`, with what the page and its calls need; or null. */
+  async function portalWhere(where: SQL) {
+    const [row] = await db
+      .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, backUrl: feedbackSettings.portalBackUrl, backText: feedbackSettings.portalBackText, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null`, confirmByEmail: feedbackSettings.confirmByEmail, confirmLinkHours: feedbackSettings.confirmLinkHours, rememberAddressDays: feedbackSettings.rememberAddressDays })
+      .from(feedbackSettings)
+      .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
+      .where(and(where, eq(feedbackSettings.portalEnabled, true)));
+    return row ?? null;
   }
 
   /** Checks that the links a feature points at are in its company, and the hierarchy stays one level. */
@@ -636,12 +646,15 @@ export function feedbackService(
     // ---- The portal: a page outsiders reach by a secret link ----
 
     /** Turns the portal on or off and sets its words. Turning it on the first time makes its link. */
-    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null; backUrl?: string | null; backText?: string | null; confirmByEmail?: boolean; confirmLinkHours?: number; rememberAddressDays?: number }) {
+    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null; backUrl?: string | null; backText?: string | null; confirmByEmail?: boolean; confirmLinkHours?: number; rememberAddressDays?: number; portalAtBareAddress?: boolean }) {
       const current = await settings(companyId);
+      // BOS-1680: only one company's portal can be the one the bare address opens; turning it on here turns it off elsewhere.
+      if (patch.portalAtBareAddress) await db.update(feedbackSettings).set({ portalAtBareAddress: false }).where(and(eq(feedbackSettings.portalAtBareAddress, true), ne(feedbackSettings.companyId, companyId)));
       const token = patch.enabled && !current.portalToken ? randomBytes(24).toString("base64url") : current.portalToken;
       const set = {
         ...(patch.enabled !== undefined ? { portalEnabled: patch.enabled } : {}),
         ...(patch.confirmByEmail !== undefined ? { confirmByEmail: patch.confirmByEmail } : {}),
+        ...(patch.portalAtBareAddress !== undefined ? { portalAtBareAddress: patch.portalAtBareAddress } : {}),
         ...(patch.confirmLinkHours !== undefined ? { confirmLinkHours: patch.confirmLinkHours } : {}),
         ...(patch.rememberAddressDays !== undefined ? { rememberAddressDays: patch.rememberAddressDays } : {}),
         ...(patch.title !== undefined ? { portalTitle: patch.title } : {}),
@@ -671,12 +684,11 @@ export function feedbackService(
     /** The company behind an enabled portal's token, or null. */
     async portalFor(token: string) {
       if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
-      const [row] = await db
-        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, backUrl: feedbackSettings.portalBackUrl, backText: feedbackSettings.portalBackText, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null`, confirmByEmail: feedbackSettings.confirmByEmail, confirmLinkHours: feedbackSettings.confirmLinkHours, rememberAddressDays: feedbackSettings.rememberAddressDays })
-        .from(feedbackSettings)
-        .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
-        .where(and(eq(feedbackSettings.portalToken, token), eq(feedbackSettings.portalEnabled, true)));
-      return row ?? null;
+      return portalWhere(eq(feedbackSettings.portalToken, token));
+    },
+    /** BOS-1680: the enabled portal the owner chose to open at the bare public address (no token in the link), or null. */
+    async bareAddressPortal() {
+      return portalWhere(eq(feedbackSettings.portalAtBareAddress, true));
     },
     /** What a visitor sees: features shown on the portal, by stage, with their own votes. */
     async portalView(companyId: string, voter: string | null) {

@@ -39,6 +39,8 @@ export type WorkflowRun = {
   conclusion: string | null;
   headSha: string;
   headMessage: string;
+  /** The workflow's file, e.g. .github/workflows/ci.yml (BOS-1688: a commit that changed it is a suspect). */
+  path?: string;
   url: string;
   createdAt: string;
   updatedAt: string;
@@ -51,7 +53,11 @@ export type CommitAnnotations = { name: string; lines: string[] };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
+/** A compare between two commits (BOS-1688): its commits, oldest first, and every file the range changed (old names of renames too). */
+export type CompareDetail = { commits: Array<{ sha: string; message: string; parents: string[] }>; files: string[] };
 
+/** BOS-1749: every branch the merge gate pushes for CI starts with this (protocol.ts ciBranchFor); the only branches ever deleted. */
+export const CI_BRANCH_PREFIX = "bossman-ci/";
 export class GitHostError extends Error {
   constructor(
     readonly status: number,
@@ -275,6 +281,40 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
     },
 
     /**
+     * BOS-1749: the merge gate's CI branches (bossman-ci/*) on the host with the time of the commit each points at, newest
+     * first. GitHub only: other hosts get an empty list. Reads at most 5 pages of 100 refs.
+     */
+    async ciBranches(cfg: GitHostConfig, token: string): Promise<Array<{ branch: string; sha: string; committedAt: number }>> {
+      if (cfg.kind !== "github") return [];
+      const refs: Array<{ branch: string; sha: string }> = [];
+      for (let page = 1; page <= 5; page++) {
+        const res = await call(cfg, token, "GET", `/git/matching-refs/heads/${CI_BRANCH_PREFIX}?per_page=100&page=${page}`);
+        if (!res.ok || !Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't list ${CI_BRANCH_PREFIX} branches: ${messageOf(res.json, res.status)}`);
+        for (const r of res.json) {
+          const name = typeof r.ref === "string" ? r.ref.replace(/^refs\/heads\//, "") : "";
+          const sha = (r.object as { sha?: unknown } | undefined)?.sha;
+          if (name.startsWith(CI_BRANCH_PREFIX) && typeof sha === "string") refs.push({ branch: name, sha });
+        }
+        if (res.json.length < 100) break;
+      }
+      const out: Array<{ branch: string; sha: string; committedAt: number }> = [];
+      for (const r of refs) {
+        const c = await call(cfg, token, "GET", `/git/commits/${encodeURIComponent(r.sha)}`);
+        const when = c.ok && c.json && !Array.isArray(c.json) ? Date.parse(String((c.json.committer as { date?: unknown } | undefined)?.date ?? "")) : NaN;
+        // Unreadable commit: treated as old (0), so a branch whose commit can't be read is still cleared.
+        out.push({ ...r, committedAt: Number.isFinite(when) ? when : 0 });
+      }
+      return out.sort((a, b) => b.committedAt - a.committedAt);
+    },
+
+    /** BOS-1749: deletes one CI branch. Refuses any name outside bossman-ci/ so no other branch can ever be touched. Already gone counts as deleted. */
+    async deleteCiBranch(cfg: GitHostConfig, token: string, branch: string): Promise<boolean> {
+      if (cfg.kind !== "github" || !branch.startsWith(CI_BRANCH_PREFIX) || branch.includes("..") || branch.length <= CI_BRANCH_PREFIX.length) return false;
+      const res = await call(cfg, token, "DELETE", `/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`);
+      return res.ok || res.status === 404 || res.status === 422;
+    },
+
+    /**
      * What failed in failed CI jobs (BOS-1070): vitest's GitHub reporter writes an annotation per failing test, with its name,
      * so the agent is told what failed. Up to `per` lines per job; the generic "Process completed with exit code" goes.
      * Annotations sit behind the Checks permission, so they are optional (BOS-1630): a refused read gives the failed step
@@ -354,6 +394,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           conclusion: typeof r.conclusion === "string" ? r.conclusion : null,
           headSha: String(r.head_sha ?? ""),
           headMessage: typeof head.message === "string" ? head.message : "",
+          ...(typeof r.path === "string" && r.path ? { path: r.path.split("@")[0]! } : {}),
           url: String(r.html_url ?? ""),
           createdAt: String(r.created_at ?? ""),
           updatedAt: String(r.updated_at ?? r.created_at ?? ""),
@@ -491,6 +532,32 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       // this only answers for GitHub; elsewhere it fails and the check is left to the runner.
       const rows = Array.isArray(res.json.commits) ? (res.json.commits as Array<Record<string, unknown>>) : [];
       return rows.map((c) => (typeof c.sha === "string" ? c.sha.slice(0, 40) : "")).filter(Boolean);
+    },
+
+    /**
+     * GitHub's compare with what the main-CI watcher needs to rank suspects (BOS-1688): every commit
+     * from..to with its parents and first message line, and the files the whole range changed. Needs
+     * the token's Contents read; with Actions read only it throws and the caller says so.
+     */
+    async compareDetail(cfg: GitHostConfig, token: string, from: string, to: string): Promise<CompareDetail> {
+      const res = await call(cfg, token, "GET", `/compare/${encodeURIComponent(from)}...${encodeURIComponent(to)}?per_page=250`);
+      if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't compare ${from.slice(0, 8)} with ${to.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
+      const rows = Array.isArray(res.json.commits) ? (res.json.commits as Array<Record<string, unknown>>) : [];
+      const files = Array.isArray(res.json.files) ? (res.json.files as Array<Record<string, unknown>>) : [];
+      return {
+        commits: rows
+          .filter((c) => typeof c.sha === "string" && c.sha)
+          .map((c) => {
+            const commit = (c.commit ?? {}) as Record<string, unknown>;
+            const parents = Array.isArray(c.parents) ? (c.parents as Array<Record<string, unknown>>) : [];
+            return {
+              sha: String(c.sha),
+              message: typeof commit.message === "string" ? commit.message.split("\n")[0]! : "",
+              parents: parents.map((p) => String(p.sha ?? "")).filter(Boolean),
+            };
+          }),
+        files: files.flatMap((f) => [f.filename, f.previous_filename]).filter((n): n is string => typeof n === "string" && !!n),
+      };
     },
 
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {

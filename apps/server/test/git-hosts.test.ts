@@ -261,6 +261,23 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
     expect(await h.workflowRuns(cfg("gitea"), "t", "main")).toEqual([]);
   });
 
+  it("reads the workflow file of a run, and a compare's commits with parents and every changed file (BOS-1688)", async () => {
+    const h = host((p) =>
+      p.startsWith("/actions/runs?")
+        ? json(200, { workflow_runs: [{ id: 5, name: "CI", event: "push", status: "completed", conclusion: "failure", head_sha: "a".repeat(40), path: ".github/workflows/ci.yml@refs/heads/main" }] })
+        : json(200, {
+            commits: [{ sha: "b".repeat(40), commit: { message: "Merge y\n\nbody" }, parents: [{ sha: "a".repeat(40) }, { sha: "e".repeat(40) }] }],
+            files: [{ filename: "apps/server/test/a.test.ts" }, { filename: "new.ts", previous_filename: "old.ts" }],
+          }),
+    );
+    expect((await h.workflowRuns(cfg("github"), "t", "main"))[0]!.path).toBe(".github/workflows/ci.yml");
+    expect(await h.compareDetail(cfg("github"), "t", "a".repeat(40), "b".repeat(40))).toEqual({
+      commits: [{ sha: "b".repeat(40), message: "Merge y", parents: ["a".repeat(40), "e".repeat(40)] }],
+      files: ["apps/server/test/a.test.ts", "new.ts", "old.ts"],
+    });
+    await expect(host(() => json(403, { message: "Resource not accessible" })).compareDetail(cfg("github"), "t", "a", "b")).rejects.toMatchObject({ status: 403 });
+  });
+
   it("throws a GitHostError when the token can't read the runs", async () => {
     await expect(host(() => json(403, { message: "Resource not accessible" })).workflowRuns(cfg("github"), "t", "main")).rejects.toMatchObject({ status: 403 });
   });
@@ -287,5 +304,34 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
         : json(200, [{ path: "a.ts", start_line: 3, message: "boom" }]),
     );
     expect(await h.commitAnnotations(cfg("github"), "t", "a".repeat(40))).toEqual([{ name: "test", lines: ["a.ts:3 boom"] }]);
+  });
+});
+
+describe("the gate's CI branches (BOS-1749): list and delete only bossman-ci/", () => {
+  const calls: Array<{ method: string; url: string }> = [];
+  const fake = (): typeof fetch =>
+    (async (url: string, init?: RequestInit) => {
+      calls.push({ method: init?.method ?? "GET", url: String(url) });
+      const u = String(url);
+      if (u.includes("/git/matching-refs/")) return json(200, [{ ref: "refs/heads/bossman-ci/t1", object: { sha: "a".repeat(40) } }, { ref: "refs/heads/bossman-ci/t2", object: { sha: "b".repeat(40) } }]);
+      if (u.includes("/git/commits/" + "a".repeat(40))) return json(200, { committer: { date: "2026-11-17T01:00:00Z" } });
+      if (u.includes("/git/commits/")) return json(404, {});
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+  it("lists them with the commit time, an unreadable commit counting as old", async () => {
+    calls.length = 0;
+    const list = await gitHostService({ fetch: fake() }).ciBranches(cfg("github"), "t");
+    expect(list).toEqual([
+      { branch: "bossman-ci/t1", sha: "a".repeat(40), committedAt: Date.parse("2026-11-17T01:00:00Z") },
+      { branch: "bossman-ci/t2", sha: "b".repeat(40), committedAt: 0 },
+    ]);
+    expect(calls[0]!.url).toContain("/git/matching-refs/heads/bossman-ci/");
+  });
+  it("deletes a bossman-ci branch and refuses every other name", async () => {
+    calls.length = 0;
+    const h = gitHostService({ fetch: fake() });
+    expect(await h.deleteCiBranch(cfg("github"), "t", "bossman-ci/t1")).toBe(true);
+    for (const bad of ["main", "bossman/t1", "bossman-ci/", "bossman-ci/../main", "x/bossman-ci/t1"]) expect(await h.deleteCiBranch(cfg("github"), "t", bad)).toBe(false);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["DELETE https://host/api/repos/leon/site/git/refs/heads/bossman-ci/t1"]);
   });
 });
