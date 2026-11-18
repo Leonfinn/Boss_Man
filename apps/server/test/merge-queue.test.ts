@@ -399,6 +399,16 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       mergeQueueService(c.db, { runningMerges: () => [], limit: async () => 2, queueStatus: async () => ({ mode: "server", slots: 2, running: 0, waiting: 0 }), runnerConnected: async () => true, ...over });
     const labelOf = async (c: Awaited<ReturnType<typeof setup>>, id: string, over: Partial<Parameters<typeof mergeQueueService>[1]>) => (await svc(c, over).get(c.company.id)).waiting.find((w) => w.ticketId === id)!;
 
+    // BOS-1757: a running merge check holds a slot even when no landing owns it, so the screen counts the same rows as the Checks panel.
+    it("lists a running merge job that no landing owns, so it counts the same as the Checks panel", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const started = new Date(Date.now() - 15 * 60_000);
+      const view = await svc(c, { runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: started }], queueStatus: async () => ({ mode: "server", slots: 3, running: 1, waiting: 0 }) }).get(c.company.id);
+      expect(view.running.map((r) => r.ticketId)).toEqual([id]);
+      expect(view.running[0]!.minutes).toBeGreaterThanOrEqual(15);
+    });
+
     it("says no runner is connected before anything else, even with every slot busy", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);

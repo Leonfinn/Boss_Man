@@ -191,11 +191,16 @@ describe("a deploy target's tag (DR-033)", () => {
       can: c.runners.can,
       request: c.runners.request,
     };
-    const svc = deploysService(c.db, { runners: hub, alert: async (i) => void raised.push(i.question), tagRunnerAlertMs: 10, tagRunnerGiveUpMs: 200 });
+    const svc = deploysService(c.db, { runners: hub, alert: async (i) => {
+        raised.push(i.question);
+        connected = true; // the runner comes back only once the alert has gone out: no clock race on a loaded machine
+      },
+      tagRunnerAlertMs: 10,
+      tagRunnerGiveUpMs: 2_000,
+    });
     const r = await svc.request(c.actor, { target: "Staging", ref: "main" });
     await c.db.update(deploys).set({ status: "running" }).where(eq(deploys.id, r.deploy.id));
     connected = false;
-    setTimeout(() => (connected = true), 60);
     await svc.report({ companyId: c.company.id }, { deployId: r.deploy.id, outcome: "succeeded" });
     await svc.waitForTag(r.deploy.id, r.deploy.targetId);
     expect(raised).toHaveLength(1);
