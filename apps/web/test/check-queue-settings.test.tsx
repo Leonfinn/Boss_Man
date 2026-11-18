@@ -38,6 +38,36 @@ describe("Checks in Settings", () => {
     expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ mode: "server", slots: 2, train: false }); // the merge train switch (BOS-1366) is sent as shown: off
   });
 
+  it("BOS-1803: the background lane wait shows only when the server knows it, saves 0 to 1440 minutes, and refuses a blank", async () => {
+    const calls: Array<{ method: string; body: unknown }> = [];
+    const v = { ...view, mode: "server", laneAgeMinutes: 120, defaultLaneAgeMinutes: 120 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : null });
+        return json(v);
+      }),
+    );
+    render(<CheckQueueSetting />);
+    const field = (await screen.findByLabelText(/Background lane gives way for/)) as HTMLInputElement;
+    expect(field.value).toBe("120");
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    for (const bad of ["", "1441", "-5", "1.5"]) {
+      fireEvent.change(field, { target: { value: bad } });
+      expect(save.disabled).toBe(true);
+    }
+    fireEvent.change(field, { target: { value: "0" } });
+    fireEvent.click(save);
+    await vi.waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ mode: "server", slots: 1, train: false, laneAgeMinutes: 0 });
+    cleanup();
+    // An older server sends no lane age: no field, and nothing extra is saved.
+    vi.stubGlobal("fetch", vi.fn(async () => json(view)));
+    render(<CheckQueueSetting />);
+    await screen.findByRole("radio", { name: /Each agent runs its own/ });
+    expect(screen.queryByLabelText(/Background lane gives way for/)).toBeNull();
+  });
+
   it("won't save slots outside 1 to 8, and warns about a runner too old for queued checks", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...view, runnersTooOld: ["App Co"] })));
     render(<CheckQueueSetting />);

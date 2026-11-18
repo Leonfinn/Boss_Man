@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { checkQueue } from "../src/services/check-queue.js";
-import { checkPriority, isBackgroundLaneTitle } from "../src/services/check-gate.js";
+import { checkPriority, isBackgroundLaneTitle, laneWords } from "../src/services/check-gate.js";
 
 // BOS-1403: a background-lane ticket (its assignee's job title is Background Developer) merges after the ordinary ones.
 const shared = openPglite();
@@ -67,3 +67,58 @@ describe("merge line: background lane goes last (BOS-1403)", () => {
     expect(await s.order()).toEqual([fix, lane, urgent, normal]);
   });
 });
+
+// BOS-1803: on 18 Nov a lane merge queued at 04:45 still waited at 12:55 behind ordinary merges queued hours later.
+describe("merge line: a background-lane merge ages up (BOS-1803)", () => {
+  it("after the default 2 h it ranks as ordinary by its queue time; urgent work still goes first", async () => {
+    const s = await setup();
+    const older = await s.merge({ minutesAgo: 240 });
+    const lane = await s.merge({ lane: true, minutesAgo: 480 - 5 }); // the 04:45 merge, read at 12:40
+    const newer = await s.merge({ minutesAgo: 10 });
+    const urgent = await s.merge({ urgent: true, minutesAgo: 1 });
+    expect(await s.order()).toEqual([urgent, lane, older, newer]);
+    // A restart re-seats the merge train in the same order.
+    expect(await s.q.liveMergeOrder(await projectOf(s.co.id))).toEqual([urgent, lane, older, newer]);
+  });
+
+  it("still yields to newer ordinary work before the lane age, and the setting moves the line both ways", async () => {
+    const s = await setup();
+    const lane = await s.merge({ lane: true, minutesAgo: 90 });
+    const newer = await s.merge({ minutesAgo: 10 });
+    expect(await s.order()).toEqual([newer, lane]);
+    await s.q.setLaneAge(60);
+    expect(await s.order()).toEqual([lane, newer]);
+    await s.q.setLaneAge(0); // off: the BOS-1403 order as before
+    expect(await s.order()).toEqual([newer, lane]);
+    expect(await s.q.laneAge()).toBe(0);
+  });
+
+  it("says the lane and how long it still gives way, on the waiting row only", async () => {
+    const s = await setup();
+    const lane = await s.merge({ lane: true, minutesAgo: 50 });
+    const aged = await s.merge({ lane: true, minutesAgo: 200 });
+    const normal = await s.merge({ minutesAgo: 5 });
+    const rows = new Map((await s.q.list(s.co.id)).rows.map((r) => [r.ticketId, r]));
+    expect(rows.get(lane)!.lane).toBe("background lane: newer ordinary work goes first for up to 1 h 10 min more");
+    expect(rows.get(aged)!.lane).toBe("background lane, waited over 2 h, so now in line by when it joined");
+    expect(rows.get(normal)!.lane).toBeNull();
+    await s.q.moveToFront(s.co.id, lane, "Sam");
+    expect((await s.q.list(s.co.id)).rows.find((r) => r.ticketId === lane)!.lane).toBeNull(); // moved to front: no lane to explain
+  });
+
+  it("the setting takes whole minutes from 0 to a day; anything stored oddly reads as the default", async () => {
+    const s = await setup();
+    for (const bad of [-1, 1441, 1.5]) await expect(s.q.setLaneAge(bad)).rejects.toThrow(/whole number of minutes/);
+    expect(await s.q.laneAge()).toBe(120);
+    const { db } = await shared;
+    await db.insert(settings).values({ key: "background_lane_age_minutes", value: "soon" });
+    expect(await s.q.laneAge()).toBe(120);
+    expect(laneWords(1, 0, 0)).toBeNull();
+    expect(laneWords(2, 0, 0)).toBe("background lane: newer ordinary work goes first");
+  });
+});
+
+async function projectOf(companyId: string): Promise<string> {
+  const { db } = await shared;
+  return (await db.select({ id: projects.id }).from(projects).where(eq(projects.companyId, companyId)))[0]!.id;
+}

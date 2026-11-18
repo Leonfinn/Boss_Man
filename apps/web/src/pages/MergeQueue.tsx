@@ -341,7 +341,7 @@ function Recent({ rows }: { rows: RecentRow[] }) {
   );
 }
 
-type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null };
+type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null; seatPlace?: number | null; lane?: string | null };
 type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
@@ -413,7 +413,9 @@ export function QueuedChecks({ data, heldBehind }: { data: CheckQueueData; heldB
                 {/* BOS-1435: only a check on a check worker says where; the company runner is the usual place. */}
                 {r.ranOn && r.ranOn !== "company runner" ? <span data-check-ran-on="worker"> Running on the check worker {r.ranOn}.</span> : null}
                 {/* BOS-1602: why a waiting check waits, e.g. "waiting for a merge slot: 2 of 2 busy". */}
-                {r.state === "waiting" && r.heldBy ? <span className="muted" data-check-wait-why=""> {upFirst(r.heldBy)}.</span> : null}
+                {r.state === "waiting" && r.heldBy ? <span className="muted" data-check-wait-why=""> {upFirst(r.heldBy)}{r.seatPlace ? ` (${r.seatPlace === 1 ? "next for a seat" : `${r.seatPlace - 1} ahead for a seat`})` : ""}.</span> : null}
+                {/* BOS-1803: a background-lane wait says so, and for how long newer ordinary work still goes first. */}
+                {r.lane ? <span className="muted" data-check-lane=""> {upFirst(r.lane)}.</span> : null}
               </p>
             </article>
           ))}
