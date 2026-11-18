@@ -20,7 +20,7 @@ import { runnerImageCommit } from "../services/runner-image.js";
 import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
 import { getHold, type maintenanceService } from "../services/maintenance.js";
-import type { reviewService } from "../services/review.js";
+import { MERGE_TURN_MAX_MIN, type reviewService } from "../services/review.js";
 import type { runnersService } from "../services/runners.js";
 import { DEFAULT_LIMITS, type schedulerService } from "../services/scheduler.js";
 
@@ -275,4 +275,12 @@ export function settingsLimitsRoutes(
   // BOS-1070: the merge gate waits for GitHub CI on the merge commit before it merges.
   owner.get("/api/settings/wait-for-ci", async () => ({ on: await review.waitForCi() }));
   owner.put("/api/settings/wait-for-ci", async (req) => ({ on: await review.setWaitForCi(z.object({ on: z.boolean() }).parse(req.body).on) }));
+  // BOS-1762: land a passed merge across a main move that touches none of its files, and the landing turn's cap (0 = off).
+  owner.get("/api/settings/merge-carry", async () => ({ on: await review.mergeCarry(), turnMinutes: await review.mergeTurnMinutes() }));
+  owner.put("/api/settings/merge-carry", async (req) => {
+    const body = z.object({ on: z.boolean().optional(), turnMinutes: z.number().int().min(0).max(MERGE_TURN_MAX_MIN).optional() }).parse(req.body);
+    if (body.on !== undefined) await review.setMergeCarry(body.on);
+    if (body.turnMinutes !== undefined) await review.setMergeTurnMinutes(body.turnMinutes);
+    return { on: await review.mergeCarry(), turnMinutes: await review.mergeTurnMinutes() };
+  });
 }
