@@ -74,11 +74,11 @@ describe("lintOwnerSteps R9", () => {
 describe("checkAsk with R9", () => {
   const off = facts({ tailscale: "not_set_up" });
   it("refuses an agent, and lets the CEO override with a reason", () => {
-    expect(checkAsk({ triedFirst: TRIED, ownerMustDo: true, steps: STAGE5.slice(0, 1), addons: off }).error).toMatch(/Step 1: relies on Tailscale/);
-    const over = checkAsk({ triedFirst: TRIED, ownerMustDo: true, steps: STAGE5.slice(0, 1), addons: off, byCeo: true, lintOverride: "The owner set it up an hour ago by hand." });
+    expect(checkAsk({ triedFirst: TRIED, why: "The owner gets Tailscale.", minutes: 5, ownerMustDo: true, steps: STAGE5.slice(0, 1), addons: off }).error).toMatch(/Step 1: relies on Tailscale/);
+    const over = checkAsk({ triedFirst: TRIED, why: "The owner gets Tailscale.", minutes: 5, ownerMustDo: true, steps: STAGE5.slice(0, 1), addons: off, byCeo: true, lintOverride: "The owner set it up an hour ago by hand." });
     expect(over.error).toBeNull();
     expect(over.lint?.override?.findings).toEqual([expect.objectContaining({ rule: "R9" })]);
-    expect(checkAsk({ triedFirst: TRIED, ownerMustDo: true, steps: STAGE5.slice(0, 1), addons: off, setsUp: "tailscale" }).error).toBeNull();
+    expect(checkAsk({ triedFirst: TRIED, why: "The owner gets Tailscale.", minutes: 5, ownerMustDo: true, steps: STAGE5.slice(0, 1), addons: off, setsUp: "tailscale" }).error).toBeNull();
   });
 });
 
@@ -175,7 +175,7 @@ describe("raise_decision and server_status use the add-on state", () => {
   }
   const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
   const isError = (r: unknown) => (r as { isError?: boolean }).isError === true;
-  const card = (steps: string[], extra: Record<string, unknown> = {}) => ({ question: "Move to the new host?", options: ["Done", "It failed"], recommended: "Done", triedFirst: TRIED, ownerMustDo: true, steps, ...extra });
+  const card = (steps: string[], extra: Record<string, unknown> = {}) => ({ question: "Move to the new host?", options: ["Done", "It failed"], recommended: "Done", triedFirst: TRIED, why: "The new host gets Tailscale.", minutes: 10, ownerMustDo: true, steps, ...extra });
 
   it("refuses the Stage 5 card, raises the setup card with setsUp, and shows the add-ons", async () => {
     const c = (ctx = await setup());
@@ -185,7 +185,7 @@ describe("raise_decision and server_status use the add-on state", () => {
     expect(textOf(refused)).toMatch(/Step 1: relies on Tailscale [\s\S]*Step 2: relies on ntfy/);
     expect(await c.db.select().from(decisions)).toHaveLength(0);
 
-    const setupCard = await w.callTool({ name: "raise_decision", arguments: card(["Install Tailscale on the host and log in to your tailnet."], { question: "Set up Tailscale?", setsUp: "tailscale" }) });
+    const setupCard = await w.callTool({ name: "raise_decision", arguments: card(["Install Tailscale on the host (see Settings → Server and runner → This host) and log in to your tailnet."], { question: "Set up Tailscale?", setsUp: "tailscale" }) });
     expect(isError(setupCard)).toBe(false);
 
     const ceo = await c.mcp(c.ceo.id);

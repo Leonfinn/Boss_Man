@@ -9,7 +9,7 @@ import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { activity, agents, checkJobs, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
+import { type CardOpening, checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
 import { recentOwnerAnswer } from "./stale-requests.js";
@@ -68,7 +68,7 @@ export type WatchdogDeps = {
   addons?: () => Promise<AddonFacts>;
   notify: Notify;
   nudge: Nudge;
-  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; ownerMustDo?: boolean }) => Promise<{ id: string }>;
+  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; ownerMustDo?: boolean; opening?: CardOpening }) => Promise<{ id: string }>;
   assign: (ticketId: string, agentId: string | null) => Promise<unknown>;
   /** Puts a ticket back in the state it was in (through the normal ticket update, so it is versioned and logged). */
   restoreState: (ticketId: string, state: SnapTicket["state"]) => Promise<unknown>;
@@ -1403,13 +1403,13 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       companyId: string,
       agentId: string,
       runId: string,
-      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string; stillNeeded?: string; proof?: string },
+      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; why?: string; minutes?: number; reason: string; stillNeeded?: string; proof?: string },
     ) {
       const reason = oneLine(input.reason);
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ triedFirst: input.triedFirst, question: input.question, why: input.why, minutes: input.minutes, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
@@ -1418,7 +1418,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       }
       const f = await handedFlag(companyId, t.id, "raise_decision");
       await capOrFail(companyId, s);
-      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? (({ steps, stepSources }) => ({ steps, ...(stepSources ? { stepSources } : {}) }))(splitOwnerSteps(input.steps)) : {}), stillNeeded: input.stillNeeded?.trim() || undefined, lint: ask.lint, ownerMustDo: input.ownerMustDo || undefined });
+      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? (({ steps, stepSources }) => ({ steps, ...(stepSources ? { stepSources } : {}) }))(splitOwnerSteps(input.steps)) : {}), ...(input.steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: input.stillNeeded?.trim() || undefined, lint: ask.lint, ownerMustDo: input.ownerMustDo || undefined });
       return log({ companyId, kind: "raise_decision", ticketId: t.id, flagId: f.id, actorAgentId: sm.id, actorRunId: runId, reason, before: { state: t.systemState }, after: { decisionId: d.id }, undoable: true, summary: `${sm.name} asked the owner a question about it: ${reason}` });
     },
 

@@ -20,6 +20,8 @@ const rules = (steps: string[]) => lintOwnerSteps(steps).refuse.map((f) => `${f.
 const REHEARSED = { rehearsed: true as const, script: "tailscale", commit: "0123abcd" };
 /** Every command block says where and as whom (BOS-427, R6); these tests are about the other rules. */
 const H = { host: "nas01", as: "root" as const };
+/** BOS-1660: a card with steps opens with why and minutes; the tests that expect a raised card give them. */
+const OPEN = { why: "The owner gets the change these steps make.", minutes: 5 };
 
 describe("lintOwnerSteps", () => {
   it("refuses a step that points to another document (the 14:45 card)", () => {
@@ -275,33 +277,33 @@ describe("R6: the server's name comes from the host report, never a remembered o
 
   it("fills host=\"{{host}}\" with the reported name (DR-046)", () => {
     // checkAsk fills the token from the report before the lint, so host="{{host}}" is the server's own name.
-    const ok = checkAsk({ triedFirst: TRIED, steps: [tokenStep], hosts: HOSTS, serverHost: "Docker01" });
+    const ok = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [tokenStep], hosts: HOSTS, serverHost: "Docker01" });
     expect(ok.error).toBeNull();
     expect(ok.steps?.[0]).toContain('host="Docker01"');
   });
 
   it("refuses host=\"{{host}}\" with a plain message when Boss Man has no host report (DR-046)", () => {
-    const r = checkAsk({ triedFirst: TRIED, steps: [tokenStep], hosts: HOSTS, serverHost: null });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [tokenStep], hosts: HOSTS, serverHost: null });
     expect(r.error).toMatch(/host deployer hasn't reported a name yet/);
   });
 
   it("fills the reported name into a block that names the account but leaves the host out (BOS-774 item 2)", () => {
     const noLabel = "Look at the install folder:\n\n```sh as=\"root\"\nls -ld /srv/bm\n```";
-    const ok = checkAsk({ triedFirst: TRIED, steps: [noLabel], hosts: HOSTS, serverHost: "Docker01" });
+    const ok = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [noLabel], hosts: HOSTS, serverHost: "Docker01" });
     expect(ok.error).toBeNull();
     expect(ok.steps?.[0]).toContain('host="Docker01" as="root"');
   });
 
   it("lets a CEO-raised card name the one host it is setting up (newHost), saying that host isn't known yet (DR-046)", () => {
     const steps = [step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" }))];
-    const r = checkAsk({ triedFirst: TRIED, steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: true });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: true });
     expect(r.error).toBeNull();
     expect(r.lint?.warn.some((w) => /isn't known to Boss Man yet/.test(w.problem))).toBe(true);
   });
 
   it("refuses newHost from anyone but the CEO (DR-046)", () => {
     const steps = [step("Look at the new machine: this prints nothing.", sh("df -h", { host: "Proxmox01", as: "root" }))];
-    const r = checkAsk({ triedFirst: TRIED, steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: false });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps, hosts: HOSTS, serverHost: "Docker01", newHost: "Proxmox01", byCeo: false });
     expect(r.error).toMatch(/Only the CEO can pass newHost/);
   });
 
@@ -374,7 +376,7 @@ describe("R14: git that writes the checkout runs in a (umask 022 && …) subshel
   });
 
   it("can't be overridden by the CEO: the fix is always the same subshell", () => {
-    const r = checkAsk({ triedFirst: TRIED, steps: [step("Pin it:", sh("cd /srv/bm/src && git checkout main", H))], lintOverride: "The owner's umask is 022 on this host.", byCeo: true });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [step("Pin it:", sh("cd /srv/bm/src && git checkout main", H))], lintOverride: "The owner's umask is 022 on this host.", byCeo: true });
     expect(r.error).toMatch(/runs git checkout outside a \(umask 022 && …\) subshell/);
   });
 });
@@ -421,15 +423,15 @@ describe("R15: an agent card can't update the machine itself (DR-036, the 7 Nov 
   });
 
   it("can't be overridden by the CEO: the fix is to leave the update to Boss Man's card", () => {
-    const r = checkAsk({ triedFirst: TRIED, steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], lintOverride: "The server card has no steps this time.", byCeo: true, selfDeploy: { enabled: true, installDir: "/srv/bm/src" } });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], lintOverride: "The server card has no steps this time.", byCeo: true, selfDeploy: { enabled: true, installDir: "/srv/bm/src" } });
     expect(r.error).toMatch(/runs the machine's own update script/);
   });
 
   it("checkAsk passes the facts through, and the refusal names the open card", () => {
-    const r = checkAsk({ triedFirst: TRIED, steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], selfDeploy: { enabled: true, openCommit: "6d679f9a" } });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [step("Update it:", sh("cd /srv/bm/src && scripts/rebuild-live.sh", H))], selfDeploy: { enabled: true, openCommit: "6d679f9a" } });
     expect(r.error).toMatch(/Main has moved to 6d679f9a/);
     // No self-deploy facts at all: R15 is not checked, so the same card is only refused by the other rules (none here).
-    expect(checkAsk({ triedFirst: TRIED, steps: [step("Pin it:", sh("git -C /srv/bm/src status", H))] }).error).toBeNull();
+    expect(checkAsk({ triedFirst: TRIED, ...OPEN,steps: [step("Pin it:", sh("git -C /srv/bm/src status", H))] }).error).toBeNull();
   });
 });
 
@@ -473,29 +475,29 @@ describe("R16: no 'Build and update runners' ask while an update is already pend
   });
 
   it("lets the CEO override with a reason, for a pending image that is itself broken", () => {
-    const r = checkAsk({ triedFirst: TRIED, steps: [SETTINGS], selfDeploy: deploy({ kind: "update" }) });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [SETTINGS], selfDeploy: deploy({ kind: "update" }) });
     expect(r.error).toMatch(/already under way/);
     // Not a non-CEO's to override.
-    expect(checkAsk({ triedFirst: TRIED, steps: [SETTINGS], lintOverride: "The pending image is broken.", selfDeploy: deploy({ kind: "update" }) }).error).toMatch(/Only the CEO/);
-    const ok = checkAsk({ triedFirst: TRIED, steps: [SETTINGS], lintOverride: "The pending image is broken, rebuild it now.", byCeo: true, selfDeploy: deploy({ kind: "update" }) });
+    expect(checkAsk({ triedFirst: TRIED, ...OPEN,steps: [SETTINGS], lintOverride: "The pending image is broken.", selfDeploy: deploy({ kind: "update" }) }).error).toMatch(/Only the CEO/);
+    const ok = checkAsk({ triedFirst: TRIED, ...OPEN,steps: [SETTINGS], lintOverride: "The pending image is broken, rebuild it now.", byCeo: true, selfDeploy: deploy({ kind: "update" }) });
     expect(ok.error).toBeNull();
     expect(ok.lint?.override?.findings).toEqual([expect.objectContaining({ step: 1, rule: "R16" })]);
   });
 });
 
 describe("checkAsk with the lint", () => {
-  const bad = ["Follow docs/06 for the folder."];
+  const bad = ["Follow docs/06 for the folder, shown in Settings → Server and runner → This host."];
   it("returns the refusal with the step and the reason", () => {
-    const r = checkAsk({ triedFirst: TRIED, ownerMustDo: true, steps: bad });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,ownerMustDo: true, steps: bad });
     expect(r.error).toMatch(/Step 1: points to a doc in docs\/ \("docs\/06"\)/);
     expect(r.error).not.toMatch(/lintOverride/);
   });
 
   it("lets only the CEO override, with a reason, and keeps what it let through", () => {
-    expect(checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: "The doc is right this time." }).error).toMatch(/Only the CEO/);
-    expect(checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: "ok", byCeo: true }).error).toMatch(/at least 10/);
-    expect(checkAsk({ triedFirst: TRIED, steps: bad, byCeo: true }).error).toMatch(/pass lintOverride/);
-    const r = checkAsk({ triedFirst: TRIED, steps: bad, lintOverride: "  The owner asked for the doc  reference. ", byCeo: true });
+    expect(checkAsk({ triedFirst: TRIED, ...OPEN,steps: bad, lintOverride: "The doc is right this time." }).error).toMatch(/Only the CEO/);
+    expect(checkAsk({ triedFirst: TRIED, ...OPEN,steps: bad, lintOverride: "ok", byCeo: true }).error).toMatch(/at least 10/);
+    expect(checkAsk({ triedFirst: TRIED, ...OPEN,steps: bad, byCeo: true }).error).toMatch(/pass lintOverride/);
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps: bad, lintOverride: "  The owner asked for the doc  reference. ", byCeo: true });
     expect(r.error).toBeNull();
     const f = [expect.objectContaining({ step: 1, rule: "R1" })];
     expect(r.lint?.override).toEqual({ reason: "The owner asked for the doc reference.", findings: f, entries: [{ reason: "The owner asked for the doc reference.", findings: f }] });
@@ -523,7 +525,9 @@ describe("checkAsk with the lint", () => {
     });
 
     it("naming every refused step lets them through, and the card keeps one entry per reason", () => {
-      const r = checkAsk({ triedFirst: TRIED, steps: two, lintOverride: [{ steps: [1], rules: ["R1"], reason: why }, { steps: [3], reason: "The seventh doc is right as well." }], byCeo: true });
+      // BOS-1660: every step also names where it happens, so only R1 is left to override.
+      const placed = ["In Settings → Funding, follow docs/06 for the folder.", two[1]!, "In Settings → Funding, follow docs/07 for the other folder."];
+      const r = checkAsk({ triedFirst: TRIED, ...OPEN, steps: placed, lintOverride: [{ steps: [1], rules: ["R1"], reason: why },{ steps: [3], reason: "The seventh doc is right as well." }], byCeo: true });
       expect(r.error).toBeNull();
       expect(r.lint?.override?.entries).toEqual([
         { reason: why, findings: [expect.objectContaining({ step: 1, rule: "R1" })] },
@@ -543,7 +547,7 @@ describe("checkAsk with the lint", () => {
   });
 
   it("never lets an override through a command that isn't copy-safe", () => {
-    const r = checkAsk({ triedFirst: TRIED, steps: ["Run `ssh root@<host-ip>`."], lintOverride: "Urgent, the owner knows the address.", byCeo: true });
+    const r = checkAsk({ triedFirst: TRIED, ...OPEN,steps: ["Run `ssh root@<host-ip>`."], lintOverride: "Urgent, the owner knows the address.", byCeo: true });
     expect(r.error).toMatch(/placeholder/);
   });
 });
@@ -589,7 +593,7 @@ const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).cont
 const isError = (r: unknown) => (r as { isError?: boolean }).isError === true;
 
 describe("raise_decision checks the owner's steps", () => {
-  const card = (steps: string[], extra: Record<string, unknown> = {}) => ({ question: "Move Boss Man to the new host?", options: ["Done", "It failed"], recommended: "Done", triedFirst: TRIED, ownerMustDo: true, steps, ...extra });
+  const card = (steps: string[], extra: Record<string, unknown> = {}) => ({ question: "Move Boss Man to the new host?", options: ["Done", "It failed"], recommended: "Done", triedFirst: TRIED, why: "The new host runs Boss Man once these steps are done.", minutes: 10, ownerMustDo: true, steps, ...extra });
 
   it("refuses an agent's card that says follow docs/06 or uses an unset variable, and raises nothing", async () => {
     const c = (ctx = await setup());
@@ -616,7 +620,7 @@ describe("raise_decision checks the owner's steps", () => {
     const ok = await w.callTool({ name: "raise_decision", arguments: card(steps, { proof: "not rehearsed: the owner's new host, never tried there" }) });
     expect(isError(ok)).toBe(false);
     const ceo = await c.mcp(c.ceo.id);
-    const over = await ceo.callTool({ name: "raise_decision", arguments: card(["Follow docs/06 on the new host."], { question: "Install on the new host?", lintOverride: "The owner asked to be pointed at the guide." }) });
+    const over = await ceo.callTool({ name: "raise_decision", arguments: card(["Follow docs/06 on the new host, listed in Settings → Server and runner → This host."], { question: "Install on the new host?", lintOverride: "The owner asked to be pointed at the guide." }) });
     expect(isError(over)).toBe(false);
     const rows = await c.db.select().from(decisions);
     const lintOf = (q: string) => (rows.find((d) => d.question === q)!.context as { lint?: CardLint }).lint;

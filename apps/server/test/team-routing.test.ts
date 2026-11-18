@@ -233,7 +233,7 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(await reload(d!.id)).toMatchObject({ tier: "ceo", forAgentId: null });
     expect((await reload(d!.id).then((r) => (r.context as { ladder: Ladder }).ladder)).rung).toBe("ceo");
     const ceo = await client(ctx.ceo.id);
-    const esc = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Checked the runner and the agent's last output; the run cannot finish without the owner's service credentials.", ownerMustDo: true, steps: ["Open Settings → Secrets", "Add API_TOKEN"] } });
+    const esc = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d!.id, triedFirst: "Checked the runner and the agent's last output; the run cannot finish without the owner's service credentials.", ownerMustDo: true, openingWhy: "The stalled run can finish.", minutes: 3, steps: ["Open Settings → Secrets", "In Settings → Secrets, add API_TOKEN"] } });
     expect(isError(esc)).toBe(false);
     const owner = await reload(d!.id);
     expect(owner).toMatchObject({ tier: "owner", status: "open" });
@@ -279,7 +279,7 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(await queueIds()).not.toContain(open.id);
     expect((await ownerNotified(open.id)).length).toBe(0);
     // Only the CEO sending it on (escalate) puts it in front of the owner, with what was tried.
-    const esc = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "escalate", id: open.id, triedFirst: "Checked the reviewer and moved the review on; nobody else is free to take it", steps: ["Move the review to another agent in Settings → Reviews"] } });
+    const esc = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "escalate", id: open.id, triedFirst: "Checked the reviewer and moved the review on; nobody else is free to take it", openingWhy: "The stuck review moves on.", minutes: 2, steps: ["Move the review to another agent in Settings → Reviews"] } });
     expect(isError(esc)).toBe(false);
     const owner = await reload(open.id);
     expect(owner.tier).toBe("owner");

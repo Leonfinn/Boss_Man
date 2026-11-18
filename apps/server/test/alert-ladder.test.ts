@@ -178,10 +178,10 @@ describe("the alert ladder (BOS-64)", () => {
     expect((await ladderOf(d.id)).ladder.rung).toBe("ceo");
     const noSteps = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d.id, triedFirst: "Parked the ticket and checked both agents' last runs", ownerMustDo: true } });
     expect(textOf(noSteps)).toMatch(/give steps/);
-    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d.id, triedFirst: "Parked the ticket and checked both agents' last runs; it needs the Penpot login", ownerMustDo: true, steps: ["Open Settings → Secrets", "Add PENPOT_PASSWORD"] } });
+    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d.id, triedFirst: "Parked the ticket and checked both agents' last runs; it needs the Penpot login", ownerMustDo: true, openingWhy: "Penpot designs can be read again.", minutes: 3, steps: ["Open Settings → Secrets", "In Settings → Secrets, add PENPOT_PASSWORD"] } });
     expect(isError(ok)).toBe(false);
     const c = await ladderOf(d.id);
-    expect(c).toMatchObject({ triedFirst: expect.stringContaining("Penpot login"), steps: ["Open Settings → Secrets", "Add PENPOT_PASSWORD"] });
+    expect(c).toMatchObject({ triedFirst: expect.stringContaining("Penpot login"), steps: ["Open Settings → Secrets", "In Settings → Secrets, add PENPOT_PASSWORD"] });
     expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.tier).toBe("owner");
     expect(await ownerNotified(d.id)).toHaveLength(1);
   });

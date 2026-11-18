@@ -325,8 +325,11 @@ describe("Boss Man MCP server", () => {
     const noSteps = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true } });
     expect(noSteps.isError).toBe(true);
     expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"))).toHaveLength(0);
-    const steps = ["Open Settings → Server and runner → Updates.", "Click Build and update runners.", "To undo, click Update runners again after reverting."];
-    const ok = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true, steps } });
+    const steps = ["Open Settings → Server and runner → Updates.", "In Settings → Server and runner → Updates, click Build and update runners.", "To undo, go to Settings → Server and runner → Updates and click Update runners again after reverting."];
+    // BOS-1660: a card with steps opens with why and minutes; without them it is refused, and nothing is raised.
+    const noOpening = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true, steps } });
+    expect(noOpening.isError).toBe(true);
+    const ok = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true, steps, why: "The runners get the new image.", minutes: 3 } });
     expect(ok.isError).toBeFalsy();
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
     expect(d!.context).toMatchObject({ type: "question", triedFirst: tried, steps });
