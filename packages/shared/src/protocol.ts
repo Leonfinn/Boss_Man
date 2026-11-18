@@ -270,6 +270,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     base: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     /** Merge train: finish pushes only if main's tip is exactly this commit, the base the checked tree was prepared on. */
     expectBase: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    /**
+     * BOS-1762 (runner feature "merge-carry"): finish may land the passed merge on a main that moved since prepare, when main's
+     * new commits touch none of the ticket's files and nothing that re-tests the whole repo. Otherwise main_moved as before.
+     */
+    carry: z.boolean().optional(),
     /** BOS-1664 (runner feature "ci-publish-scan"): the owner's private-details list, applied to the secrets scan that runs before the "publish" push makes the commit public. */
     scanList: z.string().max(60_000).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
@@ -416,8 +421,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "ci-publish": workspace.merge's "publish" and "unpublish" phases and its expectTree (BOS-1070); an older runner would read an unknown phase as a plain merge, so the server only sends them to a runner that says this. "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. "ci-publish-scan" (BOS-1664): runs the secrets scan, with the owner's private-details list from workspace.merge's scanList, before a "publish" push; the early GitHub run (pre-flight) is offered only to a runner that says this. "main-log": answers workspace.mainLog (BOS-1645). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan", "main-log"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "ci-publish": workspace.merge's "publish" and "unpublish" phases and its expectTree (BOS-1070); an older runner would read an unknown phase as a plain merge, so the server only sends them to a runner that says this. "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. "ci-publish-scan" (BOS-1664): runs the secrets scan, with the owner's private-details list from workspace.merge's scanList, before a "publish" push; the early GitHub run (pre-flight) is offered only to a runner that says this. "main-log": answers workspace.mainLog (BOS-1645). "merge-carry" (BOS-1762): honours workspace.merge's carry on finish; the server sends it only to a runner that says this. */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan", "main-log", "merge-carry"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -565,7 +570,11 @@ export type MergeResult =
   /** Phase "unpublish": the CI branch is gone from origin (or was never there). */
   | { status: "unpublished"; branch: string }
   /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
-  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
+  /**
+   * `carried` (BOS-1762): the passed merge landed on a main that had moved since it was tested (`from` the tested base, `to` the
+   * tip it landed on), because main's `commits` new commits touched none of the ticket's files; `files` is how many they touched.
+   */
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[]; carried?: MergeCarried }
   | { status: "already_merged"; commit: string }
   /** `why`: the migration renumber (BOS-690) looked at the clash and refused; its reason, for the send-back text (BOS-1540). */
   | { status: "conflicts"; files: string[]; why?: string }
@@ -574,8 +583,15 @@ export type MergeResult =
   | { status: "migration_journal"; problems: string[] }
   /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
   | { status: "check_failed"; command: string; result: VerifyResult }
-  /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
-  | { status: "main_moved" };
+  /**
+   * The target kept moving while its merged result was checked; nothing was pushed, try again. BOS-1762: `carryEligible` means a
+   * carry was allowed but the push lost a race, so finish may be asked again without preparing; `notCarried` says why a carry
+   * that was asked for was not allowed (for the merge-line record).
+   */
+  | { status: "main_moved"; carryEligible?: boolean; notCarried?: { why: string; files?: string[] } };
+
+/** BOS-1762: a passed merge landed on a moved main (see MergeResult "merged"). */
+export type MergeCarried = { from: string; to: string; commits: number; files: number };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
 /** `contained`: this ticket's branch holds the other branch's whole tip, so merging this one lands it too (BOS-372). */
