@@ -525,7 +525,7 @@ describe("checkAsk with the lint", () => {
     });
 
     it("naming every refused step lets them through, and the card keeps one entry per reason", () => {
-      const r = checkAsk({ triedFirst: TRIED, steps: two, lintOverride: [{ steps: [1], rules: ["R1"], reason: why }, { steps: [3], reason: "The seventh doc is right as well." }], byCeo: true });
+      const r = checkAsk({ triedFirst: TRIED, ...OPEN, steps: two, lintOverride: [{ steps: [1], rules: ["R1"], reason: why },{ steps: [3], reason: "The seventh doc is right as well." }], byCeo: true });
       expect(r.error).toBeNull();
       expect(r.lint?.override?.entries).toEqual([
         { reason: why, findings: [expect.objectContaining({ step: 1, rule: "R1" })] },
