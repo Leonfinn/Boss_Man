@@ -147,6 +147,29 @@ describe("decision queue", () => {
     expect(screen.getByText("Runner update afterwards: not needed.")).toBeTruthy();
   });
 
+  // BOS-1826: the card showed "+17 more" for the rest of the first 20 and "and 4 more" for those past 20: two counts for one list.
+  it("a deploy card has one 'and N more' line counting every ticket not on screen (BOS-1826)", () => {
+    const changes = Array.from({ length: 20 }, (_, i) => ({ ticketId: `t${i + 1}`, ref: `APP-${i + 1}`, title: `Change ${i + 1}` }));
+    const d = decision({
+      kind: "approval",
+      question: "Deploy Boss Man?",
+      options: ["Deploy", "Not now"],
+      recommendedOption: "Deploy",
+      blocks: [],
+      context: { type: "self_deploy", update: { from: "a".repeat(40), to: "b".repeat(40), total: 120, files: 157, changes, more: 4, otherCommits: ["Bump one", "Bump two"], otherMore: 94, risks: [] } },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const list = screen.getByRole("list", { name: "Tickets in this update" });
+    // 3 shown, 17 kept but folded, 4 only counted: one line, 21.
+    expect(list.textContent).toContain("and 21 more — See all the tickets");
+    expect(list.textContent).not.toMatch(/\+\d+ more|and 4 more/);
+    fireEvent.click(screen.getByRole("button", { name: "and 21 more" }));
+    expect(screen.getByText("APP-20", { exact: false })).toBeTruthy();
+    expect(list.textContent).toContain("and 4 more — See all the tickets · Show fewer");
+    // Other commits count those the card keeps by name and those it only counts.
+    expect(screen.getByText("Other commits: 96")).toBeTruthy();
+  });
+
   it("shows each hand-apply command in its own block with a Copy button that copies only the command (BOS-269)", async () => {
     setSecure(true);
     const writeText = vi.fn(() => Promise.resolve());

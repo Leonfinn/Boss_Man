@@ -30,6 +30,10 @@ type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 const ROLE_EXPECTED = "leader (or single on a server that runs one copy)";
 const RUNNER_STEP ="rebuild the runners: Settings → Server and runner → Updates → Build and update runners";
 
+/** How many tickets and other commits a deploy card's update keeps by name; the rest are counted in `more` and `otherMore`. */
+const KEEP_TICKETS = 20;
+const KEEP_OTHER_COMMITS = 30;
+
 const Available = z.object({
   checkedAt: z.string(),
   deployed: z.string(),
@@ -316,7 +320,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   /**
    * What the owner is approving (BOS-213): Boss Man's merges record the ticket as
    * `Merge "<title>" (<ticket id>)`, so each one maps back to its ticket and title. Commits that
-   * aren't a ticket keep their subject line. Long ranges show the first 20 tickets.
+   * aren't a ticket keep their subject line. Long ranges keep the first KEEP_TICKETS tickets and count the rest.
    */
   async function updateFor(commit: string, fromCommit: string, a: Available | null, extras: { handBecause?: string; handFiles?: string[]; handEffect?: DeployUpdate["handEffect"]; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean; risks: string[] }): Promise<DeployUpdate | undefined> {
     const commits = a?.commits ?? [];
@@ -339,20 +343,23 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const seen = new Set<string>();
     for (const e of entries) {
       const t = e.ticketId ? found.get(e.ticketId) : undefined;
-      // A merge whose ticket can't be found (removed, or another install) is still shown as a commit.
+      // A merge whose ticket can't be found (removed, or another install) is still shown as a commit, and so is a
+      // ticket's second merge, so tickets + other commits always add up to `total` (BOS-1826).
       if (t && !seen.has(t.ticketId)) {
         seen.add(t.ticketId);
         all.push(t);
-      } else if (!t) otherCommits.push(e.subject);
+      } else otherCommits.push(e.subject);
     }
     return {
       from: fromCommit,
       to: commit,
       total: entries.length,
       files: a?.paths.length ?? 0,
-      changes: all.slice(0, 20),
-      more: Math.max(0, all.length - 20),
-      otherCommits,
+      changes: all.slice(0, KEEP_TICKETS),
+      more: Math.max(0, all.length - KEEP_TICKETS),
+      // The host sends the whole range since BOS-1826, which can be hundreds of branch commits: the card keeps a page.
+      otherCommits: otherCommits.slice(0, KEEP_OTHER_COMMITS),
+      ...(otherCommits.length > KEEP_OTHER_COMMITS ? { otherMore: otherCommits.length - KEEP_OTHER_COMMITS } : {}),
       ...(extras.handBecause ? { handBecause: extras.handBecause } : {}),
       ...(extras.handFiles?.length ? { handFiles: extras.handFiles } : {}),
       ...(extras.handEffect ? { handEffect: extras.handEffect } : {}),
@@ -776,7 +783,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // The tickets this update carries, in the owner's words (BOS-683, DR-036): the new card lists them, so
     // the card that clears the older one says what it includes. Only the tickets, never the bare commits.
     const carried = (update?.changes ?? []).slice(0, 10).map((c) => `${c.ref}: ${c.title}`);
-    const carries = carried.length ? ` It includes ${carried.join("; ")}${update && update.more > 0 ? `; and ${update.more} more` : ""}.` : "";
+    // Every ticket not named here, both those kept on the card past the 10th and those past KEEP_TICKETS (BOS-1826).
+    const notNamed = update ? update.changes.length - carried.length + update.more : 0;
+    const carries = carried.length ? ` It includes ${carried.join("; ")}${notNamed > 0 ? `; and ${notNamed} more` : ""}.` : "";
     const question =
       lead +
       (target === "runner"

@@ -177,9 +177,12 @@ export type DeployUpdate = {
   /** How many files the update touches. */
   files: number;
   changes: DeployChange[];
-  /** Tickets beyond the first 20. */
+  /** Tickets beyond the first 20. `changes.length + more + otherCommits.length + (otherMore ?? 0)` = `total`. */
   more: number;
+  /** The commits that aren't a ticket's first merge, the first 30 of them. */
   otherCommits: string[];
+  /** Other commits beyond those listed (BOS-1826); absent when all are listed. */
+  otherMore?: number;
   handBecause?: string;
   handFiles?: string[];
   /** What a hand-applied update changes: the deployer script, the server, or both (BOS-218). */

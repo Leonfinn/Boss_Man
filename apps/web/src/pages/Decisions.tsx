@@ -239,8 +239,13 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
   // card doesn't fill the screen with the whole list (the same on every update card, open or closed).
   const KEEP_TICKETS = 3;
   const shownChanges = u.changes.slice(0, KEEP_TICKETS);
-  const hidden = u.changes.length - shownChanges.length;
   const [allShown, setAllShown] = useState(false);
+  // One overflow line, one number (BOS-1826): every ticket not on screen, whether the card keeps it (u.changes past
+  // the third, shown on a click) or only counts it (u.more, past the server's first 20).
+  const listed = allShown ? u.changes.length : shownChanges.length;
+  const notShown = u.changes.length - listed + u.more;
+  const canExpand = u.changes.length > shownChanges.length;
+  const otherCount = u.otherCommits.length + (u.otherMore ?? 0);
   return (
     <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
       <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
@@ -253,27 +258,41 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
               <a href={`#/tickets/${c.ticketId}`}><strong>{c.ref}</strong> {c.title}</a>
             </li>
           ))}
-          {hidden > 0 && (
+          {(notShown > 0 || allShown) && (
             <li>
-              <button type="button" className="linkish" onClick={() => setAllShown((v) => !v)}>
-                {allShown ? "Show fewer" : `+${hidden} more`}
-              </button>
-            </li>
-          )}
-          {u.more > 0 && (
-            <li className="muted">
-              and {u.more} more. <a href="#/board">See all the tickets</a>.
+              {notShown > 0 && (
+                <>
+                  {canExpand && !allShown ? (
+                    <button type="button" className="linkish" onClick={() => setAllShown(true)}>
+                      and {notShown} more
+                    </button>
+                  ) : (
+                    <span className="muted">and {notShown} more</span>
+                  )}
+                  {" — "}
+                  <a href="#/board">See all the tickets</a>
+                </>
+              )}
+              {allShown && (
+                <>
+                  {notShown > 0 ? " · " : ""}
+                  <button type="button" className="linkish" onClick={() => setAllShown(false)}>
+                    Show fewer
+                  </button>
+                </>
+              )}
             </li>
           )}
         </ul>
       )}
-      {u.otherCommits.length > 0 && (
+      {otherCount > 0 && (
         <details>
-          <summary>Other commits: {u.otherCommits.length}</summary>
+          <summary>Other commits: {otherCount}</summary>
           <ul style={{ paddingLeft: 20, margin: "4px 0" }}>
             {u.otherCommits.map((s, i) => (
               <li key={i} style={{ overflowWrap: "anywhere" }}><span className="mono muted">{s}</span></li>
             ))}
+            {(u.otherMore ?? 0) > 0 && <li className="muted">and {u.otherMore} more</li>}
           </ul>
         </details>
       )}

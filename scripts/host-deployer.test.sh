@@ -1461,6 +1461,25 @@ plreq setup bossman-publish alerts "$PUB"; PL_FAIL=token plhost
 unset PL_NOPUB
 rm -f "$PD/inbox/phone-login.json"
 
+# BOS-1826: the offer is the whole range. It held only the newest 30 commits (git log -n 30), so the card said "30 changes"
+# however many were waiting, and the first 300 paths, so host-deployer.sh (listed late, as paths sort) could drop out.
+# Its own origin and checkout, so the fixture above is untouched: 150 commits, one of them adding 310 files.
+LR="$T/long-range"; mkdir -p "$LR/deployer/inbox" "$LR/deployer/outbox"
+git init -q --bare -b main "$LR/origin.git"
+git clone -q "$LR/origin.git" "$LR/w" 2>/dev/null
+mkdir -p "$LR/w/apps/server" "$LR/w/scripts"; echo a >"$LR/w/apps/server/a"
+git -C "$LR/w" add -A; git -C "$LR/w" commit -qm base; git -C "$LR/w" push -q origin HEAD:main 2>/dev/null
+git clone -q "$LR/origin.git" "$LR/src" 2>/dev/null
+for i in $(seq 1 310); do echo "$i" >"$LR/w/apps/server/f$i"; done
+echo x >"$LR/w/scripts/host-deployer.sh"
+git -C "$LR/w" add -A; git -C "$LR/w" commit -qm "add 311 files"
+for i in $(seq 2 150); do git -C "$LR/w" commit -q --allow-empty -m "commit $i"; done
+git -C "$LR/w" push -q origin HEAD:main 2>/dev/null
+printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$LR/src" >"$LR/deployer/host.conf"; chmod 600 "$LR/deployer/host.conf"
+BOSSMAN_DEPLOYER="$LR/deployer" "$here/host-deployer.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (long range)"; }
+lr="$(node -e 'const o=require(process.argv[1]);process.stdout.write(`${o.commits.length} ${o.paths.length} ${o.infraPaths.join(",")} ${o.commits.at(-1).subject}`)' "$LR/deployer/outbox/available.json")"
+[[ $lr == "150 311 scripts/host-deployer.sh add 311 files" ]] || fail "long range: wanted 150 commits, 311 paths and host-deployer.sh, got: $lr"
+
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"
 out="$( (unset BOSSMAN_DEPLOYER; bash "$own/deployer/host-deployer.sh" --dry-run 2>&1) || true)"
