@@ -33,10 +33,11 @@ describe("go-live line and the not-live warning", () => {
     expect(await liveClaimWarning(db, ticket, "The change is live.")).toBeNull();
   });
 
-  it("says no and warns when the server runs something older", async () => {
+  it("says can't tell, never a wrong no, when the running commit can't be placed; still warns (BOS-1644)", async () => {
     const other = "d".repeat(40);
     await db.insert(settings).values({ key: `live_release:${COMPANY}`, value: { old: other, new: other } }).onConflictDoUpdate({ target: settings.key, set: { value: { old: other, new: other } } });
-    expect(await goLiveLine(db, ticket)).toContain("live on the server: no");
+    expect(await goLiveLine(db, ticket)).toContain("live on the server: can't tell (");
+    expect(await goLiveLine(db, ticket)).not.toContain("live on the server: no");
     expect(await goLiveLine(db, { ...ticket, touchesRunner: true })).toContain("runners rebuilt:");
     const w = await liveClaimWarning(db, ticket, "Good news: this is live on the server.");
     expect(w).toContain("not live yet");

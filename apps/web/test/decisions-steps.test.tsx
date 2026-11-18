@@ -46,6 +46,26 @@ describe("command blocks say where and as whom (BOS-427)", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("ls -l /mnt/backups"));
   });
 
+  it("leaves no Copy reset timer running after the card unmounts (BOS-1783)", async () => {
+    setSecure(true);
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const { unmount } = render(<Decisions decisions={[card(['List:\n\n```sh host="nas01" as="root"\nls\n```'])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+      // Let the copy promise settle (microtasks only) so the 2 s timer is started.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByRole("button", { name: "Copy this command" }).textContent).toBe("Copied");
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(2500);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("says 'the logged-in account' for an as=login block", () => {
     render(<Decisions decisions={[card(['Check it:\n\n```sh host="nas01" as="login"\nid\n```'])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
     expect(line(/^On nas01, as the logged-in account\.$/)).toBeTruthy();

@@ -370,7 +370,7 @@ export function alertLadder(
   async function openAlert(companyId: string, decisionId: string) {
     const [d] = await db.select().from(decisions).where(and(eq(decisions.id, decisionId), eq(decisions.companyId, companyId), eq(decisions.status, "open")));
     const ladder = (d?.context as { ladder?: Ladder } | undefined)?.ladder;
-    if (!d || !ladder) throw new WatchdogError(404, "No open alert with that ID.");
+    if (!d || !ladder) throw new WatchdogError(404, "No open card with that ID (an alert, or a team question waiting with the CEO).");
     return { d, ladder };
   }
 
@@ -628,7 +628,7 @@ export function alertLadder(
     /** The CEO can't settle it: it goes to the owner with what was tried and the steps (the raise_decision rules). */
     async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; /** The owner must act now (BOS-1097): the card also reaches their phone. */ urgentWhy?: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
       const [ceo] = await db.select().from(agents).where(and(eq(agents.id, ceoId), eq(agents.companyId, companyId), eq(agents.role, "ceo")));
-      if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
+      if (!ceo) throw new WatchdogError(403, "Only the CEO passes cards to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
       // The card's own options are buttons the owner sees, so R7 accepts "press <option>" (BOS-421).

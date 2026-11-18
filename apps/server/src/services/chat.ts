@@ -69,7 +69,34 @@ export class ChatError extends Error {
 
 type Agent = typeof agents.$inferSelect;
 
-export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string; trace?: ChatTraceService }) {
+/** The note on the one chat wake Boss Man adds after a run ended without a reply (BOS-1734): a run started by it isn't asked a third time. */
+export const NO_REPLY_NOTE = "The last chat run ended without a reply; asked again once.";
+
+/** Why a run stopped, in plain words with the recorded outcome kept (BOS-1734). */
+export function stopWords(outcome: string | null): string {
+  if (!outcome) return "no stop reason was recorded";
+  const plain: Record<string, string> = {
+    end_turn: "it ended its turn without writing one",
+    max_tokens: "it hit its output limit",
+    max_turn_requests: "it hit its step limit",
+    refusal: "the model refused",
+    cancelled: "it was cancelled",
+    interrupted: "it was interrupted",
+  };
+  const said = plain[outcome] ?? (outcome.startsWith("stopped: ") ? `Boss Man stopped it: ${outcome.slice(9)}` : null);
+  return said ? `${said}; stop reason "${outcome}"` : `stop reason "${outcome.slice(0, 200)}"`;
+}
+
+export function chatService(
+  db: Db,
+  deps: {
+    notify: (agentId: string, input: { reason: string; priority: number; note?: string; causedByRunId?: string }) => Promise<unknown>;
+    workspaceRoot: string;
+    trace?: ChatTraceService;
+    /** A "flag" in the owner's feed (BOS-1734): a chat run asked again still ended without a reply. */
+    flag?: (n: { companyId: string; agentId: string; title: string; body: string; link: string }) => Promise<unknown>;
+  },
+) {
   // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
   const saving = new Map<string, Promise<unknown>>();
   // shortcut: how many changes the run had when it last replied, so the run-end line lists only what came after (BOS-758).
@@ -277,7 +304,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       // that answered, and a run that never answered shows nothing.
       deps.trace?.forget(runId);
       const [r] = await db
-        .select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, startedAt: runs.startedAt, name: agents.name, duty: agents.duty })
+        .select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, startedAt: runs.startedAt, outcome: runs.outcome, stopReason: runs.stopReason, cancelRequestedAt: runs.cancelRequestedAt, name: agents.name, duty: agents.duty })
         .from(runs)
         .innerJoin(agents, eq(agents.id, runs.agentId))
         .where(eq(runs.id, runId));
@@ -307,9 +334,28 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       if (last && !done.length && !asked!.n) return;
       const parts = [...(asked!.n ? [`${asked!.n} decision${asked!.n === 1 ? "" : "s"} sent to Decisions`] : []), ...done.slice(0, 5)];
       const more = done.length > 5 ? ` (and ${done.length - 5} more)` : "";
-      const head = `${r.name} finished${last ? " after its last message" : " without a reply"}.`;
-      const text = parts.length ? `${head} ${last ? "Since that message" : "In this run"}: ${parts.join("; ")}${more}.` : head;
+      const did = parts.length ? ` ${last ? "Since that message" : "In this run"}: ${parts.join("; ")}${more}.` : "";
+      if (last) {
+        await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId, role: "system", text: `${r.name} finished after its last message.${did}`, runId });
+        return;
+      }
+      // BOS-1734: no reply at all must never be a silent end. The stop reason (runs.outcome, kept for every run) is named;
+      // the owner's messages are released so the next run claims them (and a PA-escalated copy's answer is still relayed);
+      // the run is asked again once, straight away. A run that was itself that second try, or one someone stopped by hand,
+      // isn't asked again: the owner is told why it stopped and that the message is kept, with a flag in the feed.
+      const stop = stopWords(r.outcome);
+      await db.update(ownerChatMessages).set({ runId: null }).where(and(eq(ownerChatMessages.runId, runId), eq(ownerChatMessages.role, "owner")));
+      const [woke] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.runId, runId), eq(wakes.note, NO_REPLY_NOTE)));
+      const byHand = !!r.cancelRequestedAt && !r.stopReason;
+      if (!woke && !byHand) {
+        await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId, role: "system", text: `${r.name} finished without a reply (${stop}), so it was asked again.${did}`, runId });
+        await deps.notify(agentId, { reason: CHAT_REASON, priority: 4, note: NO_REPLY_NOTE, causedByRunId: runId });
+        return;
+      }
+      const text = `${r.name} finished without a reply${woke ? " again" : ""} (${stop}). Your message is kept: ${r.name}'s next chat run answers it, and sending another message starts one.${did}`;
       await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId, role: "system", text, runId });
+      // Stopped by hand, the one who stopped it knows: only a second silent end is flagged.
+      if (woke) await deps.flag?.({ companyId: r.companyId, agentId, title: `${r.name} didn't answer your chat message`, body: `It ended twice without a reply (${stop}). Your message is kept.`, link: `#/chat/${r.companyId}/${agentId}` });
     },
   };
 }

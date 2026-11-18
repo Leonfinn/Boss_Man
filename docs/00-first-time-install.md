@@ -263,9 +263,10 @@ Check it worked: you see "Saved." and the step shows a tick.
 3. Leave **Default branch** as it is unless yours differs. Under **When work is approved**, choose **Merge into the default branch** or **Open a pull request**. Choose the pull request option if your default branch only accepts pull requests.
 4. Save, then **Next**.
 
-**The runner.** It's the container where the company's agents work. It connects out to Boss Man, so it needs no open ports.
-- With the launcher on, the step shows the container `boss-man-runner-<slug>`. If the connection says **Not started**, choose **Start runner**.
-- Wait for the tag to say **Connected**. It goes through **Starting…** first. This can take up to a minute.
+**The runner.** It's the container where the company's agents work. It connects out to Boss Man, so it needs no open ports. This step only shows its status.
+- If the tag says **Connected**, there is nothing to do.
+- If it says **Not connected** and the launcher is on, choose **Start the runner**. Without the launcher, the step points you to **Settings → Server and runner**: follow the steps there.
+- Wait for the tag to say **Connected**. This can take up to a minute; the page updates by itself.
 
 Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
 
@@ -273,13 +274,13 @@ Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"
 
 Make each secret on your own computer, then paste it into the form. Boss Man encrypts it and never shows it again. Paste a token only into these forms, never into a chat or a ticket.
 
-**Claude.** Choose **Claude setup-token** under **Add**. On your own computer:
+**Claude.** One box, **Claude setup token**. On your own computer:
 
 ```sh
 claude setup-token
 ```
 
-It prints a long-lived token for your subscription. Paste it into **Value**, leave **Variable name** as `CLAUDE_CODE_OAUTH_TOKEN`, then choose **Check** and save. Boss Man refuses a token with stray spaces or quotes and says why. In the table, choose **Check with Claude**: it runs one tiny prompt on the runner and uses a little of your allowance. If you use an API key instead, choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
+Sign in with your Claude Pro or Max account. It prints a long-lived token. Paste it into the box and choose **Save the token**. Boss Man refuses a token with stray spaces or quotes and says why. Saving also makes the funding source and sets the CEO to run on it, so you skip "What pays for the CEO". The step then shows **Connected**; to change it later, use **Settings → Credentials**. If you use an API key instead, open **Use an API key instead** and choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
 
 **A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Boss Man's runner uses it as `GIT_TOKEN` for git; agents' own sessions never see it.
 - **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Actions read-only, so Boss Man can read CI runs.
@@ -293,7 +294,7 @@ Check it worked: the message says "The token can read and push to the repo." If 
 
 **Checks before merging.** Boss Man looks at the repo through the runner and proposes what runs before work merges. Under **Before merging, Boss Man will**, choose one. If the list is the standard one, choose **Re-detect** now that the runner and git token work.
 
-**What pays for the CEO.** This tracks cost and quota.
+**What pays for the CEO.** If you saved a Claude setup token in step 9, the wizard skips this step: the token already made the funding source. If you used an API key instead, this tracks cost and quota:
 1. Under **Funding sources**, name it (for example "Claude Max") and choose a **Kind**: **Subscription (setup-token)** for a Pro or Max plan, or **API credit, monthly grant** for an API key (then give the monthly grant in USD).
 2. Choose **Add**.
 3. Under "The CEO runs on", pick that source.
