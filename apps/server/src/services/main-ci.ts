@@ -439,7 +439,7 @@ export function mainCiService(
         const t = await deps.createTicket(p.id, { title, body, assigneeAgentId: who.agentId, urgent: true, risk: "medium", state: "ready" });
         // R40: what this red covers. One tree read per ticket opened; a failed read leaves the scope unknown (holds all).
         const named = namedFiles(f.lines);
-        const tree = named.length ? await deps.gitHosts.treePaths(cfg, token, run.headSha).catch(() => null) : null;
+        const tree = named.length ? await Promise.resolve().then(() => deps.gitHosts.treePaths(cfg, token, run.headSha)).catch(() => null) : null;
         const scope = redScope(named, run.path ?? null, tree);
         state.open[f.key] = { ticketId: t.id, workflow, runs: [run.url], mainAt: run.headSha, lastGreen: green?.headSha ?? null, suspects: blame.suspects, job: f.job, step: f.step, named, scope };
         // Saved at once: if a later ticket in this pass fails, the next pass must not open this one again.
