@@ -14,6 +14,7 @@ import { record } from "./activity.js";
 import { checkFailureFacts, firstFailingLine, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 import { softHold } from "./deploy-wait-hold.js";
 import { agedTier, retierWaiting, setTrainLaneAge, trainView } from "./merge-train.js";
+import { landingTurns } from "./landing-turn.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -375,6 +376,11 @@ export function checkQueue(db: Db) {
       return b ? { front: b.front, tier: b.tier, at: b.at, seat: seat! } : { front: j.frontAt?.getTime() ?? 0, tier: ranked(j), at: j.queuedAt.getTime(), seat: 0 };
     };
     const keys = new Map(queued.map((j) => [j.id, key(j)]));
+    // BOS-1822: while a ticket holds its project's landing turn (BOS-1762) every other passed merge of that project waits to
+    // push until it lands, so its re-check starts next, below only a fix for a red main. It used to queue at the ticket's
+    // own tier and place, and spent up to 14 of the turn's 25 minutes waiting for a slot (18 Nov). The turn is in memory
+    // in this process, the one that runs the landings and serves the queue.
+    const turn = (j: CheckJob) => j.kind === "merge" && landingTurns.holds(j.projectId, j.ticketId);
     const order = queued
       .filter((j) => !(red.has(j.projectId) && j.kind === "merge" && !j.fixesMain) && !trainHeld.has(j.id))
       .sort((a, b) => {
@@ -382,6 +388,7 @@ export function checkQueue(db: Db) {
         const kb = keys.get(b.id)!;
         return (
           Number(b.fixesMain) - Number(a.fixesMain) ||
+          Number(turn(b)) - Number(turn(a)) ||
           (trainFirst ? Number(seatOf.has(b.id)) - Number(seatOf.has(a.id)) : 0) ||
           Number(withMerges(b)) - Number(withMerges(a)) ||
           kb.front - ka.front ||
@@ -757,7 +764,7 @@ export function checkQueue(db: Db) {
         minutes: minutes(j.state === "running" ? j.startedAt : j.queuedAt),
         fixesMain: j.fixesMain,
         // BOS-1384: why this one is ahead of the others, in the owner's words (null for an ordinary place).
-        why: j.state !== "queued" ? null : j.fixesMain ? "fixes main" : j.frontAt ? `moved to front by ${j.frontBy ?? "the owner"}` : r.urgent ? "urgent" : null,
+        why: j.state !== "queued" ? null : j.fixesMain ? "fixes main" : j.kind === "merge" && landingTurns.holds(j.projectId, j.ticketId) ? "holds the landing turn" : j.frontAt ? `moved to front by ${j.frontBy ?? "the owner"}` : r.urgent ? "urgent" : null,
         heldBy,
         // BOS-1517: held because the ticket has no merge-train seat yet (its check isn't waiting for a slot at all).
         heldBySeat: j.state === "queued" && served.trainHeld.has(j.id),

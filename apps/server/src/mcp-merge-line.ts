@@ -18,7 +18,10 @@ import { fail, text, type Scope } from "./mcp-common.js";
 export const MERGE_LINE_EXPORT_DEFAULT = 5000;
 export const MERGE_LINE_EXPORT_MAX = 20_000;
 /** with and files (BOS-1515): a train_clash row's clashing tickets (ids, space-separated) and files (comma-separated, capped). */
-export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs", "check", "passed", "by", "commit", "with", "files"] as const;
+export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs", "check", "passed", "by", "commit", "with", "files", "note", "action", "rebuilds", "reason"] as const;
+// BOS-1823: note = a hold_started's note (for hold "turn", names the ticket that has the landing turn); action = a landing_turn's
+// (taken, queued, ended, expired) or a train_clash's; rebuilds = a rebuilt's or landing_turn's count; reason = why a merge was
+// rebuilt (rebuilt rows) or failed (attempt_failed rows). Other events' notes and reasons stay private.
 /** ran_on (BOS-1435): "company runner" or the check worker's name, for a job that started; null otherwise. */
 export const CHECK_JOB_COLUMNS = ["ticket_id", "kind", "scope", "queued", "started", "finished", "outcome", "reused", "ran_on"] as const;
 
@@ -44,6 +47,10 @@ export function exportRow(r: { ticketId: string | null; at: Date; detail: Record
     commit: str(d.commit),
     with: Array.isArray(d.with) ? d.with.map((w) => str((w as { ticketId?: unknown } | null)?.ticketId)).filter((x): x is string => !!x).join(" ") || null : null,
     files: Array.isArray(d.files) ? d.files.filter((f): f is string => typeof f === "string").join(",") || null : null,
+    note: d.event === "hold_started" ? str(d.note) : null,
+    action: str(d.action),
+    rebuilds: typeof d.rebuilds === "number" ? d.rebuilds : null,
+    reason: d.event === "rebuilt" ? str(d.why) : d.event === "attempt_failed" ? str(d.reason) : null,
   };
 }
 
@@ -75,7 +82,7 @@ export function registerMergeLineExport(server: Pick<McpServer, "registerTool">,
     "merge_line_records",
     {
       description:
-        `Read-only export of your company's merge-line timeline (the rows BOS-769 records: approved, check queued/started/ended, hold started/ended, merged, and each server takeover: event "takeover" with the cause in by and the live commit in commit), oldest first. Returns ticket_id, at, event, hold, heldMs, check, passed, by, commit, with and files for each row, and nothing else (with and files: a train_clash row's clashing ticket ids and files, for a ticket held to land alone or sent back for a clash with main). since is an ISO date or time (e.g. 2026-11-08T21:22:00Z); optional until (exclusive), format json (default) or csv, and limit (default ${MERGE_LINE_EXPORT_DEFAULT}, at most ${MERGE_LINE_EXPORT_MAX}). If the answer was cut at the limit it says so; ask again with since set to the last row's at to carry on (rows at that exact moment repeat, so drop them). ` +
+        `Read-only export of your company's merge-line timeline (the rows BOS-769 records: approved, check queued/started/ended, hold started/ended, merged, and each server takeover: event "takeover" with the cause in by and the live commit in commit), oldest first. Returns ticket_id, at, event, hold, heldMs, check, passed, by, commit, with, files, note, action, rebuilds and reason for each row, and nothing else (with and files: a train_clash row's clashing ticket ids and files, for a ticket held to land alone or sent back for a clash with main; note: a hold_started row's note, which for hold "turn" names the ticket that HAS the landing turn: the row's own ticket is only waiting behind it; action: a landing_turn row's taken, queued, ended or expired; rebuilds and reason: why a merge was rebuilt after main moved, or why an attempt failed). since is an ISO date or time (e.g. 2026-11-08T21:22:00Z); optional until (exclusive), format json (default) or csv, and limit (default ${MERGE_LINE_EXPORT_DEFAULT}, at most ${MERGE_LINE_EXPORT_MAX}). If the answer was cut at the limit it says so; ask again with since set to the last row's at to carry on (rows at that exact moment repeat, so drop them). ` +
         `what: "check_jobs" exports the whole check line instead, by queue time: every check job (kind pre_review for agents' request_check, merge for the gate) with ticket_id, kind, scope, queued, started, finished, outcome, reused and ran_on ("company runner" or a check worker's name). Queue wait = started - queued; a job never started has started empty. A request_check answered by an earlier pass or by the ticket's job already in line is its own row with reused "passed" or "live" and no start or finish. Carry on from the last row's queued.`,
       inputSchema: {
         since: z.string().min(8).max(40),

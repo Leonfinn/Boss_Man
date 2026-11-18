@@ -185,7 +185,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     else if (job.runnerId) deps.send(job.runnerId, { type: "check.cancel", jobId: job.id });
   };
 
-  /** R46: a machine with a free slot that is not taking a queued job, since when and why. In memory: a restart starts the clock again. */
+  // shortcut: lost on restart, harmless because the next tick rebuilds it and the idle clock simply starts again; upgrade only if alarms must survive restarts.
+  /** R46: a machine with a free slot that is not taking a queued job, since when and why. */
   const idle = new Map<string, Omit<IdleSlot, "minutes">>();
 
   /** Start whatever the free slots allow. Safe to call any time: a job is never claimed twice. */

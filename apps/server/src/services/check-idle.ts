@@ -31,6 +31,7 @@ export function checkIdleService(deps: {
   now?: () => Date;
 }) {
   const now = deps.now ?? (() => new Date());
+  // shortcut: lost on restart, harmless because a restart at worst repeats one wake or page per standing pair; upgrade if that ever annoys.
   // Slot and job pairs already told, so a repeat never happens; forgotten once the pair stops standing.
   const told = new Map<string, { ceo: boolean; owner: boolean }>();
 

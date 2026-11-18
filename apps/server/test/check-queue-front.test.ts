@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { activity, checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { checkQueue } from "../src/services/check-queue.js";
+import { landingTurns } from "../src/services/landing-turn.js";
 
 // BOS-1384: urgent merges go ahead of ordinary ones (read live from the ticket), and "Move to front" puts a merge next.
 const shared = openPglite();
@@ -73,6 +74,37 @@ describe("merge line order (BOS-1384)", () => {
     const again = (await s.q.enqueue({ companyId: s.co.id, projectId: (await s.db.select().from(tickets).where(eq(tickets.id, b.ticketId)))[0]!.projectId, ticketId: b.ticketId, kind: "merge", scope: "full", commit: "c-new", tree: "t-new" })).job;
     expect(again.frontBy).toBe("Sam");
     expect(again.frontAt).not.toBeNull();
+  });
+
+  // BOS-1822: every other passed merge of the project waits to push while a ticket holds the landing turn (BOS-1762), so the
+  // holder's re-check must start next, not wait at its ordinary tier and place behind older, urgent or moved-to-front jobs.
+  it("serves the landing-turn holder's re-check first, below only a fix for main", async () => {
+    const s = await setup();
+    const old = await s.merge({ minutesAgo: 50 });
+    const urgent = await s.merge({ minutesAgo: 40, urgent: true });
+    const moved = await s.merge({ minutesAgo: 30 });
+    await s.q.moveToFront(s.co.id, moved.ticketId, "Sam");
+    const holder = await s.merge({ minutesAgo: 1 });
+    const [h] = await s.db.select().from(tickets).where(eq(tickets.id, holder.ticketId));
+    const projectId = h!.projectId;
+    try {
+      // Two rebuilds after a pass take the turn (capMs 25 minutes).
+      landingTurns.rebuilt(projectId, holder.ticketId, 25 * 60_000);
+      expect(landingTurns.rebuilt(projectId, holder.ticketId, 25 * 60_000).turn).toBe("taken");
+      expect(await s.order()).toEqual([holder.ticketId, moved.ticketId, urgent.ticketId, old.ticketId]);
+      expect((await s.q.list(s.co.id)).rows.find((r) => r.ticketId === holder.ticketId)!.why).toBe("holds the landing turn");
+      // A fix for a red main still goes first.
+      const fix = await s.merge({ minutesAgo: 0, fixesMain: true });
+      expect((await s.order()).slice(0, 2)).toEqual([fix.ticketId, holder.ticketId]);
+      // The free slot goes to the fix, the next one to the holder, not to the older jobs.
+      expect((await s.q.claimNext(null)).map((j) => j.ticketId)).toEqual([fix.ticketId]);
+      await s.db.update(checkJobs).set({ state: "passed", endedAt: new Date() }).where(eq(checkJobs.id, fix.jobId));
+      expect((await s.q.claimNext(null)).map((j) => j.ticketId)).toEqual([holder.ticketId]);
+    } finally {
+      landingTurns.done(projectId, holder.ticketId);
+    }
+    // The turn over, the others keep their usual order.
+    expect(await s.order()).toEqual([moved.ticketId, urgent.ticketId, old.ticketId]);
   });
 });
 
