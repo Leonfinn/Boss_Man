@@ -7,7 +7,9 @@ import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { parseRepoUrl } from "@boss-man/shared";
 import { checkWorkers, projects, runners, settings } from "../db/schema.js";
-import { onlineWorkerCount } from "./check-workers.js";
+import { isWorkerOnline, onlineWorkerCount } from "./check-workers.js";
+import { clip, day, searchOwnerAnswers } from "./owner-answers.js";
+import { ANSWERED_LOOKBACK_MS } from "./stale-requests.js";
 import type { GitHostConfig } from "./git-hosts.js";
 
 export type OwnerRecordFacts = {
@@ -88,6 +90,29 @@ export function ownerSetupLines(f: OwnerRecordFacts): string[] {
     `- Runner: ${!f.runner.registered ? "none registered" : f.runner.everConnected ? "has connected" : "registered, never connected"}.`,
     `- Public address: ${f.publicAddress.set ? "set" : "not set; never ask the owner to open Boss Man from outside their network"}.`,
   ];
+}
+
+const kindsOf = (w: { takes: string; mergeKept: number }) =>
+  w.takes === "merge" ? "merge checks only" : w.takes === "checks" ? "quick checks only" : w.mergeKept > 0 ? `all checks, ${w.mergeKept} slot${w.mergeKept === 1 ? "" : "s"} kept for merges` : "all checks";
+
+/**
+ * One line per check worker (R49, BOS-1815): its name, what kinds of check it takes, whether it is online, and the owner's
+ * newest answered card that names it in the last 30 days, so the CEO sees what the owner last decided about a machine
+ * before offering to change it. Read live; nothing is stored.
+ */
+export async function workerSetupLines(db: Db, companyId: string): Promise<string[]> {
+  const workers = (await db.select({ id: checkWorkers.id, name: checkWorkers.name, takes: checkWorkers.takes, mergeKept: checkWorkers.mergeKept, enabled: checkWorkers.enabled, companyIds: checkWorkers.companyIds }).from(checkWorkers)).filter((w) => w.companyIds.includes(companyId));
+  const since = new Date(Date.now() - ANSWERED_LOOKBACK_MS);
+  const lines: string[] = [];
+  for (const w of workers) {
+    const name = w.name.trim();
+    // Only a card that names the machine counts: a name made of common words must not pull in unrelated answers.
+    const hits = name ? (await searchOwnerAnswers(db, { companyId, q: name, since, kinds: ["card"], limit: 50 })).filter((h) => `${h.question ?? ""} ${h.answer} ${h.ownerNote ?? ""}`.toLowerCase().includes(name.toLowerCase())) : [];
+    const last = hits.sort((a, b) => b.at.getTime() - a.at.getTime())[0];
+    const word = last ? `owner's last word: card ${last.sourceId.slice(0, 8)}${last.ticketRef ? ` (${last.ticketRef})` : ""} ${day(last.at).slice(0, 10)}, asked "${clip(last.question ?? "", 100)}", owner: "${clip(last.answer, 100)}"` : "no owner card on it in 30 days";
+    lines.push(`- Worker ${clip(name, 40)}: ${kindsOf(w)} · ${w.enabled ? "on" : "switched off"} · ${isWorkerOnline(w.id) ? "online" : "offline"} · ${word}`);
+  }
+  return lines;
 }
 
 /** `{{checkWorkers.added}}`, `{{checkWorkers.everConnected}}`, `{{checkWorkers.online}}`: card steps filled from the record, like `{{host}}`. */

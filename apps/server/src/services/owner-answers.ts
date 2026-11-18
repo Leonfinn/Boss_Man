@@ -48,6 +48,8 @@ export type OwnerAnswerHit = {
   meaning: number | null;
   /** Which search found it. */
   method: "words" | "meaning" | "both";
+  /** An answered action card: the owner did what it asked (R49), so it is shown as "(owner did this)". */
+  ownerDid?: boolean;
 };
 
 /** A card answer posted on its tickets (decisions.ts postAnswerOnTickets) is the card again, not a new owner message. */
@@ -341,16 +343,16 @@ async function withTicketRefs(db: Db, hits: OwnerAnswerHit[]): Promise<OwnerAnsw
 }
 
 const KIND_LABEL: Record<OwnerAnswerKind, string> = { card: "card", ticket_reply: "ticket message", chat: "chat", note: "lasting note" };
-const day = (d: Date) => d.toISOString().slice(0, 16).replace("T", " ");
+export const day = (d: Date) => d.toISOString().slice(0, 16).replace("T", " ");
 /** Every quote shown to an agent goes through here, so a token the owner pasted into chat is redacted first. */
-const clip = (s: string, n: number) => {
+export const clip = (s: string, n: number) => {
   const t = redact(s).replace(/\s+/g, " ").trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 
 /** One line per hit, for a tool result or a refusal. */
 export function describeOwnerAnswer(h: OwnerAnswerHit): string {
-  const where = `${KIND_LABEL[h.kind]} ${h.sourceId.slice(0, 8)}${h.ticketRef ? ` on ${h.ticketRef}` : ""}, ${day(h.at)} UTC`;
+  const where = `${KIND_LABEL[h.kind]} ${h.sourceId.slice(0, 8)}${h.ticketRef ? ` on ${h.ticketRef}` : ""}, ${day(h.at)} UTC${h.ownerDid ? " (owner did this)" : ""}`;
   const asked = h.question ? ` Asked: "${clip(h.question, 160)}".` : "";
   const note = h.ownerNote && h.kind === "card" ? ` Owner's note: "${clip(h.ownerNote, 200)}".` : h.ownerNote && h.kind === "note" ? ` Note: "${clip(h.ownerNote, 200)}".` : "";
   const words = `${Math.round(Math.max(h.score, h.sameQuestion) * 100)}% of the words`;
@@ -395,9 +397,8 @@ export async function checkOwnerAsk(
   );
   const counts = (h: OwnerAnswerHit) => h.kind !== "card" || fact.get(h.sourceId) === true;
   const repeat = hits.find((h) => isRepeat(h) && counts(h));
-  const related = hits.filter((h) => h !== repeat && counts(h) && Math.max(h.score, h.sameQuestion, h.meaning ?? 0) >= 0.5).slice(0, 3);
-  // R34 (BOS-1670): an answered step card is never a refusal (a step can need redoing), but the raiser is shown it,
-  // so the ask isn't made without checking the live state first.
+  // R49 (BOS-1815): an answered action card (steps the owner did, e.g. "turn the worker off") is never a refusal, but it is
+  // the record of what they set and why, so it is listed as related, marked "(owner did this)", instead of being dropped.
   const stepIds = new Set(
     ctxs
       .filter((d) => {
@@ -406,6 +407,14 @@ export async function checkOwnerAsk(
       })
       .map((d) => d.id),
   );
+  // a near-identical step card is already shown by the doneSteps warning below, so it isn't listed twice
+  const nearSame = (h: OwnerAnswerHit) => h.kind === "card" && stepIds.has(h.sourceId) && Math.max(h.sameQuestion, h.meaning ?? 0) >= REPEAT_SAME_QUESTION;
+  const related = hits
+    .filter((h) => h !== repeat && (counts(h) || (stepIds.has(h.sourceId) && !nearSame(h))) && Math.max(h.score, h.sameQuestion, h.meaning ?? 0) >= 0.5)
+    .slice(0, 3)
+    .map((h) => (h.kind === "card" && stepIds.has(h.sourceId) ? { ...h, ownerDid: true } : h));
+  // R34 (BOS-1670): an answered step card is never a refusal (a step can need redoing), but the raiser is shown it,
+  // so the ask isn't made without checking the live state first.
   const doneSteps = hits.filter((h) => h.kind === "card" && stepIds.has(h.sourceId) && Math.max(h.sameQuestion, h.meaning ?? 0) >= REPEAT_SAME_QUESTION).slice(0, 3);
   if (!repeat) return { refusal: null, related, doneSteps, meaning };
   const what = repeat.question ? `"${clip(repeat.question, 160)}"` : "this";
