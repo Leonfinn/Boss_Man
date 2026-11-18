@@ -237,25 +237,33 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           await page.goto("about:blank");
           await page.goto(`${base}/#/settings/c1/${id}`);
           // The links can draw, vanish and draw again while the section loads its answer, so "more than 3 links"
-          // must hold for a moment before they are read (the old 500 ms sleep stood in for this hold).
-          await page
+          // must hold for a moment before they are read (the old 500 ms sleep stood in for this hold). The wait
+          // also returns the links it saw holding, rather than reading them again after it: a separate read is a
+          // later round-trip, and a section reloading its answer in between could empty the list and be read as 0.
+          const held = await page
             .waitForFunction(
               () => {
                 const w = window as any;
-                const n = document.querySelectorAll(".set-jump a").length;
-                if (n <= 3) {
+                const links = Array.from(document.querySelectorAll(".set-jump a")).map((a) => (a.getAttribute("href") || "").slice(1));
+                if (links.length <= 3) {
                   w.__jumpSince = 0;
                   return false;
                 }
                 w.__jumpSince = w.__jumpSince || Date.now();
-                return Date.now() - w.__jumpSince >= 400;
+                return Date.now() - w.__jumpSince >= 400 ? links : false;
               },
               undefined,
               { timeout: 10_000, polling: 100 },
             )
             .catch(() => undefined);
-          const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
-          expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
+          const hrefs: string[] = held ? ((await held.jsonValue()) as string[]) : [];
+          // If the hold never held, say what the page actually showed (its jump links and headings), so the next
+          // bounce tells whether the page was still drawing or the section ids were missing.
+          const seen =
+            hrefs.length > 3
+              ? ""
+              : `; saw links ${JSON.stringify(await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href"))))}, headings ${JSON.stringify(await page.locator(".set-page h2, .set-page h3").allInnerTexts())}`;
+          expect(hrefs.length, `${vp.name}/${id} has jump links${seen}`).toBeGreaterThan(3);
           for (const target of hrefs) {
             // Bring the section into view and confirm it settles there (BOS-1319/BOS-1336). A single click + "is it
             // in view once" is not enough: the page can still be growing (a section above shows "Loading…" until
