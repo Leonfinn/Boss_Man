@@ -578,6 +578,19 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       };
     },
 
+    /**
+     * Every file path in the tree at `sha` (R40, BOS-1685): the main-CI watcher resolves a package-relative file a
+     * failure names (`test/a.test.ts`) to its repo path. Throws when it can't be read or GitHub cut the list short,
+     * so the caller treats the red's scope as unknown rather than guessing from part of the tree.
+     */
+    async treePaths(cfg: GitHostConfig, token: string, sha: string): Promise<string[]> {
+      const res = await call(cfg, token, "GET", `/git/trees/${encodeURIComponent(sha)}?recursive=1`);
+      if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't read the tree at ${sha.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
+      if (res.json.truncated === true) throw new GitHostError(res.status, `GitHub cut the tree at ${sha.slice(0, 8)} short`);
+      const rows = Array.isArray(res.json.tree) ? (res.json.tree as Array<Record<string, unknown>>) : [];
+      return rows.filter((r) => r.type === "blob" && typeof r.path === "string").map((r) => String(r.path));
+    },
+
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {
       const res = await call(cfg, token, "GET", `/pulls/${number}`);
       if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't read pull request ${number}: ${messageOf(res.json, res.status)}`);

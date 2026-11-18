@@ -23,6 +23,7 @@ import { checkPriority } from "./check-gate.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
 import { heldTicketIds, mergeHolds, mergeWaits, wakeReadyHolds } from "./review-holds.js";
+import { escalateStuckLineHolders } from "./line-holder.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { ownerWaitWatch } from "./owner-todo.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
@@ -1743,6 +1744,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (!held) await opts.withdrawRepeatRounds?.(judgedRounds).catch(() => undefined);
       // A review hold whose wait is over (BOS-808): the holding reviewer is asked once to re-check and release.
       const holdWakes = held ? 0 : await wakeReadyHolds(db, t, (input) => opts.wake(input));
+      // A main fix that has held merges for 2 hours wakes the CEO once with quarantine-or-revert (R40). Only tells.
+      if (!held) await escalateStuckLineHolders(db, t, (input) => opts.wake(input)).catch(() => 0);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
       const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
       // The owner's messages that nobody has answered (BOS-425). A hold stops new runs, so both

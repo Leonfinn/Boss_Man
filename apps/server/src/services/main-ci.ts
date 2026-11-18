@@ -40,8 +40,44 @@ export type Suspect = { sha: string; message: string; reason: string };
  * suspects between them. Absent on failures opened before them. R40's quarantine-or-revert wake reads suspects
  * through suspectsFor: an empty list means "no commit to revert".
  */
-type OpenFailure = { ticketId: string; workflow: string; runs: string[]; mainAt?: string; lastGreen?: string | null; suspects?: Suspect[] };
+/**
+ * job/step/named/scope (R40, BOS-1685): what the red covers, so a GitHub-only red holds only the merges that touch it
+ * and the gate can tell main's known failure from a branch's own. `scope`: repo path prefixes (redScope); null or
+ * absent means unknown, and an unknown scope holds every merge, as before R40.
+ */
+export type OpenFailure = { ticketId: string; workflow: string; runs: string[]; mainAt?: string; lastGreen?: string | null; suspects?: Suspect[]; job?: string; step?: string; named?: string[]; scope?: string[] | null };
 type ProjectState = { status: MainCiStatus & { at: string }; seen: Record<string, string>; open: Record<string, OpenFailure> };
+
+/** The project's open main-CI failures (R40), keyed by failing step. A settings read only. */
+export async function mainCiFailures(db: Db, projectId: string): Promise<OpenFailure[]> {
+  const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, STATE_KEY(projectId)));
+  return Object.values((row?.value as ProjectState | undefined)?.open ?? {});
+}
+
+/** The part of the repo a path belongs to (R40): `apps/<x>/`, `packages/<x>/`, else its top folder; a file at the root is itself. */
+export function areaOf(path: string): string {
+  const parts = path.split("/");
+  if (parts.length === 1) return path;
+  if ((parts[0] === "apps" || parts[0] === "packages") && parts.length > 2) return `${parts[0]}/${parts[1]}/`;
+  return `${parts[0]}/`;
+}
+
+/**
+ * The repo areas a red covers (R40): the failing workflow's file, plus the area of every file its error lines name.
+ * A logged name is often package-relative (`test/a.test.ts`), so it is matched by suffix against main's tree; a name
+ * that matches files in several areas covers all of them. Null (unknown) when nothing is named, a name matches no file,
+ * or the tree couldn't be read: an unknown red holds every merge (fail closed).
+ */
+export function redScope(named: string[], workflowFile: string | null, tree: string[] | null): string[] | null {
+  if (!named.length || !tree) return null;
+  const out = new Set<string>(workflowFile ? [workflowFile] : []);
+  for (const n of named) {
+    const hits = tree.filter((p) => sameFile(p, n));
+    if (!hits.length) return null;
+    for (const p of hits) out.add(areaOf(p));
+  }
+  return [...out].sort();
+}
 
 /** One failing step, found in one run. */
 export type Failure = { key: string; workflow: string; job: string; step: string; jobUrl: string; lines: string[] };
@@ -75,6 +111,35 @@ export function namedFiles(lines: string[]): string[] {
 
 /** Whether a repo path is the file a log named (by path suffix, so `test/a.test.ts` finds `apps/server/test/a.test.ts`). */
 const sameFile = (repoPath: string, named: string) => repoPath === named || repoPath.endsWith(`/${named}`);
+
+/** One failed job of a branch's merge run, as the gate read it: the files its annotations and log lines name. */
+export type BranchFailure = { job: string; step?: string; files: string[] };
+
+/**
+ * R40 (BOS-1685): whether every failed job of a branch's GitHub run is main's known red, and which reds. Each failure
+ * must match one open red with a known scope exactly: the same job, the same failing step when the gate knows it, and
+ * it names at least one file, every one of them a file the red named (so a new failing test is never taken as main's).
+ * Null when any failure doesn't match: the gate then goes its usual way. `reds` are already limited to GitHub-only,
+ * open reds whose scope the branch doesn't touch; that and the gate's own check passing are the caller's conditions.
+ */
+export function knownRedOnly(failed: BranchFailure[], reds: OpenFailure[]): OpenFailure[] | null {
+  if (!failed.length) return null;
+  const matched = new Set<OpenFailure>();
+  for (const f of failed) {
+    const red = reds.find(
+      (r) =>
+        !!r.scope?.length &&
+        !!r.job &&
+        r.job.toLowerCase() === f.job.toLowerCase() &&
+        (!f.step || (!!r.step && r.step.toLowerCase() === f.step.toLowerCase())) &&
+        f.files.length > 0 &&
+        f.files.every((x) => (r.named ?? []).some((n) => sameFile(x, n) || sameFile(n, x))),
+    );
+    if (!red) return null;
+    matched.add(red);
+  }
+  return [...matched];
+}
 
 export function mainCiService(
   db: Db,
@@ -372,7 +437,11 @@ export function mainCiService(
           "Boss Man opens one ticket for each failing step and adds later failed runs here. It says here when main is green again.",
         ].join("\n");
         const t = await deps.createTicket(p.id, { title, body, assigneeAgentId: who.agentId, urgent: true, risk: "medium", state: "ready" });
-        state.open[f.key] = { ticketId: t.id, workflow, runs: [run.url], mainAt: run.headSha, lastGreen: green?.headSha ?? null, suspects: blame.suspects };
+        // R40: what this red covers. One tree read per ticket opened; a failed read leaves the scope unknown (holds all).
+        const named = namedFiles(f.lines);
+        const tree = named.length ? await deps.gitHosts.treePaths(cfg, token, run.headSha).catch(() => null) : null;
+        const scope = redScope(named, run.path ?? null, tree);
+        state.open[f.key] = { ticketId: t.id, workflow, runs: [run.url], mainAt: run.headSha, lastGreen: green?.headSha ?? null, suspects: blame.suspects, job: f.job, step: f.step, named, scope };
         // Saved at once: if a later ticket in this pass fails, the next pass must not open this one again.
         await writeState(p.id, state);
         await record(db, { companyId: p.companyId, ticketId: t.id, kind: "main_ci_failure", summary: `Opened for a failing step on ${p.defaultBranch}`, at: now() });

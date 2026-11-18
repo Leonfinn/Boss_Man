@@ -5,9 +5,10 @@
 import { and, eq, inArray, isNotNull, isNull, ne } from "drizzle-orm";
 import { deploysNothing, ticketRef, touchesRunnerCode } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, companies, decisions, projects, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
+import { mainCiFailures } from "./main-ci.js";
 import { openSignoffCard } from "./signoff.js";
 import { openHoldingCard, ticketBlockerFinished } from "./ticket-links.js";
 
@@ -150,10 +151,45 @@ export async function ticketInForce(db: Db, ticketId: string, until: "merged" | 
   return (await goLiveWaitOf(db, files ? { ...b, touchesRunner: touchesRunnerCode(files) } : b)) === null;
 }
 
+/** A change every red covers (R40): CI config, or a file at the repo root (lockfile, package.json, tsconfig). */
+const touchesEveryRed = (p: string) => p.startsWith(".github/") || !p.includes("/");
+
+/** Whether a ticket's files touch a red's scope (R40). Null files (none kept, or cut at 2000) count as touching it. */
+export function touchesScope(files: string[] | null, scope: string[]): boolean {
+  if (!files) return true;
+  return files.some((p) => touchesEveryRed(p) || scope.some((s) => (s.endsWith("/") ? p.startsWith(s) : p === s)));
+}
+
+/** A ticket's stored diff files (set at approve and at land), or null when unknown. */
+export async function knownDiffFiles(db: Db, ticketId: string): Promise<string[] | null> {
+  const [r] = await db.select({ files: tickets.diffFiles }).from(tickets).where(eq(tickets.id, ticketId));
+  return r && r.files.length && r.files.length < 2000 ? r.files : null;
+}
+
+/**
+ * The scope of a GitHub-only red this fix ticket is for (R40, BOS-1685): the union of the scopes of the project's open
+ * main-CI failures filed on it. Null (holds every merge, as before R40) when the ticket isn't a main-CI watcher ticket,
+ * any of its failures has an unknown scope, or the gate's own check of main is red too: then it isn't GitHub-only.
+ */
+export async function githubOnlyScope(db: Db, projectId: string, fixId: string): Promise<string[] | null> {
+  const [p] = await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, projectId));
+  if (!p || p.s === "red") return null;
+  const reds = (await mainCiFailures(db, projectId)).filter((o) => o.ticketId === fixId);
+  if (!reds.length || reds.some((r) => !r.scope?.length)) return null;
+  return [...new Set(reds.flatMap((r) => r.scope!))].sort();
+}
+
+/** Whether ticket `t` waits on merge-check fix `fixId` (R40): always, unless the fix is for a GitHub-only red `t` doesn't touch. */
+export async function waitsOnFix(db: Db, t: { id: string; projectId: string }, fixId: string): Promise<boolean> {
+  const scope = await githubOnlyScope(db, t.projectId, fixId);
+  return !scope || touchesScope(await knownDiffFiles(db, t.id), scope);
+}
+
 /**
  * What an approved ticket's merge waits on before any check runs (BOS-1173, DR-053): its own waits-on links to
  * tickets not yet in force, and any other open ticket in the project marked as fixing the merge check. A ticket
- * marked that way never waits on another such ticket: it is the fix, and its own check must run.
+ * marked that way never waits on another such ticket: it is the fix, and its own check must run. A fix for a
+ * GitHub-only red holds only the tickets that touch the red (R40, waitsOnFix); a waits-on link always holds.
  */
 export async function mergeWaits(db: Db, t: { id: string; projectId: string; fixesMergeCheck: boolean }): Promise<string[]> {
   const linked = await db
@@ -166,7 +202,9 @@ export async function mergeWaits(db: Db, t: { id: string; projectId: string; fix
         .select({ id: tickets.id })
         .from(tickets)
         .where(and(eq(tickets.projectId, t.projectId), eq(tickets.fixesMergeCheck, true), ne(tickets.id, t.id), ne(tickets.systemState, "done")));
-  const waits = [...linked.map((l) => ({ id: l.id!, until: l.until === "done" ? ("done" as const) : ("merged" as const) })), ...gate.map((g) => ({ id: g.id, until: "merged" as const }))].filter((w) => w.id !== t.id);
+  const holding: string[] = [];
+  for (const g of gate) if (await waitsOnFix(db, t, g.id)) holding.push(g.id);
+  const waits = [...linked.map((l) => ({ id: l.id!, until: l.until === "done" ? ("done" as const) : ("merged" as const) })), ...holding.map((id) => ({ id, until: "merged" as const }))].filter((w) => w.id !== t.id);
   const out: string[] = [];
   for (const w of waits) if (!out.includes(w.id) && !(await ticketInForce(db, w.id, w.until))) out.push(w.id);
   return out;
@@ -239,7 +277,8 @@ async function setSystemWaits(db: Db, holdId: string, blockerIds: string[], prun
 async function systemHoldWaits(db: Db, t: { id: string; projectId: string; fixesMergeCheck: boolean }, stored: string[]): Promise<string[]> {
   const out = await mergeWaits(db, t);
   const marked = stored.length ? await db.select({ id: tickets.id }).from(tickets).where(and(inArray(tickets.id, stored), eq(tickets.fixesMergeCheck, true))) : [];
-  for (const { id } of marked) if (id !== t.id && !out.includes(id) && !(await ticketInForce(db, id))) out.push(id);
+  // R40: the same scope test as mergeWaits, or a ticket held before go-live on a GitHub-only red it doesn't touch stays held.
+  for (const { id } of marked) if (id !== t.id && !out.includes(id) && !(await ticketInForce(db, id)) && (await waitsOnFix(db, t, id))) out.push(id);
   return out;
 }
 

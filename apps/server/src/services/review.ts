@@ -32,7 +32,8 @@ import { tellCeoLineHolderSentBack } from "./line-holder.js";
 import { priorityGroup } from "./priority-group.js";
 import { mainGen, mainMoved, trainFor, type RestackWhy, type TrainClash } from "./merge-train.js";
 import { landingTurns } from "./landing-turn.js";
-import { closeHold, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
+import { closeHold, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold, releaseReadyHolds, touchesScope, type HoldWaitInput } from "./review-holds.js";
+import { knownRedOnly, mainCiFailures, namedFiles, type BranchFailure, type OpenFailure } from "./main-ci.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 
@@ -2439,7 +2440,10 @@ export function reviewService(
           prep,
           stop,
         ).then(
-          async (o) => {
+          async (got) => {
+            // R40: a failure that is only main's known red becomes known_red, which lets the gate's own check finish.
+            const red = got.kind === "failed" && !got.status.billing ? await knownRed(got.status) : null;
+            const o: CiOutcome = red ? { kind: "known_red", ...red } : got;
             // BOS-1749: the branch has done its job on every ending except a pass (the merge deletes it after landing) and a
             // replacement by a newer push (that push owns the branch now). Best effort; the periodic sweep catches a miss.
             if (o.kind !== "passed" && o.kind !== "superseded") await dropCiBranch();
@@ -2486,10 +2490,49 @@ export function reviewService(
       // whether to try; then the gate runs those tests once more on the exact merge commit, as a merge-kind job on the same
       // commit and tree (so every reader of the ticket's merge jobs treats it as part of this merge: restart pick-up, the
       // branch-moved cancel, its place in line). Failing there means the failure is real; passing buys one GitHub retry.
+      /**
+       * R40 (BOS-1685): the failure is main's known GitHub-only red, not this branch's. All of: the gate's own check of
+       * main isn't red (so the red is GitHub-only); the red's ticket is open and its scope known; this branch's files don't
+       * touch that scope (nor .github/ or a root file); and every failed job matches the red exactly (knownRedOnly). The
+       * last condition, the gate's own check passing, holds because a known_red outcome doesn't stop that check (ciStops).
+       * Any doubt (a read fails, a diff unknown) is null: the usual path.
+       */
+      const knownRed = async (s: CiStatus): Promise<{ jobs: string[]; refs: string[] } | null> => {
+        try {
+          const [proj] = await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, t.projectId));
+          if (!proj || proj.s === "red") return null;
+          const open = await mainCiFailures(db, t.projectId);
+          if (!open.length || !s.failed.length) return null;
+          const mine = changed?.files.length ? changed.files.map((f) => f.path) : null;
+          if (!mine) return null;
+          const reds: Array<OpenFailure & { ref: string }> = [];
+          for (const r of open) {
+            if (!r.scope?.length || touchesScope(mine, r.scope)) continue;
+            const [rt] = await db.select({ state: tickets.systemState, number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, r.ticketId));
+            if (!rt || rt.state === "done") continue;
+            reds.push({ ...r, ref: ticketRef(rt.prefix, rt.number) ?? r.ticketId });
+          }
+          if (!reds.length) return null;
+          const found = await deps.gitHosts!.failures(ci!.cfg, ci!.token, s.failed).catch(() => []);
+          const failed: BranchFailure[] = [];
+          for (const run of s.failed) {
+            const f = found.find((x) => x.run === run);
+            const log = run.id ? await deps.gitHosts!.jobLogBlock(ci!.cfg, ci!.token, run.id).catch(() => [] as string[]) : [];
+            const files = new Set([...(f?.paths ?? []).filter(Boolean), ...namedFiles([...(f?.lines ?? []), ...log])]);
+            failed.push({ job: run.name, ...(run.step ? { step: run.step } : {}), files: [...files] });
+          }
+          const m = knownRedOnly(failed, reds);
+          return m ? { jobs: s.failed.map((r) => r.name), refs: [...new Set(m.map((r) => (r as OpenFailure & { ref: string }).ref))] } : null;
+        } catch {
+          return null;
+        }
+      };
       let flakeCounts = new Map<string, number>();
       const flakeRetry = async (prep: { commit: string; tree: string }, s: CiStatus, stop: CiStop): Promise<FlakeAnswer> => {
         // BOS-1752: a copy that handed over queues no re-run and asks GitHub for no retry; ciVerdict then ends it quietly.
         if (deps.isLeader && !deps.isLeader()) return { retry: false, why: HANDED_OVER_WHY };
+        // R40: main's known red would pass a re-run at the gate (GitHub-only) and fail GitHub's retry: neither is worth it.
+        if (await knownRed(s)) return { retry: false, why: "it fails the same way on main" };
         const found = await deps.gitHosts!.failures(ci!.cfg, ci!.token, s.failed).catch(() => []);
         const named = namedTestFiles(s.failed.map((run) => ({ job: run.name, paths: found.find((f) => f.run === run)?.paths ?? null })));
         const diff = await readDiff().catch(() => null);
@@ -2587,6 +2630,12 @@ export function reviewService(
               await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI passed on its one retry, so ${o.flaky.join(", ")} failed only once; Boss Man told the CEO about the flaky test. Nothing to do.` });
               await reportFlaky(o.flaky, o.retryRunUrl, prep.commit).catch(() => undefined);
             }
+            startCiWaiters();
+            return null;
+          case "known_red":
+            // R40: no "ci" pass row on purpose: this tree never passed GitHub CI, so no later run may reuse it as green.
+            // The gate's own check still decides: alongsideCi waits for it (known_red isn't in ciStops), ciThenChecked runs it next.
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI failed only in ${o.jobs.join(", ")}, which also fails on main (${o.refs.join(", ")}) and which this branch doesn't touch, so it merges on Boss Man's own check. Nothing to do.` });
             startCiWaiters();
             return null;
           case "no_workflows":
