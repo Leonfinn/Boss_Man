@@ -1251,6 +1251,10 @@ describe("open issues and the timeline (BOS-199)", () => {
   });
 
   it("labels each timeline entry with its issue, its open or settled state, and a repeat warning on the same ticket", async () => {
+    // Pin the clock to midday UTC of its own day: "today" needs the warning and the clock on one date, and a run
+    // that crosses 00:00 UTC (BOS-1788) put the warning a minute before midnight, on yesterday.
+    const midday = new Date(clock); midday.setUTCHours(12, 0, 0, 0);
+    ctx.advance((midday.getTime() - clock.getTime()) / 60_000);
     const t = await ctx.ticket({ title: "Two warnings", stateChangedAt: ctx.ago(1) });
     const opened = ctx.now();
     const [first] = await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: t.id, rule: "stale_in_progress", status: "closed", openedAt: new Date(opened.getTime() - 60_000), closedAt: opened, dueAt: opened }).returning();
