@@ -91,14 +91,19 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
     expect((await c.row(t.id)).systemState).toBe("blocked");
   });
 
-  it("accepts a merged ticket with after-merge criteria not yet reported, and refuses one with none left", async () => {
+  it("accepts a merged ticket waiting to go live, but not a live one whose after-merge checks are all that is left (R36)", async () => {
     const c = await setup();
     const t = await c.ticket();
     const crit = [{ text: "Panel shows the host", after: "merge" as const }];
-    await c.put(t.id, { systemState: "in_progress", mergeCommit: "a".repeat(40), acceptanceCriteria: crit });
+    await c.put(t.id, { systemState: "in_progress", mergeCommit: "a".repeat(40), goLiveWait: "server", acceptanceCriteria: crit });
     const agent = await c.mcp(c.worker.id);
     expect(await c.block(agent, t.id)).toContain("is now blocked");
     expect((await c.row(t.id)).systemState).toBe("blocked");
+
+    // Live now: the checks alone no longer hold it (old code accepted this).
+    const live = await c.ticket();
+    await c.put(live.id, { systemState: "in_progress", mergeCommit: "c".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
+    expect(await c.block(agent, live.id)).toMatch(/Blocked is for a ticket that only waits/);
 
     const u = await c.ticket();
     await c.put(u.id, { systemState: "in_progress", mergeCommit: "b".repeat(40), acceptanceCriteria: crit, stateNote: "1 pass" });
@@ -148,11 +153,46 @@ describe("Blocked on an open card is freed when the card is answered (BOS-1209)"
     await c.put(withCard.id, { systemState: "blocked", stateChangedAt: old });
     await plan(c, withCard.id);
     await c.put(withDate.id, { systemState: "blocked", stateChangedAt: old, blockedUntil: new Date(Date.now() + 86_400_000) });
-    await c.put(merged.id, { systemState: "blocked", stateChangedAt: old, mergeCommit: "a".repeat(40), acceptanceCriteria: [{ text: "Panel shows the host", after: "merge" as const }] });
+    await c.put(merged.id, { systemState: "blocked", stateChangedAt: old, mergeCommit: "a".repeat(40), goLiveWait: "server", acceptanceCriteria: [{ text: "Panel shows the host", after: "merge" as const }] });
+    // R36: live, with after-merge checks unreported and nothing else holding it: freed (old code kept it Blocked forever).
+    const live = await c.ticket();
+    await c.put(live.id, { systemState: "blocked", stateChangedAt: old, mergeCommit: "b".repeat(40), goLiveWait: null, acceptanceCriteria: [{ text: "Panel shows the host", after: "merge" as const }] });
     await c.sweeps.run();
     expect((await c.row(stranded.id)).systemState).toBe("ready");
     expect((await c.row(stranded.id)).stateNote).toMatch(/^Ready: nothing is holding it any more/);
+    expect((await c.row(live.id)).systemState).toBe("ready");
     for (const id of [withCard.id, withDate.id, merged.id]) expect((await c.row(id)).systemState).toBe("blocked");
+  });
+
+  it("refuses a note that names a colleague with only a date behind it, and accepts it once their ticket is linked (R36)", async () => {
+    const c = await setup();
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Brian - Release Manager" })).json();
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress" });
+    const agent = await c.mcp(c.worker.id);
+    const args = { blocked_until: tomorrow(), blocked_reason: "redeploy", summary: "Waiting for Brian's redeploy." };
+    const msg = await c.block(agent, t.id, args);
+    expect(msg).toMatch(/waits on Brian/);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+    const theirs = await c.ticket({ assigneeAgentId: other.id });
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerTicketId: theirs.id, until: "done" });
+    expect(await c.block(agent, t.id, args)).toContain("is now blocked");
+    // No name, a date alone: still fine.
+    const u = await c.ticket();
+    await c.put(u.id, { systemState: "in_progress" });
+    expect(await c.block(agent, u.id, { blocked_until: tomorrow(), blocked_reason: "72h of data", summary: "Collecting data." })).toContain("is now blocked");
+  });
+
+  it("wakes the CEO once on the third date-only park in a row (R36)", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    const agent = await c.mcp(c.worker.id);
+    const ceoWakes = async () => (await c.db.select().from(wakes).where(eq(wakes.ticketId, t.id))).filter((w) => w.agentId === c.ceo.id).length;
+    for (let i = 1; i <= 4; i++) {
+      await c.put(t.id, { systemState: "in_progress" });
+      expect(await c.block(agent, t.id, { blocked_until: tomorrow(), blocked_reason: "waiting for data", summary: `Park ${i}.` })).toContain("is now blocked");
+      expect(await ceoWakes(), `after park ${i}`).toBe(i === 3 ? 1 : 0); // put() clears the ticket's wakes each round, so a 4th wake would show
+    }
   });
 });
 

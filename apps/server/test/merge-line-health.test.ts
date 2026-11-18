@@ -36,6 +36,23 @@ describe("mergeLineHealth: held behind a main fix (R28)", () => {
   });
 });
 
+describe("mergeLineHealth: banner and sidebar badge agree (BOS-1715)", () => {
+  it("31 in the queue, 10 of them held by an agent: the banner names both figures, and no clear time from one landing", () => {
+    const waiting = [...queue(21), ...queue(10, { state: "held", actor: "agent", stuck: false })];
+    const line = mergeLineHealth(input({ waiting, recent: [merged(3, 1)] }), { now: NOW });
+    // The badge shows waiting.length (waitingCount); the banner must carry that same 31.
+    expect(line).toMatchObject({ state: "over_capacity", waiting: 21, inQueue: waiting.length, etaMinutes: null });
+    const text = slowText(line as never, () => "08:13");
+    expect(text).toContain("21 merge checks waiting (31 in the queue; the other 10 wait on an agent or you)");
+    expect(text).toContain("estimating the time to clear…");
+  });
+
+  it("landings bunched into a few minutes (just after a restart) give no estimate", () => {
+    const line = mergeLineHealth(input({ waiting: queue(5), recent: [merged(1, 1), merged(2, 2), merged(4, 3)] }), { now: NOW });
+    expect(line).toMatchObject({ state: "over_capacity", etaMinutes: null });
+  });
+});
+
 describe("mergeLineHealth", () => {
   it("17 tickets behind 3 slots, landing every 20 minutes: over capacity, not stuck (the 15 Nov case)", () => {
     const line = mergeLineHealth(input({ waiting: queue(17), recent: [merged(7, 1), merged(27, 2), merged(47, 3), merged(67, 4)] }), { now: NOW });

@@ -117,6 +117,17 @@ describe("Stuck-merges banner", () => {
     expect(within(banner).getByRole("link").getAttribute("href")).toBe("#/merge-queue/c1");
   });
 
+  it("BOS-1715: one queue state, badge and banner: 31 in the queue, 21 waiting for Boss Man, no clear time yet", () => {
+    const line: MergeLine = { state: "over_capacity", waiting: 21, inQueue: 31, etaMinutes: null, lastLandedAt: null, advice: null };
+    const v = view({ waitingCount: 31, line });
+    render(<MergesStuckBanner stuck={null} slow={slowSummary(v)} companyId="c1" />);
+    const text = screen.getByRole("status").textContent ?? "";
+    // The sidebar badge shows waitingCount (31); the banner names the same 31 and says why its own count is lower.
+    expect(text).toContain(`21 merge checks waiting (${v.waitingCount} in the queue; the other 10 wait on an agent or you)`);
+    expect(text).toContain("estimating the time to clear…");
+    expect(text).not.toMatch(/about .* to clear/);
+  });
+
   it("over capacity: says merging slowly in a calm style, never 'stuck'", () => {
     expect(stuckSummary(view({ line: slowLine }))).toBeNull();
     render(<MergesStuckBanner stuck={null} slow={slowSummary(view({ line: slowLine }))} companyId="c1" />);

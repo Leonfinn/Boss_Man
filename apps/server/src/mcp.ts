@@ -25,7 +25,7 @@ import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesServi
 import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { ceoPlanText } from "./services/ceo-plan.js";
-import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
+import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_HANDS_HINT, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import { LINT_OVERRIDE_HELP, lintOverrideSchema } from "./services/lint-override.js";
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
@@ -446,6 +446,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in, checker tags taken out (BOS-1665)
       const stepSources = ask.stepSources;
+      let notLiveLine = "";
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
@@ -456,7 +457,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // ticket merged before the wait existed is covered too.
         const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, blocksTicketId));
         const notLive = m ? await goLiveWaitOf(db, m) : null;
-        if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
+        // Only a card that settles an after-merge criterion is held (it can't pass before the merge runs; the
+        // criterion check below holds it too). Any other card is posted with a server-written "not live" line.
+        if (notLive && criterion !== undefined) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so its after-merge checks can't pass and the owner is not asked. Boss Man wakes you when it is live; don't raise this card before then.`);
+        if (notLive) notLiveLine = `This ticket's code isn't live yet (waiting for ${goLiveWaitWords(notLive)}).`;
       }
       const alsoIds = [...new Set(alsoBlocks ?? [])].filter((id) => id !== blocksTicketId);
       if (alsoIds.length) {
@@ -506,7 +510,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: notLiveLine ? `${question}\n\n${notLiveLine}` : question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -518,7 +522,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // the answer records against the criteria the card names, so a card worded differently would record nothing.
       const settle = blocksTicketId ? await afterMergeCardNote(db, blocksTicketId, question, options, criterionIndexes) : "";
       const extra = `${skipped.length ? `\n\n${skipped.join("\n")}` : ""}${settle ? `\n\n${settle}` : ""}${links ? `\n\n${links}` : ""}${askNotes ? `\n\n${askNotes}` : ""}`;
-      if (d.withCeo) return text(`Decision ${d.id} went to the CEO first, because it needs none of the owner's hands, money, secrets or sign-off. If the CEO doesn't settle it within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it reaches the owner. You'll be woken with the answer; don't wait in this turn.${extra}`);
+      if (d.withCeo) return text(`Decision ${d.id} went to the CEO first, because it needs none of the owner's hands, money, secrets or sign-off. If the CEO doesn't settle it within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it reaches the owner. ${OWNER_HANDS_HINT} You'll be woken with the answer; don't wait in this turn.${extra}`);
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${extra}`);
     },
   );
