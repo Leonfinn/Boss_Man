@@ -89,6 +89,36 @@ has() { grep -Eq "$1" <<<"$changed"; }
 # shellcheck source=scripts/install-packages.sh
 . "$(dirname "${BASH_SOURCE[0]}")/install-packages.sh"
 env_fault=0
+# The list guards first (BOS-1727): four lists kept by hand (in-memory state notes, the owner's controls, wake classes, the screen
+# inventory) failed 25 quick checks in 3 days, each only after 9 to 13 minutes. They run in the first minute, each only when a
+# file it reads changed, and a failure names the file to edit and the line to add (scripts/check-guards.sh). Each still fails
+# for a screen, control or wake reason changed without its record: only the order changed, nothing was loosened.
+if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
+  if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
+  g_wake=0 g_owner=0 g_screen=0
+  # The full check that runs next (BOSSMAN_FULL_CHECK_NEXT) starts with these guards itself (check-all.sh), after its own install.
+  [ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ] || {
+  has '^apps/server/src/|^apps/server/test/wake-classes\.test\.ts$|^scripts/check-guards\.sh$' && g_wake=1
+  has '^apps/web/src/pages/|^apps/web/src/components/|^packages/shared/src/owner-controls\.ts$|^apps/server/test/owner-control-list\.test\.ts$|^scripts/check-guards\.sh$' && g_owner=1
+  has '^apps/web/src/|^apps/web/test/screen-(inventory|scan)|^scripts/check-guards\.sh$' && g_screen=1
+  }
+  if [ $((g_wake + g_owner + g_screen)) -gt 0 ] && [ ! -d node_modules ]; then
+    # A fresh tree (the queued check job) has no packages yet; install them here, as the later install step would.
+    before=$failed failed=0 irc=0
+    iout="$(install_packages 2>&1)" || irc=$?
+    if [ "$irc" -eq 0 ]; then echo "PASS  install packages (fresh tree, no node_modules)"
+    else
+      echo "FAIL  install packages (fresh tree, no node_modules) (exit $irc)"; printf '%s\n' "$iout" | tail -n 40 | sed 's/^/      /'; failed=1
+      [ "$irc" -ne 75 ] || [ "$before" -ne 0 ] || env_fault=1
+    fi
+    install_failed=$failed failed=$((before | failed))
+    install_tried=1 install_tried_failed=$install_failed
+    [ "$install_failed" -eq 0 ] || { g_wake=0 g_owner=0 g_screen=0; echo "SKIP  list guards: the install failed"; }
+  fi
+  [ "$g_wake" -eq 0 ] || step "guard: wake classes (every wake reason has a class)" scripts/check-guards.sh wake-classes
+  [ "$g_owner" -eq 0 ] || step "guard: owner controls (every button and field is listed)" scripts/check-guards.sh owner-controls
+  [ "$g_screen" -eq 0 ] || step "guard: screen inventory (screen-inventory.txt is current)" scripts/check-guards.sh screen-inventory
+fi
 
 # Tests that find their source files by path (readFileSync, readdirSync) instead of importing them: vitest related can't
 # see a change to those files, so only an entry here makes the test run for it (BOS-881). Add an entry when a test reads
@@ -199,8 +229,7 @@ done
   # BOS-1549: two guides in docs/ must not share a number, counting pages main added since this branch left it. Runs on
   # every branch (it takes well under a second), since a clash can come from main even when the branch touched no doc.
   step "docs numbers are unique" node scripts/check-doc-numbers.mjs "$base"
-  # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
-  if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
+  # The in-memory-state lint (BOS-460, 492, 516, 702) now runs with the other list guards, first (BOS-1727).
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
   # Compose files and CI workflows (BOS-1036): validated by the Docker CLI's compose plugin (no daemon, no socket) and actionlint.
   # A runner image built before they were added has neither tool: that is a SKIP naming the fix, not a failure.
@@ -272,7 +301,12 @@ done
 # the install never holds a check slot. The queue job sets the shared pnpm store (BOS-655), so this is quick when warm.
 # A tree that already has node_modules (an agent's checkout) is left as it is.
 web_build=0; ! has '^apps/web/|^packages/shared/' || web_build=1
-if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
+if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ -n "${install_tried:-}" ] && [ ! -d node_modules ]; then
+  # The list guards above already tried the install on this tree: do not try (and retry) it a second time.
+  if [ "$install_tried_failed" -ne 0 ]; then
+    echo "SKIP  typecheck, related tests, web build: the install failed"; need_slot=0 web_build=0
+  fi
+elif { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
   before=$failed failed=0 irc=0
   iout="$(install_packages 2>&1)" || irc=$?
   if [ "$irc" -eq 0 ]; then echo "PASS  install packages (fresh tree, no node_modules)"

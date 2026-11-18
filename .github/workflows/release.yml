@@ -42,9 +42,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
-      - uses: sigstore/cosign-installer@v3
-        with:
-          cosign-release: v2.4.1
+      - name: Install cosign v2.4.1 (retries the download, checks a pinned SHA-256; BOS-1726)
+        run: scripts/install-cosign.sh v2.4.1
       - name: Read and check the publishing settings (fails loudly when Docker Hub is on and a secret is missing)
         id: s
         run: |

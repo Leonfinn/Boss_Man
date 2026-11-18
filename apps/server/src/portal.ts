@@ -85,7 +85,9 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
   /** The portal from the request's header, or a 404 that looks the same whatever was wrong. */
   async function portalOf(req: FastifyRequest, reply: FastifyReply) {
     const token = req.headers["x-portal-token"];
-    const p = typeof token === "string" ? await deps.feedback.portalFor(token) : null;
+    // BOS-1680: no link secret at all means the bare public address; it opens the portal the owner chose for it, if any.
+    // A wrong secret is still refused, so a guess never falls back to the shared portal.
+    const p = token === undefined || token === "" ? await deps.feedback.bareAddressPortal() : typeof token === "string" ? await deps.feedback.portalFor(token) : null;
     if (!p) {
       reply.code(404).send({ error: "not_found", message: "This portal link doesn't work. Ask for a new one." });
       return null;

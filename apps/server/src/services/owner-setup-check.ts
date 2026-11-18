@@ -6,8 +6,9 @@
 // Host values come from the host deployer's report (host-facts.ts), never from text: authors write
 // `{{host.env.file}}` or `{{host.compose.cmd}} restart <service>`, and the card shows this server's real values.
 import { type CompanyFacts, fillCompanyFacts } from "./company-facts.js";
+import { composeFactsFrom } from "./compose-steps.js";
 import { type WhenFacts, branchingFindings, settleWhen } from "./owner-setup-when.js";
-import { type HostFacts,type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
+import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
 
 /**
  * The host facts a setup step may name, and the plain words the card uses when the host hasn't reported one
@@ -112,7 +113,8 @@ export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts
   const company = fillCompanyFacts(settled.steps, facts.company, mode);
   const filled = fillOwnerSetup(company.steps, facts.values ?? {});
   const shown = fillServerHost(filled.steps, facts.serverHost);
-  const lint = lintOwnerSteps(shown, { ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
+  const compose = composeFactsFrom(facts.values);
+  const lint = lintOwnerSteps(shown, { ...(compose ? { compose } : {}), ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
   // R20 (BOS-1650) runs on the steps as the owner will read them, after every marker is settled.
   const refuse = [...settled.findings, ...company.findings, ...lint.refuse, ...branchingFindings(shown)];
   const warn = lint.warn;
