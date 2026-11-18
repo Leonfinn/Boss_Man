@@ -7,7 +7,7 @@ import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notI
 import { GO_LIVE_WAIT_MAX_MS, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
-import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import { activity, agents, checkJobs, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
@@ -400,6 +400,26 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       if (rr.length && evaluateReviews(rr) === "passed") mergeWaiting.add(r.id);
     }
     const heldIds = await heldTicketIds(db, rows.map((r) => r.id));
+    // BOS-1760: what each in-progress ticket waits on in the check queue: its merges, and its quick or full checks on its
+    // current head (the commit of its newest check; a newer commit's request cancels the older queued ones). Only jobs
+    // still live or ended since the ticket last moved matter to the rules.
+    const checks = new Map<string, Array<{ from: Date; to: Date | null }>>();
+    const inProgress = rows.filter((r) => r.systemState === "in_progress").map((r) => r.id);
+    if (inProgress.length) {
+      const jobs = await db
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, commit: checkJobs.commit, state: checkJobs.state, queuedAt: checkJobs.queuedAt, endedAt: checkJobs.endedAt })
+        .from(checkJobs)
+        .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
+        .where(and(inArray(checkJobs.ticketId, inProgress), inArray(checkJobs.kind, ["pre_review", "merge"]), or(inArray(checkJobs.state, ["queued", "running"]), gte(checkJobs.endedAt, tickets.stateChangedAt))))
+        .orderBy(desc(checkJobs.queuedAt));
+      const head = new Map<string, string>();
+      for (const j of jobs) if (j.kind === "pre_review" && !head.has(j.ticketId)) head.set(j.ticketId, j.commit);
+      for (const j of jobs) {
+        if (j.kind === "pre_review" && j.commit !== head.get(j.ticketId)) continue;
+        const live = j.state === "queued" || j.state === "running";
+        checks.set(j.ticketId, [...(checks.get(j.ticketId) ?? []), { from: j.queuedAt, to: live ? null : (j.endedAt ?? j.queuedAt) }]);
+      }
+    }
     const snapTickets: SnapTicket[] = rows.map((r) => ({
       id: r.id,
       state: r.systemState,
@@ -415,6 +435,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       held: heldIds.has(r.id),
       unblockedAt: releasedAt(r),
       bounces: bounces.get(r.id) ?? 0,
+      checks: checks.get(r.id),
     }));
     return {
       tickets: snapTickets,
