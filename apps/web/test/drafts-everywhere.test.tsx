@@ -69,9 +69,11 @@ describe("the rules box keeps what you type until the CEO request is sent (BOS-7
     fireEvent.change(box, { target: { value: "Let agents read GitHub freely" } });
     expect(readDraft("rule-ask/c1")).toBe("Let agents read GitHub freely");
     fireEvent.click(screen.getByRole("button", { name: "Ask the CEO to draft it" }));
-    await waitFor(() => expect(sent).toBe("ok"));
-    expect(readDraft("rule-ask/c1")).toBe("");
-    expect(box.value).toBe("");
+    await waitFor(() => {
+      expect(sent).toBe("ok");
+      expect(readDraft("rule-ask/c1")).toBe("");
+      expect(box.value).toBe("");
+    });
   });
 
   it("keeps the text when the send fails, so it can be sent again", async () => {
