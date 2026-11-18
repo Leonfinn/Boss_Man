@@ -44,3 +44,4 @@ export * from "./compression.js";
 export * from "./thinking.js";
 export * from "./step-text.js";
 export * from "./age.js";
+export * from "./owner-figures.js";

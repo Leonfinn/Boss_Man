@@ -1,7 +1,7 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { api, ApiError, type ActiveRun, type Company, type Decision, type DecisionTally, type NoticeFeed, type TeamAlert, type AdvisedDecision, type ClosedNoticeCard } from "./api";
 import { art } from "./brand";
-import { Sidebar } from "./components/Sidebar";
+import { companyFigure, Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
@@ -27,7 +27,7 @@ import { Workflow } from "./pages/Workflow";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
-import { MergesStuckBannerFor } from "./components/MergesStuckBanner";
+import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { Skills } from "./pages/Skills";
 import { Agents } from "./pages/Agents";
 import { Features } from "./pages/Features";
@@ -301,7 +301,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
   // turns the badge to the warning colour when a jam is there to see.
   const mergeQueue = usePoll(
-    (signal) => (current ? api<{ waitingCount: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    (signal) => (current ? api<{ waitingCount: number; lineCount?: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
     20_000,
     `merge-badge-${current?.id}`,
   );
@@ -370,8 +370,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         decisionsTally={decisionsTally.data}
         companyTallies={companyTallies.data ?? undefined}
         unread={feed.data?.unread ?? 0}
-        feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
-        mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
+        feedback={companyFigure(unprocessed.data, current?.id)}
+        mergeWaiting={mergeQueue.data ? inLineOf(mergeQueue.data) : 0}
         mergeStuck={mergeQueue.data?.stuckCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
@@ -424,7 +424,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><SetupChecklist companyId={current?.id} go={go} folded={folded} /></>} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: companyTallies.data?.[c.id]?.open ?? (decisions.data ?? []).filter((d) => d.companyId === c.id && !d.waiting).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><SetupChecklist companyId={current?.id} go={go} folded={folded} /></>} />
         ) : (
           <Dashboard company={current} decisions={decisions.data === null ? null : decisions.data.filter((d) => !current || d.companyId === current.id)} tally={decisionsTally.data} />
         )}
