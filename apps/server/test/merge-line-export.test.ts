@@ -59,13 +59,30 @@ describe("merge_line_records", () => {
     const c = await asCeo(ctx.mine);
     const out = JSON.parse(textOf(await call(c, { since: "2026-11-08T21:22:00Z" }))) as { rows: Array<Record<string, unknown>> };
     expect(out.rows.map((r) => r.event)).toEqual(["check_ended", "hold_ended", "train_clash"]);
-    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null, commit: null, with: null, files: null });
+    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null, commit: null, with: null, files: null, note: null, action: null, rebuilds: null, reason: null });
     expect(out.rows[1]).toMatchObject({ hold: "card", heldMs: 1234 });
     expect(out.rows[2]).toMatchObject({ with: "t-1 t-2", files: "src/a.ts,src/b.ts" });
     const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", format: "csv" }));
-    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by,commit,with,files");
+    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by,commit,with,files,note,action,rebuilds,reason");
     for (const leak of ["private", "secret summary", "jobId", "j1"]) expect(all).not.toContain(leak);
     expect(textOf(await call(c, { since: "2026-11-01T00:00:00Z", until: "2026-11-08T21:10:00Z" }))).toContain('"event":"approved"');
+    await c.close();
+  });
+
+  it("exports the landing-turn holder, the turn's action, and why a merge was rebuilt (BOS-1823)", async () => {
+    await row(ctx.mine, "2026-11-09T01:00:00Z", "merge_line", { event: "landing_turn", action: "taken", rebuilds: 3, capMin: 20 });
+    await row(ctx.mine, "2026-11-09T01:01:00Z", "merge_line", { event: "hold_started", hold: "turn", note: '"Holder ticket" has the landing turn; this merge pushes when it lands or the turn ends' });
+    await row(ctx.mine, "2026-11-09T01:02:00Z", "merge_line", { event: "rebuilt", rebuilds: 2, why: "main changed build or check files", files: ["package.json"] });
+    await row(ctx.mine, "2026-11-09T01:03:00Z", "merge_line", { event: "landing_turn", action: "ended" });
+    await row(ctx.mine, "2026-11-09T01:04:00Z", "merge_line", { event: "check_ended", check: "gate", passed: true, why: "private why", note: "private note" });
+    const c = await asCeo(ctx.mine);
+    const out = JSON.parse(textOf(await call(c, { since: "2026-11-09T00:00:00Z" }))) as { rows: Array<Record<string, unknown>> };
+    expect(out.rows[0]).toMatchObject({ event: "landing_turn", action: "taken", rebuilds: 3 });
+    expect(out.rows[1]).toMatchObject({ event: "hold_started", hold: "turn", note: expect.stringContaining("Holder ticket") });
+    expect(out.rows[2]).toMatchObject({ event: "rebuilt", rebuilds: 2, reason: "main changed build or check files" });
+    expect(out.rows[3]).toMatchObject({ action: "ended" });
+    expect(out.rows[4]).toMatchObject({ note: null, reason: null });
+    expect(JSON.stringify(out.rows)).not.toContain("private");
     await c.close();
   });
 

@@ -28,6 +28,7 @@ import { record } from "./activity.js";
 import { leftLineSince, lineEvent, TRAIN_CLASH_FILES, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
 import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
+import { tellCeoLineHolderSentBack } from "./line-holder.js";
 import { priorityGroup } from "./priority-group.js";
 import { mainGen, mainMoved, trainFor, type RestackWhy, type TrainClash } from "./merge-train.js";
 import { landingTurns } from "./landing-turn.js";
@@ -2169,9 +2170,12 @@ export function reviewService(
           throw new ReviewError(409, (err as Error).message);
         }
       };
-      const sendBack = async (text: string, reason: string) => {
+      // `what`: one line for the CEO when this ticket holds the merge line (R32); defaults to the reason.
+      const sendBack = async (text: string, reason: string, what?: string) => {
         await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true, internal: true });
-        return tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
+        const delivered = await tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
+        await tellCeoLineHolderSentBack(db, wake, t, what ?? reason);
+        return delivered;
       };
       // BOS-1723: the bounce's record in the ticket's conversation, kept after the wake note is gone. Never stops the bounce.
       const keepBounce = async (text: string) => {
@@ -2387,7 +2391,7 @@ export function reviewService(
         // The failing lines come from the whole kept log when there is one: the tail often starts after the failure.
         const whole = v.keptLog ? ((await queue.readLog(t.companyId, ticketId, v.keptLog.jobId).catch(() => null))?.log ?? null) : null;
         await keepBounce(gateBounceRecord({ command, why, output: whole ?? v.output, jobId: v.keptLog?.jobId, ticketId }));
-        const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review. If the failure isn't caused by your branch (the same step fails on main, or the check itself is broken), don't change your code: tell the CEO, who marks the ticket fixing the check (update_ticket fixesMergeCheck), then move this ticket back to review on the same commit; its approvals and sign-off are kept and it waits, held, for that fix.${facts ? `\n\nWhat failed: ${facts}.` : ""}\n\nLast output:\n${v.output.slice(-4000)}${v.keptLog ? `\n\n${fullLogPointer(v.keptLog.jobId, v.keptLog.ticketId, v.keptLog.chars)}` : ""}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
+        const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review. If the failure isn't caused by your branch (the same step fails on main, or the check itself is broken), don't change your code: tell the CEO, who marks the ticket fixing the check (update_ticket fixesMergeCheck), then move this ticket back to review on the same commit; its approvals and sign-off are kept and it waits, held, for that fix.${facts ? `\n\nWhat failed: ${facts}.` : ""}\n\nLast output:\n${v.output.slice(-4000)}${v.keptLog ? `\n\n${fullLogPointer(v.keptLog.jobId, v.keptLog.ticketId, v.keptLog.chars)}` : ""}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed", `the gate's check \`${command}\` ${why}${facts ? ` (${facts})` : ""}`);
         return { outcome: "verify_failed", delivered, detail: v };
       };
       // BOS-313 (F6): with the setting on, the checks run on the merge commit that will be pushed, inside the merge itself.
@@ -2648,6 +2652,7 @@ export function reviewService(
             const delivered = await sendBack(
               `The review was approved, but GitHub CI failed on the merge of your branch with ${defaultBranch} (commit ${prep.commit.slice(0, 12)}), so it can't be merged yet. Failed:\n${body}${tried}\n\nFix it on your branch (merge origin/${defaultBranch} in if the failure comes from the two together), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`,
               "ci failed",
+              `GitHub CI failed on commit ${prep.commit.slice(0, 12)} (${jobs.join(", ") || "workflow failed before any job ran"})`,
             );
             return { outcome: "verify_failed", delivered, detail: { ci: "failed", jobs } };
           }

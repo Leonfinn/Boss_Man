@@ -44,7 +44,7 @@ describe("R10: commands that wait for typed input", () => {
   });
 
   it("can't be overridden, even by the CEO", () => {
-    const r = checkAsk({ triedFirst: TRIED, steps: [step("Enter the key.", sh("read -rsp 'Key: ' TS_AUTHKEY"))], lintOverride: "The owner knows what to type here.", byCeo: true });
+    const r = checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: [step("Enter the key.", sh("read -rsp 'Key: ' TS_AUTHKEY"))], lintOverride: "The owner knows what to type here.", byCeo: true });
     expect(r.error).toMatch(/R10|typed input|answer by typing/);
     expect(r.error).toMatch(/waits for typed input/);
   });
@@ -139,13 +139,13 @@ describe("R10: pagers, typed-into prompts and commands that never return", () =>
     const found = lintOwnerSteps([step6, step9]).refuse.filter((f) => f.rule === "R10");
     expect(found.map((f) => f.step)).toContain(1);
     expect(found.map((f) => f.problem).join("\n")).toMatch(/psql prompt.*-c/);
-    const r = checkAsk({ triedFirst: TRIED, steps: [step6, step9], lintOverride: "The owner knows to press q.", byCeo: true });
+    const r = checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: [step6, step9], lintOverride: "The owner knows to press q.", byCeo: true });
     expect(r.error).toMatch(/can't let through.*pager or never returns/);
   });
 
   it("can't be overridden, even by the CEO", () => {
     for (const cmd of ["git log -5", "tail -f app.log", "docker exec -it db psql -U bossman"]) {
-      const r = checkAsk({ triedFirst: TRIED, steps: [step("Look at it. This prints nothing.", sh(cmd))], lintOverride: "The owner knows to press q.", byCeo: true });
+      const r = checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: [step("Look at it. This prints nothing.", sh(cmd))], lintOverride: "The owner knows to press q.", byCeo: true });
       expect(r.error, cmd).toMatch(/can't let through.*pager or never returns/);
     }
   });
@@ -215,12 +215,12 @@ describe("R12: steps that print nothing say so", () => {
   it("lintOverride lets R12 through, but not R10 on the same card", () => {
     // R35: the override names the five steps and the rule it covers.
     const named = [{ steps: [1, 2, 3, 4, 5], rules: ["R12"], reason: "Each step says what the next one checks." }];
-    const over = checkAsk({ triedFirst: TRIED, steps: card(), proof: PROOF, lintOverride: named, byCeo: true });
+    const over = checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: card(), proof: PROOF, lintOverride: named, byCeo: true });
     expect(over.error).toBeNull();
     expect(over.lint?.override?.findings.map((f) => f.rule)).toEqual(["R12", "R12", "R12", "R12", "R12"]);
-    const both = checkAsk({ triedFirst: TRIED, steps: [...card(), step("Look at the log.", sh("tail -f app.log"))], proof: PROOF, lintOverride: named, byCeo: true });
+    const both = checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: [...card(), step("Look at the log.", sh("tail -f app.log"))], proof: PROOF, lintOverride: named, byCeo: true });
     expect(both.error).toMatch(/Step 6: .*never returns/);
-    expect(checkAsk({ triedFirst: TRIED, steps: card(), proof: PROOF }).error).toMatch(/prints nothing when it works/);
+    expect(checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: card(), proof: PROOF }).error).toMatch(/prints nothing when it works/);
   });
 });
 
@@ -270,18 +270,18 @@ describe("R11: host commands need proof", () => {
   });
 
   it("checkAsk refuses a malformed proof, keeps a good one for the banner, and lets the CEO override a missing one", () => {
-    expect(checkAsk({ triedFirst: TRIED, steps: host, proof: "tested it" }).error).toMatch(/proof must be "rehearsed <script> @ <commit>"/);
-    expect(checkAsk({ triedFirst: TRIED, steps: host }).error).toMatch(/Step 1: has a host command, so the card needs proof/);
-    const ok = checkAsk({ triedFirst: TRIED, steps: host, proof: "not rehearsed: the login needs the owner's own account" });
+    expect(checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: host, proof: "tested it" }).error).toMatch(/proof must be "rehearsed <script> @ <commit>"/);
+    expect(checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: host }).error).toMatch(/Step 1: has a host command, so the card needs proof/);
+    const ok = checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: host, proof: "not rehearsed: the login needs the owner's own account" });
     expect(ok.error).toBeNull();
     expect(ok.lint?.proof).toEqual({ rehearsed: false, part: "the login needs the owner's own account" });
-    const over = checkAsk({ triedFirst: TRIED, steps: host, lintOverride: "Rehearsal job isn't built yet; same steps as yesterday's card.", byCeo: true });
+    const over = checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: host, lintOverride: "Rehearsal job isn't built yet; same steps as yesterday's card.", byCeo: true });
     expect(over.error).toBeNull();
     expect(over.lint?.override?.findings).toEqual([expect.objectContaining({ rule: "R11" })]);
-    expect(checkAsk({ triedFirst: TRIED, steps: host, lintOverride: "Rehearsal job isn't built yet.", byCeo: false }).error).toMatch(/Only the CEO/);
+    expect(checkAsk({ triedFirst: TRIED, why: "The owner gets what the steps set up.", minutes: 5, steps: host, lintOverride: "Rehearsal job isn't built yet.", byCeo: false }).error).toMatch(/Only the CEO/);
   });
 
   it("a card without steps needs no proof", () => {
-    expect(checkAsk({ triedFirst: TRIED, proof: "rehearsed tailscale @ 0123abcd" })).toEqual({ error: null });
+    expect(checkAsk({ triedFirst: TRIED, proof: "rehearsed tailscale @ 0123abcd" })).toEqual({ error: null, triedFirst: TRIED });
   });
 });

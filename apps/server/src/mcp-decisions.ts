@@ -7,7 +7,7 @@ import { ageWords, isAfterMerge, REAL_USE_ASK, REAL_USE_LABEL, recurringDutyHits
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable } from "./db/schema.js";
 import { record } from "./services/activity.js";
-import { AnswerError, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
+import { AnswerError, OPENING_WHY_MAX, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
 import { LINT_OVERRIDE_HELP, lintOverrideSchema } from "./services/lint-override.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
@@ -75,6 +75,9 @@ export function registerDecisionTools(
         setsUp: z.enum(ADDONS).optional(),
         newHost: z.string().min(1).max(64).optional(),
         proof: z.string().max(300).optional(),
+        /** escalate, and advise with outcome reissue, when the card has steps (BOS-1660): the card's opening. Boss Man writes "Where" from the steps. */
+        openingWhy: z.string().max(OPENING_WHY_MAX).optional().describe("With steps (escalate, reissue): one sentence saying what the owner gets, or what breaks if they skip it."),
+        minutes: z.number().int().min(1).max(480).optional().describe("With steps (escalate, reissue): a whole number of minutes the steps take the owner."),
       },
     },
     async (input) => {
@@ -275,11 +278,14 @@ export function registerDecisionTools(
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(input.newHost ? { newHost: input.newHost } : {}), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), ...(await seenImageDates(db, scope.companyId, input.steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, input.steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", question: input.question, why: input.openingWhy, minutes: input.minutes, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(input.newHost ? { newHost: input.newHost } : {}), hostValues: await hostFacts.valuesFor(input.steps, input.question, input.options, input.triedFirst), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), ...(await seenImageDates(db, scope.companyId, input.steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, input.steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
             if (ask.error) return fail(ask.error);
             if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent reissue needs urgentWhy: one short sentence (10 to 200 characters) on what the owner must act on now (it is shown on their phone list).");
             const reissueSteps = ask.steps ?? input.steps;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            // BOS-1660: the owner reads the question, options and triedFirst with host tokens filled; a recommendation or verdict names its option's new text.
+            const filledAs = new Map(input.options.map((o, i) => [o, ask.options?.[i] ?? o]));
+            const verdicts = input.optionVerdicts ? Object.fromEntries(Object.entries(input.optionVerdicts).map(([k, v]) => [filledAs.get(k) ?? k, v])) : undefined;
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: ask.question ?? input.question, options: ask.options ?? input.options, recommended: filledAs.get(input.recommended) ?? input.recommended, triedFirst: (ask.triedFirst ?? input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), ...(reissueSteps?.length && ask.opening ? { opening: ask.opening } : {}), lint: ask.lint, ...(verdicts ? { optionVerdicts: verdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";
@@ -305,8 +311,9 @@ export function registerDecisionTools(
         if (!isCeo || !scope.agentId) return fail("Only the CEO passes cards to the owner.");
         if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent escalation needs urgentWhy: one short sentence on what the owner must act on now (it is shown on their phone list).");
         try {
-          await alerts.escalate(scope.companyId, scope.agentId, { alertId: input.id, triedFirst: input.triedFirst, ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}), steps: input.steps, ownerMustDo: input.ownerMustDo, lintOverride: input.lintOverride, setsUp: input.setsUp, proof: input.proof, adviceNeeded: input.adviceNeeded, adviceDeny: input.adviceDeny });
-          return text("Passed to the owner, with what you tried.");        } catch (err) {
+          await alerts.escalate(scope.companyId, scope.agentId, { alertId: input.id, triedFirst: input.triedFirst, ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}), steps: input.steps, why: input.openingWhy, minutes: input.minutes, ownerMustDo: input.ownerMustDo, lintOverride: input.lintOverride, setsUp: input.setsUp, proof: input.proof, adviceNeeded: input.adviceNeeded, adviceDeny: input.adviceDeny });
+          return text("Passed to the owner, with what you tried.");
+        } catch (err) {
           if (err instanceof WatchdogError) return fail(err.message);
           throw err;
         }
