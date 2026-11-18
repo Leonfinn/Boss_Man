@@ -22,6 +22,7 @@ beforeAll(async () => {
   shared = await sharedDatabase();
 });
 afterEach(async () => {
+  // test-lines-ok: lets the last background write settle before the database closes; nothing to poll for
   await new Promise((resolve) => setTimeout(resolve, 50));
 });
 afterAll(async () => {
@@ -121,6 +122,7 @@ describe("a landing whose ticket left review is over (BOS-1769)", () => {
     await expect(c.retry()).resolves.toMatchObject({ state: "running", startedBy: "the CEO (retrying the merge)" });
     // The old landing notices on its next poll and ends; the job stays queued for the new attempt (same tree: reused, not re-queued).
     expect(await c.waitFor(async () => (await c.lineRows("check_ended")).some((d) => d.why === "the ticket left review"))).toBe(true);
+    // test-lines-ok: a "nothing more happens" wait, there is no event to wait for; a longer wait on a slow runner only makes it stricter
     await new Promise((r) => setTimeout(r, 700));
     const now = await c.jobs();
     expect(now).toHaveLength(1);

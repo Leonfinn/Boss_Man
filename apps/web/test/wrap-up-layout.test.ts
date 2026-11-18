@@ -130,15 +130,24 @@ const saveShot = (name: string, page: Page) => {
 };
 
 describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
-  // One test per size (BOS-1708 pattern): each keeps the 60 s limit (not raised) but now covers 4 page loads, not 16.
-  // The limit still catches a page that never draws the mode's data (the wait above has a 20 s deadline).
+  // One test per size and mode (BOS-1708 pattern, one step finer after BOS-1790): each keeps the 60 s limit (not raised)
+  // but covers ONE page load. The browser is started once, in beforeAll, so a cold GitHub runner's Chromium start-up
+  // is not charged to the first test; the tests still time only the page work.
+  // The limit still catches a page that never draws the mode's data (the wait below has a 20 s deadline).
+  let browser: Browser | null = null;
+  beforeAll(async () => {
+    browser = await launch();
+  }, 180_000);
+  afterAll(async () => {
+    await browser?.close();
+  });
   const sizes = [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "brave1667", width: 1667, height: 724, touch: true, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }];
-  it.each(sizes)("is inside the Updates box, above the update buttons, with the bottom panel gone, at $name", async (vp) => {
-    const browser = await launch();
+  const cases = sizes.flatMap((vp) => ["waiting", "asked", "late", "none"].map((m) => ({ vp, m, name: vp.name })));
+  it.each(cases)("is inside the Updates box, above the update buttons, with the bottom panel gone, at $name in mode $m", async ({ vp, m }) => {
     if (!browser) return; // no browser here: skipped, not passed
     try {
       {
-        for (const m of ["waiting", "asked", "late", "none"]) {
+        {
           mode = m;
           const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.dsf, hasTouch: vp.touch });
           const errors: string[] = [];
@@ -213,7 +222,7 @@ describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
         }
       }
     } finally {
-      await browser.close();
+      /* the shared browser is closed in afterAll */
     }
   }, 60_000);
 });

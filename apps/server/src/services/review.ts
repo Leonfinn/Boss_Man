@@ -13,7 +13,7 @@ import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { CI_TIMING, CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop } from "./ci-publish.js";
-import { GitHostError, type CiStatus, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
+import { CI_BRANCH_PREFIX, GitHostError, type CiStatus, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
@@ -2270,6 +2270,7 @@ export function reviewService(
             // BOS-1664: the runner scans before this push with the owner's list too (a runner without "ci-publish-scan" drops the field).
             publish: async (commit) => {
               const scanList = await scanListWarning.forScan();
+              ciPushed = true;
               return ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit, ...(scanList ? { scanList } : {}) }), MERGE_WAIT_MS);
             },
             announce: async (branch) => {
@@ -2283,9 +2284,20 @@ export function reviewService(
           },
           prep,
           stop,
-        ).catch((err: Error) => {
-          throw err instanceof CiPublishError ? new ReviewError(409, err.message) : err;
-        });
+        ).then(
+          async (o) => {
+            // BOS-1749: the branch has done its job on every ending except a pass (the merge deletes it after landing) and a
+            // replacement by a newer push (that push owns the branch now). Best effort; the periodic sweep catches a miss.
+            if (o.kind !== "passed" && o.kind !== "superseded") await dropCiBranch();
+            return o;
+          },
+          async (err: Error) => {
+            await dropCiBranch();
+            throw err instanceof CiPublishError ? new ReviewError(409, err.message) : err;
+          },
+        );
+      let ciPushed = false; // a refusal before the push leaves nothing to delete
+      const dropCiBranch = () => !ciPushed ? Promise.resolve() : ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "unpublish", phase: "unpublish" }), MERGE_WAIT_MS).then(() => undefined, () => undefined);
       // Other tickets in this project that waited on an open CI card: CI can be read again, so start them.
       const startCiWaiters = () => {
         const held = ciCardWaiting.get(t.projectId);
@@ -3178,6 +3190,36 @@ export function reviewService(
     async setCheckMergedResult(on: boolean) {
       await db.insert(settings).values({ key: CHECK_MERGED_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
       return on;
+    },
+
+    /**
+     * BOS-1749: deletes bossman-ci/* branches on each GitHub project's repo whose commit is older than `maxAgeMs` and whose ticket
+     * has no CI wait running here. Catches what the gate's own cleanup missed (a restart mid-check, a refused delete). Only
+     * branches named bossman-ci/ are ever listed or deleted (git-hosts.ts). Repos and tokens come from the projects themselves.
+     */
+    async sweepCiBranches(maxAgeMs = 6 * 3_600_000): Promise<{ repos: number; deleted: string[]; failed: number }> {
+      const out = { repos: 0, deleted: [] as string[], failed: 0 };
+      if (!deps.gitHosts) return out;
+      const rows = await db.select({ companyId: projects.companyId, repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase }).from(projects).where(eq(projects.gitHost, "github"));
+      const seen = new Set<string>();
+      for (const p of rows) {
+        const target = await prTarget(p.companyId, p.repoUrl, p.gitHost, p.gitApiBase).catch(() => null);
+        if (!target) continue;
+        const key = `${target.cfg.apiBase}/${target.cfg.owner}/${target.cfg.repo}`.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.repos++;
+        try {
+          for (const b of await deps.gitHosts.ciBranches(target.cfg, target.token)) {
+            if (Date.now() - b.committedAt < maxAgeMs || ciWaits.has(b.branch.slice(CI_BRANCH_PREFIX.length))) continue;
+            if (await deps.gitHosts.deleteCiBranch(target.cfg, target.token, b.branch)) out.deleted.push(b.branch);
+            else out.failed++;
+          }
+        } catch {
+          out.failed++;
+        }
+      }
+      return out;
     },
 
     waitForCi,

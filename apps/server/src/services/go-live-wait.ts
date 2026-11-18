@@ -63,6 +63,25 @@ export function serverContains(live: string | null, merge: string, order: string
   return at >= 0 && run >= 0 && at <= run;
 }
 
+/** BOS-1644: the three answers to "does what the server runs include this merge?". "unknown" always carries why. */
+export type LiveAnswer = { state: "yes" } | { state: "no" } | { state: "unknown"; reason: string };
+
+/**
+ * The same question as serverContains, but "can't tell" is its own answer instead of a "no" (R26). "no" only when
+ * both commits are placed in merge order and the merge is the later one. Nothing recorded, a merge or a running
+ * commit Boss Man can't place: "unknown", with the reason. serverContains is this answer being "yes".
+ */
+export function serverHas(live: string | null, merge: string, order: string[], contains: readonly string[] = []): LiveAnswer {
+  if (!live) return { state: "unknown", reason: "nothing is recorded yet about which version the server runs" };
+  const want = merge.toLowerCase();
+  if (live === want || contains.some((c) => c.toLowerCase() === want)) return { state: "yes" };
+  const at = order.indexOf(want);
+  if (at < 0) return { state: "unknown", reason: "Boss Man can't place this merge among the recorded merges" };
+  const run = placeInOrder(live, order, contains);
+  if (run < 0) return { state: "unknown", reason: `Boss Man can't place the running version (${live.slice(0, 8)}) among the recorded merges` };
+  return at <= run ? { state: "yes" } : { state: "no" };
+}
+
 /** What the runner image contains beyond its own place: the server's known contents when it was built from the live commit. */
 const imageKnown = (image: string | null, rec: { live: string | null; contains: string[] }) => (image && image === rec.live ? rec.contains : []);
 
@@ -132,16 +151,19 @@ export async function goLiveWaitOf(db: Db, t: GoLiveTicket): Promise<GoLiveWait 
 export async function goLiveFacts(
   db: Db,
   t: { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null },
-): Promise<{ live: string | null; server: boolean | undefined; runners: boolean | undefined } | null> {
+): Promise<{ live: string | null; server: boolean | undefined; serverUnknownReason?: string; runners: boolean | undefined } | null> {
   if (!t.mergeCommit) return null;
   const merge = t.mergeCommit.toLowerCase();
   const rec = await liveServerRecord(db, t.companyId);
   const live = rec.live;
   const order = await allMergeOrder(db, t.companyId);
   const image = await runnerImageCommit(db, t.companyId);
+  const has = live === null ? null : serverHas(live, merge, order, rec.contains);
   return {
     live,
-    server: live === null ? undefined : serverContains(live, merge, order, rec.contains),
+    // undefined = nothing reported or can't tell (serverUnknownReason says why); never a false "no" (BOS-1644).
+    server: has === null || has.state === "unknown" ? undefined : has.state === "yes",
+    serverUnknownReason: has?.state === "unknown" ? has.reason : undefined,
     runners: t.touchesRunner === true && image !== null ? imageContains(image, merge, order, imageKnown(image, rec)) : undefined,
   };
 }
@@ -157,7 +179,7 @@ export async function goLiveLine(db: Db, t: GoLiveTicket): Promise<string | null
   }
   const f = await goLiveFacts(db, t);
   if (!f) return null;
-  const server = `live on the server: ${yesNo(f.server)}${f.live ? ` (the server runs commit ${f.live.slice(0, 8)})` : ""}`;
+  const server = `live on the server: ${f.serverUnknownReason ? `can't tell (${f.serverUnknownReason})` : yesNo(f.server)}${f.live ? ` (the server runs commit ${f.live.slice(0, 8)})` : ""}`;
   return `Go-live: ${server}${t.touchesRunner === true ? `; runners rebuilt: ${yesNo(f.runners)}` : ""}. Say "is live" or "is deployed" only when this says yes.`;
 }
 

@@ -43,6 +43,8 @@ export const OWNER_CONTROLS = {
   ],
   Decisions: [
     "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
+    // The project filter chips (BOS-1744); project names are data, these two are fixed.
+    "All projects", "Company-wide",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
     "Send my answer", "Ask the CEO for advice",
     // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
@@ -134,7 +136,7 @@ export const OWNER_CONTROLS = {
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
-    "Review and deploy", "Check for updates now", "Build and update runners", "Cancel queued runner update", "Save", "Save add-ons","Cancel the update", "Update runners (finish runs first)",
+    "Review and deploy", "Check for updates now", "Build and update runners", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
