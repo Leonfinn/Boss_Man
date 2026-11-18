@@ -535,14 +535,41 @@ export function outsideSiteKeys(prose: string, serverHost: string | null | undef
   return [...new Set(keys)];
 }
 /** The refusal for a `not seen` step on a site whose docs misled the owner within SEEN_MAX_DAYS, or null. */
-function mismatchRefusal(prose: string, facts: LintFacts, now: Date): string | null {
-  if (!facts.mismatchedSites) return null;
+function mismatchRefusal(prose: string, facts: LintFacts, now: Date, covered: ReadonlySet<string> = new Set()): string | null {
+  for (const [key, at] of misledSites(prose, facts, now)) {
+    // BOS-1653: once an earlier step on this site is backed by a fresh screenshot, later steps may be "not seen".
+    if (covered.has(key)) continue;
+    return `reads ${key}'s docs, but on ${at.slice(0, 10)} ${key}'s docs didn't match the owner's screen, so for ${SEEN_MAX_DAYS} days after that the first step on that site needs "seen: <ticket image id>" from the owner's own screenshot (under ${SEEN_MAX_DAYS} days old), not "not seen:": ask the owner for one screenshot of their starting page first, attach it (attach_image), and write that first step from it. Steps after it may be "not seen:" if each says what the owner should see ("You should see …")`;
+  }
+  return null;
+}
+/** The sites in this step whose docs misled the owner within SEEN_MAX_DAYS, as [siteKey, when]. */
+function misledSites(prose: string, facts: LintFacts, now: Date): [string, string][] {
+  const out: [string, string][] = [];
+  if (!facts.mismatchedSites) return out;
   for (const key of outsideSiteKeys(prose, facts.serverHost)) {
     const at = facts.mismatchedSites[key];
     if (at === undefined) continue;
-    const ageDays = (now.getTime() - Date.parse(at)) / 86_400_000;
-    if (!(ageDays <= SEEN_MAX_DAYS)) continue;
-    return `reads ${key}'s docs, but on ${at.slice(0, 10)} ${key}'s docs didn't match the owner's screen, so for ${SEEN_MAX_DAYS} days after that a step there needs "seen: <ticket image id>" from the owner's own screenshot (under ${SEEN_MAX_DAYS} days old), not "not seen:": ask the owner for one screenshot of their starting page first, attach it (attach_image), and write the steps from it`;
+    if ((now.getTime() - Date.parse(at)) / 86_400_000 <= SEEN_MAX_DAYS) out.push([key, at]);
+  }
+  return out;
+}
+
+/** BOS-1653: a token is shown once, on the page right after these actions, so no one may be asked to photograph it. */
+const TOKEN_ACTION = /\bcreate (?:a |an |the |new )*(?:tunnel|(?:(?:api|access|personal access|fine-grained|classic)\s+)*token)\b/i;
+const SCREENSHOT_ASK = /\b(?:screenshots?|screen ?grabs?|photos?|photographs?|pictures?|snap(?:shot)?s?)\b/i;
+/** Whether a step asks the owner for a picture of their screen (not Boss Man's own "seen:" marks or the stop option). */
+function asksForScreenshot(prose: string): boolean {
+  const text = prose.replace(new RegExp(NOT_SEEN_MARK.source, "gi"), " ").replace(new RegExp(SEEN_MARK.source, "gi"), " ").replace(/my screen looks different(?:\s*\([^)]*\))?/gi, " ");
+  return SCREENSHOT_ASK.test(text);
+}
+/** BOS-1653: a step that asks for a screenshot in the step of, or just after, a token-bearing action on Cloudflare or GitHub. */
+function secretScreenshotFinding(step: number, prose: string, previous: string | undefined, serverHost: string | null | undefined): LintFinding | null {
+  if (!asksForScreenshot(prose)) return null;
+  const both = `${previous ?? ""}\n${prose}`;
+  // The tunnel or token action is in this step or the one before; the site may be named in either.
+  if (TOKEN_ACTION.test(both) && outsideSiteKeys(both, serverHost).some((s) => s === "cloudflare" || s === "github")) {
+    return { step, rule: "R19", problem: `asks the owner for a screenshot of a page that shows a token (the page right after "Create tunnel" or "Create token"). A screenshot would put the secret in a ticket. Don't ask for a picture there: say what they should see in words, or have them paste the token into Boss Man's Secrets screen, and ask for the screenshot of the page before that action instead` };
   }
   return null;
 }
@@ -567,7 +594,7 @@ function checkpointFinding(first: string | undefined, options: readonly string[]
  * which the card-level option check needs. `images` maps ticket image ids to their created-at; with none given an
  * image id is accepted as it is (the caller could not look it up) and only its form is checked.
  */
-function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refuse: LintFinding[]): boolean {
+function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refuse: LintFinding[], covered: Set<string>): boolean {
   const site = outsideSite(prose, facts.serverHost);
   if (!site) return false;
   const now = facts.now ?? new Date();
@@ -580,7 +607,10 @@ function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refu
       return false;
     }
     const ageDays = created === undefined ? 0 : (now.getTime() - Date.parse(created)) / 86_400_000;
-    if (ageDays <= SEEN_MAX_DAYS) return false;
+    if (ageDays <= SEEN_MAX_DAYS) {
+      for (const k of outsideSiteKeys(prose, facts.serverHost)) covered.add(k);
+      return false;
+    }
     const stale = mismatchRefusal(prose, facts, now);
     if (stale) {
       refuse.push({ step, rule: "R19", problem: `says "seen: ${seen[1]}", but that screenshot is ${Math.floor(ageDays)} days old, and it ${stale}` });
@@ -593,8 +623,15 @@ function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refu
     if (Number.isNaN(Date.parse(notSeen[2]!)) || Date.parse(notSeen[2]!) > now.getTime() + 86_400_000) {
       refuse.push({ step, rule: "R19", problem: `has "not seen: …, ${notSeen[2]}", which is not a real past date. Write the date you read the doc as YYYY-MM-DD` });
     }
-    const misled = mismatchRefusal(prose, facts, now);
+    const misled = mismatchRefusal(prose, facts, now, covered);
     if (misled) refuse.push({ step, rule: "R19", problem: misled });
+    else if (misledSites(prose, facts, now).length) {
+      // Allowed only because an earlier step on the site is backed by a screenshot; this step carries its own checkpoint.
+      const m = CHECKPOINT.exec(prose);
+      if (!m || !CONCRETE_NAME.test(prose.slice(m.index))) {
+        refuse.push({ step, rule: "R19", problem: `is a "not seen" step on a site whose docs misled the owner, so it needs its own checkpoint: say what they should see before going on ("You should see "<a name they will recognise>""), with something concrete in quotes or backticks` });
+      }
+    }
     return true;
   }
   refuse.push({ step, rule: "R19", problem: `sends the owner to ${site}, a site Boss Man can't see, and doesn't say where its clicks came from. Add "seen: <ticket image id>" if you have a screenshot of that screen (attach_image first, and it must be under ${SEEN_MAX_DAYS} days old), or "not seen: <doc URL>, <YYYY-MM-DD>" if you only read a doc${ANY_SEEN_WORD.test(prose) ? " (the mark you wrote isn't in that form)" : ""}. A card with a not-seen step must also offer the option "${SCREEN_DIFFERENT_OPTION}"` });
@@ -821,6 +858,9 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   let hostStep = 0;
   let notSeenStep = 0;
   let anyOutside = false;
+  /** Sites an earlier step of this card has already shown from a fresh screenshot (BOS-1653). */
+  // not state: scratch for one call over one card; nothing is kept between calls.
+  const seenSites = new Set<string>();
   // not state: scratch for one call over one card; nothing is kept between calls.
   const composeSteps: ComposeStep[] = [];
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
@@ -876,7 +916,9 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     runnerUpdateFindings(step, text, code, given, refuse, warn);
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
     vagueHostFindings(step, prose, blocks, refuse);
-    if (outsideSiteFindings(step, prose, given, refuse) && !notSeenStep) notSeenStep = step;
+    if (outsideSiteFindings(step, prose, given, refuse, seenSites) && !notSeenStep) notSeenStep = step;
+    const secret = secretScreenshotFinding(step, prose, i > 0 ? pieces(steps[i - 1]!).prose : undefined, given.serverHost);
+    if (secret) refuse.push(secret);
     if (!anyOutside && outsideSite(prose, given.serverHost)) anyOutside = true;
     for (const c of code) {
       const hit = INTERACTIVE.find(([re]) => re.test(c));

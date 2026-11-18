@@ -233,6 +233,7 @@ reads:
   - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
+  - /api/settings/merge-carry
   - /api/settings/wait-for-ci
   - /api/wip-limits
 

@@ -16,6 +16,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, checkJobs, checkResults, decisions, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { landingTurns } from "../src/services/landing-turn.js";
 import { holdView } from "../src/services/review-holds.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
 import { approveAndWait } from "./helpers.js";
@@ -114,7 +115,7 @@ function fakeGitHub() {
   return { fetch, calls, state, reads };
 }
 
-async function setup(opts: { features?: string[]; holdVerify?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[] } = {}) {
+async function setup(opts: { features?: string[]; holdVerify?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[] } = {}) {
   const gh = fakeGitHub();
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: gh.fetch, ciTiming: { pollMs: 10, graceMs: 60, ceilingMs: 3_000, retryMs: 5 } });
@@ -145,7 +146,7 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; workflow
         else queueMicrotask(answer);
       }
       if (c.type === "workspace.merge") {
-        if (c.phase === "prepare") reply(c, { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN });
+        if (c.phase === "prepare") reply(c, opts.prepares?.length ? opts.prepares.shift() : { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN });
         else if (c.phase === "publish") reply(c, { status: "published", branch: `bossman-ci/${c.ticketId}`, commit: c.commit, hasWorkflows: opts.workflows !== false });
         else if (c.phase === "unpublish") reply(c, { status: "unpublished", branch: `bossman-ci/${c.ticketId}` });
         else if (c.phase === "finish" && opts.finishes?.length) reply(c, opts.finishes.shift());
@@ -534,6 +535,158 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       await finishJob(c, { state: "passed", exitCode: 0 });
       expect((await res).json()).toMatchObject({ outcome: "merged" });
       expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
+    });
+
+    describe("carrying a passed merge across a main move (BOS-1762)", () => {
+      const CARRY = ["carried-check", "ci-publish", "merge-carry"];
+      const MERGE2 = "d".repeat(40);
+      const TREE2 = "9".repeat(40);
+      const NEW_MAIN = "8".repeat(40);
+      const finishes = (c: Awaited<ReturnType<typeof setup>>) => c.sent.filter((m): m is Extract<RunnerCommand, { type: "workspace.merge" }> => m.type === "workspace.merge" && m.phase === "finish");
+      const lineEvents = async (c: Awaited<ReturnType<typeof setup>>) =>
+        (await c.db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, "merge_line")))).map((r) => r.detail as { event: string; [k: string]: unknown });
+
+      it("main moved without touching the ticket's files: lands at once, with no new prepare, check or GitHub run, and says so", async () => {
+        const carried = { from: MAIN, to: NEW_MAIN, commits: 2, files: 3 };
+        const c = (ctx = await setup({ features: CARRY, finishes: [{ status: "merged", commit: FINAL, checked: { sha: MERGE, tree: TREE, ms: 0 }, carried }] }));
+        await serverMode(c);
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
+        expect(finishes(c)[0]).toMatchObject({ carry: true, commit: MERGE, tree: TREE });
+        expect(c.gh.reads.get(MERGE)).toBe(1);
+        expect(await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).toHaveLength(1);
+        expect(await c.state()).toMatchObject({ systemState: "done", mergeCommit: FINAL });
+        expect((await lineEvents(c)).find((e) => e.event === "carried_across")).toMatchObject(carried);
+        const note = (await c.db.select({ summary: activity.summary }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, "merge_carried"))))[0]?.summary;
+        expect(note).toMatch(/2 commits .* touch 3 files, none of this ticket's/);
+      });
+
+      it("main moved touching the ticket's files: built, checked and run on GitHub again, and the record says why", async () => {
+        const c = (ctx = await setup({
+          features: CARRY,
+          prepares: [{ status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN }, { status: "prepared", commit: MERGE2, tree: TREE2, targetSha: NEW_MAIN }],
+          finishes: [{ status: "main_moved", notCarried: { why: "main changed files this ticket changes", files: ["src/a.ts"] } }],
+        }));
+        await serverMode(c);
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        expect(c.merges()).toEqual(["prepare", "publish", "finish", "prepare", "publish", "finish", "unpublish"]);
+        expect(finishes(c).map((f) => [f.commit, f.carry])).toEqual([[MERGE, true], [MERGE2, true]]);
+        expect(c.gh.reads.get(MERGE2)).toBeGreaterThan(0);
+        expect(await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).toHaveLength(2);
+        expect((await lineEvents(c)).find((e) => e.event === "rebuilt")).toMatchObject({ rebuilds: 1, why: "main changed files this ticket changes", files: ["src/a.ts"] });
+      });
+
+      it("rebuilt twice after passing: takes the landing turn for its third try, and gives it up once it lands", async () => {
+        const TREE3 = "7".repeat(40);
+        const MERGE3 = "6".repeat(40);
+        const c = (ctx = await setup({
+          features: CARRY,
+          prepares: [{ status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN }, { status: "prepared", commit: MERGE2, tree: TREE2, targetSha: NEW_MAIN }, { status: "prepared", commit: MERGE3, tree: TREE3, targetSha: NEW_MAIN }],
+          finishes: [{ status: "main_moved", notCarried: { why: "main changed files this ticket changes" } }, { status: "main_moved", notCarried: { why: "main changed files this ticket changes" } }],
+        }));
+        await serverMode(c);
+        const res = approveAndWait(c.req, c.ticket.id);
+        for (let i = 0; i < 3; i++) await finishJob(c, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        const ev = await lineEvents(c);
+        expect(ev.filter((e) => e.event === "rebuilt").map((e) => e.rebuilds)).toEqual([1, 2]);
+        expect(ev.filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual(["taken", "ended"]);
+        expect(landingTurns.check(c.project.id).holder).toBeNull();
+      });
+
+      it("a push race the runner calls carryEligible is finished again on the newer main without preparing", async () => {
+        const c = (ctx = await setup({ features: CARRY, finishes: [{ status: "main_moved", carryEligible: true }, { status: "merged", commit: FINAL, checked: { sha: MERGE, tree: TREE, ms: 0 }, carried: { from: MAIN, to: NEW_MAIN, commits: 1, files: 1 } }] }));
+        await serverMode(c);
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        expect(c.merges()).toEqual(["prepare", "publish", "finish", "finish", "unpublish"]);
+      });
+
+      it("switch off, or a runner without merge-carry: finish asks for no carry (today's sequence)", async () => {
+        for (const o of [{ features: CARRY, off: true }, { features: ["carried-check", "ci-publish"], off: false }]) {
+          const c = (ctx = await setup({ features: o.features }));
+          await serverMode(c);
+          if (o.off) expect((await c.req("PUT", "/api/settings/merge-carry", { on: false })).json()).toEqual({ on: false, turnMinutes: 60 });
+          const res = approveAndWait(c.req, c.ticket.id);
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          expect((await res).json()).toMatchObject({ outcome: "merged" });
+          expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
+          expect(finishes(c)[0]!.carry).toBeUndefined();
+          ctx.release();
+          await ctx.app.close();
+          await ctx.close();
+          ctx = undefined;
+        }
+      });
+
+      it("never skips the gate's own check: a failed merge check lands nothing and finish is never asked", async () => {
+        const c = (ctx = await setup({ features: CARRY }));
+        await serverMode(c);
+        const res = approveAndWait(c.req, c.ticket.id);
+        await finishJob(c, { state: "failed", exitCode: 1, logTail: "1 test failed" });
+        expect((await res).json()).not.toMatchObject({ outcome: "merged" });
+        expect(finishes(c)).toEqual([]);
+        expect((await c.state()).mergeCommit).toBeNull();
+      });
+
+      it("never skips GitHub: a red CI lands nothing and finish is never asked", async () => {
+        const c = (ctx = await setup({ features: CARRY }));
+        await serverMode(c);
+        c.gh.state.ci = (sha) => (sha === MERGE ? red([job("check", "failure", 4, "Run tests")]) : green());
+        expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+        expect(finishes(c)).toEqual([]);
+      });
+
+      it("never skips the owner's sign-off: a high-risk ticket without it never reaches the merge", async () => {
+        const c = (ctx = await setup({ features: CARRY }));
+        await serverMode(c);
+        await c.db.update(tickets).set({ risk: "high" }).where(eq(tickets.id, c.ticket.id));
+        // A landing started without the owner's approval (a sweep or retry): refused before anything is built or pushed.
+        await expect(c.review.landOnce(c.ticket.id, "Boss Man")).rejects.toThrow(/sign-off/);
+        expect(c.merges()).toEqual([]);
+        expect((await c.state()).mergeCommit).toBeNull();
+      });
+
+      it.each([
+        ["lands", "done"],
+        ["leaves review", "left"],
+      ] as const)("while another ticket has the landing turn, a passed merge waits to push until that ticket %s", async (_what, how) => {
+        const c = (ctx = await setup({ features: CARRY }));
+        await serverMode(c);
+        const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Hot-file change", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+        landingTurns.rebuilt(c.project.id, other.id, 60 * 60_000);
+        expect(landingTurns.rebuilt(c.project.id, other.id, 60 * 60_000).turn).toBe("taken");
+        try {
+          const res = approveAndWait(c.req, c.ticket.id);
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          // Wait for the hold to be recorded (a deadline, not a fixed sleep): both checks passed, and the push waits.
+          const deadline = Date.now() + 20_000;
+          while (!(await lineEvents(c)).some((e) => e.event === "hold_started" && e.hold === "turn") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+          expect((await lineEvents(c)).find((e) => e.event === "hold_started")).toMatchObject({ hold: "turn", note: expect.stringContaining("Hot-file change") });
+          expect(finishes(c)).toEqual([]);
+          if (how === "done") landingTurns.done(c.project.id, other.id);
+          else await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, other.id));
+          expect((await res).json()).toMatchObject({ outcome: "merged" });
+          expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
+          expect((await lineEvents(c)).some((e) => e.event === "hold_ended" && e.hold === "turn")).toBe(true);
+          expect(landingTurns.check(c.project.id).holder).toBeNull();
+        } finally {
+          landingTurns.done(c.project.id, other.id);
+        }
+      });
+
+      it("the switch and the turn's cap are owner settings, on and 60 minutes by default", async () => {
+        const c = (ctx = await setup({ features: CARRY }));
+        expect((await c.req("GET", "/api/settings/merge-carry")).json()).toEqual({ on: true, turnMinutes: 60 });
+        expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 0 })).json()).toEqual({ on: true, turnMinutes: 0 });
+        expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 999 })).statusCode).toBe(400);
+      });
     });
 
     it("with the merge train on too, the merge skips the train and still waits for CI (BOS-1366)", async () => {
