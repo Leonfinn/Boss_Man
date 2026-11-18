@@ -5,10 +5,14 @@
 // Nothing is stored: every figure is read from existing tables and the live socket count.
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { parseRepoUrl } from "@boss-man/shared";
+import { failingChecks, parseRepoUrl } from "@boss-man/shared";
 import { checkWorkers, projects, runners, settings } from "../db/schema.js";
+import type { AddonFacts } from "./addons.js";
 import { onlineWorkerCount } from "./check-workers.js";
 import type { GitHostConfig } from "./git-hosts.js";
+import type { HostFactsRecord } from "./host-facts.js";
+import { HOST_REPORT_FRESH_MS } from "./host-facts.js";
+import { PHONE_TEST_KEY, type PhoneTestRecord } from "./notifications.js";
 
 export type OwnerRecordFacts = {
   checkWorkers: {
@@ -169,4 +173,150 @@ export async function ownerFactHeldLive(db: Db, companyId: string, probe: GitTok
   const bad = hits.filter((r) => r.contradicted(facts));
   if (!bad.length) return null;
   return `Not sent. ${bad.map((r) => r.hold(r.live(facts))).join(" ")}`;
+}
+
+// ── Questions the record answers (BOS-1797, R48; DR-064 extended from statements to questions) ──────────────────
+// The rows above hold text that *states* something the record contradicts. These hold a *question* to the owner
+// that the record already answers ("does your phone reach the Tailscale address?" when the phone tapped Got it
+// through it). Each row says which questions it answers (`asks`, narrow on purpose) and reads the answer from the
+// record with its time (`answer`). The rule is R34's: a definite, fresh value refuses the card and gives the raiser
+// the value; a value the record can't vouch for any more (too old, or a setting it depends on changed) lets the card
+// through with a warning and the record line on it; no value says nothing. Never on ticket_reply: a reply that
+// mentions a fact doesn't ask the owner anything.
+
+/** What the ask rows read. Each source is optional: a row whose source is missing is unknown, which never refuses. */
+export type AskRecord = {
+  now: Date;
+  /** The public address saved on the Notifications page now (null: none). */
+  publicUrl: string | null;
+  /** The last test push (null: none sent). */
+  phoneTest: PhoneTestRecord | null;
+  /** The host's facts as last reported (Settings → This host). */
+  host?: HostFactsRecord;
+  /** The add-on states server_status shows. */
+  addons?: AddonFacts;
+};
+
+/** The record's answer to a question. `fresh` false: the record has a value but can't vouch it still holds (`staleWhy`). */
+export type RecordAnswer = { value: string; source: string; at: string | null; fresh: boolean; staleWhy?: string };
+/** `answer` gives no entry when the record doesn't know, which never refuses or warns. */
+type AskRow = { key: string; asks: (text: string) => boolean; answer: (r: AskRecord, text: string) => RecordAnswer[] };
+
+/** A tap on Got it is proof for this long; past it the phone may have changed (Tailscale removed, a new phone). */
+export const PHONE_PROOF_FRESH_MS = 30 * 24 * 3_600_000;
+
+const isQuestion = (t: string) => /\?|\b(?:does|do you|is it|is there|are you|can (?:you|it|your)|still)\b/i.test(t);
+/** "On your phone / laptop": the owner's own device, which no server-side add-on state describes. */
+const ON_OWNER_DEVICE = /\bon (?:your|the|their) (?:own )?(?:phone|tablet|laptop|computer|mac|pc|desktop)\b/i;
+const sameUrl = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && a.trim().replace(/\/+$/, "").toLowerCase() === b.trim().replace(/\/+$/, "").toLowerCase();
+const utc = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
+const ADDON_NAMES: Record<string, string> = { ntfy: "ntfy", tailscale: "Tailscale", penpot: "Penpot" };
+
+const ASK_TABLE: AskRow[] = [
+  {
+    // Card 82647439 (BOS-1603): "the box 'Boss Man's address on your phone' holds your Tailscale name … Keep it?"
+    // A tap on Got it travels from the phone to `${publicUrl}/api/phone/got-it`, so it proves the phone reached the
+    // address the test used. It says nothing about an address saved after the test.
+    key: "ntfy.phoneReachesAddress",
+    asks: (t) =>
+      /\bphones?\b/i.test(t) &&
+      /\b(?:tailscale|tailnet|ts\.net|address|url|reach(?:es)?|open(?:s)?)\b/i.test(t) &&
+      /\b(?:keep|can|could|does|do you|works?|working|still|right value|reach(?:es)?)\b/i.test(t) &&
+      isQuestion(t),
+    answer: (r) => {
+      const p = r.phoneTest;
+      if (!p?.confirmedAt) return []; // never confirmed: the record doesn't know
+      const source = "server_status addons.ntfy.phone (the owner's tap on Got it on a test push)";
+      const at = p.confirmedAt;
+      if (!p.url) return [{ value: `the phone tapped Got it on a test push at ${utc(at)}, but that test is from before Boss Man kept the address it used`, source, at, fresh: false, staleWhy: "the test record doesn't say which address it tested; a new test push from the Notifications page would" }];
+      const value = `the phone reached Boss Man at ${p.url}: it tapped Got it on a test push at ${utc(at)}`;
+      if (!sameUrl(p.url, r.publicUrl)) return [{ value, source, at, fresh: false, staleWhy: r.publicUrl ? `the public address has changed since, to ${r.publicUrl.replace(/\/+$/, "")}` : "no public address is saved now" }];
+      if (r.now.getTime() - Date.parse(at) > PHONE_PROOF_FRESH_MS) return [{ value, source, at, fresh: false, staleWhy: "that tap is more than 30 days old" }];
+      return [{ value, source, at, fresh: true }];
+    },
+  },
+  {
+    // Card 5c87e6d4 (BOS-1584): "Does the This host panel still show repo.probe as failed, or the standby colour as a failing check?"
+    key: "host.checks",
+    asks: (t) => /\b(?:repo\.probe|failing checks?|checks? (?:is |are )?(?:still )?fail(?:ing|ed)?|this host panel|(?:probe|check)\b[^.?\n]{0,40}\bfail(?:s|ed|ing)?)\b/i.test(t) && isQuestion(t),
+    answer: (r) => {
+      const h = r.host;
+      if (!h?.reportedAt) return [];
+      const probe = h.facts["repo.probe"]?.value.trim();
+      const bad = failingChecks(h.facts);
+      const value = `${probe ? `repo.probe = ${probe}` : "repo.probe not reported"}; ${bad.length ? `failing: ${bad.map((k) => `${k} = ${h.facts[k]!.value.trim()}`).join(", ")}` : "no failing check"} (host report at ${utc(h.reportedAt)})`;
+      const source = "server_status hostFacts (Settings → This host)";
+      const age = r.now.getTime() - Date.parse(h.reportedAt);
+      if (!Number.isFinite(age) || age > HOST_REPORT_FRESH_MS) return [{ value, source, at: h.reportedAt, fresh: false, staleWhy: "the host's last report is more than 30 minutes old, so the deployer may have stopped reporting" }];
+      return [{ value, source, at: h.reportedAt, fresh: true }];
+    },
+  },
+  {
+    // "Is ntfy / Tailscale / Penpot running?" Boss Man's own view of the add-on, not one on the owner's phone or laptop.
+    // ntfy "running" means only that ntfy accepted the last push (BOS-1482); whether the phone got it is the row above.
+    key: "addons.running",
+    // Only a question about its state ("is Penpot still running?"); "Set up Tailscale?" asks the owner to do it.
+    asks: (t) => !ON_OWNER_DEVICE.test(t) && /\b(?:is|are|was|were|has|have)\b[^.?\n]{0,30}\b(?:ntfy|tailscale|penpot)\b[^.?\n]{0,30}\b(?:running|up|started|stopped|installed|set up)\b[^.\n]{0,40}\?/i.test(t),
+    // One answer per add-on the text names: "is Tailscale running?" is answered from Tailscale's state only.
+    answer: (r, text) => {
+      if (!r.addons) return [];
+      const out: RecordAnswer[] = [];
+      for (const name of ["ntfy", "tailscale", "penpot"] as const) {
+        if (!new RegExp(String.raw`\b${name}\b`, "i").test(text)) continue;
+        const f = r.addons[name];
+        if (!f || f.state === "unknown") continue; // Boss Man can't see it: say nothing
+        out.push({ value: `${ADDON_NAMES[name]} is ${f.state.replace(/_/g, " ")}${f.since ? ` (since ${utc(f.since)})` : ""}: ${f.source}`, source: `server_status addons.${name}`, at: f.since, fresh: true });
+      }
+      return out;
+    },
+  },
+  {
+    // "Have you saved a public address?" The Notifications page's own setting: live, so always fresh.
+    key: "publicAddress.set",
+    asks: (t) => /\bpublic (?:address|url)\b/i.test(t) && /\b(?:have you|did you|is there|do you have|is (?:a|the|your) public|has (?:a|the) public)\b/i.test(t) && isQuestion(t),
+    answer: (r) => [{ value: r.publicUrl ? `the public address saved on the Notifications page is ${r.publicUrl.replace(/\/+$/, "")}` : "no public address is saved on the Notifications page", source: "server_status ownerSetup (Notifications → public address)", at: null, fresh: true }],
+  },
+];
+
+/** What the record says about the questions a card asks: settled (refuse unless stillNeeded), stale (warn), or null (unknown or not asked). */
+export type AskAnswered = { kind: "settled" | "stale"; line: string; message: string };
+
+/** The record line a card carries at its head when it is raised anyway (stillNeeded) or the record is stale. */
+export function recordHeadLine(a: AskAnswered, stillNeeded?: string): string {
+  return `Boss Man's record says: ${a.line}.${stillNeeded?.trim() ? ` Asked because: ${stillNeeded.trim()}` : a.kind === "stale" ? " The record may be out of date, so this is asked." : ""}`;
+}
+
+/** Pure part of ownerFactAnswered, for tests: which rows the text asks, and what the record says. */
+export function answerFromRecord(texts: Array<string | null | undefined>, r: AskRecord): AskAnswered | null {
+  const text = texts.filter(Boolean).join("\n");
+  if (!text) return null;
+  const answers = ASK_TABLE.filter((row) => row.asks(text)).flatMap((row) => row.answer(r, text));
+  if (!answers.length) return null;
+  const fresh = answers.filter((a) => a.fresh);
+  if (fresh.length) {
+    const line = fresh.map((a) => `${a.value} (${a.source})`).join("; ");
+    return { kind: "settled", line, message: `Not raised. Boss Man already knows the answer to this question: ${line}. Use that and carry on without asking the owner. If you believe the record is out of date, raise it again with stillNeeded saying why: the card then goes to the CEO first, with this record line at its head.` };
+  }
+  const line = answers.map((a) => `${a.value} (${a.source}; may be out of date: ${a.staleWhy})`).join("; ");
+  return { kind: "stale", line, message: `Boss Man's record has a value for this question but can't vouch for it now: ${line}. The card carries that line at its head and goes to the CEO first.` };
+}
+
+/** Reads the record the ask rows need and answers the card's question from it (BOS-1797). Only for owner asks: raise_decision and notify_owner. */
+export async function ownerFactAnswered(
+  db: Db,
+  sources: { host?: () => Promise<HostFactsRecord>; addons?: () => Promise<AddonFacts>; now?: () => Date },
+  texts: Array<string | null | undefined>,
+): Promise<AskAnswered | null> {
+  const text = texts.filter(Boolean).join("\n");
+  if (!text || !ASK_TABLE.some((row) => row.asks(text))) return null; // most cards ask nothing the record holds: no reads
+  const [notify] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "notifications"));
+  const [test] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, PHONE_TEST_KEY));
+  const record: AskRecord = {
+    now: sources.now ? sources.now() : new Date(),
+    publicUrl: (notify?.value as { publicUrl?: string | null } | undefined)?.publicUrl ?? null,
+    phoneTest: (test?.value as PhoneTestRecord | undefined) ?? null,
+    host: sources.host ? await sources.host().catch(() => undefined) : undefined,
+    addons: sources.addons ? await sources.addons().catch(() => undefined) : undefined,
+  };
+  return answerFromRecord([text], record);
 }
