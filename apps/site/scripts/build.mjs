@@ -101,6 +101,23 @@ function footer(vars) {
 </footer>`;
 }
 
+// Structured data for the home page: what Boss Man is, for search engines. Data blocks are not run, so the CSP does not block them.
+function softwareApplication(config, meta, siteUrl) {
+  return {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: config.name,
+    description: meta.description,
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Linux, macOS, Windows (with Docker)",
+    isAccessibleForFree: true,
+    license: "https://www.apache.org/licenses/LICENSE-2.0",
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+    ...(siteUrl && { url: siteUrl + "/", image: siteUrl + config.ogImage }),
+    sameAs: [config.repo],
+  };
+}
+
 function headTags(config, meta, siteUrl) {
   const title = escapeHtml(meta.title);
   const description = escapeHtml(meta.description);
@@ -128,6 +145,7 @@ function headTags(config, meta, siteUrl) {
     `<meta name="twitter:description" content="${description}">`,
     `<meta name="twitter:image" content="${abs(config.ogImage)}">`,
     meta.robots && `<meta name="robots" content="${escapeHtml(meta.robots)}">`,
+    meta.path === "/" && `<script type="application/ld+json">${JSON.stringify(softwareApplication(config, meta, siteUrl)).replace(/</g, "\\u003c")}</script>`,
     `<script src="/menu.js" defer></script>`,
   ];
   return tags.filter(Boolean).join("\n");
