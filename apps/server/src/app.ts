@@ -517,6 +517,8 @@ export async function buildApp(opts: AppOptions) {
       return !!r && runners.isConnected(r.id);
     },
     settled: () => scheduler.settled(),
+    // BOS-1645: `review` is built further down; this only runs during a drain pass.
+    landingMerges: () => review.landingMergesByCompany(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
