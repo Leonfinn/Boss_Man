@@ -147,6 +147,8 @@ export function mergeJamService(
         if (!view) continue;
         await flagStaleHolds(companyId, view);
         const health = lineOf(view, t);
+        // R44: a deliberate pause raises no alarm and ends none: leave any episode as it is until the normal verdicts return.
+        if (health.state === "paused") continue;
         const jam = health.state === "stuck" ? health : null;
         const jammed = jam !== null;
         // Landing but slow is not a jam: no flag, no page, one feed note a day (BOS-1594).

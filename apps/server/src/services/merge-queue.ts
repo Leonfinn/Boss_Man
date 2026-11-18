@@ -8,7 +8,7 @@ import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
-import { softHold } from "./deploy-wait-hold.js";
+import { softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
 import { clashWords } from "./merge-line.js";
@@ -580,7 +580,8 @@ export function mergeQueueService(
       const runningIds = new Set(running.map((r) => r.ticketId));
       const queue = deps.queueStatus ? await deps.queueStatus(companyId).catch(() => null) : null;
       // A server update waiting for a quiet machine parks new checks (BOS-420): say so rather than "waiting for a slot".
-      const held = (await softHold(db, t).catch(() => ({ on: false as const }))).on;
+      const soft = await softHold(db, t).catch(() => ({ on: false as const }));
+      const held = soft.on;
       // BOS-1486: live state for the reason a merge waits. Absent deps (older callers, tests) mean "unknown", never a reason.
       const runnerUp = deps.runnerConnected ? await deps.runnerConnected(companyId).catch(() => null) : null;
       const runnerUpdateOn = deps.runnerUpdateOn ? await deps.runnerUpdateOn().catch(() => false) : false;
@@ -767,7 +768,9 @@ export function mergeQueueService(
       const emptySeatSince = deps.emptySeatSince ? await deps.emptySeatSince(companyId).catch(() => null) : null;
       const workerReady = deps.workerReady ? await deps.workerReady(companyId).catch(() => undefined) : undefined;
       const heldBehindFix = await heldBehindFixOf(db, prefix, heldWaits, { running, waiting });
-      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix });
+      // R44: a server update holding new checks is a deliberate pause: its own verdict, with the reason and the latest end.
+      const pause = soft.on ? { reason: "a server update", since: softHoldReason(soft).since, until: softHoldReason(soft).until } : null;
+      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix, pause });
       return {
         companyId,
         mode: queue?.mode ?? "legacy",

@@ -73,7 +73,23 @@ export type SlowLine = {
   advice: string | null;
 };
 
-export type MergeLineHealth = { state: "healthy" } | StuckLine | SlowLine | HeldLine;
+/** R44: new checks are paused on purpose (a server update waits for a quiet machine). No estimate, no alarm while it lasts. */
+export type PausedLine = {
+  state: "paused";
+  /** What the pause is for, as a noun phrase: "a server update". */
+  reason: string;
+  since: string;
+  /** The latest the pause can last (the soft hold's cap). */
+  until: string;
+  /** Check slots in use and in total, for the slot line "2 of 5 in use: new checks paused". */
+  inUse: number;
+  slots: number;
+};
+
+export type MergeLineHealth = { state: "healthy" } | StuckLine | SlowLine | HeldLine | PausedLine;
+
+/** A deliberate pause on new checks: from the soft hold (softHoldReason); null when none. */
+export type LinePause = { reason: string; since: string; until: string };
 
 export type HealthInput = Pick<MergeQueueView, "running" | "waiting" | "recent" | "slots">;
 
@@ -85,6 +101,8 @@ export type HealthOpts = {
   workerReady?: boolean;
   /** Approved work held behind a merge-check fix (R28); from mergeWaits, the same call that holds it. */
   heldBehindFix?: HeldBehindFix | null;
+  /** R44: a deliberate pause on new checks. While it lasts the verdict is "paused": no stuck, slow or jam verdict. */
+  pause?: LinePause | null;
 };
 
 const fixName = (f: HeldFix) => f.ref ?? `"${f.title}"`;
@@ -114,6 +132,9 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
   const merged = (view.recent ?? []).filter((r) => r.result === "merged").map((r) => new Date(r.at).getTime()).filter(Number.isFinite).sort((a, b) => b - a);
   const lastLanded = merged[0] ?? null;
   const sinceLandingMin = lastLanded === null ? null : Math.max(0, Math.round((nowMs - lastLanded) / 60_000));
+
+  // R44: a deliberate pause is a verdict of its own. Nothing waits too long or stalls while checks are held on purpose.
+  if (opts.pause) return { state: "paused", ...opts.pause, inUse: running.length, slots: view.slots };
 
   const overLimit = running.filter((r) => r.overLimit);
   // A stuck waiting row that is not simply waiting its turn for a slot or seat: no runner, a host fault, a carried-work wait.
@@ -208,4 +229,9 @@ export function heldText(h: HeldLine, clock: (iso: string) => string): string {
   const fixes = h.fixes.map(fixText).join(" and ");
   const owner = h.fixes.some((f) => f.ownerUpdate) ? " It goes on once you run the server update." : " They merge by themselves once it is merged and live.";
   return `Main is red: ${h.held} approved ${plural(h.held, "ticket is", "tickets are")} held behind the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}.${owner}`;
+}
+
+/** The paused line as one plain sentence; `clock` turns a time into HH:MM (the server uses UTC). */
+export function pausedText(p: PausedLine, clock: (iso: string) => string): string {
+  return `Paused for ${p.reason} since ${clock(p.since)}; new checks start once it is done, by ${clock(p.until)} at the latest. ${p.inUse} of ${p.slots} ${plural(p.slots, "slot", "slots")} in use: new checks paused.`;
 }

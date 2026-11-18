@@ -13,7 +13,27 @@ export type MergeLine =
   | { state: "healthy" }
   | { state: "stuck"; cause: string; title: string; reason: string; fix: string; others: number }
   | { state: "over_capacity"; waiting: number; inQueue?: number; etaMinutes: number | null; lastLandedAt: string | null; advice: string | null }
-  | { state: "held_behind_fix"; held: number; fixes: HeldFix[]; since: string | null };
+  | { state: "held_behind_fix"; held: number; fixes: HeldFix[]; since: string | null }
+  | { state: "paused"; reason: string; since: string; until: string; inUse: number; slots: number };
+
+/** R44: new checks are paused on purpose (a server update). */
+export type PausedSummary = { reason: string; since: string; until: string; inUse: number; slots: number };
+
+/** The deliberate pause, or null: only the server's "paused" verdict counts. */
+export function pausedSummary(view: Pick<MergeHealthView, "line"> | null | undefined): PausedSummary | null {
+  const l = view?.line;
+  return l?.state === "paused" ? { reason: l.reason, since: l.since, until: l.until, inUse: l.inUse, slots: l.slots } : null;
+}
+
+/** "Paused for a server update since 08:52; new checks start once it is done, by 11:52 at the latest." */
+export function pausedText(p: PausedSummary): string {
+  return `Paused for ${p.reason} since ${clock(p.since)}; new checks start once it is done, by ${clock(p.until)} at the latest.`;
+}
+
+/** "2 of 5 in use: new checks paused": the slot line while the pause lasts. */
+export function pausedSlotsText(p: PausedSummary): string {
+  return `${p.inUse} of ${p.slots} ${p.slots === 1 ? "slot" : "slots"} in use: new checks paused`;
+}
 
 /** A ticket that fixes the merge check and holds approved work (R28). */
 export type HeldFix = { ticketId: string; ref: string | null; title: string; stateText: string; ownerUpdate: boolean; updateCardId?: string | null };
@@ -96,8 +116,22 @@ export function slowText(s: SlowSummary): string {
   return `Merging, but slowly: ${s.waiting} merge ${s.waiting === 1 ? "check" : "checks"} waiting${of}${eta}${last}.`;
 }
 
-export function MergesStuckBanner({ stuck, slow, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; companyId?: string }) {
+export function MergesStuckBanner({ stuck, slow, paused, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; paused?: PausedSummary | null; companyId?: string }) {
   const href = companyId ? `#/merge-queue/${companyId}` : "#/merge-queue";
+  if (paused) {
+    return (
+      <div className="merges-banner merges-banner-slow" role="status" data-merge-paused="true">
+        <a className="merges-banner-link" href={href}>
+          <span className="merges-banner-sym" aria-hidden="true">‖</span>
+          <span className="merges-banner-text">
+            <strong>{pausedText(paused)}</strong>
+            <span>{sentence(pausedSlotsText(paused))}</span>
+          </span>
+          <span className="merges-banner-go">Open Merge queue</span>
+        </a>
+      </div>
+    );
+  }
   if (stuck) {
     const behind = stuck.others > 0 ? ` ${stuck.others === 1 ? "1 more is" : `${stuck.others} more are`} waiting behind it.` : "";
     return (
@@ -141,5 +175,5 @@ export function MergesStuckBannerFor({ companyId }: { companyId: string | undefi
     20_000,
     `merge-banner-${companyId}`,
   );
-  return <MergesStuckBanner stuck={view.data ? stuckSummary(view.data) : null} slow={view.data ? slowSummary(view.data) : null} companyId={companyId} />;
+  return <MergesStuckBanner stuck={view.data ? stuckSummary(view.data) : null} slow={view.data ? slowSummary(view.data) : null} paused={view.data ? pausedSummary(view.data) : null} companyId={companyId} />;
 }
