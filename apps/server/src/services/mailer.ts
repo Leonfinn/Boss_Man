@@ -36,7 +36,7 @@ export type StoredEmail = Omit<z.infer<typeof EmailSettingsInput>, "password"> &
 /** The page's view: everything but the password, plus whether one is saved. */
 export type EmailSettingsView = Omit<StoredEmail, "passwordSecretId"> & { hasPassword: boolean };
 
-export const NOT_SET_UP = "Outgoing email isn't set up. Add the mail server in Settings → Server and runner → Outgoing email.";
+export const NOT_SET_UP = "Outgoing email isn't set up. Add the mail server in Settings → Server and runner → Email.";
 
 export class MailNotConfigured extends Error {
   constructor() {
