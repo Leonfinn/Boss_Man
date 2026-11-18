@@ -531,15 +531,16 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       const isRerun = (j: { command: string | null }) => !!j.command?.startsWith(GATE_RERUN_MARK);
       /** Plays the dispatcher for one job: waits for an open job that matches, then ends it with the given patch. */
       const finish = async (c: Awaited<ReturnType<typeof setup>>, match: (j: typeof checkJobs.$inferSelect) => boolean, patch: Record<string, unknown>) => {
-        for (let i = 0; i < 200; i++) {
-          const open = (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find((j) => (j.state === "queued" || j.state === "running") && match(j));
-          if (open) {
-            await c.db.update(checkJobs).set({ endedAt: new Date(), ...patch }).where(eq(checkJobs.id, open.id));
-            return open;
-          }
-          await new Promise((r) => setTimeout(r, 20));
-        }
-        throw new Error("no matching job was queued");
+        const open = await vi.waitFor(
+          async () => {
+            const job = (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find((j) => (j.state === "queued" || j.state === "running") && match(j));
+            if (!job) throw new Error("no matching job was queued");
+            return job;
+          },
+          { timeout: 5_000, interval: 20 },
+        );
+        await c.db.update(checkJobs).set({ endedAt: new Date(), ...patch }).where(eq(checkJobs.id, open.id));
+        return open;
       };
       /** CI red on the merge commit with one annotation on FILE until GitHub was asked to re-run the failed jobs; then `after`. */
       const flaky = async (opts: { after?: "green" | "red"; changed?: string[] } = {}) => {
