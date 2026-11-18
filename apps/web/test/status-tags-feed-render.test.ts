@@ -183,9 +183,19 @@ describe("feedTitle", () => {
 });
 
 describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1667 x 724", () => {
+  // One browser for the whole describe, started in beforeAll (BOS-1790): on a cold GitHub runner the first test paid
+  // for Chromium's start-up inside its 60 s and timed out. The tests still time only their own page work.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let shared: any = null;
+  beforeAll(async () => {
+    shared = await launch();
+  }, 180_000);
+  afterAll(async () => {
+    await shared?.close();
+  });
   it("tags are sentence case, 12 px body font with a dot and 4.5:1; the feed leads with the question and cuts long titles", async () => {
     expect(builtNow(), "apps/web/dist is missing and the build did not make it").toBe(true);
-    const browser = await launch();
+    const browser = shared;
     if (!browser) {
       expect(strict, "no browser could be launched; the merge gate and CI must supply one").toBe(false);
       return;
@@ -222,7 +232,7 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
         await page.screenshot({ path: path.join(dir, "bos-1124-notifications-after.png") }).catch(() => undefined);
       }
     } finally {
-      await browser.close();
+      /* the shared browser is closed in afterAll */
     }
   }, 60_000);
 
@@ -230,7 +240,7 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
   // slower runners overran (18 page loads, each with a fixed sleep). Each width has its own budget now.
   for (const [w, h] of [[1550, 1611], [1667, 724], [390, 844]] as const) it(`the screens open at ${w} px wide without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)`, async () => {
     expect(builtNow(), "apps/web/dist is missing and the build did not make it").toBe(true);
-    const browser = await launch();
+    const browser = shared;
     if (!browser) {
       expect(strict, "no browser could be launched; the merge gate and CI must supply one").toBe(false);
       return;
@@ -266,7 +276,7 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
         }
       }
     } finally {
-      await browser.close();
+      /* the shared browser is closed in afterAll */
     }
   }, 120_000);
 });

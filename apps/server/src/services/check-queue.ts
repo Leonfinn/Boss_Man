@@ -468,12 +468,19 @@ export function checkQueue(db: Db) {
     opts: { policy?: SlotPolicy; dedicatedOnly?: boolean } = {},
   ): Promise<CheckJob[]> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
-    // BOS-1435: this holds workers too; their checks report to this server, which is about to restart.
-    if ((await softHold(db, now)).on) return [];
-    const policy = opts.policy ?? DEFAULT_SLOT_POLICY;
+    // BOS-1748: the hold parks the company runner and every merge check, but a separate check worker still takes quick
+    // pre-review checks. The update waits only on merge checks and agent runs (deploy-wait counts nothing on a worker), a
+    // worker holds no secrets and does no merges, and a quick check cut off by the restart goes back in line (requeueWorker
+    // when its socket drops) and costs 2 to 5 minutes. Holding them back gained nothing and left the worker idle for up to 3 hours.
+    const held = (await softHold(db, now)).on;
     const worker = isWorker(machine) ? machine.workerId : null;
+    if (held && !worker) return [];
+    const policy = opts.policy ?? DEFAULT_SLOT_POLICY;
     // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
-    const candidates = (await servable(now, limit >= 2)).filter((j) => (!companyId || j.companyId === companyId) && !skip?.(j.id));
+    const candidates = (await servable(now, limit >= 2))
+      .filter((j) => (!companyId || j.companyId === companyId) && !skip?.(j.id))
+      .filter((j) => !held || !isLong(j));
+    if (candidates.length === 0) return [];
     const onMachine = machineCond(worker, companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {

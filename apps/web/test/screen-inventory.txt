@@ -34,6 +34,7 @@ sections:
   - Approved, merging
   - Costliest tasks
   - Filter tasks
+  - Merged, waiting for a live check
   - On your subscriptions
   - Passed, held
   - Pay-as-you-go spend
@@ -66,6 +67,7 @@ sections:
   - Dashboard
   - Decisions
   - Finish setting up
+  - Left your list recently
   - Needs you Checking…
   - Needs you …
   - Recent tasks

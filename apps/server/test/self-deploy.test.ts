@@ -691,6 +691,20 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
   });
 
+  it("goes ahead, and says why it couldn't confirm, when the live commit can't be placed (BOS-1644, R26)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Fix update-runner.sh", number: 1417, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: true });
+    // The server runs a commit that is no ticket's recorded merge and nothing places it: "can't tell", not "no".
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(200);
+    expect(r.json().note).toContain("couldn't confirm that BOS-1417");
+  });
+
   it("does not refuse for a merge that never touched the runner update path (BOS-1467)", async () => {
     const c = (ctx = await setup());
     await c.available({ deployed: B });
