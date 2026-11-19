@@ -542,17 +542,20 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
       if (state === "done") {
         const [t] = await db
-          .select({ repoUrl: projects.repoUrl, mergeCommit: tickets.mergeCommit, noCode: tickets.noCode, assignee: tickets.assigneeAgentId })
+          .select({ repoUrl: projects.repoUrl, mergeCommit: tickets.mergeCommit, noCode: tickets.noCode, assignee: tickets.assigneeAgentId, systemState: tickets.systemState })
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        // BOS-1837: a ticket that is already done and merged only gets its note replaced (the branch now equals main,
+        // so the "no changes of its own" check would wrongly refuse the assignee). Moves that need a diff keep it.
+        const doneNoteOnly = t?.systemState === "done" && !!t.mergeCommit;
         // A ticket whose branch is already merged but stayed in review (e.g. waiting on the owner's yes) can be closed by a manager.
         const merged = !!t?.mergeCommit && (await managerIn(db, scope));
         // A no-code ticket never has a branch to merge, so its own assignee closes it once the work is
         // done (BOS-304): the CEO no longer has to move each research, wiki or docs task by hand.
         const ownNoCode = !!t?.noCode && !!scope.agentId && t.assignee === scope.agentId;
         // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
-        if (t?.repoUrl && outcome !== "cancelled" && !merged && !ownNoCode) {
+        if (t?.repoUrl && outcome !== "cancelled" && !merged && !ownNoCode && !doneNoteOnly) {
           // No code at all means nothing to merge for anyone; otherwise only "nothing changed" can skip review.
           // A manager may still close either, as before, whatever the branch holds.
           const nothingOwn = !!t?.noCode || (await review.needsChanges(ticketId, scope.companyId).catch(() => false));
