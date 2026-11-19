@@ -206,11 +206,11 @@ export function projectRoutes(
     // Tokens from every run on the project's tasks, subscription runs included (they have no money cost but still use the plan).
     const tokenSum = (since?: Date) =>
       db
-        .select({ input: sql<string>`coalesce(sum(${runsTable.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runsTable.outputTokens}), 0)` })
+        .select({ input: sql<string>`coalesce(sum(${runsTable.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runsTable.outputTokens}), 0)`, cacheRead: sql<string>`coalesce(sum(${runsTable.cachedReadTokens}), 0)`, cacheWrite: sql<string>`coalesce(sum(${runsTable.cachedWriteTokens}), 0)` })
         .from(runsTable)
         .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
         .where(since ? and(eq(tickets.projectId, id), gte(runsTable.startedAt, since)) : eq(tickets.projectId, id))
-        .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0) }));
+        .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0), cacheRead: Number(r?.cacheRead ?? 0), cacheWrite: Number(r?.cacheWrite ?? 0) }));
     const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
     return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
   });
