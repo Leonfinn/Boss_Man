@@ -35,13 +35,15 @@ flowchart LR
   LED -.->|"only with a Console organisation: Admin API cost_report"| ANT["Anthropic Console"]
 ```
 
+*Now (Nov 2026):* the cost-report poll and the Admin API link in this diagram were never built; they remain an optional later step. Nothing on the server calls `cost_report`.
+
 ### Server (`boss-man`)
 - **Stack:** a TypeScript Node server, Postgres and a React UI. One Compose stack.
 - **Owner authentication:** a single owner account with local login. Remote access is assumed to go through Tailscale or the LAN.
 - **Scheduler:**
   - wakes agents on a schedule or when an event arrives (a ticket is assigned, a blocker is resolved, a decision is answered);
   - runs the stale-blocker sweep;
-  - optionally polls the Admin API cost report (later, once a Console organisation exists).
+  - optionally polls the Admin API cost report (later, once a Console organisation exists). *Now (Nov 2026):* not built.
 - **Policy engine:** evaluates the rules for the decision tiers and answers ACP permission requests.
 - **MCP server:** the only way agents reach Boss Man (Streamable HTTP). Each agent session gets a token that is limited to its own company and agent.
 
@@ -51,9 +53,9 @@ flowchart LR
   - Codex and `@agentclientprotocol/codex-acp`;
   - OpenCode (`opencode-ai`, MIT);
   - a small **runner daemon**.
-- **The Claude pack (DR-050, BOS-972):** `apps/runner/claude-pack/` pins `@anthropic-ai/claude-code` and `@agentclientprotocol/claude-agent-acp` with a committed lockfile. A one-shot installer container (the runner image, another command) runs `npm ci` into `/opt/bossman-claude/<lock hash>` on the `bossman-claude` named volume, checks `claude --version`, runs the canary, then writes a `READY` marker; only a ready folder is used. The launcher runs it before starting a runner (and the compose `claude-pack` service does the same for hand-started runners); the runner mounts the volume **read-only** and points `CLAUDE_CODE_EXECUTABLE` at the ready pack, with the adapter from the pack too. Without a ready pack the runner reports Claude Code absent (Claude agents say so), and Codex and OpenCode keep working. Folders are content-addressed, so an update installs beside the old one and a rollback just picks the old folder.
+- **The Claude pack (DR-050, BOS-972):** `apps/runner/claude-pack/` pins `@anthropic-ai/claude-code` and `@agentclientprotocol/claude-agent-acp` with a committed lockfile. A one-shot installer container (the runner image, another command) runs `npm ci` into `/opt/bossman-claude/<lock hash>` on the `claude-pack` named volume (mounted at `/opt/bossman-claude`), checks `claude --version`, runs the canary, then writes a `READY` marker; only a ready folder is used. The launcher runs it before starting a runner (and the compose `claude-pack` service does the same for hand-started runners); the runner mounts the volume **read-only** and points `CLAUDE_CODE_EXECUTABLE` at the ready pack, with the adapter from the pack too. Without a ready pack the runner reports Claude Code absent (Claude agents say so), and Codex and OpenCode keep working. Folders are content-addressed, so an update installs beside the old one and a rollback just picks the old folder.
 - **Connection:** the daemon **dials out** to the server over WebSocket using a per-runner token. A runner can therefore run on a different host from the server without any inbound ports.
-- **Work:** it starts and manages ACP sessions over JSON-RPC on stdio, one session per agent task. It streams events back to the server: messages, tool calls, `usage_update`, permission requests, and `rate_limit_event` if spike S1 shows it is available.
+- **Work:** it starts and manages ACP sessions over JSON-RPC on stdio, one session per agent task. It streams events back to the server: messages, tool calls, `usage_update`, permission requests, and `rate_limit_event` if spike S1 shows it is available. *Now (Nov 2026):* Claude quota comes from `usage_update._meta["_claude/rateLimit"]` (`apps/runner/src/session-manager.ts`, `packages/shared/src/quota.ts`), not `rate_limit_event`.
 - **Workspace:** each company has its own volumes. Secrets are injected at runtime from that company's grants and never written into the image.
 - **Rebuilds:** the image is rebuilt by hand, roughly weekly, to pick up new releases (R9); nothing rebuilds it on a timer. `scripts/update-runner.sh` builds a candidate and runs a canary in it with networking off: a real Codex and OpenCode session against stand-in models, each with one permission-checked tool call, and each inside the agent fence where the host has one (BOS-321); a Claude session is proven by the pack installer instead (it runs the same canary once it has the pack). Only a passing build replaces `boss-man-runner:current`; the one before is kept as `:previous` for `--rollback` (R52). The runners then move onto it without cutting off runs in progress (see [09-self-deploy.md](09-self-deploy.md), "Phase 2"). With the launcher (R55), the server asks a small launcher container to start, stop and swap each company's runner.
 - **Spike S2 settled these details** (see `spikes/s2-acp/README.md`):
@@ -61,12 +63,12 @@ flowchart LR
   - **Codex approvals:** Codex must start in `INITIAL_AGENT_MODE=workspace-write`. Its default `agent` mode sends approvals to Codex's own AI reviewer instead of Boss Man.
   - **Codex sandbox:** superseded by the agent fence (DR-004, below). Codex's own bubblewrap sandbox can't start in a runner container (user namespaces are blocked; BOS-315 proved it fails outright), and loosening seccomp for it would weaken the whole container. A shell call fails in Codex's sandbox until the model asks to escalate it, which raises a permission request to Boss Man; the escalated command then runs inside the agent fence.
   - **Denials:** Codex ends the turn when a permission is denied, while Claude continues. The decision flow re-wakes Codex agents with the answer.
-- **Agent fence (DR-004).** A run started with `fence` (the company setting arrives with Sandbox 5) runs its adapter, and so everything the agent starts, inside a Landlock fence applied by `apps/runner/src/fence/landlock.pl` (BOS-321). Landlock is unprivileged and allowed by Docker's default seccomp since 20.10.18; the runner needs no extra capabilities.
+- **Agent fence (DR-004).** A run started with `fence` (the company setting arrives with Sandbox 5) runs its adapter, and so everything the agent starts, inside a Landlock fence applied by `apps/runner/src/fence/landlock.pl` (BOS-321). *Now (Nov 2026):* the company setting exists (`companies.fence_mode`, see "Self-test" below). Landlock is unprivileged and allowed by Docker's default seccomp since 20.10.18; the runner needs no extra capabilities.
   - **What a session may write:** its working folder, its own home (`<runner data>/agents/<agentId>`: HOME, Claude/Codex/XDG folders) and a temp folder per run in it, the pnpm store, check-all's queue folder (`<workspaces>/.bossman-coord/queue`), and the project's shared Claude memory. check-all's stored results and pair proof (`.bossman-coord/gate`) are read-only to it: only the runner and its merge check write them, so an agent can't switch on two checks at once. An agent can still disrupt the queue (hold a slot, plant entries) or fool a check it runs by hand; the merge check never reuses a stored result, so neither changes what merges. Of the shared bare repo, for a worktree only what a commit writes (`objects`, `refs`, `logs`, its worktree's admin folder), never its `config` or `hooks`; for a ticket's own clone (below), nothing.
   - **What it may read:** system folders, the runner app, the npm prefix and browsers, its skills and the shared repo. Not other tickets, other agents' homes, the shared `~/.claude`, the runner's data or `/run/secrets`. With Landlock ABI 6 it also can't signal or reach the sockets of other sessions or the runner.
   - **Self-test:** at start-up the runner reports its Landlock ABI and level (`full` from ABI 6, `partial` from 2, else `unavailable`) as `runner.sandbox`, stored on the runner. An agent run never goes unfenced unless the owner chose Off (BOS-373, DR-055). While the runner reports `unavailable`, the scheduler holds the company's agent wakes and the fence sweep raises one owner card (keep agents stopped, or run agents without the fence). The runner also refuses a run asked to be fenced that it can't fence. Board-tools-only runs (owner chat, the PA) are exempt. The runner's git calls that carry the login (fetch, push, ls-remote) always name the recorded address, never `origin` from the shared repo's config.
   - **The merge check:** `workspace.verify` with `fence` runs the check the same way, with its own home (`<runner data>/agents/merge-check`) and a temp folder per check (BOS-323). Unasked, or on an unavailable runner, it runs as before; the reply's `fenced` says which.
-  - **Not covered yet:** network addresses (netguard, Sandbox 4) and credentials in the agent's environment (Sandbox 2).
+  - **Not covered yet:** network addresses (netguard, Sandbox 4) and credentials in the agent's environment (Sandbox 2). *Now (Nov 2026):* the network guard is built; see [27-netguard.md](27-netguard.md).
 - **The runner's own git (BOS-326, BOS-332).** The runner runs git itself (checkpoints, review copies, diffs, releases, merges, fetches and pushes with the company's git token), and a repo's config can name programs git then runs inside the runner. So every such call, in `apps/runner/src/workspace.ts`:
   - **Config allowlist:** `GitConfigGuard` (`git-config-guard.ts`) reads the shared repo's `config` (`git config --no-includes --list`, which runs nothing) and removes any key not on a short allowlist (core basics, `remote.origin.url/fetch`, `branch.*.remote/merge`, `user.*`, `bossman.ticket-*.base`, a few `gc.*`). Each removed key is logged by name. If one can't be removed the call is refused. It is an allowlist because most dangerous keys are wildcards (`filter.<x>.clean`, `diff.<x>.textconv`, `merge.<x>.driver`, `url.<x>.insteadOf`, `include*.path`) that no per-key override can cover. Agents' own settings in the shared config (aliases, `pull.rebase`) are removed too; to keep one, add it to the allowlist.
   - **Ticket clones (BOS-323):** a call in a ticket's own clone checks that clone's `config` against the same allowlist (plus `remote.shared.url/fetch`), so a filter planted there is removed before the runner's git runs, fenced or not. New clones get the recorded address as `origin`, not the shared config's.
@@ -93,7 +95,7 @@ flowchart LR
 
 ### Claude credentials (R10)
 - **Default:** a `claude setup-token` one-year token, kept in the secrets store and injected as `CLAUDE_CODE_OAUTH_TOKEN`. Shared interactive logins race when they refresh (anthropics/claude-code#73576, #88583), so the setup-token is the default for any runner with agents running in parallel.
-- **Alternative:** Anthropic's own login completed inside the runner, through a relayed terminal (`claude auth login --claudeai`). The resulting credentials stay in the runner's volume. Boss Man never reads them.
+- **Alternative:** Anthropic's own login completed inside the runner, through a relayed terminal (`claude auth login --claudeai`). The resulting credentials stay in the runner's volume. Boss Man never reads them. *Now (Nov 2026):* not built. There is no relayed terminal for this login.
 - **API key:** from the linked Console organisation. This draws on the $200 monthly API credit.
 
 ## Core data model (sketch)
@@ -123,6 +125,8 @@ flowchart LR
 | `secret_access_log` | grant, run, at | |
 | `deploy_target` | company, kind (`ssh`/`docker`/`git`), endpoint, grantIds, rules, prodFlag | |
 | `policy_rule` | company?, trigger, condition, outcome (`allow`/`ceo`/`owner`/`deny`) | |
+
+*Now (Nov 2026):* some names in this sketch differ from the schema. `project` has no `workflow` field (columns point to their project); `workflow_column` uses `position`, not `order`; `secret` has no `owner`; `deploy_target` has no `grantIds` and uses `isProduction`. Costs are in micro-dollars: `cost_event.costMicros` and `chargedProjectId`, and `engagement.budgetCapMicros`. `quota_sample` stores `utilization`, not `usedPct`. Decision kinds also include `skill`. `apps/server/src/db/schema.ts` is the source of truth.
 
 Agents never see status names. They see the meaning of the system states through the MCP tool descriptions, for example `set_ticket_state(state: "review")`. A project's custom columns are labels for people only.
 
@@ -209,8 +213,9 @@ stateDiagram-v2
 - **Claude quota:**
   - **If spike S1 succeeds:** `rate_limit_event` data gives the 5-hour and 7-day used percentages and reset times.
   - **Otherwise:** usage is estimated from tokens and labelled as an estimate.
+  - *Now (Nov 2026):* the quota comes from `usage_update._meta["_claude/rateLimit"]`, sent by `claude-agent-acp`, not from `rate_limit_event`.
   - **Throttling:** low-priority agents are paused when a window passes its threshold.
-- **Codex quota:** read through the Codex app-server, using `account/rateLimits/read` and the `account/rateLimits/updated` notifications.
+- **Codex quota:** read through the Codex app-server, using `account/rateLimits/read` and the `account/rateLimits/updated` notifications. *Now (Nov 2026):* the runner does not send `account/rateLimits/read` or handle the `updated` notifications yet. `packages/shared/src/quota.ts` can parse its answer, but it has not been run live.
 - **Enforcement:** pre-dispatch checks against each `budget_policy`. A soft limit raises a decision row. A hard limit pauses the scope.
 
 ## Security notes
