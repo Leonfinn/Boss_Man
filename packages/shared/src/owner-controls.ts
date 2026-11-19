@@ -70,7 +70,7 @@ export const OWNER_CONTROLS = {
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
-    "Make Priority 1", "Priority 1 is on", "Edit steps", "Save steps", "Discard draft",
+    "Make Priority 1", "Priority 1 is on", "Edit steps and lines", "Save steps", "Discard draft",
     // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
     "Reload the latest",
     // A Details row's own request failed: fetch it again (BOS-1195).
@@ -224,7 +224,7 @@ export const OWNER_FIELDS = {
   ],
   Ticket: [
     "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
-    "What you have to do, one step per line", "What should the agent change",
+    "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
     "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
   ],
