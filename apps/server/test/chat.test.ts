@@ -133,6 +133,19 @@ describe("owner chat", () => {
     expect(await namedThingLines(c.db, c.company.id, [{ kind: "Worker", name: "Unknown", needles: ["Unknown"], record: null }])).toEqual([]);
   });
 
+  it("BOS-1870: a Settings path through Limits shows the saved and in-force values; other paths and a failing source say nothing", async () => {
+    const c = await setup();
+    const { namedThingsSection } = await import("../src/services/named-things.js");
+    const held = { saved: 6, inForce: 3, because: "a server update is waiting for a quiet machine", since: "2026-11-19T10:00:00.000Z", until: "2026-11-19T13:00:00.000Z" };
+    const free = { saved: 2, inForce: 2, because: null, since: null, until: null };
+    const text = "Why is Settings → Server and runner → Limits and checks lower than I set?";
+    const out = (await namedThingsSection(c.db, c.company.id, [text], { limits: async () => ({ allCompanies: held, background: free }) })).join("\n");
+    expect(out).toContain("record: agents at once, all companies: saved 6, in force 3 (a server update is waiting for a quiet machine, until 2026-11-19 at the latest); background: 2 (saved and in force)");
+    // a path that is not about limits, and a source that fails, add no record
+    expect(await namedThingsSection(c.db, c.company.id, ["See Settings → Add-ons."], { limits: async () => ({ allCompanies: held, background: free }) })).toEqual([]);
+    expect(await namedThingsSection(c.db, c.company.id, [text], { limits: async () => { throw new Error("down"); } })).toEqual([]);
+  });
+
   it("stays open while an update waits and an agent is still working (BOS-349)", async () => {
     const c = await setup();
     // The CEO is busy with its own work, then a runner update starts to drain.

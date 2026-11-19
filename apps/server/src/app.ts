@@ -483,7 +483,7 @@ export async function buildApp(opts: AppOptions) {
     trace,
     flag: (n) => notes.notify({ ...n, level: "flag" }),
     // DR-069 D2: read lazily, because the git host service and the host facts are made further down.
-    named: { addons: () => addonFacts(), serverHost: () => hostFacts.serverHost(), gitTokenProbe: (companyId) => gitTokenProbe(companyId), now: opts.now },
+    named: { addons: () => addonFacts(), serverHost: () => hostFacts.serverHost(), gitTokenProbe: (companyId) => gitTokenProbe(companyId), limits: async () => { const l = await scheduler.limitsInForce(); return { allCompanies: l.allCompanies, background: l.background }; }, now: opts.now },
   });
   const pa =paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
