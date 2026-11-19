@@ -5,6 +5,11 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d)"; trap 'kill "${hook_pid:-0}" 2>/dev/null || true; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*"; [[ -z ${DEBUG:-} ]] || { cat "${DL:-/dev/null}" "$D/deployer.log"; }; exit 1; }
+# gpush <repo> <push args...>: git push with git's stderr kept; a failed push ends the whole test, naming the helper
+# and printing git's message (BOS-1835). Used inside $(...) too, where exit ends only the subshell, so signal $$.
+gpush() {
+  local err; err="$(git -C "$1" push -q "${@:2}" 2>&1)" || { echo "FAIL: gpush($1 ${*:2}) failed: $err" >&2; kill -TERM "$$"; exit 1; }
+}
 has() { grep -qF -- "$2" "$1" || fail "$1 lacks: $2 (has: $(cat "$1" 2>/dev/null))"; }
 hasnt() { ! grep -qF -- "$2" "$1" 2>/dev/null || fail "$1 should not have: $2"; }
 jget() { node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(o[process.argv[2]]))' "$1" "$2"; }
@@ -12,7 +17,7 @@ jget() { node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(proc
 # --- fixture: origin, a working clone that moves main, and the checkout the host deploys ---
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 git init -q --bare -b main "$T/origin.git"
-git clone -q "$T/origin.git" "$T/w" 2>/dev/null
+git clone -q "$T/origin.git" "$T/w"
 mkdir -p "$T/w/scripts" "$T/w/apps/server"
 cat >"$T/w/scripts/deploy.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -31,12 +36,12 @@ exit "${STUB_RC:-0}"
 STUB
 chmod +x "$T"/w/scripts/*.sh
 echo a >"$T/w/apps/server/a"
-git -C "$T/w" add -A; git -C "$T/w" commit -qm base; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+git -C "$T/w" add -A; git -C "$T/w" commit -qm base; gpush "$T/w" origin HEAD:main
 base="$(git -C "$T/w" rev-parse HEAD)"
-git clone -q "$T/origin.git" "$T/src" 2>/dev/null
+git clone -q "$T/origin.git" "$T/src"
 push() { # file: change a file and push main; prints the new sha
   mkdir -p "$(dirname "$T/w/$1")"; echo "$RANDOM" >"$T/w/$1"
-  git -C "$T/w" add -A; git -C "$T/w" commit -qm "change $1"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+  git -C "$T/w" add -A; git -C "$T/w" commit -qm "change $1"; gpush "$T/w" origin HEAD:main
   # Exactly one 40-char sha, or end the whole test naming the helper (BOS-1817): a stray line or an empty
   # value would otherwise only show up later as the deployer rejecting the request's shape. push runs in a
   # $(...) subshell, where exit would end only the subshell, so signal the main script ($$ is the parent).
@@ -412,7 +417,7 @@ if(got!==want){console.error("keys: "+got);process.exit(1)}
 # 5. A commit that is not on main is refused (BOS-753: an older commit on main is no longer refused; see 13b).
 rm "$D/state/last-server"
 side="$(git -C "$T/w" commit-tree "$c1^{tree}" -p "$c1" -m "side branch")"
-git -C "$T/w" push -q origin "$side:refs/heads/side" 2>/dev/null
+gpush "$T/w" origin "$side:refs/heads/side"
 printf '%s\n' "$side" >"$D/inbox/checked" # even listed as checked: off main is never deployed
 req server "$side"
 host
@@ -483,7 +488,7 @@ has "$D/outbox/status.json" "built from the version the server runs now; the car
 has "$STUB_LOG" "update-runner.sh"
 # 8b. A commit that is not part of what the server runs (a switch-back) is refused, in plain words, with what to press.
 # Its own branch name: step 7 already pushed an unrelated "side" branch, and pushing over it failed (silently) every run.
-git -C "$T/w" checkout -q -b switch-back "$base" && echo side >"$T/w/side.txt" && git -C "$T/w" add -A && git -C "$T/w" commit -qm side && git -C "$T/w" push -q origin switch-back 2>/dev/null
+git -C "$T/w" checkout -q -b switch-back "$base" && echo side >"$T/w/side.txt" && git -C "$T/w" add -A && git -C "$T/w" commit -qm side && gpush "$T/w" origin switch-back
 side="$(git -C "$T/w" rev-parse HEAD)"; git -C "$T/w" checkout -q - ; git -C "$T/src" fetch -q origin switch-back
 rm -f "$D/state/last-runner"; before="$(calls)"
 req runner "$side"; host
@@ -496,7 +501,7 @@ has "$STUB_LOG" "update-runner.sh"
 hasnt "$STUB_LOG" "update-runner.sh --now" # the runner target drains; --now is for a person at the host
 
 # 9. A failed deploy reports the failure, keeps the status honest and posts the webhook.
-git -C "$T/w" reset -q --hard "$c2"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop the compose change from main
+git -C "$T/w" reset -q --hard "$c2"; gpush "$T/w" -f origin HEAD:main # drop the compose change from main
 c4="$(push apps/server/c)"
 rm -f "$D/state/last-server"
 STUB_RC=1 STUB_RESULT=partial; export STUB_RC STUB_RESULT
@@ -652,7 +657,7 @@ printf '%s\n' "$c10" "$c11" >"$D/inbox/checked"
 req server "$c10"; host
 [[ $(status result) == deployed && $(status to_commit) == "$c10" ]] || fail "13j: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "the newer commits change deployment files and have to be applied by hand"
-git -C "$T/w" reset -q --hard "$c10"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop the compose change again
+git -C "$T/w" reset -q --hard "$c10"; gpush "$T/w" -f origin HEAD:main # drop the compose change again
 # 13k. A stale card for a commit that already runs: nothing new, never a refusal, and no newer unchecked commit is taken.
 rm -f "$D/state/last-server" "$D/inbox/checked"
 req server "$c10"; host
@@ -932,7 +937,7 @@ b5="$(push deploy/caddy/Caddyfile)"; bgreq "$b5"; bg
 has "$D/outbox/status.json" "deployment files (deploy/caddy/Caddyfile)"; hasnt "$DL" "pg_dump"
 
 # 22. Manual rollback, long after the window (no soak file, old colour stopped): back to the other colour.
-git -C "$T/w" reset -q --hard "$b5^"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop case 21 Caddyfile commit
+git -C "$T/w" reset -q --hard "$b5^"; gpush "$T/w" -f origin HEAD:main # drop case 21 Caddyfile commit
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 b6="$(push apps/server/bg6)"; bgreq "$b6"; bg
 [[ $(status result) == deployed ]] || fail "setup swap: $(cat "$D/outbox/status.json")"
@@ -1025,7 +1030,7 @@ bg; [[ $(status result) == failed ]] || fail "second tick changed the status"
 svc_check() { rm -f "$D/state/last-server"; : >"$D/inbox/check"; : >"$DL"; bg; } # a refresh, as the cron tick does it
 avail() { jget "$D/outbox/available.json" "$1"; }
 no_changes_made() { ! grep -qE '^docker (up|run|restart|stop|kill|rm|build|exec)' "$DL" || fail "the refresh changed something: $(cat "$DL")"; }
-at() { git -C "$T/src" fetch -q origin 2>/dev/null; git -C "$T/src" reset -q --hard "$1"; }
+at() { git -C "$T/src" fetch -q origin; git -C "$T/src" reset -q --hard "$1"; }
 push svc-db >/dev/null; push svc-proxy >/dev/null; sB="$(push svc-server)"
 reset_world blue "$sB"; at "$sB"; rm -f "$D/state/applied-services" "$D/state/hold"
 touch "$W/running.db"; echo cid1 >"$W/cid.db"; echo 2026-11-07T10:00:00Z >"$W/started.db"
@@ -1048,7 +1053,7 @@ sE="$(push svc-db)"; at "$sD"; svc_check; has "$D/outbox/available.json" '"chang
 sF="$(push svc-proxy)"; at "$sE"; svc_check; has "$D/outbox/available.json" '"changedServices": ["proxy"]'
 at "$sD"; svc_check; has "$D/outbox/available.json" '"changedServices": ["db", "proxy"]'
 # a service added, and one removed, count as changed
-git -C "$T/w" rm -q svc-server; git -C "$T/w" commit -qm "drop svc-server"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+git -C "$T/w" rm -q svc-server; git -C "$T/w" commit -qm "drop svc-server"; gpush "$T/w" origin HEAD:main
 sG="$(git -C "$T/w" rev-parse HEAD)"; at "$sF"; svc_check; has "$D/outbox/available.json" '"changedServices": ["server"]'
 sH="$(push svc-extra)"; at "$sG"; svc_check; has "$D/outbox/available.json" '"changedServices": ["extra"]'
 # the same render works for a Compose without --hash (it hashes each service block of the rendered file)
@@ -1236,9 +1241,9 @@ printf 'runner\tpass\trunner connected, image abc123\n'
 if [[ -n ${STUB_SMOKE_FAIL:-} ]]; then printf 'board\tfail\tHTTP 500\n'; exit 1; fi
 STUB
 chmod +x "$T"/w/scripts/*.sh
-git -C "$T/w" add -A; git -C "$T/w" commit -qm "staging stubs"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+git -C "$T/w" add -A; git -C "$T/w" commit -qm "staging stubs"; gpush "$T/w" origin HEAD:main
 s1="$(git -C "$T/w" rev-parse HEAD)"
-git clone -q "$T/origin.git" "$T/stg" 2>/dev/null
+git clone -q "$T/origin.git" "$T/stg"
 # A commit that is on a side branch only, never on main.
 git -C "$T/w" checkout -q -b side; echo side >"$T/w/side.txt"; git -C "$T/w" add -A; git -C "$T/w" commit -qm side
 side="$(git -C "$T/w" rev-parse HEAD)"; git -C "$T/w" push -q origin HEAD:refs/heads/staging-offmain || fail "could not push the side branch"; git -C "$T/w" checkout -q -
@@ -1484,15 +1489,15 @@ rm -f "$PD/inbox/phone-login.json"
 # Its own origin and checkout, so the fixture above is untouched: 150 commits, one of them adding 310 files.
 LR="$T/long-range"; mkdir -p "$LR/deployer/inbox" "$LR/deployer/outbox"
 git init -q --bare -b main "$LR/origin.git"
-git clone -q "$LR/origin.git" "$LR/w" 2>/dev/null
+git clone -q "$LR/origin.git" "$LR/w"
 mkdir -p "$LR/w/apps/server" "$LR/w/scripts"; echo a >"$LR/w/apps/server/a"
-git -C "$LR/w" add -A; git -C "$LR/w" commit -qm base; git -C "$LR/w" push -q origin HEAD:main 2>/dev/null
-git clone -q "$LR/origin.git" "$LR/src" 2>/dev/null
+git -C "$LR/w" add -A; git -C "$LR/w" commit -qm base; gpush "$LR/w" origin HEAD:main
+git clone -q "$LR/origin.git" "$LR/src"
 for i in $(seq 1 310); do echo "$i" >"$LR/w/apps/server/f$i"; done
 echo x >"$LR/w/scripts/host-deployer.sh"
 git -C "$LR/w" add -A; git -C "$LR/w" commit -qm "add 311 files"
 for i in $(seq 2 150); do git -C "$LR/w" commit -q --allow-empty -m "commit $i"; done
-git -C "$LR/w" push -q origin HEAD:main 2>/dev/null
+gpush "$LR/w" origin HEAD:main
 printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$LR/src" >"$LR/deployer/host.conf"; chmod 600 "$LR/deployer/host.conf"
 BOSSMAN_DEPLOYER="$LR/deployer" "$here/host-deployer.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (long range)"; }
 lr="$(node -e 'const o=require(process.argv[1]);process.stdout.write([o.commits.length,o.paths.length,o.infraPaths.join(","),o.commits.at(-1).subject].join(" "))' "$LR/deployer/outbox/available.json")"
