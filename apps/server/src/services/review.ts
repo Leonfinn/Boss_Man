@@ -2955,6 +2955,15 @@ export function reviewService(
                 await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "the ticket left review" });
                 return { status: "left_review" };
               }
+              // BOS-1833: a hold set after the attempt began (a merge-check fix hold, a card, a waits-on link) still applies to a
+              // check that has not started. refuseIfHeld ran only at the attempt's start, so a check waiting for a slot, or queued
+              // again after main moved, used to start under a hold (18 Nov: BOS-1774, BOS-1669, BOS-1670). A running check is left
+              // alone: stopping it wastes work and the hold still stops the merge before it lands.
+              if (cur.state === "queued" && (await mergeHolds(db, ticketId)).length > 0) {
+                await deps.cancelCheck?.(cur.id, "The merge is held, so its queued check was stopped.").catch(() => undefined);
+                await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "the merge was held while the check waited" });
+                await refuseIfHeld(ticketId);
+              }
               // Merge train: the base this tree was built on no longer holds. Leave the job to the next round (it replaces it).
               const why = cur.state === "queued" || cur.state === "running" ? o.stale?.() : null;
               if (why) {
