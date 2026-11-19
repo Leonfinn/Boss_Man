@@ -105,7 +105,7 @@ import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { ownerAnswerEmbedLoop } from "./services/owner-answers.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
-import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
+import { CEO_REPLY_REASON, DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -219,6 +219,8 @@ export type AppOptions = {
   drainMinutes?: number;
   /** How long a recreated runner has to reconnect before the update is reported as a problem (ms, default 5 minutes). */
   drainReconnectMs?: number;
+  /** BOS-1954: how long a drain pass waits for a scheduling pass to end (tests make it short). */
+  drainSettleMs?: number;
   /** Who is in charge (leader.ts). Default: a lone server that always leads. */
   leader?: Leader;
 };
@@ -553,11 +555,20 @@ export async function buildApp(opts: AppOptions) {
       }
       return reached;
     },
+    // BOS-1954: the swap waited past its expected finish. The CEO of the first company is woken once, through the reply lane
+    // (the only wake a drain lets through while work is going); the owner is not asked.
+    wakeCeo: async (note) => {
+      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+      if (!home) return;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, home.id), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note });
+    },
     // `sweeps` is built further down; this only runs when a hold lifts.
     afterHold: (since) => sweeps.resumeAfterUpdate(since),
     dir: opts.deployerDir,
     drainMinutes: opts.drainMinutes,
     reconnectMs: opts.drainReconnectMs,
+    settleWaitMs: opts.drainSettleMs,
     now: opts.now,
     log: (m) => app.log.warn(m),
   });

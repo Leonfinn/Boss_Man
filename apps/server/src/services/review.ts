@@ -1510,8 +1510,15 @@ export function reviewService(
      * for these: cutting the runner off between push and record leaves main with a merge its ticket doesn't know about.
      */
     async landingMergesByCompany(): Promise<Map<string, number>> {
-      const ids = [...landings.entries()].filter(([id, l]) => l.state === "running" && phases.get(id) === "merging").map(([id]) => id);
+      let ids = [...landings.entries()].filter(([id, l]) => l.state === "running" && phases.get(id) === "merging").map(([id]) => id);
       const out = new Map<string, number>();
+      if (!ids.length) return out;
+      // BOS-1954: a merge whose check job is still queued has not pushed anything: the phase is "merging" from before its
+      // prepare, but its check can't start while the update holds new checks, so counting it made the swap wait for a merge
+      // that waited for the swap (a deadlock only a server restart cleared). Once the job runs it counts as a running check
+      // (runner-busy.ts); once it has passed, the push is what is counted here.
+      const waitingOnCheck = new Set((await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(inArray(checkJobs.ticketId, ids), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "queued")))).map((r) => r.ticketId));
+      ids = ids.filter((id) => !waitingOnCheck.has(id));
       if (!ids.length) return out;
       const rows = await db.select({ companyId: tickets.companyId }).from(tickets).where(inArray(tickets.id, ids));
       for (const r of rows) out.set(r.companyId, (out.get(r.companyId) ?? 0) + 1);
