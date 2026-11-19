@@ -67,11 +67,14 @@ describe("project page: star and spend", () => {
     expect((await req("GET", `/api/projects/${crypto.randomUUID()}/spend`)).statusCode).toBe(404);
 
     // Tokens count every run on the project's tasks, subscription ones included; other projects' runs don't.
-    await t.db.insert(runs).values({ companyId: co.company.id, ticketId: big.id, inputTokens: 1000, outputTokens: 200 });
-    await t.db.insert(runs).values({ companyId: co.company.id, ticketId: small.id, inputTokens: 50, outputTokens: 5, startedAt: longAgo });
-    await t.db.insert(runs).values({ companyId: co.company.id, ticketId: elsewhere.id, inputTokens: 9999, outputTokens: 9999 });
+    await t.db.insert(runs).values({ companyId: co.company.id, ticketId: big.id, inputTokens: 1000, outputTokens: 200, cachedReadTokens: 7000, cachedWriteTokens: 300 });
+    await t.db.insert(runs).values({ companyId: co.company.id, ticketId: small.id, inputTokens: 50, outputTokens: 5, cachedReadTokens: 20, cachedWriteTokens: 2, startedAt: longAgo });
+    await t.db.insert(runs).values({ companyId: co.company.id, ticketId: elsewhere.id, inputTokens: 9999, outputTokens: 9999, cachedReadTokens: 9999, cachedWriteTokens: 9999 });
     const withTokens = (await req("GET", `/api/projects/${p.id}/spend`)).json();
-    expect(withTokens.tokens).toEqual({ month: { input: 1000, output: 200 }, total: { input: 1050, output: 205 } });
+    expect(withTokens.tokens).toEqual({
+      month: { input: 1000, output: 200, cacheRead: 7000, cacheWrite: 300 },
+      total: { input: 1050, output: 205, cacheRead: 7020, cacheWrite: 302 },
+    });
   });
 
   // The project routes live in routes/projects.ts (BOS-909) but must stay inside the owner scope.
