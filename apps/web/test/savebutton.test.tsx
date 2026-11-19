@@ -26,11 +26,20 @@ function Demo() {
 }
 
 describe("SaveButton", () => {
-  it("goes Save, Saving…, Saved ✓ (disabled), then Save again once a field changes", async () => {
+  it("is muted until a field changes, then primary with an Unsaved changes hint, Saving…, Saved ✓ (disabled), and muted again when changed back", async () => {
     render(<Demo />);
     const btn = () => screen.getByRole("button") as HTMLButtonElement;
     expect(btn().textContent).toBe("Save");
+    expect(btn().disabled).toBe(true);
+    expect(btn().className).not.toContain("primary");
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+    fireEvent.change(screen.getByLabelText("name"), { target: { value: "z" } });
     expect(btn().className).toContain("primary");
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("name"), { target: { value: "a" } });
+    expect(btn().disabled).toBe(true);
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+    fireEvent.change(screen.getByLabelText("name"), { target: { value: "y" } });
     fireEvent.submit(btn().closest("form")!);
     expect(btn().textContent).toBe("Saving…");
     await act(() => new Promise((r) => setTimeout(r, 5)));
@@ -40,7 +49,7 @@ describe("SaveButton", () => {
     fireEvent.change(screen.getByLabelText("name"), { target: { value: "b" } });
     expect(btn().textContent).toBe("Save");
     expect(btn().disabled).toBe(false);
-    fireEvent.change(screen.getByLabelText("name"), { target: { value: "a" } });
+    fireEvent.change(screen.getByLabelText("name"), { target: { value: "y" } });
     expect(btn().textContent).toBe("Saved ✓");
   });
 });

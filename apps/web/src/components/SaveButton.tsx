@@ -26,12 +26,25 @@ export function useSaveState<T extends object>(form: T | null) {
   };
 }
 
-/** Primary "Save" while there is something to save; "Saving…" while busy; "Saved ✓" (plain, disabled) until a field changes. */
+/**
+ * The one Save button for Settings and other forms. Muted and disabled while nothing differs from the saved values;
+ * primary (filled) with an "Unsaved changes" hint while something does; "Saving…" while busy; "Saved ✓" (muted) after a
+ * save until a field changes. A failed save leaves the form dirty, so the button stays primary (the error text is the
+ * caller's own note).
+ */
 export function SaveButton({ dirty, saved, busy, disabled, style, onClick }: { dirty: boolean; saved: boolean; busy?: boolean; disabled?: boolean; style?: React.CSSProperties; onClick?: () => void }) {
-  const done = saved && !dirty;
+  const clean = !dirty;
+  const hint = dirty && !busy;
   return (
-    <button type={onClick ? "button" : "submit"} onClick={onClick} className={done || busy ? "btn" : "btn primary"} style={style} disabled={busy || done || disabled}>
-      {busy ? "Saving…" : done ? "Saved ✓" : "Save"}
-    </button>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", ...style }}>
+      <button type={onClick ? "button" : "submit"} onClick={onClick} className={clean || busy ? "btn" : "btn primary"} disabled={busy || clean || disabled}>
+        {busy ? "Saving…" : clean && saved ? "Saved ✓" : "Save"}
+      </button>
+      {hint ? (
+        <span className="muted" style={{ fontSize: 14 }} data-testid="unsaved-hint">
+          Unsaved changes
+        </span>
+      ) : null}
+    </span>
   );
 }
