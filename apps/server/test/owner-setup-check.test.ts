@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { composeCommand, flattenHostRecord, type HostRecord } from "../src/services/host-facts.js";
 import { checkOwnerSetup, fillOwnerSetup, ownerSetupWriteCheck } from "../src/services/owner-setup-check.js";
-import { lintOwnerSteps } from "../src/services/steps.js";
+import { lintOwnerSteps, placeMissingText } from "../src/services/steps.js";
+import { checkAsk } from "../src/services/card-check.js";
 
 const r17 = (step: string) => lintOwnerSteps([step]).refuse.filter((f) => f.rule === "R17");
 
@@ -179,4 +180,34 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
     expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1], reason: why }], strict: false }).error).toMatch(/Step 3/);
     expect(ownerSetupWriteCheck(["Restart the notifications add-on at http://192.168.1.50/a", "Settings → Funding → Add funding source", "Settings → Funding → Add funding source"], {}, { byCeo: true, lintOverride: stored, strict: false })).toMatchObject({ error: null });
   });
+});
+
+// BOS-1880 criterion 3: an agent's card (checkAsk) and a ticket's setup steps (checkOwnerSetup) share one place check,
+// so the same steps get the same verdict and name the same steps. Table-driven: one list, both paths, compared.
+describe("one place check for cards and setup steps (BOS-1880)", () => {
+  const rows: { name: string; steps: string[]; missing: number[]; pointer?: true }[] = [
+    { name: "a Settings path", steps: ["Settings → Funding → Add funding source"], missing: [] },
+    { name: "a website", steps: ["Open https://analytics.example.com/settings and paste the website id into the Website ID box"], missing: [] },
+    { name: "a place, then a step with none", steps: ["Settings → Funding → Add funding source", "Paste the second value into the box and save it"], missing: [2] },
+    { name: "two steps with no place", steps: ["Paste the first value into the box and save it", "Paste the second value into the box and save it"], missing: [1, 2] },
+    { name: "the Umami wording (points at a card)", steps: ["Set the two values the go-live card names, then save"], missing: [1], pointer: true },
+  ];
+  for (const row of rows) {
+    it(`${row.name}: both paths give the same verdict`, () => {
+      const setup = checkOwnerSetup(row.steps, {}, "write");
+      const refused = [...setup.hard, ...setup.soft];
+      const setupMissing = refused.filter((f) => f.rule === "R21").map((f) => f.step).sort((a, b) => a - b);
+      const card = checkAsk({ triedFirst: "Checked the settings page myself; only the owner can sign in there.", why: "It turns the feature on.", minutes: 2, steps: row.steps });
+      expect(setupMissing).toEqual(row.missing);
+      // Same accept or refuse on both paths.
+      expect(card.error === null).toBe(refused.length === 0);
+      if (row.pointer) {
+        // The card-pointer rule (R1) refuses it on both paths.
+        expect(refused.map((f) => f.rule)).toContain("R1");
+        expect(card.error).toMatch(/sends the owner to another card/);
+      } else if (row.missing.length) {
+        expect(card.error).toBe(placeMissingText(row.missing));
+      }
+    });
+  }
 });
