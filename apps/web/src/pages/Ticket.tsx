@@ -289,7 +289,7 @@ function OwnerSetupEdit({ draftKey, initial, initialWhy, initialIfSkipped, save,
             });
           }}
         >
-          Save
+          Save steps
         </button>
         {(initial || initialWhy || initialIfSkipped) && (
           <button type="button" className="btn" onClick={() => setOpen(false)}>

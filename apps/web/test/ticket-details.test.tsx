@@ -96,7 +96,7 @@ describe("the Details card (BOS-1195)", () => {
     const skip = screen.getByLabelText("If you skip it") as HTMLTextAreaElement;
     expect(skip.maxLength).toBe(240);
     fireEvent.change(skip, { target: { value: "  Runs stay paused  " } });
-    fireEvent.click(screen.getByText("Save"));
+    fireEvent.click(screen.getByText("Save steps"));
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     await waitFor(() => expect(fetchMock.mock.calls.some(([u, init]) => u === "/api/tickets/t1" && init?.method === "PATCH")).toBe(true));
     const call = fetchMock.mock.calls.find(([u, init]) => u === "/api/tickets/t1" && init?.method === "PATCH")!;
