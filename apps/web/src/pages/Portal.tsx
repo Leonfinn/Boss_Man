@@ -19,7 +19,7 @@ const STAGES: Array<{ id: Stage; label: string; help: string }> = [
 // BOS-1921: a summary that only repeats the title is shown once (nothing stored changes).
 const squash = (s: string) => s.toLowerCase().replace(/\s+/g, " ").replace(/[\s.!?…:;,]+$/, "").trim();
 const sameText = (title: string, body: string) => squash(title) === squash(body);
-type PortalFeature ={ id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
+type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
 type Portal = { title: string; intro: string | null; hasLogo: boolean; confirmByEmail?: boolean; rememberedEmail?: string | null; back: { url: string; text: string } | null; features: PortalFeature[] };
 /** BOS-1388: with "Confirm posts by email" on, the address is needed and the reason is said once, next to the box. */
 type Ask = { required: boolean; remembered: string | null };
