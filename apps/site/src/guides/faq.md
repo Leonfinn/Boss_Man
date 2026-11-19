@@ -51,7 +51,9 @@ A 64-bit Linux machine with Docker and Docker Compose v2, a GitHub or Gitea acco
 
 Why Linux? The install and update scripts expect it, and two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.
 
-Docker Desktop on Mac and Windows isn't supported yet. Ready-made images for x86 and ARM machines come after the alpha.
+Mac and Windows: not supported yet, but we're testing Docker Desktop. On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet, and Windows hasn't been tested. For now, use a Linux machine.
+
+Ready-made images for x86 and ARM machines come after the alpha.
 
 ## Is my code safe?
 
