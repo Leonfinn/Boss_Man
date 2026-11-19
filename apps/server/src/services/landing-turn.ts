@@ -20,7 +20,22 @@ export class LandingTurns {
   private readonly turns = new Map<string, Turn>();
   private readonly next = new Map<string, Array<{ ticketId: string; capMs: number }>>();
 
+  private readonly epochs = new Map<string, number>();
+
   constructor(private readonly now: () => number = Date.now) {}
+
+  /**
+   * BOS-1821: the gate pushed to the project's main. Merges waiting for another ticket's turn ask again whether their pass
+   * can still be carried when this changes, rather than only when the turn ends.
+   */
+  landed(projectId: string): void {
+    this.epochs.set(projectId, this.mainEpoch(projectId) + 1);
+  }
+
+  /** How many times the gate has pushed to the project's main since this process started (BOS-1821). */
+  mainEpoch(projectId: string): number {
+    return this.epochs.get(projectId) ?? 0;
+  }
 
   /**
    * One rebuild after a pass. Returns the ticket's count and what happened to the turn: "taken" (it holds it now), "queued"

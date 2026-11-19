@@ -119,6 +119,11 @@ export const FULL_CHECK_NEXT = "BOSSMAN_FULL_CHECK_NEXT";
 /** How often a landing re-reads its check job row (BOS-316). Tests shorten it with BOSSMAN_CHECK_JOB_POLL_MS. */
 /** BOS-1344: how often a waiting merge looks for a moved main. Tests shorten it with BOSSMAN_MERGE_RETARGET_MS. */
 const MERGE_RETARGET_MS = Number(process.env.BOSSMAN_MERGE_RETARGET_MS) > 0 ? Number(process.env.BOSSMAN_MERGE_RETARGET_MS) : 60_000;
+/**
+ * BOS-1821: a merge waiting for another ticket's landing turn asks again this often even when no gate push moved main (a push
+ * from outside the gate). Tests set BOSSMAN_TURN_WAIT_RECHECK_MS to see the asks a gate push causes on their own.
+ */
+const WAIT_RECHECK_MS = Number(process.env.BOSSMAN_TURN_WAIT_RECHECK_MS) > 0 ? Number(process.env.BOSSMAN_TURN_WAIT_RECHECK_MS) : 10 * MERGE_RETARGET_MS;
 /** BOS-1820: at most this many CI-gated refreshes in one merge attempt (each restarts GitHub CI), a guard against a loop. */
 const MAX_CI_REFRESHES = 20;
 /** The owner's off switch for refreshing a waiting merge (setting merge_retarget; on unless set to false). */
@@ -2854,6 +2859,14 @@ export function reviewService(
        */
       const landPassed = async (prep: Prepared, fin0?: () => Promise<MergeResult | null>): Promise<MergeResult | { status: "left_review" } | { status: "handed_over" } | null> => {
         let waiting = false;
+        // BOS-1821: while it waits for another ticket's turn, the merge asks the runner (BOS-1820's carry question) whether its
+        // pass could still be carried onto today's main: at the start of the wait, whenever the gate pushes to main, and every
+        // WAIT_RECHECK_MS for pushes from elsewhere. A refusal is the rebuild finish would have ordered when the turn ended, so
+        // it happens now; a conflict goes back to the author now. Same gate as BOS-1820 (carry, runner, merge_retarget switch).
+        let waitCheck: boolean | undefined;
+        let askedEpoch = -1;
+        let askedAt = 0;
+        let early: Extract<MergeResult, { status: "main_moved" }> | null = null;
         for (;;) {
           const c = landingTurns.check(t.projectId);
           if (c.expired) await lineEvent(db, { id: c.expired.ticketId, companyId: t.companyId }, { event: "landing_turn", action: "expired", capMin: Math.round(c.expired.capMs / 60_000) });
@@ -2872,10 +2885,30 @@ export function reviewService(
           if (await leftReview()) return { status: "left_review" };
           // BOS-1752: a copy that handed over while it waited for the turn must not push; the server now in charge restarts it.
           if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
+          waitCheck ??= carryOn && deps.runners.can(runner.id, "merge-refresh") && (await retargetSwitch());
+          const epoch = landingTurns.mainEpoch(t.projectId);
+          if (waitCheck && (epoch !== askedEpoch || Date.now() - askedAt >= WAIT_RECHECK_MS)) {
+            askedEpoch = epoch;
+            askedAt = Date.now();
+            // Any trouble but a lost runner: keep waiting, and finish decides when the turn ends, as before.
+            const fresh = await prepare(undefined, { commit: prep.commit, tree: prep.tree }).catch((err: Error) => {
+              if (err instanceof RunnerGone) throw err;
+              return null;
+            });
+            if (fresh?.status === "conflicts" || fresh?.status === "migration_journal" || fresh?.status === "branch_moved") return fresh;
+            if (fresh?.status === "prepared" && fresh.tree !== prep.tree && fresh.carry?.ok === false) {
+              early = { status: "main_moved", notCarried: { why: fresh.carry.why, ...(fresh.carry.files ? { files: fresh.carry.files } : {}) } };
+              break;
+            }
+          }
           await touch();
           await new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
         }
-        let fin = fin0 ? await fin0() : await finish(prep, undefined, carryOn);
+        if (early) {
+          const files = early.notCarried?.files;
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Main changed ${files?.length ? files.slice(0, 3).join(", ") + (files.length > 3 ? ", …" : "") : "shared files"} while this merge waited for another ticket's landing turn, so it is rebuilt and checked again now rather than when that turn ends. Nothing to do.` });
+        }
+        let fin = early ?? (fin0 ? await fin0() : await finish(prep, undefined, carryOn));
         for (let race = 0; fin?.status === "main_moved" && fin.carryEligible && race < 3; race++) fin = await finish(prep, undefined, carryOn);
         if (fin?.status === "merged" && fin.carried) await lineEvent(db, t, { event: "carried_across", ...fin.carried });
         if (fin?.status === "main_moved") {
@@ -3467,6 +3500,8 @@ export function reviewService(
         for (const command of checks) await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: checkedSha, kind: kindOf(command), passed: true, detail: null });
       }
       await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
+      // BOS-1821: main moved; merges waiting for another ticket's landing turn ask again whether they can still be carried.
+      if (m.status === "merged") landingTurns.landed(t.projectId);
       // The CI branch has done its job (BOS-1070); deleted so the host doesn't collect one per merge. Best effort.
       if (ci && m.status === "merged") void ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "unpublish", phase: "unpublish" }), MERGE_WAIT_MS).catch(() => undefined);
       // BOS-690 (DR-037): the gate renumbered a clashing migration itself. One line, no wake, no card: nothing for anyone to do.
