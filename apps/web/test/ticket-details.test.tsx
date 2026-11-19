@@ -86,6 +86,23 @@ describe("the Details card (BOS-1195)", () => {
     expect(rowIn(none.container, "After it goes live")!.querySelector(".detail-count")!.className).not.toContain("amber");
   });
 
+  it("shows the go-live card's why and if-skipped lines, and saves an edit to one of them alone (BOS-1882)", async () => {
+    const { container } = stub({ ownerSetup: "Open Settings", ownerSetupWhy: "Funding works again", ownerSetupIfSkipped: null });
+    await screen.findByText("After it goes live");
+    const row = rowIn(container, "After it goes live")!;
+    expect(row.textContent).toContain("Funding works again");
+    expect(row.textContent).not.toContain("If you skip it:");
+    fireEvent.click(screen.getByText("Edit steps and lines"));
+    const skip = screen.getByLabelText("If you skip it") as HTMLTextAreaElement;
+    expect(skip.maxLength).toBe(240);
+    fireEvent.change(skip, { target: { value: "  Runs stay paused  " } });
+    fireEvent.click(screen.getByText("Save"));
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u, init]) => u === "/api/tickets/t1" && init?.method === "PATCH")).toBe(true));
+    const call = fetchMock.mock.calls.find(([u, init]) => u === "/api/tickets/t1" && init?.method === "PATCH")!;
+    expect(JSON.parse(call[1].body)).toEqual({ ownerSetupIfSkipped: "Runs stay paused" });
+  });
+
   it("counts what it produced, its code, and nothing yet", async () => {
     const items = [{ id: "a1", kind: "wiki_page", title: "Report", slug: "report", path: null, ref: null, url: null, agent: null, runId: null, createdAt: "2026-10-19T09:00:00Z" }, { id: "a2", kind: "url", title: "Link", slug: null, path: null, ref: null, url: "https://example.com", agent: null, runId: null, createdAt: "2026-10-19T09:00:00Z" }];
     const two = stub({}, { artifacts: items });
