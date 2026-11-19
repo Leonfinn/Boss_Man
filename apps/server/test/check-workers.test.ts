@@ -308,6 +308,37 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(await s.job(a.id)).toMatchObject({ state: "queued", workerId: null, reason: expect.stringMatching(/went offline/) });
   });
 
+  // BOS-1917: a worker may run a full merge check. If it drops mid-check the merge goes back in line, the company runner runs
+  // it, and exactly one result counts: a late answer from the dropped worker can't pass it a second time or change it.
+  it("a merge check on a worker that drops mid-check is re-run once by the runner, and the late worker result is ignored", async () => {
+    const s = await setup({ runnerSlots: 1, graceMs: 30 });
+    s.setRunnerUp(false); // the runner has no free slot, so the worker takes the merge (the default policy takes merges)
+    const w = await s.worker();
+    const m = await s.req(s.co, { kind: "merge", scope: "full" });
+    await s.d.pump();
+    expect(await s.job(m.id)).toMatchObject({ state: "running", workerId: w.id, runnerId: null, kind: "merge" });
+    const done = { jobId: m.id, commit: m.commit, exitCode: 0, timedOut: false, tail: "worker" };
+    // The worker drops for good and the runner has room again.
+    w.release();
+    s.setRunnerUp(true);
+    s.d.onWorkerGone(w.id);
+    const end = Date.now() + 5000;
+    while ((await s.job(m.id)).runnerId === null && Date.now() < end) await new Promise((r) => setTimeout(r, 10));
+    expect(await s.job(m.id)).toMatchObject({ state: "running", runnerId: s.co.runnerId, workerId: null });
+    // Sent to the runner once, and only once to the worker.
+    expect(ran(s.toRunner)).toEqual([m.id]);
+    expect(ran(s.toWorker)).toEqual([m.id]);
+    // The worker's late answer is refused; the runner's counts once; a second answer changes nothing.
+    await s.d.onWorkerDone(w.id, done);
+    expect((await s.job(m.id)).state).toBe("running");
+    await s.d.onDone(s.co.runnerId, { ...done, tail: "runner" });
+    const passed = await s.job(m.id);
+    expect(passed.state).toBe("passed");
+    await s.d.onWorkerDone(w.id, { ...done, exitCode: 1 });
+    await s.d.onDone(s.co.runnerId, { ...done, exitCode: 1 });
+    expect(await s.job(m.id)).toMatchObject({ state: "passed", endedAt: passed.endedAt });
+  });
+
   it("on hello, re-queues a job the worker lost and stops one it runs that the server didn't give it", async () => {
     const s = await setup({ runnerSlots: 1 });
     s.setRunnerUp(false);
