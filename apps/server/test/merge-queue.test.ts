@@ -503,6 +503,61 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(row.label).not.toMatch(/waiting for a check slot/);
     });
 
+    // BOS-1871: BOS-1854's check passed at 12:44, then its landing waited for GitHub CI on the merge copy. Its check held no
+    // slot any more, so it dropped out of Running now and fell through to "next in line for a check. A slot is free".
+    it("says waiting for GitHub CI, never next in line, for a landing whose check ended but whose CI wait is open", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const landing = new Date(Date.now() - 40 * 60_000);
+      const ciSince = new Date(Date.now() - 12 * 60_000);
+      const service = svc(c, {
+        runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const, ci: { since: ciSince.toISOString(), waiting: ["check", "images (arm64)"] } }],
+        runningChecks: async () => [],
+        queueStatus: async () => ({ mode: "server", slots: 2, running: 0, waiting: 0 }),
+        queueDetail: detail(0),
+      });
+      const view = await service.get(c.company.id);
+      expect(view.running).toEqual([]);
+      const row = view.waiting.find((w) => w.ticketId === id)!;
+      expect(row).toMatchObject({ state: "waiting_for_ci", minutes: 12, stuck: false, actor: "system", label: "waiting for GitHub CI on its merge copy (check, images (arm64)), 12 min so far" });
+      expect(`${row.label} ${row.next}`).not.toMatch(/next in line|slot is free|check slot/);
+      expect(row.statusLine).toMatchObject({ step: row.label, since: ciSince.toISOString(), blocker: null });
+      expect(await service.statusLineFor(c.company.id, id)).toEqual(row.statusLine);
+      // Still one item in the line (R43), and a CI wait is not the line's own fault: no stuck badge.
+      expect(view.lineCount).toBe(1);
+      expect(view.stuckCount).toBe(0);
+      // With its check still holding a slot it stays in Running now, with the CI wait beside it (BOS-1070), as before.
+      const both = await svc(c, {
+        runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const, ci: { since: ciSince.toISOString(), waiting: [] } }],
+        runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: ciSince }],
+      }).get(c.company.id);
+      expect(both.running).toMatchObject([{ ticketId: id, ci: { minutes: 12, waiting: [] } }]);
+      expect(both.waiting.find((w) => w.ticketId === id)).toBeUndefined();
+      // A landing with no CI wait and no slot is still left out of Running now (BOS-1287), so it reads as before.
+      const none = await labelOf(c, id, { runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const }], runningChecks: async () => [], queueDetail: detail(1) });
+      expect(none.state).toBe("waiting_for_check_capacity");
+    });
+
+    // BOS-1871: the held-fix stall alarm read the CI wait only on running rows, so a fix waiting on GitHub CI was timed as
+    // "approved, waiting to land" from its approval.
+    it("times a held fix that waits for GitHub CI by that wait, not by its approval", async () => {
+      const c = (ctx = await setup());
+      const fix = await waitingMerge(c);
+      await c.db.update(tickets).set({ fixesMergeCheck: true, lastActivityAt: new Date(Date.now() - 5 * 60 * 60_000) }).where(eq(tickets.id, fix));
+      const held = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Held" })).json() as { id: string };
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, held.id));
+      await approve(c, held.id);
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: held.id, blockerTicketId: fix });
+      const lineWith = (ciMin: number) =>
+        svc(c, {
+          runningMerges: () => [{ ticketId: fix, startedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(), startedBy: "the merge gate", ci: { since: new Date(Date.now() - ciMin * 60_000).toISOString(), waiting: ["check"] } }],
+          runningChecks: async () => [],
+          queueDetail: detail(0),
+        }).get(c.company.id).then((v) => v.line);
+      expect(await lineWith(20)).toMatchObject({ state: "held_behind_fix", fixes: [{ ticketId: fix, stateText: "waiting for GitHub CI, 20 min" }] });
+      expect(await lineWith(75)).toMatchObject({ state: "stuck", cause: "fix_stalled", reason: expect.stringMatching(/waiting for GitHub CI for 75 minutes with no result/) });
+    });
+
     it("does not claim a slot is free when slot use is unknown (legacy mode, or the lookup fails)", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);

@@ -2487,8 +2487,19 @@ export function reviewService(
         }
       }
       // The push and the read live in ci-publish.ts (BOS-1664), where the pre-flight run reuses them.
-      const publishAndWait = (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> =>
-        ciPublishAndWait(
+      const publishAndWait = (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> => {
+        // BOS-1871: the wait's start and end in the merge-line records, so a CI wait can be told from a stall afterwards.
+        // The start row is written once, on the first wait report; the end row (awaited after it) says how the wait ended.
+        let ciWaitFrom: number | null = null;
+        let ciWaitStartRow: Promise<void> = Promise.resolve();
+        const endCiWait = async (outcome: string) => {
+          if (ciWaitFrom === null) return;
+          const waitedMs = Math.max(0, Date.now() - ciWaitFrom);
+          ciWaitFrom = null;
+          await ciWaitStartRow;
+          await lineEvent(db, t, { event: "ci_wait_ended", commit: prep.commit, outcome, waitedMs });
+        };
+        return ciPublishAndWait(
           {
             hosts: deps.gitHosts!,
             target: ci!,
@@ -2506,7 +2517,14 @@ export function reviewService(
             announceRerun: async (commit) => {
               await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${commit.slice(0, 12)} and no newer run replaced it, so Boss Man asked GitHub to run it once more. Nothing to do.` });
             },
-            onWait: (s) => (s ? ciWaits.set(ticketId, s) : ciWaits.delete(ticketId)),
+            onWait: (s) => {
+              if (s && ciWaitFrom === null) {
+                ciWaitFrom = s.since;
+                ciWaitStartRow = lineEvent(db, t, { event: "ci_wait_started", commit: prep.commit }, new Date(s.since));
+              }
+              if (s) ciWaits.set(ticketId, s);
+              else ciWaits.delete(ticketId);
+            },
             touch,
             // BOS-1733: only in server check-queue mode, where the gate can queue a job on the exact merge commit.
             ...(serverChecks && deps.cancelCheck ? { flakeRetry: (s: CiStatus, st: CiStop) => flakeRetry(prep, s, st), announceFlakeRetry: (files: string[], accepted: boolean) => announceFlakeRetry(prep, files, accepted) } : {}),
@@ -2518,16 +2536,19 @@ export function reviewService(
             // R40: a failure that is only main's known red becomes known_red, which lets the gate's own check finish.
             const red = got.kind === "failed" && !got.status.billing ? await knownRed(got.status) : null;
             const o: CiOutcome = red ? { kind: "known_red", ...red } : got;
+            await endCiWait(o.kind);
             // BOS-1749: the branch has done its job on every ending except a pass (the merge deletes it after landing) and a
             // replacement by a newer push (that push owns the branch now). Best effort; the periodic sweep catches a miss.
             if (o.kind !== "passed" && o.kind !== "superseded") await dropCiBranch();
             return o;
           },
           async (err: Error) => {
+            await endCiWait("error");
             await dropCiBranch();
             throw err instanceof CiPublishError ? new ReviewError(409, err.message) : err;
           },
         );
+      };
       let ciPushed = false; // a refusal before the push leaves nothing to delete
       const dropCiBranch = () => !ciPushed ? Promise.resolve() : ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "unpublish", phase: "unpublish" }), MERGE_WAIT_MS).then(() => undefined, () => undefined);
       // Other tickets in this project that waited on an open CI card: CI can be read again, so start them.
