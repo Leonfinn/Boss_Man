@@ -111,6 +111,8 @@ export const IDLE_SLOT_REASON = "idle slot";
 export const IDLE_AGENTS_REASON = "idle agents";
 /** Free run slots and idle agents for 30 minutes, but every open ticket waits on another: the CEO is told what everything waits on (BOS-1662). */
 export const NOTHING_STARTABLE_REASON = "nothing startable";
+/** The owner's "Run now" on a held ticket (BOS-1943): the one priority that skips the quota hold whatever the wake's reason. */
+export const OWNER_OVERRIDE_PRIORITY = 5;
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** Tickets moved to review, gathered into one CEO run (R85). */
@@ -2045,7 +2047,10 @@ export function schedulerService(
         // check: under the default "pause" it is held at the limit, so nothing spends unapproved
         // extra usage (BOS-253).
         const [urgentTicket] = w.ticketId && w.reason !== WATCH_REASON ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
-        const holdApplies = w.priority < limits.highPriority || !!urgentTicket?.urgent;
+        // BOS-1943: a high priority alone no longer skips the hold. Resumes, check results, GitHub feedback
+        // and "changes requested" wakes carry priority 3 but are routine work; they were starting on a held
+        // account. Only a wake someone is waiting on (chats, reviews, owner answers, alerts) skips it.
+        const holdApplies = w.priority < limits.highPriority || (w.priority < OWNER_OVERRIDE_PRIORITY && wakeClassOf(w) !== "waiting") || !!urgentTicket?.urgent;
         let onSource: string | undefined;
         if (agent?.fundingSourceId) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));

@@ -21,6 +21,8 @@ export function runOriginQuery(alias: string) {
     // A review wake carries its tickets in the note; the card names them from here.
     wakeNote: sql<string | null>`(select w."note" from "wakes" w where w."run_id" = ${table}."id" limit 1)`,
     runTicketId: sql<string | null>`${table}."run_ticket_id"`,
+    /** The account the run was paid from (BOS-1943): the one the scheduler picked at launch, else the agent's own. */
+    account: sql<string | null>`coalesce((select f."name" from "funding_sources" f where f."id" = ${table}."funding_source_id"), (select f."name" from "funding_sources" f join "agents" ag on ag."funding_source_id" = f."id" where ag."id" = ${table}."agent_id"))`,
     /** The ticket's reference (HOL-12), for the "Working on" headline (BOS-254). */
     runTicketRef: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${table}."ticket_id")`,
   };
@@ -104,6 +106,10 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
         ? await db.select({ name: agents.name, fundingKind: fundingSources.kind }).from(agents).leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId)).where(eq(agents.id, run.agentId))
         : [];
       const [ticket] = run.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, run.ticketId)) : [];
+      // The account the run was paid from (BOS-1943): the one picked at launch, else the agent's own.
+      const [launchAccount] = run.fundingSourceId ? await db.select({ name: fundingSources.name }).from(fundingSources).where(eq(fundingSources.id, run.fundingSourceId)) : [];
+      const [agentAccount] = !launchAccount && run.agentId ? await db.select({ name: fundingSources.name }).from(agents).innerJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId)).where(eq(agents.id, run.agentId)) : [];
+      const account = launchAccount ?? agentAccount;
       const limit = Math.min(Math.max(opts.limit ?? 500, 1), 1000);
       const rows = await db
         .select({ id: runnerEvents.id, seq: runnerEvents.seq, type: runnerEvents.type, payload: runnerEvents.payload, at: runnerEvents.occurredAt })
@@ -119,7 +125,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
         .limit(limit);
       const [spent] = await db.select({ micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` }).from(costEvents).where(eq(costEvents.runId, runId));
       return {
-        run: { id: run.id, companyId: run.companyId, agent: agent?.name ?? null, ticketId: run.ticketId, ticket: ticket?.title ?? null, model: run.model, startedAt: run.startedAt, endedAt: run.endedAt, outcome: run.outcome, costMicros: Number(spent?.micros ?? 0), inputTokens: run.inputTokens, outputTokens: run.outputTokens, cachedReadTokens: run.cachedReadTokens, cachedWriteTokens: run.cachedWriteTokens, fundingKind: agent?.fundingKind ?? null },
+        run: { id: run.id, companyId: run.companyId, agent: agent?.name ?? null, account: account?.name ?? null, ticketId: run.ticketId, ticket: ticket?.title ?? null, model: run.model, startedAt: run.startedAt, endedAt: run.endedAt, outcome: run.outcome, costMicros: Number(spent?.micros ?? 0), inputTokens: run.inputTokens, outputTokens: run.outputTokens, cachedReadTokens: run.cachedReadTokens, cachedWriteTokens: run.cachedWriteTokens, fundingKind: agent?.fundingKind ?? null },
         items: rows.map((r) => ({ seq: r.seq, type: r.type, at: r.at, event: r.payload })),
         next: rows.at(-1)?.seq ?? opts.after ?? 0,
         more: rows.length === limit,
