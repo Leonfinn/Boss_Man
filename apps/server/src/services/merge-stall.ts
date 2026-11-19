@@ -28,11 +28,21 @@ export const NO_LANDING_MS = 45 * 60_000;
 export type StallCause = "empty_seat" | "no_landing" | "thrash";
 
 /** Pure: the stalls standing now, each with when it began (its identity: a new start is a new stall, told again). */
-export function stalls(f: TrainFacts, now: number): Array<{ cause: StallCause; since: number }> {
+export function stalls(f: TrainFacts, now: number, pause?: { on: boolean; floor: number }): Array<{ cause: StallCause; since: number }> {
   const out: Array<{ cause: StallCause; since: number }> = [];
   if (f.thrashSince !== null && f.seated.length > 0) out.push({ cause: "thrash", since: f.thrashSince });
-  if (f.emptySeatSince !== null && !f.seeding && now - f.emptySeatSince >= EMPTY_SEAT_MS) out.push({ cause: "empty_seat", since: f.emptySeatSince });
-  if (f.noLandingSince !== null && f.seated.length + f.waiting.length > 0 && now - f.noLandingSince >= NO_LANDING_MS) out.push({ cause: "no_landing", since: f.noLandingSince });
+  // R44 follow-up (BOS-1841): while new checks are paused on purpose, an empty seat or a quiet line is no stall, and the paused
+  // time never counts: a stall told after the pause measures from when it ended (`floor`). Thrash is a fault, never paused.
+  if (pause?.on) return out;
+  const floor = pause?.floor ?? 0;
+  if (f.emptySeatSince !== null && !f.seeding) {
+    const since = Math.max(f.emptySeatSince, floor);
+    if (now - since >= EMPTY_SEAT_MS) out.push({ cause: "empty_seat", since });
+  }
+  if (f.noLandingSince !== null && f.seated.length + f.waiting.length > 0) {
+    const since = Math.max(f.noLandingSince, floor);
+    if (now - since >= NO_LANDING_MS) out.push({ cause: "no_landing", since });
+  }
   return out;
 }
 
@@ -113,8 +123,12 @@ export function mergeStallService(
     now?: () => Date;
     /** The trains to watch; the live ones by default (tests pass their own, on a fake clock). */
     trains?: () => Array<{ projectId: string; facts: TrainFacts }>;
+    /** Whether new checks are paused on purpose now (the soft hold for a server update). */
+    paused?: () => Promise<boolean>;
   },
 ) {
+  // The last pass that saw the pause on: a stall told after the pause measures from here. Lost on a restart, which errs to fewer alarms.
+  let pauseFloor = 0;
   const now = deps.now ?? (() => new Date());
   const trains = deps.trains ?? (() => trainProjects().flatMap((projectId) => {
     const facts = trainFacts(projectId);
@@ -157,13 +171,28 @@ export function mergeStallService(
       const out = { told: 0, ownerTold: 0, cleared: 0 };
       const live = trains();
       const standing = new Map<string, { projectId: string; facts: TrainFacts; cause: StallCause; since: number }>();
-      for (const { projectId, facts } of live) for (const s of stalls(facts, at)) standing.set(KEY(projectId, s.cause), { projectId, facts, ...s });
+      // BOS-1841: a deliberate pause on new checks (the soft hold) raises no empty-seat or no-landing stall, and its time is not counted.
+      const paused = deps.paused ? await deps.paused().catch(() => false) : false;
+      if (paused) pauseFloor = at;
+      const pause = { on: paused, floor: pauseFloor };
+      const raw = new Map<string, number>();
+      for (const { projectId, facts } of live) {
+        for (const s of stalls(facts, at)) raw.set(KEY(projectId, s.cause), s.since);
+        for (const s of stalls(facts, at, pause)) standing.set(KEY(projectId, s.cause), { projectId, facts, ...s });
+      }
       // Episodes that no longer stand (cleared, a new start, or no train any more) go, with the owner's notification.
       const kept = await db.select({ key: settings.key, value: settings.value }).from(settings).where(sql`${settings.key} like 'merge_stall:%'`);
       const episodes = new Map<string, Episode>();
       for (const row of kept) {
         const e = row.value as Episode | null;
         const s = standing.get(row.key);
+        // An episode raised before the pause stays as it is: not cleared during it, and not re-told after it for the same start.
+        const pausable = row.key.endsWith(":empty_seat") || row.key.endsWith(":no_landing");
+        if (e && pausable && (paused || raw.get(row.key) === e.since)) {
+          episodes.set(row.key, e);
+          if (s) s.since = e.since;
+          continue;
+        }
         if (s && e && e.since === s.since) {
           episodes.set(row.key, e);
           continue;
