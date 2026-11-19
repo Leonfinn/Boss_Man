@@ -213,6 +213,8 @@ export type MergeQueueView = {
   slots: number;
   /** BOS-1942: the name Boss Man records for this server's host, for "Running on this server (name)"; null when none is recorded. */
   serverHost?: string | null;
+  /** BOS-1942: what `slots` is made of, one entry per machine; only sent when more than one machine holds slots. */
+  slotSplit?: Array<{ ranOn: string; slots: number }>;
   running: RunningNow[];
   waiting: WaitingRow[];
   recent: RecentRow[];
@@ -384,6 +386,8 @@ export function mergeQueueService(
     endedMergePlaces?: (companyId: string, ticketIds: string[]) => Promise<Map<string, string>>;
     /** BOS-1942: the name Boss Man records for this server's host. */
     serverHost?: () => Promise<string | null>;
+    /** BOS-1942: how many of the check slots each machine holds (ranOn as in RunningNow). */
+    slotSplit?: (companyId: string) => Promise<Array<{ ranOn: string; slots: number }>>;
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
     /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
     places?: (companyId: string) => Promise<Map<string, { place: number | null; why: string | null; seatPlace?: number | null; lane?: string | null }>>;
@@ -863,6 +867,10 @@ export function mergeQueueService(
         startBrakeOff: brakeOff,
         slots,
         serverHost: deps.serverHost ? await deps.serverHost().catch(() => null) : null,
+        ...(await (async () => {
+          const split = deps.slotSplit && queue?.mode === "server" ? await deps.slotSplit(companyId).catch(() => []) : [];
+          return split.length > 1 ? { slotSplit: split } : {};
+        })()),
         running,
         waiting,
         recent: recentRows,

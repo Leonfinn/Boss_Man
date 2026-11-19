@@ -422,6 +422,17 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(none.serverHost).toBeNull();
     });
 
+    // BOS-1942: the slot total says what it is made of (server plus worker), only when more than one machine holds slots.
+    it("carries the slot split only when several machines hold slots", async () => {
+      const c = (ctx = await setup());
+      await waitingMerge(c);
+      const q = { queueStatus: async () => ({ mode: "server" as const, slots: 5, running: 0, waiting: 0 }) };
+      const two = await svc(c, { ...q, slotSplit: async () => [{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }] }).get(c.company.id);
+      expect(two.slotSplit).toEqual([{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }]);
+      const one = await svc(c, { ...q, slotSplit: async () => [{ ranOn: "company runner", slots: 5 }] }).get(c.company.id);
+      expect(one.slotSplit).toBeUndefined();
+    });
+
     it("says no runner is connected before anything else, even with every slot busy", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);

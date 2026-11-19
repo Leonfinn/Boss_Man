@@ -16,3 +16,8 @@ export function runningOnText(ranOn: string | null | undefined, serverHost?: str
 export function checkDoneOnText(ranOn: string | null | undefined, serverHost?: string | null): string | null {
   return ranOn ? `Check done on ${placePhrase(ranOn, serverHost)}.` : null;
 }
+
+/** "3 on this server (Docker01), 2 on the check worker Truenas": what a slot total is made of. */
+export function slotSplitText(split: Array<{ ranOn: string; slots: number }> | undefined, serverHost?: string | null): string | null {
+  return split && split.length > 1 ? split.map((s) => `${s.slots} on ${placePhrase(s.ranOn, serverHost)}`).join(", ") : null;
+}

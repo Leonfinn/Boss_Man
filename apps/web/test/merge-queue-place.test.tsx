@@ -45,6 +45,14 @@ describe("Merges tab says where each running merge check runs (BOS-1942)", () =>
     // The slot figures say what they count.
     expect(container.textContent).toContain("3 merge checks running · 5 check slots in all, shared with quick checks");
   });
+
+  it("says what the slot total is made of when a worker holds slots", async () => {
+    const view = { ...base, slotSplit: [{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }], running: [running("t1", "APP-1", { ranOn: "Truenas" })] };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => json(String(url).includes("check-queue") ? { mode: "server", slots: 5, running: 0, rows: [] } : view)));
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText(/Merging APP-1/);
+    expect(container.textContent).toContain("5 check slots in all (3 on this server (docker-01), 2 on the check worker Truenas), shared with quick checks");
+  });
 });
 
 describe("Quick checks tab uses the same wording (BOS-1942)", () => {

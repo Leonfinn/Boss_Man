@@ -10,7 +10,7 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
-import { checkDoneOnText, runningOnText, SERVER_PLACE } from "../check-place";
+import { checkDoneOnText, runningOnText, slotSplitText, SERVER_PLACE } from "../check-place";
 import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, pausedWaitText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
 import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
@@ -23,7 +23,7 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; ranOn?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
@@ -152,10 +152,11 @@ function SectionHead({ title, fact }: { title: string; fact: string }) {
   );
 }
 
-function Running({ rows, slots, paused, serverHost }: { rows: RunningNow[]; slots: number; paused?: PausedSummary | null; serverHost?: string | null }) {
+function Running({ rows, slots, paused, serverHost, slotSplit }: { rows: RunningNow[]; slots: number; paused?: PausedSummary | null; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }> }) {
+  const split = slotSplitText(slotSplit, serverHost);
   return (
     <section>
-      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} merge ${rows.length === 1 ? "check" : "checks"} running · ${slots} check ${slots === 1 ? "slot" : "slots"} in all, shared with quick checks · flagged after an hour`} />
+      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} merge ${rows.length === 1 ? "check" : "checks"} running · ${slots} check ${slots === 1 ? "slot" : "slots"} in all${split ? ` (${split})` : ""}, shared with quick checks · flagged after an hour`} />
       {!rows.length ? (
         <p className="muted">Nothing is checking or merging right now.</p>
       ) : (
@@ -544,7 +545,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
               {pausedLine && (
                 <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong> {pausedWaitText(pausedLine)}</p>
               )}
-              <Running rows={data.running} slots={data.slots} paused={pausedLine} serverHost={data.serverHost} />
+              <Running rows={data.running} slots={data.slots} paused={pausedLine} serverHost={data.serverHost} slotSplit={data.slotSplit} />
               <Waiting serverHost={data.serverHost} rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />
             </>

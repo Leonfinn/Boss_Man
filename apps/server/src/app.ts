@@ -1097,6 +1097,13 @@ export async function buildApp(opts: AppOptions) {
       return out;
     },
     serverHost: () => hostFacts.serverHost(),
+    // BOS-1942: which machine holds how many of the check slots (the server, then each ready worker), so the page can say what the total is made of.
+    slotSplit: async (companyId) => {
+      const ms = await checks.machines(companyId);
+      const ids = ms.map((m) => m.workerId).filter((x): x is string => !!x);
+      const names = ids.length ? await db.select({ id: checkWorkers.id, name: checkWorkers.name }).from(checkWorkers).where(inArray(checkWorkers.id, ids)) : [];
+      return ms.map((m) => ({ ranOn: m.workerId ? (names.find((n) => n.id === m.workerId)?.name ?? "a check worker") : "company runner", slots: m.limit }));
+    },
     queueStatus: async (companyId) => {
       const mode = await checkQueueSvc.mode();
       if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
