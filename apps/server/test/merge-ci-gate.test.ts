@@ -593,7 +593,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       expect(c.gh.reads.get(MERGE)).toBe(1);
     });
 
-    it("a queued check isn't moved to a new main while CI gates the merge (BOS-1344 retarget stays off)", async () => {
+    it("an older runner (no merge-refresh): a queued check isn't moved to a new main while CI gates the merge (BOS-1344 retarget stays off)", async () => {
       const c = (ctx = await setup());
       await serverMode(c);
       let done = false;
@@ -848,6 +848,85 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         expect((await c.req("GET", "/api/settings/merge-carry")).json()).toEqual({ on: true, turnMinutes: 60 });
         expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 0 })).json()).toEqual({ on: true, turnMinutes: 0 });
         expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 999 })).statusCode).toBe(400);
+      });
+    });
+
+    // BOS-1820: on 18 Nov 14 of 16 rebuilt merges had passed their check and GitHub run on a merge the carry rule already
+    // refused (main changed scripts/check-test-lines.mjs while they waited hours for a slot). With CI gating, a queued merge is
+    // now asked, while it waits, whether its pass could still be carried; a refusal moves the job to the new merge (same place)
+    // and restarts GitHub on it, before the check starts.
+    describe("refreshing a queued merge the carry would refuse (BOS-1820)", () => {
+      const REFRESH = ["carried-check", "ci-publish", "merge-carry", "merge-refresh"];
+      const MERGE2 = "d".repeat(40);
+      const TREE2 = "9".repeat(40);
+      const NEW_MAIN = "8".repeat(40);
+      const mergeCmds = (c: Awaited<ReturnType<typeof setup>>) => c.sent.filter((m): m is Extract<RunnerCommand, { type: "workspace.merge" }> => m.type === "workspace.merge");
+      const lineEvents = async (c: Awaited<ReturnType<typeof setup>>) =>
+        (await c.db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, MERGE_LINE_KIND)))).map((r) => r.detail as { event: string; [k: string]: unknown });
+      const jobs = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      /** The first prepare builds the old merge; every later one (the refresh polls) finds main moved to `later`. */
+      const preparesThen = (later: Record<string, unknown>) => [{ status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN }, ...Array.from({ length: 200 }, () => ({ status: "prepared", commit: MERGE2, tree: TREE2, targetSha: NEW_MAIN, ...later }))];
+      const refused = { ok: false, why: "main changed dependencies, build, CI or migration files", files: ["scripts/check-x.mjs"] };
+
+      it("main changed an always-re-test file while the check waited: the one job takes the new merge before it starts, GitHub runs on it, and it lands with no rebuild", async () => {
+        const c = (ctx = await setup({ features: REFRESH, prepares: preparesThen({ carry: refused }), finishes: [{ status: "merged", commit: FINAL, checked: { sha: MERGE2, tree: TREE2, ms: 0 } }] }));
+        await serverMode(c);
+        // The old merge's GitHub run never ends on its own; the new one passes.
+        c.gh.state.ci = (sha) => (sha === MERGE ? running() : green());
+        const res = approveAndWait(c.req, c.ticket.id);
+        await vi.waitFor(async () => expect((await lineEvents(c)).map((e) => e.event)).toContain("refreshed"), { timeout: 10_000 });
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        // One job, moved in place to the new merge.
+        const js = await jobs(c);
+        expect(js).toHaveLength(1);
+        expect(js[0]).toMatchObject({ commit: MERGE2, tree: TREE2 });
+        // The refresh asked about the old merge; GitHub got the new commit, after the old CI branch was deleted.
+        const cmds = mergeCmds(c);
+        expect(cmds.filter((m) => m.phase === "prepare")[1]).toMatchObject({ carryFrom: { commit: MERGE, tree: TREE } });
+        const steps = cmds.filter((m) => m.phase !== "prepare").map((m) => (m.phase === "publish" ? `publish ${m.commit!.slice(0, 1)}` : m.phase));
+        expect(steps).toEqual(["publish e", "unpublish", "publish d", "finish", "unpublish"]);
+        expect(cmds.find((m) => m.phase === "finish")).toMatchObject({ commit: MERGE2, tree: TREE2, carry: true });
+        expect(c.gh.reads.get(MERGE2)).toBeGreaterThan(0);
+        // Recorded as a refresh, never as a rebuild, and it earned no landing turn.
+        const ev = await lineEvents(c);
+        expect(ev.find((e) => e.event === "refreshed")).toMatchObject({ why: refused.why, files: refused.files, refreshes: 1 });
+        expect(ev.filter((e) => e.event === "rebuilt" || e.event === "landing_turn")).toEqual([]);
+        expect(await c.state()).toMatchObject({ systemState: "done", mergeCommit: FINAL });
+      });
+
+      it("main moved but the pass could still be carried: nothing is moved or published again, and finish carries it", async () => {
+        const c = (ctx = await setup({ features: REFRESH, prepares: preparesThen({ carry: { ok: true } }) }));
+        await serverMode(c);
+        let done = false;
+        c.gh.state.ci = (sha) => (sha === MERGE && !done ? running() : green());
+        const res = approveAndWait(c.req, c.ticket.id);
+        // Several refresh polls answer "carry ok" while the job waits.
+        await vi.waitFor(() => expect(mergeCmds(c).filter((m) => m.phase === "prepare").length).toBeGreaterThan(2), { timeout: 10_000 });
+        done = true;
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
+        expect((await jobs(c))[0]).toMatchObject({ commit: MERGE, tree: TREE });
+        expect(mergeCmds(c).filter((m) => m.phase !== "prepare").map((m) => m.phase)).toEqual(["publish", "finish", "unpublish"]);
+        expect(mergeCmds(c).find((m) => m.phase === "finish")).toMatchObject({ commit: MERGE, carry: true });
+        expect(c.gh.reads.get(MERGE2)).toBeUndefined();
+        expect((await lineEvents(c)).filter((e) => e.event === "refreshed")).toEqual([]);
+      });
+
+      it("the owner's merge_retarget switch off: no refresh is asked for (today's sequence)", async () => {
+        const c = (ctx = await setup({ features: REFRESH, prepares: preparesThen({ carry: refused }) }));
+        await serverMode(c);
+        await c.db.insert(settings).values({ key: "merge_retarget", value: false });
+        let done = false;
+        c.gh.state.ci = (sha) => (sha === MERGE && !done ? running() : green());
+        const res = approveAndWait(c.req, c.ticket.id);
+        await vi.waitFor(async () => expect(await jobs(c)).toHaveLength(1), { timeout: 5_000 });
+        // Many refresh intervals pass with the job queued.
+        await vi.waitFor(() => expect(c.gh.reads.get(MERGE) ?? 0).toBeGreaterThan(5), { timeout: 5_000 });
+        expect(mergeCmds(c).map((m) => m.phase)).toEqual(["prepare", "publish"]);
+        done = true;
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        expect((await res).json()).toMatchObject({ outcome: "merged" });
       });
     });
 

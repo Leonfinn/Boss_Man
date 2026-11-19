@@ -23,4 +23,9 @@ describe("mergePhaseOf", () => {
     expect(of({ phase: "prepare", base: sha })).toEqual({ phase: "prepare", base: sha });
     expect(of({ phase: "finish", commit: "c".repeat(40), tree: "t".repeat(40), expectBase: sha })).toEqual({ phase: "finish", commit: "c".repeat(40), tree: "t".repeat(40), expectBase: sha });
   });
+
+  it("passes prepare's carryFrom through (BOS-1820)", () => {
+    const carryFrom = { commit: "c".repeat(40), tree: "t".repeat(40) };
+    expect(of({ phase: "prepare", carryFrom })).toEqual({ phase: "prepare", carryFrom });
+  });
 });

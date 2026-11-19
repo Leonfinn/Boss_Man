@@ -119,6 +119,8 @@ export const FULL_CHECK_NEXT = "BOSSMAN_FULL_CHECK_NEXT";
 /** How often a landing re-reads its check job row (BOS-316). Tests shorten it with BOSSMAN_CHECK_JOB_POLL_MS. */
 /** BOS-1344: how often a waiting merge looks for a moved main. Tests shorten it with BOSSMAN_MERGE_RETARGET_MS. */
 const MERGE_RETARGET_MS = Number(process.env.BOSSMAN_MERGE_RETARGET_MS) > 0 ? Number(process.env.BOSSMAN_MERGE_RETARGET_MS) : 60_000;
+/** BOS-1820: at most this many CI-gated refreshes in one merge attempt (each restarts GitHub CI), a guard against a loop. */
+const MAX_CI_REFRESHES = 20;
 /** The owner's off switch for refreshing a waiting merge (setting merge_retarget; on unless set to false). */
 export const MERGE_RETARGET_KEY = "merge_retarget";
 const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
@@ -2743,7 +2745,10 @@ export function reviewService(
         }
         const r = await ownP;
         if (r) {
-          ciP.catch(() => undefined);
+          // BOS-1820: a refreshed merge publishes a new commit to the same CI branch next. Wait for the old wait to end (it
+          // sees the stop and deletes the branch) so that delete can't land after the new push.
+          if ((r as { status?: string }).status === "refreshed") await ciP.catch(() => undefined);
+          else ciP.catch(() => undefined);
           return r;
         }
         const v = await ciVerdict(await ciP, prep);
@@ -2811,24 +2816,34 @@ export function reviewService(
       type Prepared = Extract<MergeResult, { status: "prepared" }>;
       type CheckFailed = Extract<MergeResult, { status: "check_failed" }>;
       // "stopped": GitHub CI failed while the round's job ran (BOS-1070); CI's verdict is the attempt's answer.
-      type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | { status: "handed_over" } | CheckFailed;
+      // "refreshed" (BOS-1820): with CI gating, the queued job took a new merge (`prep`) the old one's pass couldn't be carried onto.
+      type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | { status: "handed_over" } | CheckFailed | { status: "refreshed"; prep: Prepared };
       const message = gateMergeMessage(t.title, ticketId);
-      const retargetOn = async () => {
-        // Never while CI gating is on (BOS-1070): CI was published for this commit, and a retargeted tree is one CI never ran on.
-        if (ci) return false;
+      const retargetSwitch = async () => {
         const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
         return row?.value !== false && row?.value !== "false";
       };
+      // Never while CI gating is on (BOS-1070): CI was published for this commit, and a retargeted tree is one CI never ran on.
+      // With CI, ciRefreshOn below (BOS-1820) refreshes only a merge whose pass couldn't be carried, and restarts its CI run.
+      const retargetOn = async () => !ci && (await retargetSwitch());
       // BOS-1365: one job per merge. Two jobs on one tree each waited for a slot and a quick merge landed in between. When the
       // deep check differs from the project check, one job runs both (project check first, with FULL_CHECK_NEXT so it skips what
       // the deep check repeats). The deep check is "also", never instead. skipChecks leaves `checks` empty, so nothing is queued.
       const queuedChecks = combinedCommand && checks.length > 1 ? [combinedCommand] : [...new Set(checks)];
       // base / expectBase only reach a runner that announced "merge-base" (the train checks that before it runs).
-      const prepare = (base?: string) => askMerge((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare", ...(base ? { base } : {}) }), MERGE_WAIT_MS);
+      // carryFrom (BOS-1820) only reaches a runner that announced "merge-refresh" (ciRefreshOn checks that).
+      const prepare = (base?: string, carryFrom?: { commit: string; tree: string }) => askMerge((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare", ...(base ? { base } : {}), ...(carryFrom ? { carryFrom } : {}) }), MERGE_WAIT_MS);
       const finish = (prep: Prepared, expectBase?: string, carry?: boolean) => askMerge((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "finish", commit: prep.commit, tree: prep.tree, ...(expectBase ? { expectBase } : {}), ...(carry ? { carry: true } : {}) }), MERGE_WAIT_MS);
       // BOS-1762: carry only to a runner that announced "merge-carry" (an older one's zod would drop it), and only while the
       // owner's switch is on. Read once per attempt.
       const carryOn = deps.runners.can(runner.id, "merge-carry") && (await mergeCarry());
+      /**
+       * BOS-1820: with GitHub CI gating, a queued merge is refreshed only when main moved in a way its pass couldn't be carried
+       * across (finish would refuse it and rebuild after both the check and GitHub had run). A file-disjoint move is left alone:
+       * the carry lands it with no second GitHub run. Needs the carry itself, a runner that answers prepare's carryFrom, and
+       * the owner's merge_retarget switch (Settings → Checks), which turns both refreshes off.
+       */
+      const ciRefreshOn = async () => !!ci && carryOn && deps.runners.can(runner.id, "merge-refresh") && (await retargetSwitch());
       const turnCapMs = (await mergeTurnMinutes()) * 60_000;
       const inReviewNow = async (id: string) => (await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, id)))[0]?.state === "review";
       /**
@@ -2881,7 +2896,7 @@ export function reviewService(
        * every poll: once it names a reason the round ends and the caller prepares again. Queueing the new tree then replaces a
        * queued job and keeps its place (BOS-1328); a running one is cancelled as a leftover, which frees its slot.
        */
-      const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined; stop?: CiStop; leftReview?: () => Promise<boolean> }): Promise<RoundEnd> => {
+      const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; ciRefresh?: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined; stop?: CiStop; leftReview?: () => Promise<boolean> }): Promise<RoundEnd> => {
         let lastRefresh = Date.now();
         for (const command of queuedChecks) {
           {
@@ -2949,7 +2964,24 @@ export function reviewService(
               // BOS-1344: still waiting for a slot. When main moved, the job takes the new merged tree before it starts, so the check
               // never begins on a tree that is already stale. A failed refresh (conflict, migration) is left to the normal round.
               // Only the round's first command: a later one would push a tree an earlier command never ran on (finish then says main_moved).
-              if (command === queuedChecks[0] && cur.state === "queued" && Date.now() - lastRefresh >= MERGE_RETARGET_MS && (await o.refresh())) {
+              const refreshDue = command === queuedChecks[0] && cur.state === "queued" && Date.now() - lastRefresh >= MERGE_RETARGET_MS;
+              // BOS-1820: GitHub CI gates this merge. Ask whether the queued merge's pass could still be carried onto a fresh one;
+              // only a refusal retargets the job (keeping its place) and ends the round, so the caller restarts GitHub on the new
+              // commit. Carry ok or the same tree: nothing changes, the running GitHub run stands and finish carries.
+              if (refreshDue && o.ciRefresh && (await o.ciRefresh())) {
+                lastRefresh = Date.now();
+                const fresh = await prepare(undefined, { commit: prep.commit, tree: prep.tree }).catch(() => null);
+                if (fresh?.status === "branch_moved") return fresh;
+                if (fresh?.status === "prepared" && fresh.tree !== cur.tree && fresh.carry?.ok === false) {
+                  const moved = await queue.retarget(cur.id, { commit: fresh.commit, tree: fresh.tree });
+                  // null: a runner claimed the job meanwhile, so it runs on the old tree and finish decides, as before.
+                  if (moved) {
+                    ref.prep = fresh;
+                    await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "main changed files a pass couldn't be carried across; the job takes the new merge, keeping its place" });
+                    return { status: "refreshed", prep: fresh };
+                  }
+                }
+              } else if (refreshDue && (await o.refresh())) {
                 lastRefresh = Date.now();
                 const fresh = await prepare().catch(() => null);
                 // BOS-1413: a commit made while the check waited for a slot: the queued job is dropped and nothing is merged.
@@ -3007,18 +3039,32 @@ export function reviewService(
         // The train doesn't adopt: it re-prepares, and the same tree reuses the live job through enqueue. Nor does CI gating: an
         // adopted commit was never published, so CI would start from scratch on it anyway, and a normal prepare does that.
         let adopted = ci ? undefined : opts?.adopt;
+        // BOS-1820: the merge a refreshed round moved its queued job to. The next round starts on it without preparing again and
+        // isn't counted: nothing was checked or landed, so it is no rebuild and earns no landing turn.
+        let refreshed: Prepared | undefined;
+        let refreshes = 0;
         // BOS-1762: a ticket that took the landing turn gets one more round, so the turn it earned isn't wasted on the round cap.
         for (let round = 0; round < 3 || (round < 4 && landingTurns.holds(t.projectId, ticketId)); round++) {
-          await heldBeforeRebuild(round);
-          const prep: MergeResult = adopted ? { status: "prepared", commit: adopted.commit, tree: adopted.tree, targetSha: "" } : await prepare();
+          if (!refreshed) await heldBeforeRebuild(round);
+          const prep: MergeResult = refreshed ?? (adopted ? { status: "prepared", commit: adopted.commit, tree: adopted.tree, targetSha: "" } : await prepare());
+          refreshed = undefined;
           if (prep.status !== "prepared") return prep;
           const wasAdopted = !!adopted;
           adopted = undefined;
           const ref = { prep };
           const r = await alongsideCi(prep, async (stop) => {
-            const end = await runRound(ref, { refresh: retargetOn, stop, leftReview });
+            const end = await runRound(ref, { refresh: retargetOn, ...(refreshes < MAX_CI_REFRESHES ? { ciRefresh: ciRefreshOn } : {}), stop, leftReview });
             return end.status === "passed" || end.status === "stopped" ? null : end;
           });
+          if (r?.status === "refreshed") {
+            refreshes++;
+            const why = r.prep.carry?.ok === false ? r.prep.carry : { why: "main changed", files: undefined };
+            await lineEvent(db, t, { event: "refreshed", why: why.why, ...(why.files?.length ? { files: why.files } : {}), refreshes });
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Main changed ${why.files?.length ? why.files.slice(0, 3).join(", ") + (why.files.length > 3 ? ", …" : "") : "shared files"} while the merge check waited for a slot, so the merge was rebuilt on the current main before its check started (it keeps its place, and GitHub CI starts again on the new merge). Nothing to do.` });
+            refreshed = r.prep;
+            round--;
+            continue;
+          }
           if (r?.status === "restack") continue; // only the train restacks; kept for the type
           if (r) return r;
           // BOS-1769: the check (and CI) passed, but the ticket left review meanwhile: a pass that is over never pushes. A landing
@@ -3267,6 +3313,8 @@ export function reviewService(
               }
               // The train never runs with CI gating, so nothing stops its rounds; never read "stopped" as a pass.
               if (r.status === "stopped") throw new Error("A merge-train check round was stopped by a CI wait that the train doesn't run.");
+              // Nor a CI-gated refresh (BOS-1820): the train passes no ciRefresh.
+              if (r.status === "refreshed") throw new Error("A merge-train check round was refreshed for a CI wait that the train doesn't run.");
               if (r.status !== "passed") return r;
               train.passed(ticketId);
               // Land only as the head, on exactly the base this tree was prepared on.
