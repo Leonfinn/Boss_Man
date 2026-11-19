@@ -5,7 +5,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, deploys, runners, secretAccessLog, wakes } from "../src/db/schema.js";
-import { endpointProblem } from "../src/services/deploys.js";
+import { endpointProblem, liveTagOf } from "../src/services/deploys.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -120,5 +120,30 @@ describe("deploys (R15)", () => {
     await c.target({ name: "Staging", kind: "docker", endpoint: "tcp://socket-proxy:2375" });
     await expect(c.deploys.request(c.actor, { target: "Prod", ref: "v1" })).rejects.toThrow(/Targets: Staging/);
     await expect(c.deploys.request(c.actor, { target: "Staging", ref: "v1", notes: "key AKIAIOSFODNN7EXAMPLE" })).rejects.toThrow(/AWS access key/);
+  });
+});
+
+describe("liveTagOf (DR-033)", () => {
+  const live = { projectId: "11111111-1111-4111-8111-111111111111", name: "live-deployed" };
+
+  it("returns a target's well-formed deploy tag", () => {
+    expect(liveTagOf({ rules: { liveTag: live } })).toEqual(live);
+    // A copy, not the stored object: the caller can't change the target's rules through it.
+    expect(liveTagOf({ rules: { liveTag: live } })).not.toBe(live);
+    // Unknown keys the stored rules may carry are dropped.
+    expect(liveTagOf({ rules: { liveTag: { ...live, extra: true } } })).toEqual(live);
+  });
+
+  it("returns null for empty or unknown rules, or a malformed tag", () => {
+    expect(liveTagOf({ rules: null })).toBeNull();
+    expect(liveTagOf({ rules: {} })).toBeNull();
+    expect(liveTagOf({ rules: { requiresApproval: true } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: null } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: "live-deployed" } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { name: live.name } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: live.projectId } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: live.projectId, name: "" } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: 42, name: live.name } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: live.projectId, name: 7 } } })).toBeNull();
   });
 });
