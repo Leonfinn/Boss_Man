@@ -289,7 +289,9 @@ export type Ticket = {
   /** The merge commit, set once merged; with systemState "blocked" or "in_progress" it puts the card in the "Merged, watching" lane (BOS-1636, BOS-1907). */
   mergeCommit?: string | null;
   /** In review and not the owner's to act on: still with its reviewers, or approved by all of them and only merging (BOS-667). */
-  reviewStage?: "awaiting_review" | "merging" | "held" | null;
+  reviewStage?: "awaiting_review" | "merging" | "held" | "checking" | null;
+  /** BOS-1906: with reviewStage "checking", where its quick check stands ("running now", "no. 3 in line"). */
+  checkLine?: string | null;
   /** A reviewer passed it but holds the merge (BOS-808). */
   hold?: ReviewHold | null;
   /** Where an approved ticket's merge is, in plain words ("Waiting for a check slot."). */

@@ -1,5 +1,5 @@
 {
-  "id": "9b049b0e-c810-434b-bc50-71801472f8ac",
+  "id": "0b4a2e97-796a-4aeb-a691-14b6d8153c27",
   "prevId": "1d157377-b06b-47df-bd3e-74e80aeaeb5b",
   "version": "7",
   "dialect": "postgresql",
@@ -10206,18 +10206,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "watching_for": {
-          "name": "watching_for",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "watch_until": {
-          "name": "watch_until",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "live_evidence": {
           "name": "live_evidence",
           "type": "text",
@@ -10508,6 +10496,12 @@
         },
         "wip_held_at": {
           "name": "wip_held_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "check_hold_at": {
+          "name": "check_hold_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

@@ -33,6 +33,8 @@ import { SIGNED_OFF_HEAD_REFUSAL, signedOffHeadOutsideReview } from "./services/
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, stagingTexts, stagingWarning, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, unlinkedOrderWarning, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
+import { CHAT_REASON } from "./services/chat.js";
+import { dueChatReport, setReportInChat } from "./services/chat-report-back.js";
 
 /** The state note after update_ticket replaces the criteria: the old note's verdicts belong to the old list, so none carries over. */
 const CRITERIA_REPLACED_NOTE = "The CEO replaced this ticket's acceptance criteria. Report each one again.";
@@ -387,11 +389,20 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         }).optional().describe("Add or remove \"waits on\" links on this ticket. When the point in until is reached (merge commit on main, or done), this ticket's assignee is woken. On approved work in review, the link also holds the merge: it waits as \"Passed, held\" with its approvals kept and merges by itself once the linked ticket is merged and live. Besides the CEO and managers, the ticket's own assignee may use this on their own ticket."),
         acceptanceCriteria: acceptanceCriteriaSchema.optional().describe("Replaces the ticket's tracked acceptance criteria, in the shape create_ticket takes (a string, or {text, after: \"merge\"}); up to 10, empty clears them. Every criterion goes back to not reported (the old pass/fail verdicts in the state note are dropped), and the change and your reason are kept in the ticket history. If the ticket is in review, reviews are not re-requested: tell the assignee and reviewers."),
         markLive: z.string().max(300).optional().describe("CEO only, on its own: say a merged ticket is live, for a company that puts its own work live (not through the Boss Man server update). Give the evidence: the commit sha that went live, or a short note of how it went live. Its go-live wait ends and the assignee is woken to report the after-merge checks."),
+        reportInChat: z.boolean().optional().describe("CEO only, on its own: true marks the ticket as asked for in chat, so when it closes or hands out follow-ups your chat is woken to report back to the owner there (and Boss Man posts a line if you don't); false clears the mark. Boss Man sets it by itself on a ticket a chat run creates or changes (R52)."),
         reason: z.string().trim().min(1).max(240),
         expected_version: z.number().int().optional(),
       },
     },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, ownerSetupWhy, ownerSetupIfSkipped, lintOverride, urgent, fixesLive, size, fixesMergeCheck, acceptanceCriteria, waitsOn, ceoPlan, ceoPlanDeadline, markLive, reason, expected_version }) => {
+    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, ownerSetupWhy, ownerSetupIfSkipped, lintOverride, urgent, fixesLive, size, fixesMergeCheck, acceptanceCriteria, waitsOn, ceoPlan, ceoPlanDeadline, markLive, reportInChat, reason, expected_version }) => {
+      // R52: the CEO sets or clears "report back in chat" on one ticket, as its own call.
+      if (reportInChat !== undefined) {
+        const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
+        if (me?.role !== "ceo" || !scope.agentId) return fail("Only the CEO sets or clears report-back-in-chat on a ticket.");
+        if (!(await setReportInChat(db, scope.companyId, ticketId, reportInChat, scope.agentId))) return fail("No ticket with that ID in your company.");
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me.name} ${reportInChat ? "marked it to be reported back in chat" : "cleared its report back in chat"}: ${reason}` });
+        return text(reportInChat ? "Marked: when this ticket closes or hands out follow-ups, your chat is woken to report it to the owner." : "Cleared: this ticket is no longer reported back in chat.");
+      }
       const badPage = acceptanceCriteria ? pageClauseRefusal(acceptanceCriteria) : null;
       if (badPage) return fail(badPage);
       const manager = await isManager();
@@ -719,6 +730,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // the merge line's "left" event, and the done, review and feature steps after a real change. This tool
       // only says whom to wake: the chain depth of this run goes with each wake.
       const at = new Date();
+      // BOS-1906: with no passing quick check on the head, Boss Man queues it and the ticket waits in review as "Being checked":
+      // no review round opens and no reviewer is woken until it passes.
+      const beingChecked = state === "review" && !sameState && checkRequests ? await checkRequests.holdForReview({ companyId: scope.companyId, agentId: scope.agentId, ticketId }) : { held: false as const };
       let moved: Awaited<ReturnType<typeof moveTicket>>;
       try {
         moved = await moveTicket(db, ticketId, state, {
@@ -729,10 +743,10 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           note: summary,
           blockedUntil: state === "blocked" ? until : undefined,
           blockedUntilReason: blocked_reason?.trim() || null,
-          fields: { ...(watching_for?.trim() ? { watchingFor: watching_for.trim(), watchUntil } : {}), ...(gateAdded ?{ acceptanceCriteria: withCriteria.criteria } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(ownerSetupWhy !== undefined ? { ownerSetupWhy: ownerSetupWhy.trim() || null } : {}), ...(ownerSetupIfSkipped !== undefined ? { ownerSetupIfSkipped: ownerSetupIfSkipped.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
+          fields: { ...(watching_for?.trim() ? { watchingFor: watching_for.trim(), watchUntil } : {}), ...(beingChecked.held ? { checkHoldAt: at } : {}), ...(gateAdded ? { acceptanceCriteria: withCriteria.criteria } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(ownerSetupWhy !== undefined ? { ownerSetupWhy: ownerSetupWhy.trim() || null } : {}), ...(ownerSetupIfSkipped !== undefined ? { ownerSetupIfSkipped: ownerSetupIfSkipped.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
           hooks: {
             onDone: () => hooks.onTicketDone?.(ticketId, scope.runId),
-            onReview: () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),
+            onReview: beingChecked.held ? undefined : () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),
             onFeature: (fid) => feedback.syncFeature(fid),
           },
           now: at,
@@ -775,6 +789,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (followUps?.length && sameState) followUp += "\n\nThe ticket was already in that state, so no follow-ups were opened.";
       if (followUps?.length && !sameState && followUpWho && "ids" in followUpWho) {
         const opened = await openFollowUps(db, work, ticketId, followUps, followUpWho.ids, scope.agentId, { isManager: followUpManager, suggested: followUpWho.suggested }).catch(() => null);
+        // R52: a ticket asked for in chat that hands out follow-ups is reported back in that chat (done does it too, in onTicketDone).
+        if (opened?.length) {
+          const owed = await dueChatReport(db, ticketId, new Date(), scope.runId).catch(() => null);
+          if (owed) await Promise.resolve(hooks.wake?.(owed.agentId, { reason: CHAT_REASON, note: "", priority: 4, causedByRunId: scope.runId })).catch(() => undefined);
+        }
         followUp += opened
           ? `\n\nBoss Man opened ${opened.length === 1 ? "the follow-up" : "the follow-ups"}: ${opened.map((o) => `${o.ref} (#/tickets/${o.id}) "${o.title}" for ${o.assignee}`).join("; ")}. Don't create them again.`
           : `\n\nThe move worked, but Boss Man couldn't open the follow-ups. Create them with create_ticket.`;
@@ -807,7 +826,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, !byCeo);
         if (state === "blocked" && withCriteria.prev === "in_progress" && waitsOnMergeOnly && (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId)).limit(1)).length) planNote += `\n\n${IN_PROGRESS_BLOCKED_WARNING}`;
       }
-      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
+      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
     },
   );
 }

@@ -647,6 +647,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
       )}
       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
       {merging && t.mergeNote && !mergeLine && <span className="note">{t.mergeNote}</span>}
+      {t.reviewStage === "checking" && <span className="note" data-testid="board-being-checked-note">Quick check: {t.checkLine ?? "waiting"}.</span>}
       {mergeLine && <span className="note" data-testid="board-merge-line">{statusLineText(mergeLine)}</span>}
       {/* BOS-1565: a held card says what it waits for even before the merge queue's own line has loaded or if it has none. */}
       {t.reviewStage === "held" && t.hold && !mergeLine && (
@@ -785,7 +786,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Awaiting review" : c.name);
   const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
-  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean; liveCheck?: boolean }> => {
+  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean; liveCheck?: boolean; checking?: boolean }> => {
     const open = col.tickets.filter((t) => !t.waitingOnOwner);
     // BOS-1636: merged work in Blocked that only waits for its after-merge check is not stuck: its own lane, shown only when there is some.
     // BOS-1907: the lane is "Merged, watching". A merged ticket still in In progress (merged before the change) shows here too.
@@ -797,8 +798,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     if (col.systemState !== "review") return [{ col, tickets: open, mine: false }];
     // A reviewer's hold (BOS-808): passed, kept from merging on purpose. Its own lane, shown only when something is held.
     const held = open.filter((t) => t.reviewStage === "held");
+    // BOS-1906: handed in, its quick check is queued or running, no reviewer is asked yet. Its own lane at the top, shown only when there is one.
+    const checking = open.filter((t) => t.reviewStage === "checking");
     return [
-      { col, tickets: open.filter((t) => t.reviewStage !== "merging" && t.reviewStage !== "held"), mine: false },
+      ...(checking.length ? [{ col, tickets: checking, mine: false, checking: true }] : []),
+      { col, tickets: open.filter((t) => t.reviewStage !== "merging" && t.reviewStage !== "held" && t.reviewStage !== "checking"), mine: false },
       { col, tickets: open.filter((t) => t.reviewStage === "merging"), mine: false, merging: true },
       ...(held.length ? [{ col, tickets: held, mine: false, held: true }] : []),
       { col, tickets: waiting, mine: true },
@@ -1072,7 +1076,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {!board.data && current && !board.error && (
             <section className="lane" aria-label="Loading tasks"><Loader label="Loading tasks" /></section>
           )}
-          {lanes.map(({ col, tickets, mine, merging, held, liveCheck }) => {
+          {lanes.map(({ col, tickets, mine, merging, held, liveCheck, checking }) => {
             // Tickets that can't move (waits-on, plan with owner, merged and waiting to go live) don't count towards the limit (BOS-1172).
             const counted = col.tickets.filter((t) => !t.wipExempt).length;
             const full = col.wipLimit != null && counted >= col.wipLimit;
@@ -1085,7 +1089,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
             const visible = done && !allDone && !words.length ? rows.slice(0, DONE_SHOWN) : rows;
             return (
-              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : liveCheck ? "live-check" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : liveCheck ? "lane-live-check" : `lane-${col.id}`}>
+              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : liveCheck ? "live-check" : checking ? "being-checked" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : liveCheck ? "lane-live-check" : checking ? "lane-being-checked" : `lane-${col.id}`}>
                 {mine ? (
                   <header className="lane-head">
                     <div className="lane-title">
@@ -1115,6 +1119,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         : "A reviewer passed these but is holding the merge on purpose. Nothing is wrong, and nobody is woken until the hold ends."}
                     </span>
                     {heldSummary(mergeLines.data) && <HeldBehindFixLine held={heldSummary(mergeLines.data)!} />}
+                  </header>
+                ) : checking ? (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id="lane-being-checked">Being checked</h2>
+                      <span className="mono">{shown.length}</span>
+                    </div>
+                    <span className="lane-hint">Handed in. Boss Man is running each quick check, and nobody is asked to review until it passes. If it fails, the task goes back to its agent. Nothing is stuck.</span>
                   </header>
                 ) : liveCheck ? (
                   <header className="lane-head">

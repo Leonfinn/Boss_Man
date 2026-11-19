@@ -146,7 +146,7 @@ export type McpHooks = {
   onTicketReview?: (ticketId: string, byAgentId: string | null, causedByRunId: string) => Promise<unknown>;
   nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
   /** Wakes an agent, e.g. the CEO for a note request. */
-  wake?: (agentId: string, input: { reason: string; note: string; ticketId?: string | null; causedByRunId?: string | null }) => Promise<unknown>;
+  wake?: (agentId: string, input: { reason: string; note: string; ticketId?: string | null; causedByRunId?: string | null; priority?: number }) => Promise<unknown>;
   /** A run with no ticket touched one: record it as the run's ticket so the Runs list shows it (BOS-254). */
   onRunTicket?: (ticketId: string, runId: string) => Promise<unknown>;
 };

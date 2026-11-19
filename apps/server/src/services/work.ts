@@ -339,7 +339,17 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (d.state === "waiting") signoffWaiting.set(r.t.id, d.reviewer);
       }
       const withPr = new Set(rows.filter((r) => r.t.pullRequestUrl).map((r) => r.t.id));
-      for (const id of inReview) if (!pendingAny.has(id) && !withPr.has(id) && !signoffWaiting.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
+      // BOS-1906: a ticket "Being checked" has no review open on purpose; it is not the owner's until its check has passed.
+      const beingChecked = new Set(rows.filter((r) => r.t.systemState === "review" && r.t.checkHoldAt).map((r) => r.t.id));
+      // Where each one stands in the check line, in the words a check's owner hears ("queued at no. 3", "running now").
+      const checkLines = new Map<string, string>();
+      if (beingChecked.size) {
+        const q = await checkQueue(db).status(p.companyId);
+        for (const j of q.running) if (beingChecked.has(j.ticketId) && j.kind === "pre_review") checkLines.set(j.ticketId, "running now");
+        for (const j of q.queued) if (beingChecked.has(j.ticketId) && j.kind === "pre_review" && !checkLines.has(j.ticketId)) checkLines.set(j.ticketId, `no. ${j.place} in line`);
+        for (const j of q.held) if (beingChecked.has(j.ticketId) && !checkLines.has(j.ticketId)) checkLines.set(j.ticketId, "waiting (the line is held)");
+      }
+      for (const id of inReview) if (!beingChecked.has(id) && !pendingAny.has(id) && !withPr.has(id) && !signoffWaiting.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
       // Who is running on each ticket right now, so a card can show live work. A run counts for a
       // ticket when it is on it, was about it without being on it (a nudge that named it), or a
       // wake's note names it (a review wake can list several tickets in one run). Chat runs don't.
@@ -421,11 +431,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // Only for a ticket in review that isn't the owner's to act on: those are in Your review.
         // A reviewer's hold (BOS-808): passed, but kept from merging on purpose. Its own stage, apart from waiting for a reviewer or merging.
         const hold = t.systemState === "review" ? (holds.get(t.id) ?? null) : null;
-        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
+        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : beingChecked.has(t.id) ? ("checking" as const) : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
         ...t,
         waitingOnOwner,
         reviewStage,
+        checkLine: reviewStage === "checking" ? (checkLines.get(t.id) ?? "waiting for its check") : null,
         hold,
         mergeNote: reviewStage === "merging" ? mergeNote(t) : null,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,

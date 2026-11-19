@@ -5,6 +5,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Db } from "./db/client.js";
 import { tickets } from "./db/schema.js";
 import { refsOf } from "./mcp-common.js";
+import { markReportInChat } from "./services/chat-report-back.js";
 
 // shortcut: one run's record is held in memory and dropped when the run ends; lost on restart, harmless because a chat run dies with the restart (BOS-758).
 type RunTrace = { changes: string[]; tickets: string[] };
@@ -156,6 +157,9 @@ async function changeTrace(name: string, input: Record<string, unknown>, ref: (i
   }
 }
 
+/** The chat tools whose ticket is marked "report back in chat" (R52): the ones that create or change one ticket. */
+const REPORT_TOOLS: ReadonlySet<string> = new Set(["create_ticket", "update_ticket", "set_ticket_state", "assign_ticket", "set_ticket_risk"]);
+
 const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
 /**
@@ -187,6 +191,12 @@ export function traceCalls(server: McpServer, db: Db, runId: string, companyId: 
         // A created ticket has no id in its input, so take the one the tool returned.
         const change = await changeTrace(name, input, refOf, name === "create_ticket" ? returned[0] : undefined);
         if (change && !trace.changes.includes(change)) trace.changes.push(change);
+        // R52: a ticket a chat run creates or changes is reported back in that chat when it closes. Never turns a good call into an error.
+        // A call that sets or clears the mark by hand is the CEO's own word, and is not marked over.
+        if (REPORT_TOOLS.has(name) && input.reportInChat === undefined) {
+          const id = name === "create_ticket" ? returned[0] : typeof input.ticketId === "string" ? input.ticketId : null;
+          if (id) await markReportInChat(db, runId, id).catch(() => undefined);
+        }
         if (trace.changes.length || trace.tickets.length) traces.set(runId, trace);
       }
       return out;
