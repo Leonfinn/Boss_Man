@@ -37,7 +37,9 @@ Plan on 16 GB of memory for one company with Boss Man's default settings. 8 GB c
 - an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. A Claude Pro or Max plan is the easiest start, because the CEO is a Claude Code agent unless you change it.
 - a computer with a web browser on the same network
 
-Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**. Docker Desktop on Mac and Windows isn't supported yet.
+Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine: the network guard under **Settings → Server and runner → This server**, and the agent fence under **Settings → Permissions → Agent fence**.
+
+Mac and Windows: not supported yet, but we're testing Docker Desktop. On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet, and Windows hasn't been tested. For now, use a Linux machine.
 
 The commands are for a root shell. On a normal Linux machine, run them as root or put `sudo` in front.
 
