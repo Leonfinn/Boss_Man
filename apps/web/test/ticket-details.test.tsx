@@ -103,6 +103,21 @@ describe("the Details card (BOS-1195)", () => {
     expect(JSON.parse(call[1].body)).toEqual({ ownerSetupIfSkipped: "Runs stay paused" });
   });
 
+  it("shows both lines when both are set, and neither line when both are null (BOS-1882)", async () => {
+    const both = stub({ ownerSetup: "Open Settings", ownerSetupWhy: "Funding works again", ownerSetupIfSkipped: "Runs stay paused" });
+    await screen.findByText("After it goes live");
+    const text = rowIn(both.container, "After it goes live")!.textContent!;
+    expect(text).toContain("Funding works again");
+    expect(text).toContain("Runs stay paused");
+    cleanup();
+    vi.unstubAllGlobals();
+    const none = stub({ ownerSetup: "Open Settings", ownerSetupWhy: null, ownerSetupIfSkipped: null });
+    await screen.findByText("After it goes live");
+    const bare = rowIn(none.container, "After it goes live")!.textContent!;
+    expect(bare).not.toContain("If you skip it:");
+    expect(bare).not.toContain("Funding works again");
+  });
+
   it("counts what it produced, its code, and nothing yet", async () => {
     const items = [{ id: "a1", kind: "wiki_page", title: "Report", slug: "report", path: null, ref: null, url: null, agent: null, runId: null, createdAt: "2026-10-19T09:00:00Z" }, { id: "a2", kind: "url", title: "Link", slug: null, path: null, ref: null, url: "https://example.com", agent: null, runId: null, createdAt: "2026-10-19T09:00:00Z" }];
     const two = stub({}, { artifacts: items });
