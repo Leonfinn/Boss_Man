@@ -28,6 +28,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "priority watch": "waiting",
   // Merge stall (BOS-1515): the CEO is told the merge train has an empty seat or no landing while tickets wait. Never dropped.
   "merge line stalled": "waiting",
+  // Idle check capacity (R46, BOS-1814): a free check slot has not taken a queued job for 5 minutes. The CEO must hear it. Never dropped.
+  "idle check slot": "waiting",
   // Line holder sent back (BOS-1669): a ticket others wait on to merge failed the gate; the CEO may have promised the owner word.
   "line holder sent back": "waiting",
   // Line holder stuck (R40, BOS-1685): a main fix has held the merge line over 2 hours; the CEO picks quarantine or revert, once per fix.

@@ -88,6 +88,7 @@ import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
 import { mainCiService } from "./services/main-ci.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
+import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
@@ -613,6 +614,7 @@ export async function buildApp(opts: AppOptions) {
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
     mergeTrain: (id) => mergeTrainStatus(db, id),
+    idleCheckSlots: (id) => checks.idleSlots(id).map(idleView),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -829,6 +831,11 @@ export async function buildApp(opts: AppOptions) {
     mergeJam: () => mergeJam.run(),
     priorityWatch: () => priorityWatch.run(),
     mergeStall: () => mergeStall.run(),
+    // R46: refresh what each free check slot declined (the pump), then tell on any that has sat idle with a job waiting.
+    checkIdle: async () => {
+      await checks.pump();
+      return checkIdle.run();
+    },
     // Also flags a card whose own ticket changed state since it was raised (BOS-1161); that never closes it.
     clearAlerts: async () => {
       const wakeAgent = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number });
@@ -1177,6 +1184,16 @@ export async function buildApp(opts: AppOptions) {
     tellCeo: async ({ companyId, ticketId, note }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (ceo) await scheduler.notify(ceo.id, { reason: MERGE_STALL_REASON, ticketId, priority: 2, note });
+    },
+    notify: (input) => notes.notify(input),
+    now: opts.now,
+  });
+  // Idle check capacity (R46, BOS-1814): the CEO after 5 minutes, the owner after 30, once per machine and job.
+  const checkIdle = checkIdleService({
+    slots: () => checks.idleSlots(),
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: IDLE_CHECK_SLOT_REASON, ticketId, priority: 2, note });
     },
     notify: (input) => notes.notify(input),
     now: opts.now,
@@ -2036,7 +2053,9 @@ export async function buildApp(opts: AppOptions) {
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
     owner.get("/api/companies/:id/check-queue", async (req) => {
       const id = IdParam.parse(req.params).id;
-      return checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
+      const queue = await checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
+      // R46: "free, not taking X because …" for every machine with a free slot that declined a job it could take.
+      return { ...queue, idleSlots: checks.idleSlots(id).map(idleView) };
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
