@@ -90,6 +90,32 @@ describe("subscription quota from the Claude adapter", () => {
     expect(windowHasReset(new Date(fable.resetsAt), new Date())).toBe(true);
   });
 
+  // BOS-1916: a limit shows (and can trigger the hold) only while the account's latest report includes it.
+  it("lists only the limits the latest report includes, and keeps the owner's switch for one that went away", async () => {
+    const report = (windows: Record<string, number>) => ({ "_claude/rateLimit": { unifiedWindows: Object.fromEntries(Object.entries(windows).map(([k, u]) => [k, { utilization: u, resetsAt: 1792245600 }])) } });
+    const a = (await post("/api/funding-sources", { name: "Account A", kind: "subscription", provider: "anthropic" })).json();
+    const b = (await post("/api/funding-sources", { name: "Account B", kind: "subscription", provider: "anthropic" })).json();
+    // A used to report a 5-hour window at 99%, then its latest report left it out; B never reported Fable.
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report({ five_hour: 0.99, seven_day: 0.2 }) });
+    await post("/api/quota-samples", { fundingSourceId: b.id, claudeMeta: report({ five_hour: 0.3, seven_day: 0.2 }) });
+    await t.db.update(quotaSamples).set({ observedAt: new Date(Date.now() - 3_600_000) }).where(eq(quotaSamples.fundingSourceId, a.id));
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report({ seven_day: 0.3, seven_day_overage_included: 0.1 }) });
+    await t.app.inject({ method: "PATCH", url: `/api/funding-sources/${a.id}`, headers: { cookie }, payload: { quotaDisabledWindows: ["five_hour"] } });
+    const sa = (await get(`/api/funding-sources/${a.id}/status`)).json();
+    const sb = (await get(`/api/funding-sources/${b.id}/status`)).json();
+    expect(sa.windowsSeen).toEqual(["seven_day", "seven_day_overage_included"]);
+    expect(sa.quota.map((q: { window: string }) => q.window).sort()).toEqual(["seven_day", "seven_day_overage_included"]);
+    expect(sb.windowsSeen).toEqual(["five_hour", "seven_day"]);
+    expect(sb.quota.map((q: { window: string }) => q.window).sort()).toEqual(["five_hour", "seven_day"]);
+    // The owner's choice for the 5-hour window is kept while A does not report it.
+    expect(sa.source.quotaDisabledWindows).toEqual(["five_hour"]);
+    // It comes back by itself when A reports it again.
+    await post("/api/quota-samples", { fundingSourceId: a.id, claudeMeta: report({ five_hour: 0.1, seven_day: 0.3, seven_day_overage_included: 0.1 }) });
+    const again = (await get(`/api/funding-sources/${a.id}/status`)).json();
+    expect(again.windowsSeen).toEqual(["five_hour", "seven_day", "seven_day_overage_included"]);
+    expect(again.source.quotaDisabledWindows).toEqual(["five_hour"]);
+  });
+
   it("keeps the hold threshold, extra-usage choice and window switches per source", async () => {
     const sub = (await post("/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json();
     await post("/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.9, resetsAt: 1792245600 }, five_hour: { utilization: 0.2, resetsAt: 1792177800 } } } } });

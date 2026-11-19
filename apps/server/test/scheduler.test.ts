@@ -300,6 +300,33 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 0, deferred: 1 });
   });
 
+  // BOS-1916: a limit the account's latest report left out (an old full 5-hour reading) never holds; one it reports does.
+  it("ignores an old reading of a limit the account no longer reports", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    const day = 86_400_000;
+    const later = new Date(Date.now() + 3_600_000);
+    // An hour ago the account reported a full 5-hour window; its latest report has only This week and Fable.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: sub.id, window: "five_hour", utilization: 1, resetsAt: later, observedAt: new Date(Date.now() - 3_600_000) });
+    const now = new Date();
+    await ctx.db.insert(quotaSamples).values([
+      { fundingSourceId: sub.id, window: "seven_day", utilization: 0.3, resetsAt: new Date(Date.now() + 4 * day), observedAt: now },
+      { fundingSourceId: sub.id, window: "seven_day_overage_included", utilization: 0.1, resetsAt: new Date(Date.now() + 4 * day), observedAt: now },
+    ]);
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect(await ctx.tick()).toMatchObject({ launched: 1 });
+    await ctx.endRun(ctx.commands[0]!.runId);
+
+    // As soon as the account reports the 5-hour window again at 100%, it holds.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: sub.id, window: "five_hour", utilization: 1, resetsAt: later, observedAt: new Date(now.getTime() + 1000) });
+    await ctx.db.insert(quotaSamples).values([
+      { fundingSourceId: sub.id, window: "seven_day", utilization: 0.3, resetsAt: new Date(Date.now() + 4 * day), observedAt: new Date(now.getTime() + 1000) },
+    ]);
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect(await ctx.tick()).toMatchObject({ launched: 0, deferred: 1 });
+  });
+
   it("runs an urgent ticket at 96% while routine work is held", async () => {
     ctx = await setup({ agent: 5 });
     const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();

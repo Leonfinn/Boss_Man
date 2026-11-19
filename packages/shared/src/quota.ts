@@ -180,3 +180,16 @@ export function windowLabel(key: string): { name: string; note?: string } {
   const words = key.replace(/_/g, " ").trim();
   return { name: words ? `${words[0]!.toUpperCase()}${words.slice(1)} limit` : "Other limit" };
 }
+
+/**
+ * The limits an account reports now (BOS-1916). One report from Claude Code or Codex is stored as a batch of
+ * samples sharing one observedAt, so the newest sample per window is current only when it is from the newest
+ * report: a window whose newest sample is older was left out of a later report (the account stopped
+ * reporting it) and is dropped, from the card, the hold list, the hold and account switching. A window that
+ * has never had a sample is simply absent ("no report yet"). Synthetic readings are written per measure with
+ * their own times, so the caller leaves those alone.
+ */
+export function currentReportSamples<T extends { observedAt: Date }>(newestPerWindow: T[]): T[] {
+  const newest = Math.max(...newestPerWindow.map((s) => s.observedAt.getTime()));
+  return newestPerWindow.filter((s) => s.observedAt.getTime() === newest);
+}
