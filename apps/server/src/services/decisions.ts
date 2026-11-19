@@ -69,7 +69,7 @@ import { type CardLint, type LintFinding, THIS_HOST_POINTER, fillHostTokensIn, l
 import { HOST_TOKEN_HELP, NOT_GIVEN, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { loadCompanyFacts } from "./company-facts.js";
 import type { Addon } from "./addons.js";
-import { type CardOpening, type OwnerOnlyKind, routeAgentCard } from "./card-check.js";
+import { type CardOpening, type OwnerOnlyKind, routeAgentCard, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, isSystemCard, ceoAnswerRefusal, OWNER_ONLY_ANSWER_TYPES, fileList } from "./card-check.js";
 import { addTicketDependency, blockedHolds } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
@@ -330,15 +330,6 @@ export const KEEP_PLANNING = "Keep planning";
 export const APPROVE_MERGE = "Approve and merge";
 /** The stuck-review card's third choice (BOS-422): offered when the reviewers fail only checks that need the live work. */
 export const MOVE_AFTER_MERGE = "Move these checks to after the merge";
-export const CHECK_AGAIN = "Run the check again";
-export const CHECK_SEND_BACK = "Send it back to the agent";
-export const CHECK_SKIP = "Merge without the check";
-/** A stalled review (BOS-404, BOS-426): real actions on the review instead of "Got it". */
-export const TAKE_REVIEW = "Take the review myself";
-export const REASSIGN_REVIEW = "Give it to another reviewer";
-export const SEND_BACK_FOR_MERGE = "Send it back to the author";
-export const WAIT_ANOTHER_HOUR = "Leave it another hour";
-export const REVIEW_STALL_ACTIONS = [TAKE_REVIEW, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, WAIT_ANOTHER_HOUR];
 /** An owner to-do (BOS-122): the approved deploy still needs the owner's own hand. */
 export const TODO_DONE = "Done, it's applied";
 export const TODO_FAILED = "A step failed";
@@ -351,85 +342,6 @@ export const QUIET_FIRST = "Quiet the machine first";
 /** The "replaced by" fields of a withdraw call, as the tool received them (DR-058 B). */
 export type Replacement = { replacedBy?: string; when?: string };
 export type Withdrawal ={ by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string; /** Set when a newer plan card replaced this one (BOS-1219). */ newer?: { id: string; author: string | null; at: string } };
-
-/**
- * Cards that answer an action rather than make an owner choice: a merge retry and Boss Man's own
- * "Got it" notices and alerts. The CEO may answer these even when they sit on the owner's tier.
- */
-export function isSystemCard(d: { kind: string; tier: string; options: unknown; context: unknown }): boolean {
-  const ctx = d.context as DecisionContext & { ladder?: unknown };
-  if (ctx.type === "check_stuck") return true;
-  // A card with steps asks the owner to do something, so it is never a system card (BOS-149),
-  // even when its only option is "Got it": the ladder keeps the steps of what it escalated.
-  const steps = (ctx as { steps?: unknown }).steps;
-  if (Array.isArray(steps) && steps.length) return false;
-  const options = Array.isArray(d.options) ? (d.options as string[]) : [];
-  // Boss Man's alerts that only need acknowledging.
-  if (ctx.ladder && options.length === 1 && options[0] === "Got it") return true;
-  // Notices such as "your answer couldn't reach the runner".
-  return ctx.type === "question" && options.length === 1 && options[0] === "Got it" && !ctx.steps?.length;
-}
-
-/**
- * Why the CEO may not answer this card, or null. Enforced in `answer()` itself, so it holds for every
- * caller, not just the MCP tool: owner sign-offs, deploys, hires, instruction changes, owner-only
- * permissions and the rest stay the owner's.
- */
-export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unknown; context: unknown }, answer?: string, opts: { ladder?: boolean } = {}): string | null {
-  const ctx = d.context as DecisionContext & { ladder?: { rung?: string } };
-  // An alert still with the Scrum Master is not the CEO's yet (BOS-64): settling it here would close it
-  // and the owner would never see the escalation (BOS-149). The rung rule is for the CEO only, because
-  // the Scrum Master settles its own alerts through the same path.
-  if (opts.ladder !== false && ctx.ladder?.rung === "scrum_master") return "This alert is still with the Scrum Master, so it isn't yours to settle yet. Leave it for the ladder to hand over.";
-  // An alert that has climbed to the owner has already failed the Scrum Master and the CEO, so it is
-  // the owner's now: closing it here would take it off their queue without their seeing it (BOS-149).
-  if (opts.ladder !== false && ctx.ladder?.rung === "owner") return "This alert is already with the owner, so it isn't yours to settle. Leave it for them.";
-  if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) return "Only the owner can answer this kind of decision. Leave it for them; if they asked for your advice, use action advise.";
-  if (ctx.type === "question" && ctx.steps?.length) return "This asks the owner to do something, so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
-  // BOS-1318: a card marked owner-only stays the owner's even if a row were ever left on the CEO's tier.
-  if (ctx.type === "question" && (ctx.ownerOnly || ctx.ownerMustDo)) return "This card is marked as the owner's alone (a secret, money, a host step, a sign-off or an owner choice), so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
-  if (ctx.type === "review_stall" && answer !== undefined && !REVIEW_STALL_ACTIONS.includes(answer)) return `On a stalled review, choose one of: ${REVIEW_STALL_ACTIONS.join(", ")}.`;
-  if (d.tier === "owner" && !isSystemCard(d)) return "This card is the owner's to answer. Leave it for them; if they asked for your advice, use action advise.";
-  if (isSystemCard(d)) {
-    // An allow-list, not a single refusal: anything added to a system card later stays off the CEO's list.
-    // On a merge card only the retry and the send-back are safe; "Merge without the check" is the owner's.
-    const allowed = ctx.type === "check_stuck" ? [CHECK_AGAIN, CHECK_SEND_BACK] : ["Got it"];
-    if (!answer || !allowed.includes(answer)) {
-      return ctx.type === "check_stuck"
-        ? `The CEO may only choose "${CHECK_AGAIN}" or "${CHECK_SEND_BACK}" on this card. Leave "${CHECK_SKIP}" and any other choice to the owner.`
-        : "The CEO may only acknowledge this card with \"Got it\".";
-    }
-  }
-  return null;
-}
-
-/** Context types that are always the owner's call, even if a row was somehow left at the CEO's tier. */
-const OWNER_ONLY_ANSWER_TYPES = new Set([
-  "deploy",
-  "self_deploy",
-  "owner_todo",
-  "owner_setup",
-  "maintenance",
-  "deploy_wait",
-  "hire",
-  "instructions",
-  "rename",
-  "standing_rules",
-  "model_change",
-  "team_plan",
-  "risk_review",
-  "budget_limit",
-  "engagement",
-  "project_cap",
-  "run_time_limit",
-  "fence_default",
-  "fence_unavailable",
-  "guard_unavailable",
-  "ticket_cap",
-  "rule_proposal",
-  "goal_check",
-  "feature_portal_hold",
-]);
 
 /**
  * Cards the CEO may withdraw only when their ticket is finished, never as a duplicate (BOS-149).
@@ -824,6 +736,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
 
 // The owner-card checker lives in card-check.ts (BOS-1842); re-exported here so callers and tests keep their imports.
 export { type CardOpening, OPENING_WHY_MAX, cardOpeningProblem, fillCardText, checkAsk, OWNER_ONLY_KINDS, type OwnerOnlyKind, routeAgentCard } from "./card-check.js";
+export { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, TAKE_REVIEW, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, WAIT_ANOTHER_HOUR, REVIEW_STALL_ACTIONS, isSystemCard, ceoAnswerRefusal } from "./card-check.js";
 
 /** An agent's model setup as the CEO sets it and the owner sees it (BOS-128). */
 export type AgentModelConfig = { harness: string; provider: string; model: string; fundingSourceId: string; fundingSourceName?: string };
@@ -868,19 +781,6 @@ export type AnswerExtra = {
 export type WorkingCopy = { ticketId: string; ref: string | null; branch: string; files: string[] };
 /** The keys of Claude Code's Bash tool input. None of them moves the shell to another folder. */
 const SHELL_INPUT_KEYS = new Set(["command", "description", "timeout", "run_in_background", "dangerouslyDisableSandbox"]);
-/** Files for a card, cut at whole names with a count of the rest, so a long list never looks complete. */
-function fileList(files: string[], max: number): string {
-  let out = "";
-  let shown = 0;
-  for (const f of files) {
-    const next = out ? `${out}, ${f}` : f;
-    if (next.length > max) break;
-    out = next;
-    shown++;
-  }
-  return shown < files.length ? `${out}${out ? ", " : ""}…and ${files.length - shown} more` : out;
-}
-
 /** The rules judge's reading of a permission card, kept on it (BOS-337). In watch mode it is only recorded; in advise mode it also picked the suggested button. */
 export type JudgeNote = { mode: Exclude<PermissionJudgeMode, "off">; verdict: JudgeReading["verdict"]; row: JudgeReading["row"]; reason: string; /** The model second opinion (BOS-338), asked only when the rules judge allows. Pending until it answers or fails (at most 5 s). */ second?: SecondNote };
 
