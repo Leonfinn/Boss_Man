@@ -49,7 +49,9 @@ async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "fai
         ? null
         : { target: { cfg, token: "made-up-token" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "mergetree1", targetSha: "mainhead1" }), publish, unpublish },
   });
-  const svc = checkRequestService(db, { diff: async () => d, preflight });
+  const raw = checkRequestService(db, { diff: async () => d, preflight });
+  // These tests are about the CI hold; the quick check hold (BOS-1922) is tested in check-request.test.ts, so a queued quick job counts as passed here.
+  const svc = { ...raw, reviewRefusal: async (c: string, tk: string) => (await db.update(checkJobs).set({ state: "passed" }), raw.reviewRefusal(c, tk)) };
   return { svc, db, co: co!.id, agent: a!.id, ticket: t!.id, wakes, publish, unpublish, d };
 }
 const settled = async (s: Awaited<ReturnType<typeof setup>>) => {

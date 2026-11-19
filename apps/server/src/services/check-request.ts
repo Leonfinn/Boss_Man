@@ -1,10 +1,10 @@
 // An agent asks for a check of its ticket (request_check, DR-003, BOS-316).
 // It reads the ticket's committed head and tree from the runner, queues a pre-review job, and says where it stands.
 // The agent is woken with the result by the dispatcher (check_result), so it never polls.
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { runners, tickets } from "../db/schema.js";
+import { checkJobs, runners, tickets } from "../db/schema.js";
 import { checkQueue, type CheckScope } from "./check-queue.js";
 import { checkPriority } from "./check-gate.js";
 import { checkPlace } from "./check-wording.js";
@@ -24,6 +24,32 @@ export type CheckRequestDeps = {
   /** GitHub's CI jobs before review for a branch that changes CI or image files (BOS-1664). */
   preflight?: CiPreflight;
 };
+
+/**
+ * BOS-1922: the move to review waits for the quick check on the ticket's current head. Refused while the newest
+ * pre-review check of that commit is queued, running or failed (a pass of any width on it lifts the hold). A head with
+ * no check at all, a no-code ticket, or a runner that can't say what the head is: no hold.
+ */
+export async function quickCheckRefusal(db: Db, ticketId: string, diff: (t: typeof tickets.$inferSelect) => Promise<Pick<WorkspaceDiff, "head">>): Promise<string | null> {
+  const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+  if (!t || t.noCode) return null;
+  let head: string;
+  try {
+    head = (await diff(t)).head;
+  } catch {
+    return null;
+  }
+  if (!head) return null;
+  const jobs = await db
+    .select({ state: checkJobs.state })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.commit, head), eq(checkJobs.kind, "pre_review")))
+    .orderBy(desc(checkJobs.queuedAt));
+  if (!jobs.length || jobs.some((j) => j.state === "passed")) return null;
+  const state = jobs[0]!.state;
+  if (state !== "queued" && state !== "running" && state !== "failed") return null;
+  return `the quick check on ${head.slice(0, 8)} hasn't passed yet (${state}). It wakes you when it finishes; move to review then.`;
+}
 
 export function checkRequestService(db: Db, deps: CheckRequestDeps) {
   const queue = checkQueue(db);
@@ -88,12 +114,18 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
 
     /** BOS-1664: the move to review is refused while GitHub's CI jobs for a CI or image change haven't passed (or been marked not applicable). */
     async reviewRefusal(companyId: string, ticketId: string): Promise<string | null> {
-      if (!deps.preflight) return null;
       // With the queue off, request_check refuses, so a hold on it could never be lifted: no hold.
       if ((await queue.mode()) !== "server") return null;
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
       if (!runner) return null;
-      return deps.preflight.reviewRefusal(ticketId, (t) => deps.diff(runner.id, t.projectId, t.id));
+      const head = new Map<string, Promise<Pick<WorkspaceDiff, "head" | "files">>>();
+      const diff = (t: typeof tickets.$inferSelect) => {
+        if (!head.has(t.id)) head.set(t.id, deps.diff(runner.id, t.projectId, t.id));
+        return head.get(t.id)!;
+      };
+      const quick = await quickCheckRefusal(db, ticketId, diff);
+      if (quick) return quick;
+      return deps.preflight ? deps.preflight.reviewRefusal(ticketId, diff) : null;
     },
   };
 }
