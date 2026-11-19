@@ -26,7 +26,7 @@ function stub(patched: unknown[] = [], posted: string[] = []) {
       if (init?.method === "PATCH") return patched.push(JSON.parse(String(init.body))), json({ ...project, starred: true });
       if (url.endsWith("/projects")) return json([project]);
       if (url.endsWith("/board")) return json({ project, columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [] }] });
-      if (url.endsWith("/spend")) return json({ tokens: { month: { input: 1_200_000, output: 45_000 }, total: { input: 3_400_000, output: 98_000 } }, monthMicros: 3_500_000, totalMicros: 4_500_000, ticketCostCapMicros: 5_000_000, monthlyCapMicros: 10_000_000, monthStart: "", plan: [{ provider: "anthropic", monthRuns: 12, totalRuns: 40, monthMicros: 21_000_000, totalMicros: 60_000_000 }, { provider: "synthetic", monthRuns: 1, totalRuns: 3, monthMicros: 0, totalMicros: 0 }], topTickets: [{ id: "t1", title: "Big job", micros: 4_000_000, planMicros: 2_000_000 }] });
+      if (url.endsWith("/spend")) return json({ tokens: { month: { input: 1_200_000, output: 45_000, cacheRead: 7_000_000, cacheWrite: 300_000 }, total: { input: 3_400_000, output: 98_000, cacheRead: 20_000_000, cacheWrite: 900_000 } }, monthMicros: 3_500_000, totalMicros: 4_500_000, ticketCostCapMicros: 5_000_000, monthlyCapMicros: 10_000_000, monthStart: "", plan: [{ provider: "anthropic", monthRuns: 12, totalRuns: 40, monthMicros: 21_000_000, totalMicros: 60_000_000 }, { provider: "synthetic", monthRuns: 1, totalRuns: 3, monthMicros: 0, totalMicros: 0 }], topTickets: [{ id: "t1", title: "Big job", micros: 4_000_000, planMicros: 2_000_000 }] });
       if (url.endsWith("/check-presets")) return json({ detected: [], standard: [], none: { id: "none", label: "Nothing", command: null, plain: "", needs: [] }, tools: null, error: null });
       return json([]);
     }),
@@ -54,6 +54,9 @@ describe("project page tabs", () => {
     expect(screen.getByText("$4.50")).toBeTruthy();
     expect(screen.getByLabelText("$3.50 of the $10.00 monthly cap (API and credit runs only)").getAttribute("max")).toBe("10000000");
     expect(screen.getByRole("link", { name: "Big job" }).getAttribute("href")).toBe("#/tickets/t1");
+    // Cache tokens sit beside in / out, so the token line can be set against the dollars.
+    expect(screen.getByText("Cache read / written: 7M / 300K")).toBeTruthy();
+    expect(screen.getByText("Cache read / written: 20M / 900K")).toBeTruthy();
     // Plan use beside it: an estimate where the tool reported a price, a plain "no price" line (never $0.00) where it didn't.
     expect(screen.getByText("On your subscriptions")).toBeTruthy();
     expect(screen.getByText("$21.00")).toBeTruthy();

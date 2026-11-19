@@ -5,7 +5,7 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
 
-type Tokens = { input: number; output: number };
+type Tokens = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 type Spend = { tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
 const PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", synthetic: "Synthetic" };
 
@@ -95,10 +95,10 @@ export function ProjectBudget({ project }: { project: Project }) {
       {s.tokens && (
         <>
           <h2 style={{ fontSize: 16, marginTop: 24 }}>Tokens</h2>
-          <p className="muted" style={{ fontSize: 13, margin: 0 }}>Every run on this project's tasks, subscription runs included.</p>
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>Every run on this project's tasks, subscription runs included. "In" is new input only; cached tokens (re-read and written prompt text) are counted on their own line, and the dollar figures include them.</p>
           <dl style={{ display: "flex", gap: 32, flexWrap: "wrap", margin: 0 }}>
-            <div><dt className="muted">This month in / out</dt><dd style={{ fontSize: 20, margin: 0 }}>{n.format(s.tokens.month.input)} / {n.format(s.tokens.month.output)}</dd></div>
-            <div><dt className="muted">All time in / out</dt><dd style={{ fontSize: 20, margin: 0 }}>{n.format(s.tokens.total.input)} / {n.format(s.tokens.total.output)}</dd></div>
+            <div><dt className="muted">This month in / out</dt><dd style={{ fontSize: 20, margin: 0 }}>{n.format(s.tokens.month.input)} / {n.format(s.tokens.month.output)}</dd><dd className="muted" style={{ fontSize: 13, margin: 0 }}>Cache read / written: {n.format(s.tokens.month.cacheRead ?? 0)} / {n.format(s.tokens.month.cacheWrite ?? 0)}</dd></div>
+            <div><dt className="muted">All time in / out</dt><dd style={{ fontSize: 20, margin: 0 }}>{n.format(s.tokens.total.input)} / {n.format(s.tokens.total.output)}</dd><dd className="muted" style={{ fontSize: 13, margin: 0 }}>Cache read / written: {n.format(s.tokens.total.cacheRead ?? 0)} / {n.format(s.tokens.total.cacheWrite ?? 0)}</dd></div>
           </dl>
         </>
       )}
