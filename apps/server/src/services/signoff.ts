@@ -327,7 +327,7 @@ export async function sweepSignedOffStuck(db: Db, deps: { headOf: (ticketId: str
     .select({ t: tickets })
     .from(tickets)
     .innerJoin(companies, eq(companies.id, tickets.companyId))
-    .where(and(inArray(tickets.systemState, ["in_progress", "blocked"]), eq(companies.paused, false), sql`${tickets.mergeCommit} is null`, sql`${tickets.stateChangedAt} < ${new Date(deps.now.getTime() - deps.graceMs)}`, sql`not exists (select 1 from runs r where r.ticket_id = ${tickets.id} and r.ended_at is null)`));
+    .where(and(inArray(tickets.systemState, ["in_progress", "blocked"]), eq(companies.paused, false), sql`${tickets.mergeCommit} is null`, sql`${tickets.stateChangedAt} < ${new Date(deps.now.getTime() - deps.graceMs)}`, sql`not exists (select 1 from runs r where r.ticket_id = ${tickets.id} and r.ended_at is null)`, sql`exists (select 1 from decisions d where d.status = 'answered' and d.context->>'type' = 'risk_review' and d.context->>'ticketId' = ${tickets.id}::text and d.context->'signedOff' is not null)`));
   let moved = 0;
   for (const { t } of rows) {
     if (!(await signedOffHeadOutsideReview(db, t, deps.headOf))) continue;
