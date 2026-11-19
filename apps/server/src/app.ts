@@ -87,6 +87,7 @@ import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
 import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
+import { checkHoldService } from "./services/check-hold.js";
 import { mainCiService } from "./services/main-ci.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
@@ -357,6 +358,7 @@ export async function buildApp(opts: AppOptions) {
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
+  let checkHold: ReturnType<typeof checkHoldService> | undefined;
   // BOS-1093: a set private-details list that can't be read says so once, in the log and to the owner, and the scan runs its secret rules only.
   const scanListWarning: ScanListWarning = {
     log: (m) => app.log.warn(m),
@@ -381,6 +383,7 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     can: (id) => runners.can(id, "check-jobs"),
     wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
+    onEnded: (job) => checkHold?.onEnded(job),
     workers: checkWorkersSvc,
     bundles: {
       store: bundleStore,
@@ -833,6 +836,7 @@ export async function buildApp(opts: AppOptions) {
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
+    checkHold: async () => checkHold?.sweep(),
     priorityWatch: () => priorityWatch.run(),
     mergeStall: () => mergeStall.run(),
     // R46: refresh what each free check slot declined (the pump), then tell on any that has sat idle with a job waiting.
@@ -1064,6 +1068,12 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
+  // BOS-1906: a held ticket ("Being checked") opens its reviews on a pass, or goes back to its agent on a failure; no agent run on a pass.
+  checkHold = checkHoldService(db, {
+    openReviews: async (ticketId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, null)),
+    wake: (agentId, w) => scheduler.notify(agentId, w),
+    now: opts.now,
+  });
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
   // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and

@@ -86,6 +86,41 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
       return `A ${job.scope} check of commit ${job.commit.slice(0, 8)} is queued. ${where} You will be woken with the result, so end your turn or carry on with other work; do not poll or start your own background loop.${uncommitted}${extra}`;
     },
 
+    /**
+     * BOS-1906: an agent hands a ticket in to review. With no passing quick check on its head, the check is queued here and the
+     * ticket is to wait in review as "Being checked" (held: true; `where` says its place). A same-code pass, a queue that is off,
+     * or anything that can't be read leaves held false, so the move to review opens the reviews as it always did. The job carries no
+     * requestedBy: a pass opens the review slots (no agent run in between); a failure wakes the agent from the hold sweep.
+     */
+    async holdForReview(input: { companyId: string; agentId: string | null; ticketId: string }): Promise<{ held: false } | { held: true; where: string }> {
+      const no = { held: false } as const;
+      try {
+        if (!input.agentId || (await queue.mode()) !== "server") return no;
+        const [t] = await db.select().from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, input.companyId)));
+        if (!t || t.assigneeAgentId !== input.agentId || t.noCode || t.systemState !== "in_progress") return no;
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, input.companyId));
+        if (!runner) return no;
+        const d = await deps.diff(runner.id, t.projectId, t.id);
+        if (!d.tree || !d.head || !d.commits.length || d.unsynced) return no;
+        const { job, reused } = await queue.enqueue({
+          companyId: input.companyId,
+          projectId: t.projectId,
+          ticketId: t.id,
+          kind: "pre_review",
+          scope: "quick",
+          commit: d.head,
+          tree: d.tree,
+          command: (await deps.command?.("quick", t.projectId)) ?? null,
+          priority: checkPriority(t),
+          requestedBy: null,
+        });
+        if (reused === "passed") return no;
+        return { held: true, where: await checkPlace(queue, input.companyId, job) };
+      } catch {
+        return no;
+      }
+    },
+
     /** BOS-1664: the move to review is refused while GitHub's CI jobs for a CI or image change haven't passed (or been marked not applicable). */
     async reviewRefusal(companyId: string, ticketId: string): Promise<string | null> {
       if (!deps.preflight) return null;

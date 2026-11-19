@@ -134,6 +134,8 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
   // The hold is a field, so a later state note can't erase it (BOS-1180): set when held, kept while the ticket stays in Ready, cleared on leaving it.
   if (held) fields.wipHeldAt = t.systemState === "ready" && t.wipHeldAt ? t.wipHeldAt : at; // the first hold's time, so "held for 30 minutes" isn't reset by each refusal
   else if (target !== "ready") fields.wipHeldAt = null;
+  // "Being checked" (BOS-1906) is a mark on a ticket in review; any move out of review ends it.
+  if (target !== "review" && t.checkHoldAt && fields.checkHoldAt === undefined) fields.checkHoldAt = null;
   if (t.noCode && t.mergeCommit && !opts.internal && fields.noCode === undefined && changed && REOPEN_STATES.has(target)) fields.noCode = false;
   const set: Partial<typeof tickets.$inferInsert> = {
     ...fields,

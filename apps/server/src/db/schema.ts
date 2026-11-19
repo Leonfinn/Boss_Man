@@ -466,6 +466,12 @@ export const tickets = pgTable(
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** When the agent's WIP limit first held this ticket in Ready (BOS-1180). A field, not note text, so a state note can't erase it; cleared when the ticket leaves Ready. */
     wipHeldAt: timestamp("wip_held_at", { withTimezone: true }),
+    /**
+     * "Being checked" (BOS-1906): set while a ticket handed in to review waits for its quick check. It is in review, but no review
+     * round is open and no reviewer is woken until the check passes (then the slots open) or fails (it goes back to In progress).
+     * Cleared on any move out of review.
+     */
+    checkHoldAt: timestamp("check_hold_at", { withTimezone: true }),
     /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
     stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
