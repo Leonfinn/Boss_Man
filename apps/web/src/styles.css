@@ -1736,5 +1736,6 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .strip.stack-narrow .strip-title.rolled-wrap { display: block; -webkit-line-clamp: unset; overflow: visible; font-weight: 600; }
 .rolled-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .rolled-text.open { display: block; overflow: visible; }
-.rolled-toggle { background: none; border: 0; padding: 2px 0; color: var(--accent, #2563eb); font: inherit; font-weight: 400; cursor: pointer; text-decoration: underline; }
+.rolled-toggle { background: none; border: 0; padding: 2px 0; color: var(--link); font: inherit; font-weight: 400; cursor: pointer; text-decoration: underline; }
+.rolled-toggle:hover { color: var(--link-hover); }
 @media (pointer: coarse) { .rolled-toggle { min-height: 44px; padding: 0 4px 0 0; } }

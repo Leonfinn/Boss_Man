@@ -14,7 +14,7 @@ afterAll(async () => {
 });
 
 const now = Date.now();
-const longTitle = "Deploy Boss Man 7704a0c6 -> d969ab7c? 113 files changed, 1 database migration, runner code changed, and the deployer script was updated as well, so please confirm before it goes out tonight";
+const longTitle = "Deploy Boss Man 7704a0c6 -> d969ab7c? 113 files changed, 1 database migration, runner code changed, and the deployer script was updated as well, so please confirm before it goes out tonight. " + Array.from({ length: 12 }, (_, i) => `Included ticket BOS-${1900 + i}: a made-up change that is part of this update.`).join(" ");
 const recheck = {
   id: "d-recheck", companyId: "c1", kind: "choice", question: "Sign off the BOS-1820 plan?", options: ["Yes", "No"], recommendedOption: "Yes", tier: "owner",
   createdAt: new Date(now - 3_600_000).toISOString(), companyName: "Boss Man Co", agentName: "CEO", blocks: [], about: [], projects: [], score: 10,
@@ -85,6 +85,15 @@ describe.skipIf(!browser || !server)("BOS-1825 narrow rows on the Decisions page
             if (r.when && r.link) expect(r.link.top).toBeGreaterThanOrEqual(r.when.top);
           }
         }
+        // (BOS-1935) Expanding the long card shows more than 3 lines; the short card has no button.
+        const toggles = page.locator("[data-testid=left-your-list] .rolled-toggle");
+        expect(await toggles.count()).toBe(1);
+        await toggles.first().click();
+        await page.waitForSelector("[data-testid=left-your-list] .rolled-text.open", { timeout: 15_000 });
+        const openH = await page.evaluate(() => document.querySelector("[data-testid=left-your-list] .rolled-text")!.getBoundingClientRect().height);
+        const lineH = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector("[data-testid=left-your-list] .rolled-text")!).lineHeight) || 20);
+        if (s.width <= 700) expect(openH).toBeGreaterThan(lineH * 3 + 2);
+        if (dir) await page.screenshot({ path: `${dir}/bos-1935-${s.name}-expanded.png`, fullPage: true });
       } finally {
         await page.close();
       }
