@@ -20,6 +20,24 @@ export function checkTicketVerdict(t: { outcome: string | null; acceptanceCriter
   return verdicts.length && verdicts.every((v) => v === "pass") ? "pass" : null;
 }
 
+/**
+ * BOS-1867: the refusal for closing a check ticket done (outcome completed) while any of its own criteria has no
+ * verdict, or null when every one has one. Without it QA's "Pass: 79 GitHub runs …" closed the check with its
+ * criteria "not reported", so checkTicketVerdict read nothing and the parent got no result. readVerdicts stays as it
+ * is (loosening it would change every ticket's done gate); the text shows the numbered form it does read.
+ */
+export function checkTicketDoneRefusal(criteriaRaw: unknown, note: string | null | undefined, checksCriterion: number): string | null {
+  const criteria = readCriteria(criteriaRaw);
+  const read = readVerdicts(criteria, note);
+  const missing = read.filter((r) => r.verdict === null).map((r) => r.criterion);
+  if (criteria.length && !missing.length) return null;
+  const form = criteria.length ? criteria.map((_, i) => `${i + 1} pass: <what you saw>`).join("; ") : "1 pass: <what you saw>";
+  const what = criteria.length
+    ? `Not reported: ${missing.map((m) => `"${m}"`).join(", ")}.`
+    : "This ticket has no criteria of its own, so there is nothing to read a result from: add them with update_ticket.";
+  return `This ticket is the check for criterion ${checksCriterion} of another ticket. Boss Man copies its result there only from a numbered pass or fail for each of this ticket's own criteria, and closing it now would record nothing. ${what} Write the summary in this form, in criteria order: "${form}" (use "N fail: <why>" for a fail). A bare "Pass: …" is not read. To close it with no result, use outcome cancelled.`;
+}
+
 /** The note can hold 4000 characters: the old note gives way from the front, so the new line is never cut. */
 const NOTE_MAX = 4000;
 export const appendLine = (note: string | null, line: string): string => {
