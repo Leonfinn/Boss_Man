@@ -1731,3 +1731,10 @@ details.pushes[open] > summary { margin-bottom: 8px; }
   .strip.stack-narrow .strip-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-weight: 600; }
   .strip.stack-narrow .strip-when { display: block; }
 }
+
+/* (BOS-1935) "Left your list recently": the question rolls up to 3 lines; "Show more" expands one card in place. */
+.strip.stack-narrow .strip-title.rolled-wrap { display: block; -webkit-line-clamp: unset; overflow: visible; font-weight: 600; }
+.rolled-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.rolled-text.open { display: block; overflow: visible; }
+.rolled-toggle { background: none; border: 0; padding: 2px 0; color: var(--accent, #2563eb); font: inherit; font-weight: 400; cursor: pointer; text-decoration: underline; }
+@media (pointer: coarse) { .rolled-toggle { min-height: 44px; padding: 0 4px 0 0; } }

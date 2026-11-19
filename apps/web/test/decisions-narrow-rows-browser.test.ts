@@ -61,8 +61,9 @@ describe.skipIf(!browser || !server)("BOS-1825 narrow rows on the Decisions page
           return {
             sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth,
             rows: rows.map((li) => ({
-              title: box(li.querySelector(".strip-title")!),
-              titleLine: parseFloat(getComputedStyle(li.querySelector(".strip-title")!).lineHeight) || 20,
+              // (BOS-1935) The question text itself (without the "Show more" button) is cut to 3 lines.
+              title: box((li.querySelector(".rolled-text") ?? li.querySelector(".strip-title"))!),
+              titleLine: parseFloat(getComputedStyle((li.querySelector(".rolled-text") ?? li.querySelector(".strip-title"))!).lineHeight) || 20,
               when: li.querySelector(".strip-when") ? box(li.querySelector(".strip-when")!) : null,
               link: li.querySelector("a") ? box(li.querySelector("a")!) : null,
               lineH: parseFloat(getComputedStyle(li).lineHeight) || 20,
@@ -78,8 +79,8 @@ describe.skipIf(!browser || !server)("BOS-1825 narrow rows on the Decisions page
           if (r.when) expect(r.when.h, "time on one line").toBeLessThan(r.lineH * 1.6);
           if (r.link) expect(r.link.h, "link on one line").toBeLessThan(r.lineH * 1.6);
           if (narrow) {
-            // Stacked: title above time above link, and the title is at most 2 lines.
-            expect(r.title.h).toBeLessThanOrEqual(r.titleLine * 2 + 2);
+            // Stacked: title above time above link, and the title is at most 3 lines.
+            expect(r.title.h).toBeLessThanOrEqual(r.titleLine * 3 + 2);
             if (r.when) expect(r.when.top).toBeGreaterThanOrEqual(r.title.top + r.title.h - 1);
             if (r.when && r.link) expect(r.link.top).toBeGreaterThanOrEqual(r.when.top);
           }
