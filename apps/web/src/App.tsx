@@ -9,32 +9,38 @@ import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
 import { setHold, useHold } from "./hold";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
-import { Board } from "./pages/Board";
-import { Decisions } from "./pages/Decisions";
-import { Engagement, Engagements } from "./pages/Engagements";
-import { Run } from "./pages/Run";
-import { Runs } from "./pages/Runs";
-import { MergeQueue } from "./pages/MergeQueue";
-import { Settings, settingsRedirect } from "./pages/Settings";
-import { ProjectsPage } from "./pages/settings/Projects";
+import { lazyPage, PageSuspense } from "./lazy-page";
+import { settingsRedirect } from "./pages/settings-redirect";
 import { waitingFor, type RunnerCheckView } from "./pages/settings/updates";
-import { Ticket } from "./pages/Ticket";
-import { Rules } from "./pages/Rules";
-import { Secrets } from "./pages/Secrets";
-import { Notifications } from "./pages/Notifications";
-import { ScrumMaster } from "./pages/ScrumMaster";
-import { Workflow } from "./pages/Workflow";
-import { Plan } from "./pages/Plan";
-import { ChatPage } from "./pages/Chat";
-import { Dashboard } from "./pages/Dashboard";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
-import { Skills } from "./pages/Skills";
-import { Agents } from "./pages/Agents";
-import { Features } from "./pages/Features";
-import { Wiki } from "./pages/Wiki";
-import { Feedback } from "./pages/Feedback";
-import { Roadmap } from "./pages/Roadmap";
-import { Setup, SetupChecklist } from "./pages/Setup";
+
+// BOS-1843: every page below loads when it is first opened. Login, the shell and the banners stay in the entry file.
+const Board = lazyPage(() => import("./pages/Board"), "Board");
+const Decisions = lazyPage(() => import("./pages/Decisions"), "Decisions");
+const Engagement = lazyPage(() => import("./pages/Engagements"), "Engagement");
+const Engagements = lazyPage(() => import("./pages/Engagements"), "Engagements");
+const Run = lazyPage(() => import("./pages/Run"), "Run");
+const Runs = lazyPage(() => import("./pages/Runs"), "Runs");
+const MergeQueue = lazyPage(() => import("./pages/MergeQueue"), "MergeQueue");
+const Settings = lazyPage(() => import("./pages/Settings"), "Settings");
+const ProjectsPage = lazyPage(() => import("./pages/settings/Projects"), "ProjectsPage");
+const Ticket = lazyPage(() => import("./pages/Ticket"), "Ticket");
+const Rules = lazyPage(() => import("./pages/Rules"), "Rules");
+const Secrets = lazyPage(() => import("./pages/Secrets"), "Secrets");
+const Notifications = lazyPage(() => import("./pages/Notifications"), "Notifications");
+const ScrumMaster = lazyPage(() => import("./pages/ScrumMaster"), "ScrumMaster");
+const Workflow = lazyPage(() => import("./pages/Workflow"), "Workflow");
+const Plan = lazyPage(() => import("./pages/Plan"), "Plan");
+const ChatPage = lazyPage(() => import("./pages/Chat"), "ChatPage");
+const Dashboard = lazyPage(() => import("./pages/Dashboard"), "Dashboard");
+const Skills = lazyPage(() => import("./pages/Skills"), "Skills");
+const Agents = lazyPage(() => import("./pages/Agents"), "Agents");
+const Features = lazyPage(() => import("./pages/Features"), "Features");
+const Wiki = lazyPage(() => import("./pages/Wiki"), "Wiki");
+const Feedback = lazyPage(() => import("./pages/Feedback"), "Feedback");
+const Roadmap = lazyPage(() => import("./pages/Roadmap"), "Roadmap");
+const Setup = lazyPage(() => import("./pages/Setup"), "Setup");
+const SetupChecklist = lazyPage(() => import("./pages/Setup"), "SetupChecklist");
 
 type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
 
@@ -383,6 +389,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
+        <PageSuspense>
         {redirect ? null : page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
@@ -424,10 +431,11 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: companyTallies.data?.[c.id]?.open ?? (decisions.data ?? []).filter((d) => d.companyId === c.id && !d.waiting).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><SetupChecklist companyId={current?.id} go={go} folded={folded} /></>} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: companyTallies.data?.[c.id]?.open ?? (decisions.data ?? []).filter((d) => d.companyId === c.id && !d.waiting).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><PageSuspense fallback={null}><SetupChecklist companyId={current?.id} go={go} folded={folded} /></PageSuspense></>} />
         ) : (
           <Dashboard company={current} decisions={decisions.data === null ? null : decisions.data.filter((d) => !current || d.companyId === current.id)} tally={decisionsTally.data} />
         )}
+        </PageSuspense>
         </PageGuard>
       </main>
     </div>
