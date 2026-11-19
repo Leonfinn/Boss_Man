@@ -160,6 +160,7 @@ export type DeployUpdate = {
   changes: Array<{ ticketId: string; ref: string; title: string }>;
   more: number;
   otherCommits: string[];
+  otherMore?: number;
   handBecause?: string;
   handFiles?: string[];
   handEffect?: "server" | "deployer" | "both";

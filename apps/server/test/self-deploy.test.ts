@@ -290,6 +290,51 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(update.more).toBe(1);
   });
 
+  // BOS-1826: the host sent only the newest 30 commits, so the card said "30 changes" however many were waiting, and a
+  // live fix further back lost its urgent heading. The host now sends the whole range; this pins that the server counts
+  // and reads all of it: 120 commits, a live fix at the 45th, and every commit counted once as a ticket or another commit.
+  it("counts and heads a range of 120 commits, a live fix at the 45th still heading the card (BOS-1826)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const commits: Array<{ sha: string; subject: string }> = [];
+    const sha = () => (commits.length + 1).toString(16).padStart(40, "0");
+    const ids: string[] = [];
+    for (let i = 1; i <= 25; i++) {
+      const [t] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `Change ${i}`, number: 1000 + i, ...(i === 12 ? { fixesLive: "the board is blank" } : {}) }).returning();
+      ids.push(t!.id);
+      commits.push({ sha: sha(), subject: `Merge "Change ${i}" (${t!.id})` });
+      for (let k = 1; k <= 3; k++) commits.push({ sha: sha(), subject: `Step ${k} of change ${i}` });
+    }
+    commits.push({ sha: sha(), subject: `Merge "Change 2" (${ids[1]})` }); // a ticket merged a second time
+    while (commits.length < 120) commits.push({ sha: sha(), subject: `Bump ${commits.length}` });
+    expect(commits.findIndex((x) => x.subject.includes(ids[11]!))).toBe(44);
+    await c.available({ commits, paths: ["scripts/rebuild-live.sh", "apps/server/src/x.ts"], infraPaths: ["scripts/rebuild-live.sh"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    type U = { total: number; changes: unknown[]; more: number; otherCommits: string[]; otherMore?: number };
+    const u = (d!.context as { update: U }).update;
+    expect(u.total).toBe(120);
+    expect(u.changes).toHaveLength(20);
+    expect(u.more).toBe(5);
+    expect(u.otherCommits).toHaveLength(30);
+    expect(u.otherMore).toBe(65);
+    // Every commit is counted once: 25 tickets, plus 95 others (75 branch steps, the repeat merge, 19 bumps).
+    expect(u.changes.length + u.more + u.otherCommits.length + u.otherMore!).toBe(u.total);
+    const heading = "Urgent: contains the fix for the board is blank (BOS-1012)";
+    expect(d!.question.split("\n\n")[0]).toBe(`${heading}.`);
+    // The card that clears an older one names 10 tickets and counts the other 15, not only those past the 20th.
+    expect(d!.question).toContain("BOS-1010: Change 10; and 15 more.");
+    // Main moves on by one commit: the fix is still in the range, so the new card is headed again but is a repeat.
+    await c.available({ tip: C, commits: [{ sha: C, subject: "Tidy a comment" }, ...commits], paths: ["scripts/rebuild-live.sh"], infraPaths: ["scripts/rebuild-live.sh"] });
+    await c.selfDeploy.sync();
+    const [d2] = await c.open();
+    expect(d2!.id).not.toBe(d!.id);
+    expect((d2!.context as { urgent?: { heading: string; repeat?: boolean } }).urgent).toMatchObject({ heading, repeat: true });
+    expect((d2!.context as { update: U }).update.total).toBe(121);
+  });
+
   it("will not take a second approval while a deploy is running, and withdraws a question main has outrun", async () => {
     const c = (ctx = await setup());
     await c.available();

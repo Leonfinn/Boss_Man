@@ -373,7 +373,10 @@ refresh_available() {
   if [[ $tip != "$head" ]]; then
     g fetch --quiet origin main || { log "git fetch failed; will try again."; return 0; }
     if g merge-base --is-ancestor "$head" "$tip"; then
-      g log --format='%H %s' -n 30 "$head..$tip" >"$commits"
+      # The whole range, never a page of it: the card's change count, its ticket list and the "urgent fix" heading are all
+      # read from this list. Until BOS-1826 it stopped at the newest 30 (-n 30), so a long gap between deploys showed
+      # "30 changes" and dropped older merges, live fixes among them. A line is ~120 bytes, so even 1,000 commits is small.
+      g log --format='%H %s' "$head..$tip" >"$commits"
       g diff --name-only "$head" "$tip" >"$paths"
     else
       tip="" # main is not a fast-forward of what runs: nothing can be offered
@@ -384,12 +387,14 @@ refresh_available() {
     [[ -n ${line//[[:space:]]/} ]] || continue
     sha="${line%% *}"; out+="$sep{\"sha\": $(jstr "$sha"), \"subject\": $(jstr "${line#* }")}"; sep=", "
   done <"$commits"
-  local clist="[$out]" plist="" ilist="" runner=false n=0 ni=0
+  local clist="[$out]" plist="" ilist="" runner=false
   sep="" out=""
+  # Every changed path, uncapped (BOS-1826): the card counts files and migrations from this list and looks in it for
+  # scripts/host-deployer.sh, which git lists late (paths are sorted), so the old 300-path cap could hide the copy step.
   while IFS= read -r p; do
     [[ -n ${p//[[:space:]]/} ]] || continue
-    if ((n < 300)); then plist+="$sep$(jstr "$p")"; sep=", "; n=$((n + 1)); fi
-    if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]] && ((ni < 50)); then ilist+="${ilist:+, }$(jstr "$p")"; ni=$((ni + 1)); fi
+    plist+="$sep$(jstr "$p")"; sep=", "
+    if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]]; then ilist+="${ilist:+, }$(jstr "$p")"; fi
     if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
   done <"$paths"
   # What this install really looks like, so the owner's hand-apply steps never guess a folder (BOS-269).
