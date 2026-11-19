@@ -4,7 +4,7 @@ import { DEFAULT_WATCHDOG } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { evaluate } from "../src/services/watchdog-rules.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, runs, tickets } from "../src/db/schema.js";
+import { checkJobs, checkResults, runs, tickets } from "../src/db/schema.js";
 
 // BOS-1760: the watchdog's snapshot reads what an in-progress ticket waits on from the check queue, so the
 // "in progress with no run" rules stay quiet while its quick check or merge is queued or running.
@@ -74,5 +74,28 @@ describe("watchdog snapshot: waits in the check queue (BOS-1760)", () => {
     expect(flagged).toContain(moved.id);
     expect(flagged).toContain(before.id);
     expect(flagged).toContain(idle.id);
+  });
+
+  it("BOS-1836: GitHub CI before review counts as a wait until its result row; a lost start does not", async () => {
+    const row = (ticketId: string, kind: string, at: Date, sha = "aaa") => ctx.db.insert(checkResults).values({ companyId: ctx.companyId, ticketId, sha, kind, passed: kind === "ci_preflight", at });
+    const running = await ctx.ticket("GitHub CI running");
+    await ctx.asked(running.id);
+    await row(running.id, "ci_preflight_started", ctx.ago(30));
+    const done = await ctx.ticket("GitHub CI finished");
+    await ctx.asked(done.id);
+    await row(done.id, "ci_preflight_started", ctx.ago(100));
+    await row(done.id, "ci_preflight", ctx.ago(60));
+    const lost = await ctx.ticket("GitHub CI start lost");
+    await ctx.asked(lost.id);
+    await row(lost.id, "ci_preflight_started", ctx.ago(290));
+
+    const snap = await ctx.watchdog.snapshot(ctx.companyId);
+    const by = new Map(snap.tickets.map((t) => [t.id, t.checks]));
+    expect(by.get(running.id)).toEqual([{ from: ctx.ago(30), to: null }]);
+    expect(by.get(done.id)).toEqual([{ from: ctx.ago(100), to: ctx.ago(60) }]);
+    expect(by.get(lost.id)).toBeUndefined();
+    const flagged = evaluate(snap, { ...DEFAULT_WATCHDOG, enabled: true }, ctx.ago(0)).map((x) => x.ticketId);
+    expect(flagged).not.toContain(running.id);
+    expect(flagged).toContain(lost.id);
   });
 });
