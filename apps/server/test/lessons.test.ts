@@ -176,6 +176,21 @@ describe("lessons learned from sent-back reviews", () => {
     expect((await c.answer(b!.id, "Replace #1")).statusCode).toBe(422);
   });
 
+  it("a refused answer names long drop-one options by number, so the answer fits the tools' 200-character cap (BOS-1874)", async () => {
+    const long = "L".repeat(300);
+    const c = (ctx = await setup());
+    const lines = [`- ${long}`, ...Array.from({ length: 19 }, (_, i) => `- Lesson ${i + 2}`)].join("\n");
+    await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Lessons\n\n${lines}\n`);
+    await c.sendBack("New A");
+    await c.answer((await sendBackDecision())!.id, "Add");
+    const [a] = (await c.open()).filter((d) => (d.context as { type: string }).type === "lesson_replace");
+    const refused = await c.answer(a!.id, "nonsense");
+    expect(refused.statusCode).toBe(422);
+    const msg = JSON.stringify(refused.json());
+    expect(msg).toContain("Replace #1,");
+    expect(msg).not.toContain(long);
+  });
+
   it("after a hand edit, the refusal lists the decision's own numbers, so following it drops the lesson meant (BOS-108)", async () => {
     const c = (ctx = await setup());
     const lines = Array.from({ length: 20 }, (_, i) => `- Lesson ${i + 1}`).join("\n");

@@ -735,6 +735,8 @@ export class AnswerError extends Error {}
 
 /** The option for dropping a line: numbered, so a long lesson can be chosen by its number. */
 const replaceOption = (i: number, lesson: string) => `Replace #${i + 1}: ${lesson}`;
+/** An option as an answer can name it: a "Replace #N: <whole lesson>" option can pass the tools' 200-character cap, so it is named "Replace #N" (BOS-1874). */
+const shortLabel = (o: string) => (/^Replace #\d+: /.test(o) ? o.slice(0, o.indexOf(":")) : o);
 /** The lesson a drop answer names, in the numbered or the older "Replace: " form. */
 const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec(answer)?.[1];
 
@@ -3079,7 +3081,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (extra.custom && !ownWords) throw new AnswerError("This decision needs one of its options; only an agent's question takes your own answer.");
       const handOff = (d.context as DecisionContext).type === "stale_blocker" && answer === LET_CEO_DECIDE; // also on cards raised before the option existed
       if (handOff && extra.settledBy) throw new AnswerError("Only the owner can hand this to the CEO; answer Chase, Reassign or Drop dependency.");
-      if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
+      if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.map(shortLabel).join(", ")}`);
       await validate(d, answer, extra);
       if (handOff) return handToCeo(d);
       const ctx = d.context as DecisionContext;
