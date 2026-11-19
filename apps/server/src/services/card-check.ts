@@ -4,7 +4,7 @@
 import { splitOwnerSteps, type StepSource } from "@boss-man/shared";
 import { type LintOverrideInput, cleanOverride, overrideTooShort, resolveOverride } from "./lint-override.js";
 import { composeFactsFrom } from "./compose-steps.js";
-import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, fillHostTokensIn, fillServerHost, lintLines, ownerWhere, unfilledTokens, lintOwnerSteps, parseProof } from "./steps.js";
+import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, fillHostTokensIn, fillServerHost, lintLines, placeFindings, placeMissingText, unfilledTokens, lintOwnerSteps, parseProof } from "./steps.js";
 import { type CompanyFacts, fillCompanyFacts } from "./company-facts.js";
 import { type OwnerRecordFacts, fillOwnerSetupTokens, usesOwnerSetupToken } from "./owner-record.js";
 import type { Addon, AddonFacts } from "./addons.js";
@@ -144,8 +144,8 @@ export function checkAsk(a: { ownerSetup?: OwnerRecordFacts; triedFirst: string;
   // never typed; a step that names no place is refused, and the card opens with why and minutes.
   const openingProblem = cardOpeningProblem(a.why, a.minutes);
   if (openingProblem) return { error: openingProblem };
-  const place = ownerWhere(steps, a.serverHost);
-  if (place.missing.length) return { error: `${place.missing.length === 1 ? `Step ${place.missing[0]} doesn't` : `Steps ${place.missing.join(", ")} don't`} say where ${place.missing.length === 1 ? "it" : "they"} happen${place.missing.length === 1 ? "s" : ""}. Say where this step happens: a command block that names its host, a Settings → path, or the website it is on. Boss Man writes the card's Where line from these.` };
+  const place = placeFindings(steps, a.serverHost);
+  if (place.findings.length) return { error: placeMissingText(place.findings.map((f) => f.step)) };
   const lint: CardLint = { warn, ...(covered.length ? { override: { reason: covered.map((c) => c.reason).join(" "), findings: covered.flatMap((c) => c.findings), entries: covered } } : {}), ...(proof ? { proof } : {}) };
   // BOS-1665: the checker read the tags above; the owner's steps leave here without them, and the source of each step
   // is kept beside them for the muted "Written from…" line. No screen or push has to remember to strip a tag.

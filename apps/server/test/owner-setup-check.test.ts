@@ -93,7 +93,8 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
     for (const steps of [NTFY, SLOTS]) {
       for (const mode of ["write", "raise"] as const) {
         const c = checkOwnerSetup(steps, { values: VALUES, serverHost: "example-host" }, mode);
-        expect([...c.hard, ...c.soft]).toEqual([]);
+        // These steps keep their commands in sentences, so R21 (no place) is tested on its own below.
+        expect([...c.hard, ...c.soft].filter((f) => f.rule !== "R21")).toEqual([]);
         expect(c.generic).toBe(false);
       }
     }
@@ -112,12 +113,29 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
 
   it("with no host report, a token in the words becomes the label; one in a command is let through when written but stops the go-live card", () => {
     const write = checkOwnerSetup(NTFY, {}, "write");
-    expect([...write.hard, ...write.soft]).toEqual([]);
+    expect([...write.hard, ...write.soft].filter((f) => f.rule !== "R21")).toEqual([]);
     const raise = checkOwnerSetup(NTFY, {}, "raise");
     expect(raise.hard.map((f) => f.rule)).toContain("R4");
     const words = checkOwnerSetup(["Remove the NTFY_IMAGE line from {{host.env.file}}"], {}, "raise");
-    expect([...words.hard, ...words.soft]).toEqual([]);
+    expect([...words.hard, ...words.soft].filter((f) => f.rule !== "R21")).toEqual([]);
     expect(words.generic).toBe(true);
+  });
+
+  // BOS-1880: the Umami go-live card (BOS-1739) sent the owner to "the go-live card" for the place of two values.
+  it("a step that names no place is refused, when written and at go-live, and a step that does gets a Where line", () => {
+    const umami = ["Set the two Umami values where the go-live card names"];
+    for (const mode of ["write", "raise"] as const) {
+      const c = checkOwnerSetup(umami, {}, mode);
+      expect([...c.hard, ...c.soft].map((f) => f.rule)).toEqual(expect.arrayContaining(["R21", "R1"]));
+    }
+    expect(ownerSetupWriteCheck(umami, {}, { byCeo: true, lintOverride: "The owner knows where." }).error).toMatch(/Step 1: doesn't say where it happens/);
+    const ok = checkOwnerSetup(["Open Settings → Secrets and add the key.", "Open http://192.168.1.50/admin and save."], {}, "raise");
+    expect([...ok.hard, ...ok.soft]).toEqual([]);
+    expect(ok.where).toEqual(["Step 1: Boss Man, in Settings", "Step 2: Boss Man, in your browser"]);
+  });
+
+  it.each([["the go-live card names"], ["the value the card says"], ["see the setup card"], ["as the owner's go-live card lists"]])("R1 refuses a pointer to a card: %s", (text) => {
+    expect(lintOwnerSteps([`Open Settings → Secrets and use ${text}.`]).refuse.map((f) => f.rule)).toContain("R1");
   });
 
   it("an unknown host token is refused when written", () => {
@@ -126,7 +144,7 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
   });
 
   it("lintOverride is the CEO's only, needs a reason, covers soft findings and is returned to store", () => {
-    const vague = ["Restart the notifications add-on"];
+    const vague = ["Restart the notifications add-on at http://192.168.1.50/admin"];
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: false, lintOverride: "the add-on restarts itself" }).error).toMatch(/Only the CEO/);
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: true, lintOverride: "short" }).error).toMatch(/at least 10/);
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: true })).toMatchObject({ error: expect.stringContaining("pass lintOverride") });
@@ -141,7 +159,7 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
   });
 
   it("R35: the override names the steps it covers; a refused step it leaves out stays refused (fails on the old code)", () => {
-    const two = ["Restart the notifications add-on", "Settings → Funding → Add funding source", "Restart the other add-on"];
+    const two = ["Restart the notifications add-on at http://192.168.1.50/a", "Settings → Funding → Add funding source", "Restart the other add-on at http://192.168.1.50/b"];
     const why = "Both add-ons restart by themselves.";
     // One reason can't cover refusals on two steps.
     expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: why }).error).toMatch(/name the steps it covers/);
@@ -158,7 +176,7 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
     expect(stored).toEqual([{ steps: [1, 3], rules: [expect.any(String)], reason: why }]);
     expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: stored, strict: false })).toEqual({ error: null, override: expect.any(String) });
     // Step 3 edited to something else: the stored override no longer covers a new refusal there, and an entry whose refusal went is only unused.
-    expect(ownerSetupWriteCheck(["Restart the notifications add-on", "Settings → Funding → Add funding source", "Restart the other add-on"], {}, { byCeo: true, lintOverride: [{ steps: [1], reason: why }], strict: false }).error).toMatch(/Step 3/);
-    expect(ownerSetupWriteCheck(["Restart the notifications add-on", "Settings → Funding → Add funding source", "Settings → Funding → Add funding source"], {}, { byCeo: true, lintOverride: stored, strict: false })).toMatchObject({ error: null });
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1], reason: why }], strict: false }).error).toMatch(/Step 3/);
+    expect(ownerSetupWriteCheck(["Restart the notifications add-on at http://192.168.1.50/a", "Settings → Funding → Add funding source", "Settings → Funding → Add funding source"], {}, { byCeo: true, lintOverride: stored, strict: false })).toMatchObject({ error: null });
   });
 });

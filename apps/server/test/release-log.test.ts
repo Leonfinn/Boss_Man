@@ -295,20 +295,20 @@ describe("owner setup cards (DR-011)", () => {
   it("raises one card when the live commit includes the merge, with the author's steps", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
-    await doneTicket(c, projectId, { title: "Second Claude account", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source\nThen sign in to the second plan", at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Second Claude account", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source\nThen sign in to the second plan in Settings → Funding", at: new Date("2026-11-03T12:00:00Z") });
     await c.releaseLog.note(companyId, A);
     await c.releaseLog.note(companyId, B); // the deployer says B is live (after the standby window: only a finished deploy is noted)
     await c.releaseLog.releaseManagerWakes("deployed");
 
     const cards = await setupCards(c);
     expect(cards).toHaveLength(1);
-    expect(cards[0]).toMatchObject({ kind: "question", tier: "owner", status: "open", dedupeKey: `owner-setup:${(await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan")))[0]!.id}` });
+    expect(cards[0]).toMatchObject({ kind: "question", tier: "owner", status: "open", dedupeKey: `owner-setup:${(await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan in Settings → Funding")))[0]!.id}` });
     expect(cards[0]!.question).toContain("Second Claude account");
     expect(cards[0]!.question).toContain("Add funding source");
     expect(cards[0]!.question).toContain("sign in to the second plan");
     expect((cards[0]!.context as { ticketId?: string }).ticketId).toBeDefined();
     // The ticket records which card it raised.
-    const [t] = await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan"));
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan in Settings → Funding"));
     expect(t!.ownerSetupDecisionId).toBe(cards[0]!.id);
   });
 
@@ -411,14 +411,15 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     const c = (ctx = await setupApp());
     await hostReport(c);
     const { companyId, projectId } = await withReleaseManager(c);
-    await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}}\nRestart the notifications add-on: `{{host.compose.cmd}} up -d ntfy`", at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}} (http://192.168.1.50/admin)\nRestart the notifications add-on: `{{host.compose.cmd}} up -d ntfy` (http://192.168.1.50/admin)", at: new Date("2026-11-03T12:00:00Z") });
     await live(c, companyId);
     const [card] = await setupCards(c);
     expect(card!.question).toContain("1. Remove the NTFY_IMAGE line from /opt/example/src/.env");
     expect(card!.question).toContain("2. Restart the notifications add-on: `cd /opt/example/src && docker compose -f docker-compose.yml up -d ntfy`");
     expect(card!.question).not.toContain("{{");
     expect(card!.question).not.toContain("doesn't know this server's folders");
-    expect((card!.context as { steps: string[] }).steps[0]).toBe("Remove the NTFY_IMAGE line from /opt/example/src/.env");
+    expect((card!.context as { steps: string[] }).steps[0]).toBe("Remove the NTFY_IMAGE line from /opt/example/src/.env (http://192.168.1.50/admin)");
+    expect(card!.question).toMatch(/Where: Steps 1, 2: Boss Man, in your browser/);
   });
 
   it("vague steps raise a CEO card and no owner card, nothing is logged as a silent refusal, and once fixed the owner's card goes out on the next pass", async () => {
@@ -439,7 +440,7 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     await c.releaseLog.releaseManagerWakes("deployed");
     expect((await c.db.select().from(decisions).where(like(decisions.dedupeKey, "owner-setup-fix:%")))).toHaveLength(1);
     // The steps are fixed; the live commit doesn't change, and the next pass raises the owner's card and closes the CEO's.
-    await c.db.update(tickets).set({ ownerSetup: "Delete the BOSSMAN_CHECK_SLOTS line from {{host.env.file}}: `sed -i '/^BOSSMAN_CHECK_SLOTS=/d' {{host.env.file}}`. This prints nothing." }).where(eq(tickets.id, t.id));
+    await c.db.update(tickets).set({ ownerSetup: "Delete the BOSSMAN_CHECK_SLOTS line from {{host.env.file}}: `sed -i '/^BOSSMAN_CHECK_SLOTS=/d' {{host.env.file}}`. This prints nothing. (http://192.168.1.50/admin)" }).where(eq(tickets.id, t.id));
     await c.releaseLog.releaseManagerWakes("deployed");
     const [card] = await setupCards(c);
     expect(card).toMatchObject({ status: "open", tier: "owner" });
@@ -473,7 +474,7 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
   it("the CEO's lintOverride stored with the steps lets a soft finding through, and the owner reads why", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
-    const t = await doneTicket(c, projectId, { title: "Notifications", mergeCommit: B, ownerSetup: "Restart the notifications add-on", at: new Date("2026-11-03T12:00:00Z") });
+    const t = await doneTicket(c, projectId, { title: "Notifications", mergeCommit: B, ownerSetup: "Restart the notifications add-on at http://192.168.1.50/admin", at: new Date("2026-11-03T12:00:00Z") });
     await c.db.update(tickets).set({ ownerSetupOverride: "The add-on restarts by itself after the update." }).where(eq(tickets.id, t.id));
     await live(c, companyId);
     const [card] = await setupCards(c);
@@ -555,7 +556,7 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
     await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source", at: new Date("2026-11-03T12:00:00Z") });
-    await doneTicket(c, projectId, { title: "Turn on the second storage bucket", mergeCommit: C, ownerSetup: "Turn on the second bucket in your storage provider's console", at: new Date("2026-11-03T12:05:00Z") });
+    await doneTicket(c, projectId, { title: "Turn on the second storage bucket", mergeCommit: C, ownerSetup: "Turn on the second bucket at http://192.168.1.50/console", at: new Date("2026-11-03T12:05:00Z") });
     await c.releaseLog.note(companyId, A);
     await c.releaseLog.note(companyId, C);
     await c.releaseLog.releaseManagerWakes("deployed");
@@ -595,7 +596,7 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     // live: its card is raised, and the grouped card isn't stacked on. The old code read an empty group
     // here and threw, aborting the whole pass so this new card never went up.
     const D = "4".repeat(40);
-    await doneTicket(c, projectId, { title: "Turn on the second bucket", mergeCommit: D, ownerSetup: "Turn on the second bucket in your storage provider's console", at: new Date("2026-11-03T12:10:00Z") });
+    await doneTicket(c, projectId, { title: "Turn on the second bucket", mergeCommit: D, ownerSetup: "Turn on the second bucket at http://192.168.1.50/console", at: new Date("2026-11-03T12:10:00Z") });
     await c.releaseLog.note(companyId, D);
     await c.releaseLog.releaseManagerWakes("deployed");
     const cards = await openCards(c);

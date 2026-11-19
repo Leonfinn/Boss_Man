@@ -62,7 +62,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R20" | "R31" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R20" | "R21" | "R31" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -406,7 +406,9 @@ const DOC_POINTERS: Array<[RegExp, string]> = [
   [/\b(?:follow|see)\s+\[\[/i, "sends the owner to a wiki page"],
   [/\bwith (?:the |your |some )?changes\b/i, "asks the owner to adapt instructions (\"with changes\")"],
   [/\b(?:same as|as) (?:before|last time|usual)\b/i, "relies on what the owner did before"],
-  [/\b(?:previous|earlier|other|last|old) card\b/i, "sends the owner to another card"],
+  [/\b(?:previous|earlier|other|last|old|go-live|setup|above|below|that|first|second|original) card\b/i, "sends the owner to another card"],
+  // BOS-1880: "the value the card names", "where the go-live card says": a pointer to a card, whichever card it is.
+  [/\bthe\s+(?:[\w'-]+\s+){0,3}card\s+(?:names?|says?|lists?|gives?|shows?|describes?|tells?|mentions?|has)\b/i, "sends the owner to a card for the value or action"],
 ];
 /**
  * R15 (BOS-594): a command that recreates or restarts the runners at once cuts off every run in progress, with no
@@ -843,6 +845,23 @@ export function ownerWhere(steps: readonly string[], serverHost?: string | null)
     else byPlace.set(place, [...(byPlace.get(place) ?? []), i + 1]);
   });
   return { where: [...byPlace].map(([place, nums]) => `${stepNumbers(nums)}: ${place}`), missing };
+}
+
+/** What to tell the author when steps name no place (BOS-1660); one wording for cards and ticket setup steps. */
+export function placeMissingText(missing: readonly number[]): string {
+  const one = missing.length === 1;
+  return `${one ? `Step ${missing[0]} doesn't` : `Steps ${missing.join(", ")} don't`} say where ${one ? "it" : "they"} happen${one ? "s" : ""}. Say where this step happens: a command block that names its host, a Settings → path, or the website it is on. Boss Man writes the card's Where line from these.`;
+}
+
+/**
+ * BOS-1880: the one place check for every list of owner steps, an agent's card (checkAsk) and a ticket's setup steps
+ * (checkOwnerSetup, when written and at go-live). Returns the Where lines and, per step that names no place, an R21
+ * finding (never overridable, as on a card). Steps are read as the owner will see them, so a step whose only place is
+ * "the go-live card" has none.
+ */
+export function placeFindings(steps: readonly string[], serverHost?: string | null): { where: string[]; findings: LintFinding[] } {
+  const { where, missing } = ownerWhere(steps, serverHost);
+  return { where, findings: missing.map((step) => ({ step, rule: "R21" as const, problem: "doesn't say where it happens. Say where this step happens: a command block that names its host, a Settings → path, or the website it is on. Boss Man writes the card's Where line from these" })) };
 }
 
 /**
@@ -1639,7 +1658,7 @@ export function runnerUpdateFindings(step: number, text: string, commands: strin
 // R15 too (DR-036): the fix is to leave the update to Boss Man's own card, never to hand-write it.
 // R10 too (DR-024 D and its amendment): an override can't bypass a command that waits for typed input, pages
 // or never returns. R12 (prints nothing) stays overridable: whether a sentence says enough is a judgement.
-export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R10", "R14", "R15"]);
+export const NOT_OVERRIDABLE: ReadonlySet<LintFinding["rule"]> = new Set(["R3", "R4", "R10", "R14", "R15", "R21"]);
 
 /** One line per finding, for the agent's refusal or the CEO's list. */
 export const lintLines = (fs: LintFinding[]) => fs.map((f) => `- ${f.step > 0 ? `Step ${f.step}` : "The setup text"}: ${f.problem}.`).join("\n");
