@@ -11,6 +11,9 @@
 #
 # Settings come from the environment, never from this file (it works on any host, with any Cloudflare account):
 #   SITE_URL            the site's https origin, e.g. https://example.com (the build refuses anything else).
+#   UMAMI_SCRIPT_URL    the https address of the Umami script, and UMAMI_WEBSITE_ID the site's ID (both public; set both or
+#   UMAMI_WEBSITE_ID    neither). The build then adds the script to every page and its pre-publish check fails the
+#                       publish if a page lacks it. Empty: no statistics and a warning.
 #   CF_PAGES_PROJECT    the Cloudflare Pages project name. When it is empty, only the build runs and nothing is deployed.
 #   INDEXNOW_KEY        the key from Boss Man's Secrets screen. Empty: no key file is served and no notice is sent.
 #   INDEXNOW_ON_FAILURE a shell command to run after the notice fails twice (the publish step supplies it to raise a

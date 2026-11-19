@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkSite } from "./check.mjs";
 import { escapeHtml, inline, renderMarkdown } from "./markdown.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -91,6 +92,50 @@ export function checkIndexNowKey(raw) {
   return key;
 }
 
+/**
+ * Umami page statistics. The script address and the site ID are public (they sit in every page), so they come from the
+ * environment, not the repo: UMAMI_SCRIPT_URL (the https address of the script, for example
+ * https://stats.example.com/script.js) and UMAMI_WEBSITE_ID (the ID Umami shows for the site). Both empty means no
+ * tracking; one without the other, a non-https address or an ID that is not a UUID stops the build.
+ */
+export function checkUmami(rawUrl, rawId) {
+  const scriptUrl = (rawUrl ?? "").trim();
+  const websiteId = (rawId ?? "").trim();
+  if (!scriptUrl && !websiteId) return null;
+  if (!scriptUrl || !websiteId) throw new Error("UMAMI_SCRIPT_URL and UMAMI_WEBSITE_ID must be set together (or both left empty)");
+  let u;
+  try {
+    u = new URL(scriptUrl);
+  } catch {
+    throw new Error(`UMAMI_SCRIPT_URL "${scriptUrl}" is not a web address`);
+  }
+  if (u.protocol !== "https:" || u.username || u.password || !u.host.includes(".")) {
+    throw new Error(`UMAMI_SCRIPT_URL must be an https address with a domain name and no login, got "${scriptUrl}"`);
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(websiteId)) throw new Error("UMAMI_WEBSITE_ID must be the site ID Umami shows (a UUID)");
+  return { scriptUrl: u.href, origin: u.origin, websiteId };
+}
+
+/** The named click events Umami records: Install, GitHub and Roadmap links (a data-umami-event attribute, no extra script). */
+export function trackLinks(html, { installHref, repo, portal }) {
+  return html.replace(/<a\s[^>]*>/g, (tag) => {
+    if (/\sdata-umami-event=/.test(tag)) return tag;
+    const href = /\shref="([^"]*)"/.exec(tag)?.[1];
+    if (href === undefined) return tag;
+    const clean = href.split(/[?#]/)[0].replace(/\/$/, "");
+    let event = "";
+    if (clean === installHref) event = "install-click";
+    else if (clean === repo) event = "github-click";
+    else if (portal && href.startsWith(portal)) event = "roadmap-click";
+    return event ? tag.replace(/>$/, ` data-umami-event="${event}">`) : tag;
+  });
+}
+
+/** Lets the page load the Umami script and send its numbers: the Content-Security-Policy otherwise allows only our own files. */
+export function allowUmamiInHeaders(headers, origin) {
+  return headers.replace(/script-src 'self'/, `script-src 'self' ${origin}`).replace(/; base-uri/, `; connect-src ${origin}; base-uri`);
+}
+
 const GROUPS = ["Start here", "Everyday use", "Set it up your way", "Questions"];
 
 function header(config, vars, current) {
@@ -132,7 +177,7 @@ function footer(vars) {
 </footer>`;
 }
 
-function headTags(config, meta, siteUrl) {
+function headTags(config, meta, siteUrl, umami) {
   const title = escapeHtml(meta.title);
   const description = escapeHtml(meta.description);
   const abs = (p) => (siteUrl ? siteUrl + p : p);
@@ -160,16 +205,18 @@ function headTags(config, meta, siteUrl) {
     `<meta name="twitter:image" content="${abs(config.ogImage)}">`,
     meta.robots && `<meta name="robots" content="${escapeHtml(meta.robots)}">`,
     `<script src="/menu.js" defer></script>`,
+    // No cookies are set by this script. data-exclude-search keeps anything after "?" out of the recorded address.
+    umami && `<script defer src="${escapeHtml(umami.scriptUrl)}" data-website-id="${umami.websiteId}" data-do-not-track="true" data-exclude-search="true"></script>`,
   ];
   return tags.filter(Boolean).join("\n");
 }
 
-function document({ config, vars, siteUrl, meta, content, wrapMain = true }) {
+function document({ config, vars, siteUrl, umami, meta, content, wrapMain = true }) {
   const body = wrapMain ? `<main id="main" tabindex="-1">\n${content.trim()}\n</main>` : content.trim();
   return `<!doctype html>
 <html lang="en-GB">
 <head>
-${headTags(config, meta, siteUrl)}
+${headTags(config, meta, siteUrl, umami)}
 </head>
 <body${meta.body ? ` class="${escapeHtml(meta.body)}"` : ""}>
 <a class="skip" href="#main">Skip to the content</a>
@@ -310,7 +357,8 @@ ${html}
   return { content, wrapMain: false };
 }
 
-export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl, changelogFile = path.join(root, "..", "..", "CHANGELOG.md"), lastModified = gitLastModified, indexNowKey = process.env.INDEXNOW_KEY } = {}) {
+export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl, changelogFile = path.join(root, "..", "..", "CHANGELOG.md"), lastModified = gitLastModified, indexNowKey = process.env.INDEXNOW_KEY, umamiScriptUrl = process.env.UMAMI_SCRIPT_URL, umamiWebsiteId = process.env.UMAMI_WEBSITE_ID } = {}) {
+  const umami = checkUmami(umamiScriptUrl, umamiWebsiteId);
   siteUrl = siteUrl.replace(/\/+$/, "");
   if (siteUrl && !/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(siteUrl)) {
     throw new Error(`SITE_URL must be an https origin such as https://example.com (no path, query or spaces), got "${siteUrl}"`);
@@ -335,7 +383,8 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
   const sources = {}; // page path -> source files it is built from, for its sitemap date
   const write = (meta, parts, fileName, from = []) => {
     sources[meta.path] = from;
-    const html = portalBlocks(document({ config, vars, siteUrl, meta, ...parts }), Boolean(portal));
+    let html = portalBlocks(document({ config, vars, siteUrl, umami, meta, ...parts }), Boolean(portal));
+    if (umami) html = trackLinks(html, { installHref: config.installHref, repo: config.repo, portal });
     const target = path.join(outDir, fileName);
     mkdirSync(path.dirname(target), { recursive: true });
     writeFileSync(target, html);
@@ -377,6 +426,10 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
   for (const f of ["_headers", "_redirects"]) {
     if (existsSync(path.join(srcDir, f))) cpSync(path.join(srcDir, f), path.join(outDir, f));
   }
+  if (umami && existsSync(path.join(outDir, "_headers"))) {
+    const file = path.join(outDir, "_headers");
+    writeFileSync(file, allowUmamiInHeaders(readFileSync(file, "utf8"), umami.origin));
+  }
   return { outDir, pages: paths };
 }
 
@@ -390,4 +443,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const outDir = process.env.SITE_OUT || path.join(root, "dist"); // SITE_OUT: build somewhere else, so two builds never share a folder
   const { pages } = build({ outDir });
   console.log(`Built ${pages.length + 1} pages to ${outDir}${process.env.SITE_URL ? "" : " (SITE_URL not set: no canonical links or sitemap)"}`);
+  if (!process.env.UMAMI_SCRIPT_URL) console.warn("WARNING: UMAMI_SCRIPT_URL and UMAMI_WEBSITE_ID are not set: this build has no visitor statistics");
+  // The pre-publish check: a page missing its head tags or the Umami script stops the publish here, before anything is deployed.
+  const problems = checkSite(outDir, { siteUrl: (process.env.SITE_URL ?? "").replace(/\/+$/, ""), umami: checkUmami(process.env.UMAMI_SCRIPT_URL, process.env.UMAMI_WEBSITE_ID) });
+  if (problems.length) {
+    console.error(problems.map((p) => "- " + p).join("\n"));
+    console.error(`\nSite check failed: ${problems.length} problem(s)`);
+    process.exit(1);
+  }
 }

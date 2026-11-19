@@ -27,10 +27,13 @@ After a successful deploy, the publish step runs `node apps/site/scripts/indexno
 - `SITE_URL` (required): the site's https origin.
 - `CF_PAGES_PROJECT`: the Cloudflare Pages project. Empty: the script builds and checks only, and deploys nothing (a safe dry run).
 - `INDEXNOW_KEY`: the key from Boss Man's Secrets. Empty: no key file is served and no notice is sent.
+- `UMAMI_SCRIPT_URL` and `UMAMI_WEBSITE_ID` (set both or neither): the https address of the Umami script (for example `https://stats.example.com/script.js`) and the site ID Umami shows for bossman.website. Both are public (they sit in every page), so they are settings, not secrets; an Umami login or API key never goes in the site. With them set, the build adds the script to every page, adds a `data-umami-event` to the Install (`install-click`), GitHub (`github-click`) and Roadmap (`roadmap-click`) links, and lets that one address into the Content-Security-Policy (`script-src` and `connect-src`). Umami sets no cookies, so there is no banner; the script is told to honour Do Not Track and to leave the query string out of recorded addresses. Without them the build prints a warning and the site has no statistics.
 - `INDEXNOW_ON_FAILURE`: a shell command to raise a CEO ticket after the notice fails twice (gets a summary in `INDEXNOW_FAILURE`).
 - `WRANGLER` (default `npx --yes wrangler@4`), `CF_PAGES_BRANCH` (default `main`), `DIST_TMP` (a fresh temp dir by default).
 
 Publish from a full clone, not a shallow one: with no git history the sitemap has no dates, every page counts as changed, and all of them are sent each time (IndexNow tolerates it, but it isn't "only changed pages"). Rollback: re-run the script from the older commit.
+
+The build ends with the pre-publish check (`scripts/check.mjs`): a page without its head tags, or without the Umami script when it is configured, exits 1 and `publish-site.sh` stops before deploying.
 
 ## Cloudflare Pages settings
 
