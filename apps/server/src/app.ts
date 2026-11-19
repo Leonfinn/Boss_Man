@@ -1073,7 +1073,7 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
-  releaseGoLive =(companyId) => review.releaseGoLiveWaiters(companyId);
+  releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
   // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and
   // running and waiting counts for the company, so the screen can show "waiting for a check slot".
