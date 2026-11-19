@@ -1,5 +1,5 @@
 // The Settings addresses, kept apart from the Settings page itself so the app shell can redirect an old address
-// without loading the whole Settings page (BOS-1843: pages load when opened). test/settings-redirect.test.ts keeps
+// without loading the whole Settings page (BOS-1843: pages load when opened). test/first-load.test.ts keeps
 // SETTINGS_PAGE_IDS equal to the pages in Settings.tsx.
 export type SettingsPage = "funding" | "secrets" | "tools" | "reviews" | "team" | "watchdog" | "permissions" | "updates" | "limits" | "runner" | "email" | "server" | "devices" | "transfer";
 export const SETTINGS_PAGE_IDS: readonly SettingsPage[] = ["funding", "secrets", "tools", "reviews", "team", "watchdog", "permissions", "updates", "limits", "runner", "email", "server", "devices", "transfer"];
