@@ -9,7 +9,8 @@
 # IndexNow notice against the previous sitemap. The notice is best-effort: a failed one never fails a
 # publish (it retries once, then runs INDEXNOW_ON_FAILURE so a CEO ticket is raised).
 #
-# Settings come from the environment, never from this file (it works on any host, with any Cloudflare account):
+# Settings come from the environment, never from this file (it works on any host, with any Cloudflare account).
+# Store them once in Boss Man's Settings → Secrets (every run gets them); a value set in the command overrides it:
 #   SITE_URL            the site's https origin, e.g. https://example.com (the build refuses anything else).
 #   UMAMI_SCRIPT_URL    the https address of the Umami script, and UMAMI_WEBSITE_ID the site's ID (both public; set both or
 #   UMAMI_WEBSITE_ID    neither). The build then adds the script to every page and its pre-publish check fails the
@@ -27,7 +28,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 die() { echo "publish-site: $*" >&2; exit 1; }
 
-: "${SITE_URL:?set SITE_URL to the site https origin, e.g. https://example.com}"
+[ -n "${SITE_URL:-}" ] || die "SITE_URL is not set. Add it in Settings → Secrets (the stored value every run gets), e.g. https://example.com; or set it in the command to override for one publish"
 site_url="${SITE_URL%/}"
 case "$site_url" in
   https://*) ;;
@@ -51,9 +52,13 @@ node apps/site/scripts/indexnow.mjs --fetch-previous "$previous" || true
 
 # 3. Deploy. With no project set this is a dry run: the build and the checks above still happen.
 if [ -z "${CF_PAGES_PROJECT:-}" ]; then
-  echo "publish-site: CF_PAGES_PROJECT is empty; built only, nothing deployed"
+  echo "publish-site: CF_PAGES_PROJECT is empty (add it in Settings → Secrets to deploy); built only, nothing deployed"
   exit 0
 fi
+# Cloudflare Pages project names are lowercase letters, digits and dashes: refuse a typo before any deploy.
+case "$CF_PAGES_PROJECT" in
+  *[!a-z0-9-]*|-*|*-) die "CF_PAGES_PROJECT '$CF_PAGES_PROJECT' is not a valid Cloudflare Pages project name (lowercase letters, digits and dashes)" ;;
+esac
 branch="${CF_PAGES_BRANCH:-main}"
 wrangler="${WRANGLER:-npx --yes wrangler@4}"
 echo "publish-site: deploying $dist to Cloudflare Pages project $CF_PAGES_PROJECT (branch $branch)"
