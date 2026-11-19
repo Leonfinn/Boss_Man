@@ -11,12 +11,13 @@ Only what you set up yourself:
 | Where it goes | What goes there | When |
 |---|---|---|
 | Your AI accounts (Claude, OpenAI, OpenRouter, Ollama Cloud or Synthetic) | Prompts, and the code and text your agents work on | Every agent run |
-| Your git host (GitHub or Gitea) | Your project's code, with the token you made | When agents fetch and push |
+| Your git host (GitHub or Gitea) | Your project's code, with the token you made | When agents fetch and push, and when Boss Man reads the CI results on your main branch (on unless you switch off **Main's CI** under Settings → Server and runner) |
 | Your ntfy server | Your notifications | Only if you set up phone notifications |
 | ntfy.sh | A wake-up with the message ID only, never its text | Only if you added `NTFY_UPSTREAM_BASE_URL` for an iPhone |
 | Synthetic | A check of your remaining credit | Only if you use a Synthetic account |
 | The service you name under **Semantic search** on the Wiki page | Wiki text and search words | Only if you tick **Search by meaning as well as words** |
 | GitHub | A request for the skill's files | Only when you add a skill from a GitHub link |
+| GitHub (api.github.com) | Read-only requests for a repo's new issues, discussions and comments, with the read-only `GITHUB_WATCH_TOKEN` you saved under Secrets. Nothing is written to GitHub | Only if you tick **Watch this repo** under **GitHub feedback watcher** for a project on the Projects page (off by default), at the interval you set there |
 | The model service you name under **Second opinion from a model** (Settings, Permissions) | What a permission card asks about, with secrets taken out | Only if you turn the second opinion on (off by default) |
 
 ## Things to know
@@ -36,6 +37,6 @@ If you tick **Confirm posts by email** (Feedback → Feedback portal), visitors 
 
 ## How we checked
 
-We searched Boss Man's server, web and runner code for every outside web address and for analytics tools, on 9 November 2026. This was a search of the code, not a watch of a running server's network traffic, and it does not cover what other people's software does on its own.
+We searched Boss Man's server, web and runner code for every outside web address and for analytics tools, on 9 November 2026, and searched the same code again for outside web addresses on 19 November 2026. This was a search of the code, not a watch of a running server's network traffic, and it does not cover what other people's software does on its own.
 
 If you see Boss Man send something that is not on this page, please tell us. See [SECURITY.md](../SECURITY.md).
