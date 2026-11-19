@@ -74,4 +74,16 @@ if CF_PAGES_PROJECT=site SITE_URL="http://example.test" "$s" >"$t/out" 2>&1; the
 grep -q "must be an https address" "$t/out" || fail "refusal should name the reason"
 [ -s "$FAKE_LOG" ] && fail "nothing should run on a bad SITE_URL"
 
+# 6. A mistyped project name is refused before any deploy.
+: >"$FAKE_LOG"
+if CF_PAGES_PROJECT="My_Site " SITE_URL="https://example.test" DIST_TMP="$t/run6" "$s" >"$t/out" 2>&1; then fail "bad project name should be refused"; fi
+grep -q "not a valid Cloudflare Pages project name" "$t/out" || fail "refusal should name the project"
+grep -q wrangler "$FAKE_LOG" && fail "must not deploy a bad project name"
+
+# 7. No SITE_URL: the error points at Settings → Secrets.
+: >"$FAKE_LOG"
+if env -u SITE_URL CF_PAGES_PROJECT=site "$s" >"$t/out" 2>&1; then fail "missing SITE_URL should be refused"; fi
+grep -q "Settings → Secrets" "$t/out" || fail "missing SITE_URL error should say where to set it"
+[ -s "$FAKE_LOG" ] && fail "nothing should run with no SITE_URL"
+
 echo "publish-site.test.sh: all passed"
