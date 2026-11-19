@@ -12,10 +12,17 @@ import { agents, companies, decisions, ownerChatMessages, ownerChatTraces, proje
 import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
+import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
 
 export const CHAT_REASON = "owner_chat";
+
+/** The brief's "Owner's setup" section, for the CEO's chat prompt; empty if the record can't be read. */
+async function ownerSetupSection(db: Db, companyId: string): Promise<string[]> {
+  const lines = [...ownerSetupLines(await ownerSetupFacts(db, companyId)), ...(await workerSetupLines(db, companyId).catch(() => []))];
+  return lines.length ? ["", "## Owner's setup (from the record: say nothing about it that this contradicts)", ...lines] : [];
+}
 
 /**
  * BOS-1300: an ordinary working agent's owner chat has the agent's own working tools (its add-ons and skills, its shell and file
@@ -232,6 +239,8 @@ export function chatService(
           : `You are ${agentIdentity(agent, company?.name ?? "this company").who}. The owner is messaging you directly in Boss Man's chat. Answer their questions about your work, and turn what they ask for into work on the board.`,
         ...agentIdentity(agent, company?.name ?? "this company").instructions,
         ...(ceo ? await ceoNotesLines(db, companyId, agentId) : []),
+        // DR-069 D1: the CEO's chat sees the same "Owner's setup" record as its ticket runs' brief (workers, runner, the owner's last word per worker).
+        ...(ceo ? await ownerSetupSection(db, companyId) : []),
         "",
         // The same built-in rules as a ticket run (BOS-754); here they mostly guard what goes into tickets and pages.
         ...BUILT_IN_RULES,
