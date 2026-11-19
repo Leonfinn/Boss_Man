@@ -13,7 +13,7 @@ import { Loader } from "../components/Loader";
 import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, pausedWaitText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
 import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
-type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
+type Phase = "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; statusLine?: StatusLine };
 type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
 /** Approved work held by the carried-work guard (BOS-130, BOS-766): the ticket(s) it waits for. */
@@ -24,7 +24,7 @@ type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
 
-const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
+const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
 
 /** "12m", "1h 20m", "3h". */

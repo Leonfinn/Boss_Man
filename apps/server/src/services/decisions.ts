@@ -554,7 +554,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
  * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
  */
-export async function raiseMergeStuck(db: Db, t: { id: string; title: string; companyId: string }, why: string) {
+export async function raiseMergeStuck(db: Db, t: { id: string; title: string; companyId: string }, why: string, opts?: { /** BOS-1860: put the card on the CEO's rung of the alert ladder, so it reaches the owner only if the CEO hasn't settled it in time. */ ceoFirst?: { why: string } }) {
   // A finished ticket needs no merge card, even if a sweep or a late failure asks for one (BOS-149).
   const [ticket] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, t.id));
   if (ticket?.systemState === "done") return [];
@@ -565,6 +565,10 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
     ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
     : "";
   await lineEvent(db, t, { event: "hold_started", hold: "card", note: `the merge didn't finish: ${why}`.slice(0, 200) });
+  // tier "ceo" alone doesn't keep a card off the owner's queue (queue() filters on the ladder rung only), so a CEO-first
+  // card carries the ladder: the alert-ladder sweep hands it to the owner after CEO_QUESTION_HANDOVER_MINUTES (BOS-1860).
+  const at = new Date().toISOString();
+  const ladder = opts?.ceoFirst ? { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: t.id, about: [] as string[], hops: [{ to: "ceo", at, why: opts.ceoFirst.why }] } : null;
   return db
     .insert(decisions)
     .values({
@@ -577,7 +581,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
       tier: "ceo",
       dedupeKey: `merge-stuck:${t.id}`,
       // The one closer, on any tier: a retry card goes once its ticket finishes (DR-016, BOS-470).
-      context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }] },
+      context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }], ...(ladder ? { ladder } : {}) },
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });

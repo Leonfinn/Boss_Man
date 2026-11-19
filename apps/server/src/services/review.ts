@@ -11,6 +11,7 @@ import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, de
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
+import { GIT_RETRY_CARD_NOTE, GIT_RETRY_NOTE, isGitTransportFault } from "./git-transport-fault.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { CI_TIMING, CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop, type FlakeAnswer } from "./ci-publish.js";
@@ -55,7 +56,7 @@ export type LandingStatus = { state: "running"; startedAt: string; command: stri
  * merge can take (the same heartbeat the unmerged-approvals sweep watches), so the marker is a
  * leftover and the owner may start it again rather than waiting forever.
  */
-export type LandingView = (LandingStatus & { stale?: boolean; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" }) | null;
+export type LandingView = (LandingStatus & { stale?: boolean; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git" }) | null;
 
 /**
  * A check that was killed or timed out says nothing about the agent's work (the runner ran out of
@@ -366,7 +367,7 @@ export function reviewService(
   // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
   const landingBeat = new Map<string, number>();
   // Where a running merge is: waiting its turn for a check slot, running the check, or merging (DR-014). In memory like `landings`.
-  const phases = new Map<string, "queued" | "checking" | "merging" | "waiting_to_retry">();
+  const phases = new Map<string, "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git">();
   // BOS-1070: a merge waiting for the git host's CI, beside its own check (so not a phase): since when, and the jobs still running.
   // shortcut: in memory like `landings`, lost on restart, harmless because a restart ends the wait it describes.
   const ciWaits = new Map<string, { since: number; waiting: string[] }>();
@@ -757,6 +758,26 @@ export function reviewService(
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
     if (ceo) await wake?.(ceo.id, { ticketId: t.id, reason, note });
     return ceo?.id ?? null;
+  }
+
+  /**
+   * BOS-1860: flags the ticket's state note with Boss Man's own line (shown as "after this was written, <reason>") while a merge
+   * retries after a push/fetch failure, or clears it (reason null). `only`: change it only while the flag is one of these
+   * reasons. Setting one only replaces no flag or our own, so an owner-acted flag (stale-requests.ts) is never overwritten
+   * or cleared here. A ticket with no note is left alone.
+   */
+  async function setGitNote(ticketId: string, reason: string | null, only?: string[]) {
+    const ours = [GIT_RETRY_NOTE, GIT_RETRY_CARD_NOTE];
+    await db
+      .update(tickets)
+      .set({ stateNoteStaleAt: reason ? new Date() : null, stateNoteStaleReason: reason })
+      .where(
+        and(
+          eq(tickets.id, ticketId),
+          isNotNull(tickets.stateNote),
+          only ? inArray(tickets.stateNoteStaleReason, only) : sql`(${tickets.stateNoteStaleAt} is null or ${inArray(tickets.stateNoteStaleReason, ours)})`,
+        ),
+      );
   }
 
   /** The ticket stays in review with the host's reason; the owner hears once per new reason. */
@@ -1388,7 +1409,7 @@ export function reviewService(
       const at = (iso: string) => new Date(iso).toISOString().slice(11, 16) + " UTC";
       if (l.state === "finished") return `merge finished: ${l.text}`;
       if (l.stale) return `merge looks stuck since ${at(l.startedAt)}; nothing is running now`;
-      const word = { queued: "queued for a check slot", checking: "checking", merging: "merging", waiting_to_retry: "waiting to try again after the runner restarted" }[l.phase ?? "checking"];
+      const word = { queued: "queued for a check slot", checking: "checking", merging: "merging", waiting_to_retry: "waiting to try again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" }[l.phase ?? "checking"];
       return `merge ${word} (since ${at(l.startedAt)})`;
     },
 
@@ -1443,7 +1464,7 @@ export function reviewService(
     gatePump: () => gate.pump(),
 
     /** Every merge this process has running, with its phase, for the merge queue screen (BOS-587). */
-    runningMerges(): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry"; ci?: { since: string; waiting: string[] } }> {
+    runningMerges(): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git"; ci?: { since: string; waiting: string[] } }> {
       return [...landings.entries()].flatMap(([ticketId, l]) => {
         if (l.state !== "running") return [];
         const ci = ciWaits.get(ticketId);
@@ -1826,8 +1847,14 @@ export function reviewService(
       const failed = async (reason: FailReason, detail?: unknown, note?: string) => {
         if (!lineRow) return;
         const jobId = (detail as { keptLog?: { jobId?: unknown } } | null | undefined)?.keptLog?.jobId;
-        await recordFailedAttempt(db, { alert: deps.alert }, lineRow, reason, typeof jobId === "string" ? jobId : undefined, note);
+        // BOS-1860: a network blip the merge retries by itself raises no "Merges keep failing" alert; only a second failure counts.
+        await recordFailedAttempt(db, reason === "git_transport_retried" ? {} : { alert: deps.alert }, lineRow, reason, typeof jobId === "string" ? jobId : undefined, note);
       };
+      // BOS-1860: one retry by itself when a push or fetch to the git host failed on the network. gitTwice: it failed again.
+      let gitRetried = false;
+      let gitTwice = false;
+      // An earlier attempt's "retrying" or "card is with the CEO" flag on the note no longer says what is happening.
+      await setGitNote(ticketId, null, [GIT_RETRY_NOTE, GIT_RETRY_CARD_NOTE]).catch(() => undefined);
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
@@ -1837,7 +1864,34 @@ export function reviewService(
           try {
             r = await this.landOnce(ticketId, reviewer, causedByRunId, opts, begun);
           } catch (err) {
-            if (!(err instanceof RunnerGone)) throw err;
+            if (!(err instanceof RunnerGone)) {
+              const message = err instanceof Error ? err.message : String(err);
+              const transport = !isSignoffPending(err) && !(err instanceof ReviewHeldError) && isGitTransportFault(message);
+              // A copy no longer in charge retries nothing: the outer catch hands it to the server now in charge (DR-026).
+              if (transport && !gitRetried && (!deps.isLeader || deps.isLeader())) {
+                gitRetried = true;
+                const { t } = await ticketWithRepo(ticketId);
+                await failed("git_transport_retried", undefined, message);
+                const pause = INFRA_RETRY_BASE_MS;
+                await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Retrying after a push/fetch failure to the git host (${message.slice(0, 200)}); trying once more in ${Math.max(1, Math.round(pause / 1000))}s. The work is unchanged; nothing to do.` });
+                await setGitNote(ticketId, GIT_RETRY_NOTE).catch(() => undefined);
+                phases.set(ticketId, "retrying_git");
+                const beat = setInterval(() => void beatNow(ticketId).catch(() => undefined), MERGE_ACTIVITY_MS);
+                beat.unref?.();
+                try {
+                  await new Promise((resolve) => setTimeout(resolve, pause));
+                } finally {
+                  clearInterval(beat);
+                }
+                const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+                if (now?.state !== "review" || (await leftLineSince(db, ticketId, begun))) return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge waited to retry after a push/fetch failure, so it was not retried." } };
+                if (deps.isLeader && !deps.isLeader()) return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited to retry; the server now in charge restarts it." } };
+                attempt--;
+                continue;
+              }
+              if (transport && gitRetried) gitTwice = true;
+              throw err;
+            }
             r = { outcome: "runner_gone", delivered: null, detail: { message: err.message } };
           }
           if (r.outcome === "runner_gone") {
@@ -1931,11 +1985,24 @@ export function reviewService(
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `The merge was cut off when the server handed over (${err.message}); the server now in charge will try again.` });
           throw err;
         }
+        if (gitTwice) {
+          // BOS-1860: the retry after a push/fetch failure failed on the network too. One merge card, on the CEO's rung of the
+          // alert ladder (the CEO retries gate faults first); it reaches the owner only if the CEO hasn't settled it in time.
+          await failed("git_transport", undefined, err.message);
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't reach the git host twice (${err.message.slice(0, 300)}); a merge card is with the CEO.` });
+          const raised = await raiseMergeStuck(db, t, `it couldn't reach the git host twice, 30 s apart: ${err.message}`, { ceoFirst: { why: "a push or fetch to the git host failed twice; the CEO retries gate faults first" } });
+          await setGitNote(ticketId, GIT_RETRY_CARD_NOTE).catch(() => undefined);
+          if (raised.length) await tellCeo(t, "decision", `"${t.title}" was approved, but its merge couldn't reach the git host twice, 30 s apart (a network fault, not the agent's work). The merge card is yours first: check githubstatus.com or the runner's network, then answer "${CHECK_AGAIN}" on card ${raised[0]!.id} once the git host answers again.`).catch(() => undefined);
+          throw err;
+        }
         await failed("gate_fault", undefined, err.message);
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't run: ${err.message}` });
         await raiseMergeStuck(db, t, err.message);
         // Whoever approved still hears why, as before.
         throw err;
+      } finally {
+        // BOS-1860: the retry is over, whichever way it ended: the note no longer says "retrying". A card's own flag stays.
+        if (gitRetried) await setGitNote(ticketId, null, [GIT_RETRY_NOTE]).catch(() => undefined);
       }
     },
 

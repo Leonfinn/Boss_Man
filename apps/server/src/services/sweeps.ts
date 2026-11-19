@@ -34,6 +34,7 @@ import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
 import { HELD_AGENT } from "./fair-share.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, NOTHING_STARTABLE_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
+import { GIT_RETRY_NOTE } from "./git-transport-fault.js";
 
 export type SweepLimits = {
   staleAfterMs: number;
@@ -742,6 +743,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     if (resumedFor !== promotedAt.getTime()) {
       resumedFor = promotedAt.getTime();
       resumed.clear();
+      // BOS-1860: a merge's retry after a push/fetch failure waits in memory, so a restart ended it. Its "retrying" flag on
+      // the note says nothing now: drop it before the merges start again (a resumed one sets it afresh if it retries).
+      await db.update(tickets).set({ stateNoteStaleAt: null, stateNoteStaleReason: null }).where(eq(tickets.stateNoteStaleReason, GIT_RETRY_NOTE)).catch(() => undefined);
     }
     const list = (await approvedUnmerged()).filter((x) => x.approvedAt < promotedAt.getTime() && !resumed.has(x.id));
     list.sort((a, b) => checkPriority(a) - checkPriority(b) || a.approvedAt - b.approvedAt);
