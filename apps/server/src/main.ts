@@ -13,14 +13,15 @@ import { getHold } from "./services/maintenance.js";
 import { recordTakeover, takeoverCause } from "./services/merge-line.js";
 
 const env = process.env;
-let master: ReturnType<typeof loadMasterKey>;
-try {
-  master = loadMasterKey(env);
-} catch (e) {
-  if (!(e instanceof MasterKeyFileError)) throw e;
-  console.error(`boss-man: ${e.message}`);
-  process.exit(1);
-}
+const master = (() => {
+  try {
+    return loadMasterKey(env);
+  } catch (e) {
+    if (!(e instanceof MasterKeyFileError)) throw e;
+    console.error(`boss-man: ${e.message}`);
+    return process.exit(1);
+  }
+})();
 // BOSSMAN_MIGRATE_ON_START=0: a separate step (node dist/migrate.js) migrates; this server only checks the database is current.
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL, { migrate: env.BOSSMAN_MIGRATE_ON_START !== "0" }) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
