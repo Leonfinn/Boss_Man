@@ -340,6 +340,30 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(container.textContent).toContain("2 of 3 check slots busy, shared with merge checks");
   });
 
+  // BOS-1800 item 4: each cause of a stop is told apart, on both tabs, from the server's own line state.
+  it("a server update waiting for running checks says so, with the count, on both tabs, and never says main is red", async () => {
+    const line = { state: "paused", reason: "a server update", since: "2026-11-17T08:52:00Z", until: "2026-11-17T11:52:00Z", inUse: 3, slots: 5 };
+    for (const hash of ["#/merge-queue/c1", "#/merge-queue/c1/checks"]) {
+      goTo(hash);
+      serve({ ...calm, line }, noChecks);
+      const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+      await waitFor(() => expect(container.querySelector("[data-merge-paused]")).not.toBeNull());
+      const text = container.textContent ?? "";
+      expect(text).toContain("A server update is waiting for these 3 running checks to finish; no new merges start until it's done.");
+      expect(text).not.toMatch(/Main is red|Main is failing/);
+      cleanup();
+    }
+  });
+
+  it("a hold behind a fix never says main is red, and real red is the only 'Main is failing' wording", async () => {
+    const line = { state: "held_behind_fix", held: 2, since: null, fixes: [{ ticketId: "fx", ref: "APP-9", title: "Fix", stateText: "merged, waiting for the server update", ownerUpdate: false }] };
+    goTo("#/merge-queue/c1/checks");
+    serve({ ...calm, line }, noChecks);
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText(/Merges are held\./);
+    expect(container.textContent).not.toMatch(/Main is red|Main is failing/);
+  });
+
   it("tab counts are not amber when all is calm", async () => {
     serve({ ...calm, waitingCount: 2 }, { mode: "server", slots: 2, running: 0, rows: [checkRow({})] });
     render(<MergeQueue companies={[company]} companyId="c1" />);

@@ -32,6 +32,12 @@ export function pausedText(p: PausedSummary): string {
   return `Paused for ${p.reason} since ${clock(p.since)}; new checks start once it is done, by ${clock(p.until)} at the latest.`;
 }
 
+/** BOS-1800: what the pause waits for, so the owner need not ask whether to stop the running checks. */
+export function pausedWaitText(p: PausedSummary): string {
+  if (p.inUse === 0) return `Nothing is running, so ${p.reason} can start now. No new merge starts until it is done.`;
+  return `${p.reason.charAt(0).toUpperCase()}${p.reason.slice(1)} is waiting for ${p.inUse === 1 ? "the 1 running check" : `these ${p.inUse} running checks`} to finish; no new merges start until it's done. Nothing needs stopping.`;
+}
+
 /** "2 of 5 in use: new checks paused": the slot line while the pause lasts. */
 export function pausedSlotsText(p: PausedSummary): string {
   return `${p.inUse} of ${p.slots} ${p.slots === 1 ? "slot" : "slots"} in use: new checks paused`;
