@@ -64,7 +64,7 @@ fi
 
 # 4. No project set: builds only, deploys nothing, still exits 0.
 : >"$FAKE_LOG"
-CF_PAGES_PROJECT= WRANGLER=wrangler DIST_TMP="$t/run4" SITE_URL="https://example.test" "$s" >"$t/out" 2>&1 || fail "dry run should succeed"
+CF_PAGES_PROJECT='' WRANGLER=wrangler DIST_TMP="$t/run4" SITE_URL="https://example.test" "$s" >"$t/out" 2>&1 || fail "dry run should succeed"
 grep -q wrangler "$FAKE_LOG" && fail "must not deploy with no project set"
 grep -q "built only" "$t/out" || fail "dry run should say it built only"
 
