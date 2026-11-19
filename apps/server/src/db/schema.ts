@@ -1144,6 +1144,12 @@ export const checkJobs = pgTable(
     /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
     reason: text("reason"),
     logTail: text("log_tail"),
+    /** BOS-1923: how many slots (this machine's) were busy when the job started, itself not counted; null for a job from before. */
+    busyAtStart: integer("busy_at_start"),
+    /** BOS-1923: each step's seconds as JSON [{name, seconds}], read from the output on the machine; emptied after FULL_LOG_RETENTION_DAYS. */
+    stages: text("stages"),
+    /** BOS-1923: true once the full check (check-all) ran after the quick one; null when the machine didn't say. */
+    ranFull: boolean("ran_full"),
     queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     lastOutputAt: timestamp("last_output_at", { withTimezone: true }),

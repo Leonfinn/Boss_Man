@@ -284,8 +284,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     return (await queue.slots()) + workers.reduce((n, w) => n + w.limit, 0);
   }
 
-  async function done(machine: string | { workerId: string }, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string }) {
-    const job = await queue.complete(msg.jobId, { runnerId: machine, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog });
+  async function done(machine: string | { workerId: string }, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string; stages?: Array<{ name: string; seconds: number }>; ranFull?: boolean }) {
+    const job = await queue.complete(msg.jobId, { runnerId: machine, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog, stages: msg.stages, ranFull: msg.ranFull });
     // The machine may forget the result once the server has seen the job end, whether or not this answer counted.
     const ack = { type: "check.ack" as const, jobId: msg.jobId };
     if (typeof machine === "string") deps.send(machine, ack);
