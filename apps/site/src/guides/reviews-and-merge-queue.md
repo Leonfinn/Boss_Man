@@ -44,20 +44,22 @@ Once every reviewer approves, the ticket moves to Approved, merging, and joins t
 
 The top of the page says what needs attention, as coloured labels you can choose:
 
-- **2 need you**: work that waits on your answer
-- **Main is red: 3 checks held**: the main branch is failing its check (see [Queued checks](#queued-checks))
-- If a fix for main is on its way, approved tickets wait behind it. The label names the fix.
-- **1 check failed**: a merge check failed and Boss Man is trying again
-- **1 stuck over an hour**: work that has not moved for over an hour
+- **2 for you to answer**: work that waits on your answer
+- **Main is red: 3 checks on hold**: the main branch really is failing its check, so new checks wait (see [Quick checks](#quick-checks))
+- **Merges are held: 2 approved tickets are held behind BOS-123**: a fix for main is marked and on its way, so approved tickets wait until it is merged and live. The label names the fix. Main is not shown as red in this case.
+- **1 with a failed check**: a merge check failed and Boss Man is trying again
+- **1 not moved for over an hour**: work that has not moved for over an hour
 
 If none of these apply, it says "Nothing needs you. Everything here is moving by itself."
 
-Each tab shows a count: **Merges** counts work waiting to merge or being checked, and **Queued checks** counts the checks. The count turns amber when something on that tab needs you or is held.
+When a server update is waiting for a quiet machine, both tabs say so, for example: "Paused for a server update since 14:05; new checks start once it is done, by 14:35 at the latest. A server update is waiting for these 2 running checks to finish; no new merges start until it's done. Nothing needs stopping." You do not need to stop anything. The update starts by itself when the running checks finish.
+
+Each tab shows a count: **Merges** counts the approved work in the merge line, and **Quick checks** counts the quick and full checks. The count turns amber when something on that tab needs you or is held.
 
 The **Merges** tab shows:
 
 - **Needs you**: only when something waits on you. Each item has a button straight to its card, such as **Open the sign-off** or **Open the stopped check**.
-- **Running now**: the checks in progress, and how many check slots are busy. A check running for over an hour is marked **over an hour**.
+- **Running now**: the merges being checked, and how many merge slots are busy, for example "1 of 2 merge slots busy". A check running for over an hour is marked **over an hour**.
 - **Waiting to merge**: in the order they will go, Priority 1 work first, then the longest wait. Choose **Move to front** to put a waiting merge next in line.
 - **Recently finished**: the last three, each marked **merged** or **check failed**. Choose **Show 2 more** (or however many there are) to see the rest.
 
@@ -76,20 +78,22 @@ The row then says what is happening and who is acting. If a card holds the work,
 
 On each ticket, Boss Man runs the check you chose for the project under **Before merging, Boss Man will**. If it passes, Boss Man merges the branch or opens a pull request, as your project is set. If you chose **Nothing: merge after review only**, it merges straight after the review.
 
-### Queued checks
+### Quick checks
 
-The **Queued checks** tab lists every check that is running or waiting on the company's runner, not only merge checks. Running checks come first, then waiting ones in the order they will start. Each row shows:
+The **Quick checks** tab lists the checks agents ask for on their own work that are running or waiting. Merge checks are not listed here; they are on the **Merges** tab. Running checks come first, then waiting ones in the order they will start. Each row shows:
 
 - its place in the line, and the ticket
 - **Running**, **Waiting** or **Held**
-- the kind: **merge check**, **quick check** (an agent checking its own work) or **full check**
+- the kind: **quick check** (an agent checking its own work) or **full check**
 - who asked for it, and how long it has run or waited
 
-When the main branch is failing its check (main is red), new checks are **Held** and cannot start. One red banner above the list says how many are held and, if a ticket that fixes main is queued, links to it. A check marked **fixes main** is for that ticket, and it still runs.
+When the main branch is really failing its check (main is red), new checks are **Held** and cannot start. A red banner above the list says "Main is failing its check, so new checks wait.", how many checks are held and, if a ticket that fixes main is queued, links to it. A check marked **fixes main** is for that ticket, and it still runs.
 
-When nothing is queued, the tab says "No checks queued" and how many slots are free.
+When main is not red but a marked fix for it is on its way, the banner starts "Merges are held." instead. It says how many approved tickets are held until the fix is merged and live, and links to the fix. Checks that fix main, and merges already running, carry on.
 
-The line at the top says how many check slots are in use. You set the number under **Settings > Server and runner > Limits and checks**, in **Checks at once**. The tab is read-only.
+When nothing is queued, the tab says "No quick checks queued." and how many slots are free.
+
+The line at the top says how many check slots are busy, for example "1 of 4 check slots busy, shared with merge checks". Quick checks and merge checks take turns on the same slots. You set the number under **Settings > Server and runner > Limits and checks**, in **Checks at once**. The tab is read-only.
 
 The full list needs **Boss Man runs them** under **Who runs the checks** in the same place. With **Each agent runs its own**, the tab shows only the checks Boss Man already knows about.
 
