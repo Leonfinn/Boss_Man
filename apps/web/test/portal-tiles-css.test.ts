@@ -9,14 +9,14 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 function columnsAt(width: number): string {
   let cols = "";
   const base = /\n\.portal-list\s*\{([^}]*)\}/.exec(css);
-  const m0 = base && /grid-template-columns:\s*([^;]+);/.exec(base[1]);
-  if (m0) cols = m0[1].trim();
+  const m0 = base && /grid-template-columns:\s*([^;]+);/.exec(base[1] ?? "");
+  if (m0) cols = (m0[1] ?? "").trim();
   const re = /@media\s*\(min-width:\s*(\d+)px\)\s*\{\s*\.portal-list\s*\{([^}]*)\}\s*\}/g;
   const blocks: { min: number; cols: string }[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(css))) {
-    const c = /grid-template-columns:\s*([^;]+);/.exec(m[2]);
-    if (c) blocks.push({ min: Number(m[1]), cols: c[1].trim() });
+    const c = /grid-template-columns:\s*([^;]+);/.exec(m[2] ?? "");
+    if (c) blocks.push({ min: Number(m[1]), cols: (c[1] ?? "").trim() });
   }
   blocks.sort((a, b) => a.min - b.min);
   for (const b of blocks) if (width >= b.min) cols = b.cols;
