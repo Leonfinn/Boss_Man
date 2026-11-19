@@ -777,7 +777,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         for (const o of [{ features: CARRY, off: true }, { features: ["carried-check", "ci-publish"], off: false }]) {
           const c = (ctx = await setup({ features: o.features }));
           await serverMode(c);
-          if (o.off) expect((await c.req("PUT", "/api/settings/merge-carry", { on: false })).json()).toEqual({ on: false, turnMinutes: 60 });
+          if (o.off) expect((await c.req("PUT", "/api/settings/merge-carry", { on: false })).json()).toEqual({ on: false, turnMinutes: 60, refresh: true });
           const res = approveAndWait(c.req, c.ticket.id);
           await finishJob(c, { state: "passed", exitCode: 0 });
           expect((await res).json()).toMatchObject({ outcome: "merged" });
@@ -848,9 +848,14 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
 
       it("the switch and the turn's cap are owner settings, on and 60 minutes by default", async () => {
         const c = (ctx = await setup({ features: CARRY }));
-        expect((await c.req("GET", "/api/settings/merge-carry")).json()).toEqual({ on: true, turnMinutes: 60 });
-        expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 0 })).json()).toEqual({ on: true, turnMinutes: 0 });
+        expect((await c.req("GET", "/api/settings/merge-carry")).json()).toEqual({ on: true, turnMinutes: 60, refresh: true });
+        expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 0 })).json()).toEqual({ on: true, turnMinutes: 0, refresh: true });
         expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 999 })).statusCode).toBe(400);
+        // BOS-1900: the merge_retarget switch (rebuild a waiting merge on a moved main) has its own field, stored as before.
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: false })).json()).toEqual({ on: true, turnMinutes: 0, refresh: false });
+        expect((await c.db.select().from(settings).where(eq(settings.key, "merge_retarget")))[0]?.value).toBe(false);
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: "no" })).statusCode).toBe(400);
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: true })).json()).toMatchObject({ refresh: true });
       });
     });
 
@@ -919,7 +924,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       it("the owner's merge_retarget switch off: no refresh is asked for (today's sequence)", async () => {
         const c = (ctx = await setup({ features: REFRESH, prepares: preparesThen({ carry: refused }) }));
         await serverMode(c);
-        await c.db.insert(settings).values({ key: "merge_retarget", value: false });
+        // BOS-1900: turned off the way the owner does it, with the Settings → Checks switch's route.
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: false })).json()).toMatchObject({ refresh: false });
         let done = false;
         c.gh.state.ci = (sha) => (sha === MERGE && !done ? running() : green());
         const res = approveAndWait(c.req, c.ticket.id);

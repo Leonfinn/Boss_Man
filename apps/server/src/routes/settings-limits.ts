@@ -276,11 +276,14 @@ export function settingsLimitsRoutes(
   owner.get("/api/settings/wait-for-ci", async () => ({ on: await review.waitForCi() }));
   owner.put("/api/settings/wait-for-ci", async (req) => ({ on: await review.setWaitForCi(z.object({ on: z.boolean() }).parse(req.body).on) }));
   // BOS-1762: land a passed merge across a main move that touches none of its files, and the landing turn's cap (0 = off).
-  owner.get("/api/settings/merge-carry", async () => ({ on: await review.mergeCarry(), turnMinutes: await review.mergeTurnMinutes() }));
+  // BOS-1900: `refresh` is the merge_retarget switch (BOS-1344/1820/1821): rebuild a waiting merge on a moved main while it waits.
+  const mergeCarryView = async () => ({ on: await review.mergeCarry(), turnMinutes: await review.mergeTurnMinutes(), refresh: await review.mergeRetarget() });
+  owner.get("/api/settings/merge-carry", mergeCarryView);
   owner.put("/api/settings/merge-carry", async (req) => {
-    const body = z.object({ on: z.boolean().optional(), turnMinutes: z.number().int().min(0).max(MERGE_TURN_MAX_MIN).optional() }).parse(req.body);
+    const body = z.object({ on: z.boolean().optional(), turnMinutes: z.number().int().min(0).max(MERGE_TURN_MAX_MIN).optional(), refresh: z.boolean().optional() }).parse(req.body);
     if (body.on !== undefined) await review.setMergeCarry(body.on);
     if (body.turnMinutes !== undefined) await review.setMergeTurnMinutes(body.turnMinutes);
-    return { on: await review.mergeCarry(), turnMinutes: await review.mergeTurnMinutes() };
+    if (body.refresh !== undefined) await review.setMergeRetarget(body.refresh);
+    return mergeCarryView();
   });
 }
