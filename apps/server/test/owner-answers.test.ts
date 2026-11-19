@@ -324,6 +324,32 @@ describe("owner-answer memory (BOS-1593)", () => {
       expect(textOf(r)).toContain("Check the live state first");
     });
 
+    it("R49: an answered action card about a setting is listed as related ('owner did this'), not dropped and not a refusal", async () => {
+      const c = (ctx = await setup());
+      const done = await c.ticket("Worker off");
+      const [step] = await c.db
+        .insert(decisions)
+        .values({
+          companyId: c.company.id,
+          kind: "question",
+          question: "Please turn the check worker Truenas off for now so the merge line stops using it",
+          options: ["Done"],
+          recommendedOption: "Done",
+          raisedByAgentId: c.ceo.id,
+          status: "answered",
+          answer: "Done: worker is off",
+          answeredAt: new Date(Date.now() - 86_400_000),
+          context: { type: "question", ticketId: done.id, steps: ["Open Settings → Server and runner → Checks.", "Switch Truenas off."], ownerMustDo: true },
+        })
+        .returning();
+      const asking = await c.ticket("Merge slots");
+      const r = await raise(await mcpAs(c, c.ceo.id), "Should we let the check worker Truenas take merges as the fourth slot?", { blocksTicketId: asking.id });
+      expect(isError(r)).toBe(false);
+      expect(textOf(r)).toContain("Possibly related earlier owner answers");
+      expect(textOf(r)).toContain(`card ${step!.id.slice(0, 8)}`);
+      expect(textOf(r)).toContain("(owner did this)");
+    });
+
     it.each([
       { kind: "chat", ask: "Which port should the staging site use?", said: "Use port 8080 for the staging site, never 3000." },
       { kind: "ticket message", ask: "Send the weekly email on Sundays?", said: "Never send the weekly email on Sundays." },

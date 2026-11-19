@@ -76,6 +76,29 @@ const Status = z.object({
 });
 export type DeployStatus = z.infer<typeof Status>;
 
+/** outbox/staging-lane.json (BOS-1472): whether the host's staging lane is on. The shell writes every value as a string. */
+const StagingLane = z.object({ configured: z.string(), /** The repository the staging checkout follows (credentials dropped): only a company whose project is this repository may use the lane. */ origin: z.string().optional() });
+/**
+ * outbox/staging-status.json: the last staging request's result. Every value is a string; `check_<name>` and `why_<name>`
+ * carry each smoke check's result (pass, fail or skipped) and its one line of why, so they come through the catch-all.
+ */
+const StagingStatus = z
+  .object({
+    id: z.string(),
+    target: z.literal("staging"),
+    result: z.enum(["running", "held", "deployed", "failed", "rejected"]),
+    message: z.string(),
+    to_commit: z.string(),
+    started: z.string(),
+    ended: z.string(),
+    at: z.string(),
+    smoke: z.enum(["passed", "failed", "skipped"]).optional(),
+    failed_checks: z.string().optional(),
+    runner_image: z.string().optional(),
+  })
+  .catchall(z.string());
+export type StagingStatus = z.infer<typeof StagingStatus>;
+
 /** What the host deployer says about its memory every tick (outbox/headroom.json, BOS-420). Every field but the time is optional. */
 const Headroom = z.object({
   version: z.literal(1),
@@ -769,7 +792,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       .values({
         companyId,
         kind: "approval",
-        question,
+        question: question + (target === "server" && !infra ? await stagingLine(commit, !!urgent) : ""),
         options,
         recommendedOption: options[0]!,
         dedupeKey: `self-deploy:${target}:${commit}${again ? `:${randomBytes(3).toString("hex")}` : ""}`,
@@ -1356,11 +1379,109 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     await raiseOwnerTodo(db, { companyId, question, key: DEPLOYER_SCRIPT_CARD, steps: c.steps, check: c.check, rollback: c.rollback, ofDecisionId: "system" });
   }
 
+  // ---- The staging lane (BOS-1472, docs/22-staging.md): its own files, beside production's, never sharing a slot ----
+  const stagingLane = async () => (dir ? ((await readJson(path.join(dir, "outbox", "staging-lane.json"), StagingLane))?.configured === "true") : false);
+  const stagingStatus = () => (dir ? readJson(path.join(dir, "outbox", "staging-status.json"), StagingStatus) : Promise.resolve(null));
+  /** One staging request for the host: same flat format as production's, target "staging", written beside its name and renamed. */
+  const stagingOrigin = async () => (dir ? ((await readJson(path.join(dir, "outbox", "staging-lane.json"), StagingLane))?.origin || null) : null);
+  /**
+   * `by` says who asked, so the host's record never claims an owner approved something they didn't: "owner" (the Settings button, the
+   * owner's id), "agent-request" (an agent's deploy tool call) or "deploy-card" (Boss Man checking a production card's commit).
+   */
+  async function writeStagingRequest(id: string, commit: string, by: "owner" | "agent-request" | "deploy-card" = "owner") {
+    if (!dir) throw new Error("The host deployer folder isn't set up.");
+    const [o] = by === "owner" ? await db.select({ id: owners.id }).from(owners).limit(1) : [];
+    const body = { id, target: "staging", commit, requestedAt: new Date().toISOString(), approvedBy: by === "owner" ? (o?.id ?? "owner") : by };
+    const file = path.join(dir, "inbox", "staging-request.json");
+    const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
+    await rename(tmp, file);
+  }
+
+  /**
+   * BOS-1472: the line a production deploy card carries about staging, from what the host last recorded. A fixesLive/urgent card
+   * says it skipped staging and is never held for it; otherwise it says what staging showed for this exact commit, or "not checked".
+   */
+  async function stagingLine(commit: string, urgent: boolean): Promise<string> {
+    if (urgent) return "\n\nStaging skipped: this is an urgent fix, so it isn't held for a staging pass.";
+    const st = await stagingStatus();
+    if (st?.result === "deployed" && st.to_commit === commit) {
+      if (st.smoke === "passed") return `\n\nStaging: passed on ${short(commit)}.`;
+      if (st.smoke === "failed") return `\n\nStaging: failed on ${short(commit)} (${st.failed_checks ?? "a smoke check"}). Look at it before you approve.`;
+      return `\n\nStaging: deployed ${short(commit)}, smoke checks not run.`;
+    }
+    if (st && st.to_commit === commit && (st.result === "failed" || st.result === "rejected")) return `\n\nStaging: the deploy of ${short(commit)} did not finish (${st.message.slice(0, 160)}). Not checked.`;
+    const auto = await getSetting<{ commit: string }>(STAGED_AUTO);
+    if (auto?.commit === commit || (st && st.to_commit === commit && (st.result === "running" || st.result === "held"))) return "\n\nStaging: being checked now; this line updates when it finishes.";
+    return `\n\nStaging: not checked${st?.result === "deployed" ? ` on this commit (staging runs ${short(st.to_commit)})` : ""}.`;
+  }
+  /** The commit Boss Man last asked staging to check for a deploy card, so it asks once per commit and the card can say so. */
+  const STAGED_AUTO = "self_deploy_staged_auto";
+  const STAGING_LINE = /\n\nStaging[^\n]*$/;
+  /**
+   * BOS-1472: before a production deploy, staging checks the same commit. When the host's staging lane is on and a plain (not urgent,
+   * not hand-applied) server deploy card is open, this asks staging to deploy that commit, once, with no agent and no owner step,
+   * then keeps the card's staging line true to what the host recorded. An urgent card is never held for it and never triggers it.
+   * Nothing here blocks the card: the owner can approve at any time, and the line says "not checked" until there is a result.
+   */
+  async function stagingTick() {
+    if (!dir || !(await stagingLane())) return;
+    const cards = (await openFor("server")).filter((d) => !(d.context as SelfDeployContext).infra);
+    for (const d of cards) {
+      const ctx = d.context as SelfDeployContext;
+      const urgent = !!ctx.urgent;
+      if (!urgent && !(await stagingPending())) {
+        const auto = await getSetting<{ commit: string }>(STAGED_AUTO);
+        const st = await stagingStatus();
+        const busy = st?.result === "running";
+        const done = st?.to_commit === ctx.commit && (st.result === "deployed" || st.result === "failed" || st.result === "rejected");
+        // A request the host turned down only for its 5-minute rate limit (another staging deploy ran just before) is asked
+        // again once the limit has passed, so a merge right after another staging deploy doesn't leave the card "not checked".
+        const rateLimited = done && st?.result === "rejected" && /only one staging deploy/.test(st.message) && Date.now() - Date.parse(st.at ?? "") > 6 * 60_000;
+        if (!busy && ((auto?.commit !== ctx.commit && !done) || rateLimited)) {
+          await writeStagingRequest(randomUUID(), ctx.commit, "deploy-card");
+          await putSetting(STAGED_AUTO, { commit: ctx.commit });
+        }
+      }
+      const line = await stagingLine(ctx.commit, urgent);
+      if (STAGING_LINE.test(d.question) && d.question.replace(STAGING_LINE, "") + line !== d.question) {
+        await db.update(decisions).set({ question: d.question.replace(STAGING_LINE, "") + line }).where(eq(decisions.id, d.id));
+      }
+    }
+  }
+  /** Whether a staging request is waiting in the inbox (a held one stays there until memory frees up). */
+  const stagingPending = async () => !!dir && (await stat(path.join(dir, "inbox", "staging-request.json")).then(() => true, () => false));
+  /** What agents (server_status) and Settings see of staging: the lane, and the last result with each smoke check. */
+  async function stagingBlock() {
+    const [configured, pend, st] = await Promise.all([stagingLane(), stagingPending(), stagingStatus()]);
+    if (!st) return { configured, pending: pend, last: null };
+    const checks = Object.keys(st)
+      .filter((k) => k.startsWith("check_"))
+      .map((k) => ({ name: k.slice(6), result: st[k] as string, why: (st[`why_${k.slice(6)}`] as string | undefined) ?? "" }));
+    return { configured, pending: pend, last: { id: st.id, result: st.result, message: st.message, commit: st.to_commit, runnerImage: st.runner_image ?? null, smoke: st.smoke ?? null, failedChecks: st.failed_checks ?? null, checks, at: st.at } };
+  }
+
   return {
     enabled: !!dir,
     /** What the host deployer last reported: its last request's result, and what is live and on main (BOS-420's wait reads both). */
     status,
     available,
+    stagingLane,
+    stagingStatus,
+    stagingBlock,
+    stagingOrigin,
+    stagingTick,
+    writeStagingRequest,
+    stagingPending,
+    /** The "Deploy to staging" button on Settings → Server and runner (owner): main's newest commit, as the host last saw it. No card: staging isn't production. */
+    async deployStaging() {
+      if (!(await stagingLane())) return { error: "Staging isn't set up on this host yet: the host deployer's staging lane is off (STAGING_DIR in its host.conf, docs/22-staging.md)." } as const;
+      if ((await stagingPending()) || (await stagingStatus())?.result === "running") return { error: "A staging deploy is already queued or running. Wait for its result." } as const;
+      const commit = (await available())?.tip;
+      if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return { error: "The host hasn't reported main's newest commit yet. Try again in a minute." } as const;
+      await writeStagingRequest(randomUUID(), commit);
+      return { commit } as const;
+    },
     /** BOS-1805: wakes the CEO about an owner's approved update that was not sent (the deploy wait's 3-hour cap). */
     tellCeo,
 
@@ -1582,6 +1703,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         // BOS-1648: needed / not needed / can't tell, with the words the panel shows (never "may be needed").
         runnerUpdate: await runnerNeed(a).then((n) => (n ? { state: n.state, words: n.words, tickets: n.state === "unknown" ? [] : n.tickets } : null)).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null)),
         available: a,
+        staging: await stagingBlock(),
         pending: await pending(),
         deployer: await deployerSeen(a, s),
         deployerScript: await deployerScriptState().catch((): DeployerScriptState => ({ state: "none" })),

@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkWorkers, projects, settings } from "../src/db/schema.js";
+import { checkWorkers, decisions, projects, settings } from "../src/db/schema.js";
 import { buildBrief } from "../src/services/brief.js";
 import { checkAsk } from "../src/services/decisions.js";
 import { fillOwnerSetupTokens, gitTokenActionsProbe, ownerFactHeld, ownerFactHeldLive, ownerSetupFacts, workersLine, type GitTokenProbe } from "../src/services/owner-record.js";
@@ -46,6 +46,25 @@ describe("owner's setup facts", () => {
     expect(status.ownerSetup.checkWorkers).toMatchObject({ added: 1, everConnected: 0 });
     const brief = await buildBrief(ctx.db, { companyId: ctx.companyId, agentId: null, role: "ceo", since: null, now: new Date(), plain: true });
     expect(brief).toContain("Check workers: 1 added · 0 ever connected · 0 online");
+  });
+});
+
+describe("R49: one brief row per check worker", () => {
+  const brief = () => buildBrief(ctx.db, { companyId: ctx.companyId, agentId: null, role: "ceo", since: null, now: new Date(), plain: true });
+  it("names the worker's kinds and says no owner card when there is none", async () => {
+    await ctx.db.insert(checkWorkers).values({ name: "Harbour", tokenHash: randomUUID(), companyIds: [ctx.companyId], takes: "checks" });
+    const b = await brief();
+    expect(b).toContain("- Worker Harbour: quick checks only · on · offline · no owner card on it in 30 days");
+  });
+
+  it("shows the owner's newest answered card that names the worker, and ignores cards that don't", async () => {
+    await ctx.db.insert(checkWorkers).values({ name: "Harbour", tokenHash: randomUUID(), companyIds: [ctx.companyId], takes: "merge" });
+    const base = { companyId: ctx.companyId, kind: "question" as const, options: ["Done"], recommendedOption: "Done", status: "answered" as const, context: { type: "question", steps: ["x"], ownerMustDo: true } };
+    await ctx.db.insert(decisions).values({ ...base, question: "Please turn the check worker Harbour off for now", answer: "Done: worker is off", answeredAt: new Date(Date.now() - 86_400_000) });
+    await ctx.db.insert(decisions).values({ ...base, question: "Please turn the check worker Lighthouse on", answer: "Done", answeredAt: new Date() });
+    const b = await brief();
+    expect(b).toMatch(/- Worker Harbour: merge checks only · on · offline · owner's last word: card [0-9a-f]{8} \d{4}-\d{2}-\d{2}, asked "Please turn the check worker Harbour off for now", owner: "Done: worker is off"/);
+    expect(b).not.toContain("Lighthouse");
   });
 });
 
