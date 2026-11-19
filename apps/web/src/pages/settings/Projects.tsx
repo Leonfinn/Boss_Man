@@ -323,6 +323,34 @@ export function ProjectBrief({ p }: { p: Project }) {
   );
 }
 
+/**
+ * One project as a collapsed row: name, star, Kanban button and a one-line summary. "Edit settings" opens the form.
+ * The form stays mounted while collapsed (just hidden), so unsaved edits are never lost by collapsing.
+ */
+function ProjectCard({ p, go, agents, onStar, onChanged }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const summary = `${p.repoUrl ? "Repo set" : "No repo"} · ${p.landing === "pull_request" ? "opens pull requests" : "merges into the default branch"}`;
+  return (
+    <div style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <a href={`#/board/${p.id}`} style={{ fontWeight: 600 }}>{p.name}</a>
+        <StarButton agent={p} where="Projects" onToggle={onStar} />
+        <button type="button" className="btn small" onClick={() => go(`board/${p.id}`)}>
+          Open {p.name}'s Kanban
+        </button>
+        <button type="button" className="btn small" aria-expanded={open} aria-controls={`settings-${p.id}`} onClick={() => setOpen(!open)}>
+          {open ? "Hide settings" : "Edit settings"}
+        </button>
+      </div>
+      <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>{summary}</p>
+      <div id={`settings-${p.id}`} hidden={!open} style={{ marginTop: 10 }}>
+        <ProjectRow p={p} agents={agents} onChanged={onChanged} />
+        <GithubWatch projectId={p.id} />
+      </div>
+    </div>
+  );
+}
+
 /** Every project of the chosen company: create one, open its Kanban, set its repo, checks and reviews. */
 export function ProjectsPage({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged?: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
@@ -353,15 +381,7 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
             </p>
             {projects.data?.length
               ? projects.data.filter((p) => !p.archivedAt).map((p) => (
-                  <div key={p.id}>
-                    <a href={`#/board/${p.id}`} style={{ fontWeight: 600, marginRight: 8 }}>{p.name}</a>
-                    <StarButton agent={p} where="Projects" onToggle={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { starred: !p.starred } }).then(() => { projects.reload(); onChanged?.(); })} />
-                    <button type="button" className="btn small" onClick={() => go(`board/${p.id}`)}>
-                      Open {p.name}'s Kanban
-                    </button>
-                    <ProjectRow p={p} agents={company.agents} />
-                    <GithubWatch projectId={p.id} />
-                  </div>
+                  <ProjectCard key={p.id} p={p} go={go} agents={company.agents} onStar={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { starred: !p.starred } }).then(() => { projects.reload(); onChanged?.(); })} onChanged={() => { projects.reload(); onChanged?.(); }} />
                 ))
               : projects.data && <p>No projects yet.</p>}
             {projects.data?.some((p) => p.archivedAt) && (

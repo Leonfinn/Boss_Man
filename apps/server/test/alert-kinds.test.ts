@@ -41,6 +41,7 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/no-progress.ts", kind: "no_progress", why: "a company with work waiting and nothing finishing (BOS-593)" },
   { file: "services/opencode-vacuum.ts", kind: "opencode_vacuum_cut", why: "the OpenCode prune's VACUUM killed at its cap" },
   { file: "services/merge-failures.ts", kind: "merge_failures", why: "the same merge failure, repeatedly (BOS-1461)" },
+  { file: "services/cost-check.ts", kind: "cost_out_of_band", why: "a run's cost far from its tokens at list price (BOS-1866)" },
   { file: "services/server-health.ts", kind: "server_memory", why: "the server's memory running high or climbing" },
   { file: "services/server-health.ts", kind: "server_freezes", why: "the server freezing again and again" },
   { file: "services/github-watch.ts", kind: "github_watch", why: "the GitHub watcher unable to read the repo (BOS-1393)" },

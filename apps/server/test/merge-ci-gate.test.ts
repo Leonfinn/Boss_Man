@@ -201,6 +201,12 @@ describe("the sweep of leftover CI branches (BOS-1749)", () => {
   });
 });
 
+/** BOS-1871: the ticket's ci_wait_* merge-line rows, oldest first. */
+const ciWaitRows = async (c: Awaited<ReturnType<typeof setup>>) =>
+  (await c.db.select({ detail: activity.detail, at: activity.at }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, MERGE_LINE_KIND))).orderBy(activity.at))
+    .map((r) => r.detail as { event: string; outcome?: string })
+    .filter((e) => e.event.startsWith("ci_wait_"));
+
 describe("merge gate waits for GitHub CI (BOS-1070)", () => {
   it("publishes the merge commit, merges once CI passes on it, records the pass and deletes the CI branch", async () => {
     const c = (ctx = await setup());
@@ -215,6 +221,11 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     // The owner's kind of token: nothing was asked of the Checks API, and no card.
     expect(c.gh.calls.filter((u) => /check-runs|check-suites/.test(u))).toEqual([]);
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+    // BOS-1871: the CI wait's start and end are in the merge-line records, the end saying how it ended.
+    expect(await ciWaitRows(c)).toEqual([
+      { event: "ci_wait_started", commit: MERGE },
+      { event: "ci_wait_ended", commit: MERGE, outcome: "passed", waitedMs: expect.any(Number) },
+    ]);
   });
 
   it("a token with Actions: Read-only and no Checks: a red CI goes back naming the failing job and step, with no card (BOS-1630)", async () => {
@@ -233,6 +244,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(c.gh.calls.some((u) => u.includes("/check-runs/7/annotations"))).toBe(true);
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
     expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
+    expect((await ciWaitRows(c)).map((e) => `${e.event}:${e.outcome ?? ""}`)).toEqual(["ci_wait_started:", "ci_wait_ended:failed"]);
   });
 
   it("a red CI goes back with the failed job's log lines, secrets redacted, and says plainly when the log can't be read (BOS-1667)", async () => {
@@ -413,6 +425,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect((await c.state()).systemState).toBe("review");
     const cards = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
     expect(cards).toEqual([expect.objectContaining({ tier: "owner", dedupeKey: `ci-access:${c.project.id}` })]);
+    // BOS-1873: only the owner can change the token, so it carries no CEO ladder.
+    expect((cards[0]!.context as { ladder?: unknown }).ladder).toBeUndefined();
     expect(cards[0]!.question).toMatch(/can't read GitHub Actions runs.*Repository permissions → Actions: Read-only/);
     // No GitHub Checks permission named ("Settings → Server and runner → Checks" is Boss Man's own page).
     expect(cards[0]!.question).not.toMatch(/Checks:/);
@@ -424,7 +438,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toHaveLength(1);
   });
 
-  it("an Actions API that keeps failing is retried, then never merges and raises a card", async () => {
+  it("an Actions API that keeps failing is retried, then never merges and raises a card, with the CEO first (BOS-1873)", async () => {
     const c = (ctx = await setup());
     c.gh.state.status = 502;
     const res = (await approveAndWait(c.req, c.ticket.id)).json();
@@ -432,7 +446,10 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     // The first read and three retries, all on main's head: nothing was pushed.
     expect(c.gh.calls.filter((u) => u.includes(`/actions/runs?head_sha=${MAIN}`))).toHaveLength(4);
     expect(c.merges()).toEqual(["prepare"]);
-    expect(await c.db.select({ dedupeKey: decisions.dedupeKey, tier: decisions.tier }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `ci-error:${c.project.id}`, tier: "owner" }]);
+    const open = await c.db.select({ dedupeKey: decisions.dedupeKey, tier: decisions.tier, context: decisions.context }).from(decisions).where(eq(decisions.status, "open"));
+    expect(open).toEqual([expect.objectContaining({ dedupeKey: `ci-error:${c.project.id}`, tier: "ceo" })]);
+    // A GitHub outage needs no token or money: the CEO retries it first, and it reaches the owner only after the handover.
+    expect((open[0]!.context as { ladder?: unknown }).ladder).toMatchObject({ rung: "ceo", minutes: 60 });
   });
 
   // GitHub's jobs data for a job it refused to start: failed, no steps, no runner.
@@ -777,7 +794,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         for (const o of [{ features: CARRY, off: true }, { features: ["carried-check", "ci-publish"], off: false }]) {
           const c = (ctx = await setup({ features: o.features }));
           await serverMode(c);
-          if (o.off) expect((await c.req("PUT", "/api/settings/merge-carry", { on: false })).json()).toEqual({ on: false, turnMinutes: 60 });
+          if (o.off) expect((await c.req("PUT", "/api/settings/merge-carry", { on: false })).json()).toEqual({ on: false, turnMinutes: 60, refresh: true });
           const res = approveAndWait(c.req, c.ticket.id);
           await finishJob(c, { state: "passed", exitCode: 0 });
           expect((await res).json()).toMatchObject({ outcome: "merged" });
@@ -848,9 +865,14 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
 
       it("the switch and the turn's cap are owner settings, on and 60 minutes by default", async () => {
         const c = (ctx = await setup({ features: CARRY }));
-        expect((await c.req("GET", "/api/settings/merge-carry")).json()).toEqual({ on: true, turnMinutes: 60 });
-        expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 0 })).json()).toEqual({ on: true, turnMinutes: 0 });
+        expect((await c.req("GET", "/api/settings/merge-carry")).json()).toEqual({ on: true, turnMinutes: 60, refresh: true });
+        expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 0 })).json()).toEqual({ on: true, turnMinutes: 0, refresh: true });
         expect((await c.req("PUT", "/api/settings/merge-carry", { turnMinutes: 999 })).statusCode).toBe(400);
+        // BOS-1900: the merge_retarget switch (rebuild a waiting merge on a moved main) has its own field, stored as before.
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: false })).json()).toEqual({ on: true, turnMinutes: 0, refresh: false });
+        expect((await c.db.select().from(settings).where(eq(settings.key, "merge_retarget")))[0]?.value).toBe(false);
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: "no" })).statusCode).toBe(400);
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: true })).json()).toMatchObject({ refresh: true });
       });
     });
 
@@ -919,7 +941,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       it("the owner's merge_retarget switch off: no refresh is asked for (today's sequence)", async () => {
         const c = (ctx = await setup({ features: REFRESH, prepares: preparesThen({ carry: refused }) }));
         await serverMode(c);
-        await c.db.insert(settings).values({ key: "merge_retarget", value: false });
+        // BOS-1900: turned off the way the owner does it, with the Settings → Checks switch's route.
+        expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: false })).json()).toMatchObject({ refresh: false });
         let done = false;
         c.gh.state.ci = (sha) => (sha === MERGE && !done ? running() : green());
         const res = approveAndWait(c.req, c.ticket.id);

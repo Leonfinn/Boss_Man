@@ -20,6 +20,20 @@ export async function runsByCompany(db: Db, workOnly = false): Promise<Map<strin
 }
 
 /**
+ * BOS-1877: live owner-chat and CEO-reply runs per company that started at or after `since` (the hold's start). They
+ * are short and never held the banner's counts, but the swap waits for one that started during the drain (chat is let
+ * through while checks run), so it is never killed. A chat already going when the hold began keeps BOS-349's rule.
+ */
+export async function chatRunsByCompany(db: Db, since: Date): Promise<Map<string, number>> {
+  const rows = await db
+    .select({ companyId: runs.companyId, n: sql<number>`count(*)::int` })
+    .from(runs)
+    .where(and(isNull(runs.endedAt), sql`(${runs.purpose} = 'chat' or ${runs.purpose} = 'reply')`, sql`${runs.startedAt} >= ${since}`))
+    .groupBy(runs.companyId);
+  return new Map(rows.map((r) => [r.companyId, r.n]));
+}
+
+/**
  * Check jobs the server has handed to a machine and not seen end, per company. `onRunnerOnly` leaves out jobs on a
  * separate check worker (BOS-1435): swapping a runner does not touch that container, so those never hold a swap.
  */

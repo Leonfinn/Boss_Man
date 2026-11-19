@@ -678,6 +678,11 @@ export const runs = pgTable("runs", {
   outputTokens: bigint("output_tokens", { mode: "number" }),
   cachedReadTokens: bigint("cached_read_tokens", { mode: "number" }),
   cachedWriteTokens: bigint("cached_write_tokens", { mode: "number" }),
+  /**
+   * The cost sanity check made when the run ended (BOS-1866): its recorded cost against its own tokens at list price.
+   * "ok", "out_of_band", or "skipped:<reason>" (no list price for the model, no cost recorded, ...); null = not checked.
+   */
+  costCheck: text("cost_check"),
   purpose: text("purpose"),
   /**
    * What started the run, in plain words, for runs with no ticket: "nudge", "wiki upkeep",

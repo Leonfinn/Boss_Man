@@ -324,6 +324,11 @@ describe("unmerged approvals sweep", () => {
     expect(card!.question).toContain("sweep's one retry is used up");
     expect(card!.question).toContain('"Permission gate"');
     expect(card!.options).toContain("Run the check again");
+    // BOS-1873: the sweep's card is on the CEO's rung (hidden from the owner's queue for the first hour), and the CEO is woken with its id.
+    expect((card!.context as { ladder?: unknown }).ladder).toMatchObject({ rung: "ceo", minutes: 60, ticketId: id });
+    expect((await ctx.decisions.queue({ companyId: ctx.company.id })).map((d) => d.id)).not.toContain(card!.id);
+    const [ceo] = await ctx.db.select().from(agents).where(and(eq(agents.companyId, ctx.company.id), eq(agents.role, "ceo")));
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.agentId, ceo!.id))).some((w) => w.note?.includes(card!.id))).toBe(true);
   });
 
   it("a server that handed over mid-merge leaves it to the one now in charge, without asking the owner", async () => {

@@ -960,7 +960,7 @@ export function WaitForCiSetting() {
 
 /** BOS-1762: land a passed merge when main's newer changes touch none of its files, and the landing turn's cap. Both on by default. */
 export function MergeCarrySetting() {
-  const view = usePoll((signal) => api<{ on: boolean; turnMinutes: number }>("/api/settings/merge-carry", { signal }), 60_000, "merge-carry");
+  const view = usePoll((signal) => api<{ on: boolean; turnMinutes: number; refresh?: boolean }>("/api/settings/merge-carry", { signal }), 60_000, "merge-carry");
   const act = useAction();
   const [minutes, setMinutes] = useState<string | null>(null);
   const d = view.data;
@@ -989,6 +989,29 @@ export function MergeCarrySetting() {
           </span>
         </span>
       </label>
+      {d.refresh === undefined ? null : (
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input
+            type="checkbox"
+            checked={d.refresh}
+            disabled={act.busy}
+            onChange={(e) => {
+              const next = e.target.checked;
+              void act.run(async () => {
+                await api("/api/settings/merge-carry", { method: "PUT", body: { refresh: next } });
+                view.reload();
+                return next ? "Saved. A waiting merge is now rebuilt as soon as main moves under it." : "Saved. A waiting merge is now rebuilt only when it comes to land.";
+              });
+            }}
+          />
+          <span>
+            <strong>Rebuild waiting merges when main moves</strong>{" "}
+            <span className="muted">
+              When main moves while an approved change waits for its check or for another change's landing turn, Boss Man rebuilds it on the new main straight away instead of when it comes to land. With GitHub CI on, only a change that couldn't land across the move is rebuilt, and its GitHub run starts again. Off: a waiting merge is rebuilt only when it comes to land.
+            </span>
+          </span>
+        </label>
+      )}
       <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
         <span>
           <strong>Landing turn</strong>{" "}

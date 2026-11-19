@@ -10,6 +10,7 @@ import type { Db } from "../db/client.js";
 import { checkWorkers, companies, decisions, tickets } from "../db/schema.js";
 import { ADDON_LABELS, ADDONS, type AddonFacts } from "./addons.js";
 import { isWorkerOnline } from "./check-workers.js";
+import type { LimitInForce } from "./deploy-wait-hold.js";
 import { clip, day, searchOwnerAnswers, type OwnerAnswerHit } from "./owner-answers.js";
 import { kindsOf, type GitTokenProbe } from "./owner-record.js";
 import { screenMismatchSites } from "./outside-site-mismatch.js";
@@ -26,8 +27,17 @@ export type NamedSources = {
   addons?: () => Promise<AddonFacts>;
   gitTokenProbe?: GitTokenProbe;
   serverHost?: () => Promise<string | null | undefined>;
+  /** The run limits as saved and in force (scheduler.limitsInForce). */
+  limits?: () => Promise<{ allCompanies: LimitInForce; background: LimitInForce }>;
   now?: () => Date;
 };
+
+/** One limit as "saved 6, in force 3 (a server update is waiting for a quiet machine)"; "6 (saved and in force)" when they agree. */
+function limitWords(l: LimitInForce): string {
+  if (l.inForce === l.saved) return `${l.saved} (saved and in force)`;
+  return `saved ${l.saved}, in force ${l.inForce}${l.because ? ` (${l.because}${l.until ? `, until ${day(new Date(l.until)).slice(0, 10)} at the latest` : ""})` : ""}`;
+}
+const limitsRecord = (l: { allCompanies: LimitInForce; background: LimitInForce }) => `agents at once, all companies: ${limitWords(l.allCompanies)}; background: ${limitWords(l.background)}`;
 
 /** One thing the text names: what to call it, the words that name it (literal), and what the record says about it, if anything. */
 export type NamedThing = { kind: string; name: string; needles: string[]; record: string | null; own?: OwnerAnswerHit[] };
@@ -110,9 +120,15 @@ const KINDS: Kind[] = [
   {
     kind: "Setting",
     // A Settings path as the owner reads it: "Settings → Server and runner → Limits and checks". The path itself is the name.
-    async find({ text }) {
+    async find({ text, sources }) {
       const paths = [...text.matchAll(/\bSettings(?:\s*(?:→|->|>|›)\s*[A-Z][\p{L}\p{N}' ]{1,40}?)+(?=\s*(?:→|->|>|›|[.,;:)\n"']|$|\s[a-z]))/gu)].map((m) => m[0].trim());
-      return [...new Set(paths)].slice(0, 3).map((p) => ({ kind: "Setting", name: p, needles: [p], record: null }));
+      const unique = [...new Set(paths)].slice(0, 3);
+      // DR-069 D2 (BOS-1870): a path through "Limits and checks" also gets the run limits as saved and as in force.
+      // The path pattern stops at a lowercase word ("Limits and checks" ends at "Limits"), so the section is read from the text.
+      const aboutLimits = unique.length > 0 && /\blimits and checks\b/i.test(text);
+      const limits = aboutLimits ? await sources.limits?.().catch(() => null) : null;
+      const record = limits ? limitsRecord(limits) : null;
+      return unique.map((p, i) => ({ kind: "Setting", name: p, needles: [p], record: i === 0 ? record : null }));
     },
   },
   {

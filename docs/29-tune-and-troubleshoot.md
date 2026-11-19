@@ -21,9 +21,24 @@ docker logs --tail 50 boss-man-runner-<slug>
 `<slug>` is shown in **Settings > Server and runner** under **Runner**. Fixes:
 - If the runner image was never built, or the canary failed in step 5 of the install, run `scripts/update-runner.sh` again, then choose **Start runner**.
 - If **Settings** shows an error under the runner (the launcher couldn't start it), check `BOSSMAN_DOCKER_GID` in `.env` matches `stat -c %g /var/run/docker.sock`, then `docker compose up -d`.
+- The launcher checks its own set-up when it starts and every 30 seconds. If it can't open Docker's socket or write the data folder, `docker compose ps` shows it as **unhealthy**, and **Start the runner** shows the same message: it names the fix (the `BOSSMAN_DOCKER_GID` number to use, or the `chown 1000:1000` for the data folder). Run `docker inspect --format '{{json .State.Health}}' <launcher container>` to read it. If `BOSSMAN_DATA` is missing from `.env`, Docker creates the default folder as root: set it to your own folder and run `docker compose up -d`.
 - Choose **Reconnect runner** to give it a fresh token and container.
 - A log line `getaddrinfo ENOTFOUND server` means the server wasn't reachable. The runner keeps retrying by itself, waiting longer each time, up to 30 seconds between tries.
 - A runner that stops with "Set BOSSMAN_RUNNER_TOKEN_FILE..." was started without the launcher. Turn the launcher on as in [docs/00, step 4](00-first-time-install.md#4-write-the-settings-file) (`COMPOSE_PROFILES=launcher` and `BOSSMAN_LAUNCHER=1`): it gives each runner its token.
+
+The setup wizard's runner step names which of the three cases below it sees, with a link to the matching one.
+
+#### The launcher can't be reached
+
+The wizard or **Settings** shows the launcher's own error. Check the launcher is running (`docker compose ps launcher`, from `$B/src`), that `BOSSMAN_DOCKER_GID` in `.env` matches `stat -c %g /var/run/docker.sock`, then run `docker compose up -d`. Once the launcher answers, choose **Start the runner** again.
+
+#### The runner's container has stopped
+
+The container exists but isn't running (Docker says `exited`, `dead` or `created`). Read its log with `docker logs --tail 50 boss-man-runner-<slug>`. If the image was never built, run `scripts/update-runner.sh` again; otherwise choose **Start the runner**, or **Reconnect runner** in **Settings** for a fresh token and container.
+
+#### The runner's network guard won't start
+
+The launcher reports why the network guard (which keeps agents off your home network) didn't load. The launcher retries by itself for most faults; a host that can't load firewall rules at all (some Proxmox LXC containers) never will. See [docs/27, when a runner is removed because its guard failed](27-netguard.md#when-a-runner-is-removed-because-its-guard-failed-bos-467) for the per-host details.
 
 ### The port is already in use
 
