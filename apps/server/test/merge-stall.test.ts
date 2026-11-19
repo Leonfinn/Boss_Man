@@ -6,7 +6,7 @@ import { eq, sql } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, notifications, settings } from "../src/db/schema.js";
-import { MergeTrain } from "../src/services/merge-train.js";
+import { MergeTrain, TRAIN_THRASH_QUICK } from "../src/services/merge-train.js";
 import { EMPTY_SEAT_MS, MERGE_STALL_REASON, mergeStallService, mergeTrainStatus, NO_LANDING_MS, stalls } from "../src/services/merge-stall.js";
 import { OWNER_AFTER_MS } from "../src/services/priority-watch.js";
 import { WAKE_CLASS } from "../src/services/wake-classes.js";
@@ -341,6 +341,46 @@ describe("merge stall alarm during a deliberate pause (BOS-1841)", () => {
     clock.t += EMPTY_SEAT_MS;
     expect(await svc.run()).toMatchObject({ told: 1 });
     expect(ctx.told).toHaveLength(before + 1);
+    expect(ctx.sent).toHaveLength(0);
+  });
+
+  it("raises no no-landing stall while paused, and counts from when the pause ended", async () => {
+    const clock = { t: at("14:00:00") };
+    const tr = new MergeTrain({ seats: () => 1, now: () => clock.t });
+    tr.join(ctx.ids.get("S")!, { priority: 1, place: 1 });
+    tr.seated(ctx.ids.get("S")!);
+    tr.join(ctx.ids.get("B")!, { priority: 1, place: 2 });
+    let paused = true;
+    const svc = ctx.service(clock, () => [{ projectId: ctx.project.id, facts: tr.facts() }], () => paused);
+    clock.t += NO_LANDING_MS + 10 * MIN;
+    expect(await svc.run()).toMatchObject({ told: 0, ownerTold: 0 });
+    clock.t += NO_LANDING_MS;
+    expect(await svc.run()).toMatchObject({ told: 0, ownerTold: 0 });
+    expect(ctx.told).toHaveLength(0);
+    expect(ctx.sent).toHaveLength(0);
+    paused = false;
+    clock.t += NO_LANDING_MS - SEC;
+    expect(await svc.run()).toMatchObject({ told: 0 });
+    clock.t += SEC;
+    expect(await svc.run()).toMatchObject({ told: 1 });
+    expect(ctx.told[0]!.note).toContain("nothing has landed");
+  });
+
+  it("still tells a restack loop (thrash) at once while paused", async () => {
+    const clock = { t: at("15:00:00") };
+    const tr = new MergeTrain({ seats: () => 2, now: () => clock.t });
+    const a = ctx.ids.get("a")!;
+    tr.join(a, { priority: 1, place: 1 });
+    tr.seated(a);
+    for (let i = 0; i < TRAIN_THRASH_QUICK; i++) {
+      tr.prepared(a, { base: "m", commit: `c${i}`, tree: `t${i}`, onMain: true });
+      clock.t += SEC;
+      tr.restack(a);
+    }
+    expect(tr.facts().thrashSince).not.toBeNull();
+    const svc = ctx.service(clock, () => [{ projectId: ctx.project.id, facts: tr.facts() }], () => true);
+    expect(await svc.run()).toMatchObject({ told: 1 });
+    expect(ctx.told[0]!.note).toContain("restacking in a loop");
   });
 
   it("keeps an episode raised before the pause, and does not tell it again after", async () => {

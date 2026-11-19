@@ -127,7 +127,8 @@ export function mergeStallService(
     paused?: () => Promise<boolean>;
   },
 ) {
-  // The last pass that saw the pause on: a stall told after the pause measures from here. Lost on a restart, which errs to fewer alarms.
+  // The last pass that saw the pause on: a stall told after the pause measures from here. Only a sweep that sees the pause refreshes
+  // it, so up to one sweep interval of pause may still count. Lost on a restart, which errs to fewer alarms.
   let pauseFloor = 0;
   const now = deps.now ?? (() => new Date());
   const trains = deps.trains ?? (() => trainProjects().flatMap((projectId) => {
