@@ -926,7 +926,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO and product managers also triage (a product manager gives a reason, kept in the activity log): link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, showPublicly, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. showPublicly puts the summary on the public roadmap; it needs a publicSummary, so write the summary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO and product managers also triage (a product manager gives a reason, kept in the activity log): link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. portalVisible is the one switch that publishes a feature (the feedback portal and its public roadmap); showPublicly is retired and is only accepted as another name for portalVisible. Write the publicSummary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
       inputSchema: {
         action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size", "update_feature"]),
         effort: z.number().int().min(1).max(5).optional(),
@@ -992,6 +992,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           // update_feature never saves a feature's title or description, so a title/description here would be silently
           // ignored; worse, it could be used as decoy text to slip a security-worded feature onto the portal (BOS-991).
           if (input.title !== undefined || input.description !== undefined) return fail("update_feature does not change a feature's title or description. Leave them out.");
+          // showPublicly is retired: it never published anything. It is accepted only as an alias of portalVisible,
+          // the one switch that publishes, so older agent habits do the real thing (and get the portal's security guard).
+          const portalVisibleIn = input.portalVisible ?? input.showPublicly;
+          if (input.showPublicly !== undefined && input.portalVisible !== undefined && input.showPublicly !== input.portalVisible) return fail("showPublicly is retired and means portalVisible. Give portalVisible only.");
           const changes = {
             ...(input.objectiveId !== undefined ? { objectiveId: input.objectiveId } : {}),
             ...(input.milestoneId !== undefined ? { milestoneId: input.milestoneId } : {}),
@@ -1000,25 +1004,24 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             ...(input.status !== undefined ? { status: input.status } : {}),
             ...(input.publicSummary !== undefined ? { publicSummary: input.publicSummary } : {}),
             ...(input.publicTitle !== undefined ? { publicTitle: input.publicTitle } : {}),
-            ...(input.showPublicly !== undefined ? { showPublicly: input.showPublicly } : {}),
-            ...(input.portalVisible !== undefined ? { portalVisible: input.portalVisible } : {}),
+            ...(portalVisibleIn !== undefined ? { portalVisible: portalVisibleIn } : {}),
             // An agent may mark a feature sensitive, but only the owner clears that mark: these agents read outside
             // feedback during triage, so a hostile note must not be able to talk one into publishing a marked feature.
             ...(input.keepOffPortal === true ? { keepOffPortal: true, ...(input.keepOffReason ? { keepOffReason: input.keepOffReason } : {}) } : {}),
           };
-          if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later), status, publicSummary, publicTitle, showPublicly, portalVisible or keepOffPortal (true only).");
+          if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later), status, publicSummary, publicTitle, portalVisible or keepOffPortal (true only).");
           if (!input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
           // A feature the portal rule calls security work stays off the portal: agents read hostile feedback during
           // triage, so a note must not talk one into publishing it. Only the owner can tick it on in the app (BOS-991).
           // The guard also runs when this call rewrites the public text of a feature that is already on the portal
           // (BOS-1420), judged on the feature as it would be left, since visitors see that text too.
-          if (input.portalVisible === true || input.publicSummary !== undefined || input.publicTitle !== undefined) {
+          if (portalVisibleIn === true || input.publicSummary !== undefined || input.publicTitle !== undefined) {
             const target = await feedback.feature(input.featureId, scope.companyId);
             const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
             // Whether the feature would be on the portal after this call: the tick in this call, else the stored one.
-            const wouldBePortalVisible = (input.portalVisible ?? target.portalVisible) && !(input.keepOffPortal ?? target.keepOffPortal);
+            const wouldBePortalVisible = (portalVisibleIn ?? target.portalVisible) && !(input.keepOffPortal ?? target.keepOffPortal);
             // A public-text edit on a feature that is off the portal saves as it always has (BOS-1420).
-            if (input.portalVisible === true || wouldBePortalVisible) {
+            if (portalVisibleIn === true || wouldBePortalVisible) {
               // Judge what a visitor would see: the stored public title and the public summary (the one being written in
               // this call if there is one, else the stored one). update_feature never saves title/description, so the input
               // title and description must not be used here, and they are refused above as decoys (BOS-991, BOS-1419).
@@ -1045,8 +1048,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             input.status !== undefined ? `status ${input.status}` : null,
             input.publicSummary !== undefined ? (input.publicSummary ? "wrote its public summary" : "cleared its public summary") : null,
             input.publicTitle !== undefined ? (input.publicTitle ? "wrote its public title" : "cleared its public title") : null,
-            input.showPublicly !== undefined ? (input.showPublicly ? "shows it publicly" : "hides it from the public roadmap") : null,
-            input.portalVisible !== undefined ? (input.portalVisible ? "put it on the feedback portal" : "took it off the feedback portal") : null,
+            portalVisibleIn !== undefined ? (portalVisibleIn ? "put it on the feedback portal" : "took it off the feedback portal") : null,
             input.keepOffPortal === true ? `kept it off the portal (sensitive${input.keepOffReason ? `: ${input.keepOffReason}` : ""})` : null,
           ].filter(Boolean);
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
