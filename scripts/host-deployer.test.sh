@@ -1477,7 +1477,7 @@ for i in $(seq 2 150); do git -C "$LR/w" commit -q --allow-empty -m "commit $i";
 git -C "$LR/w" push -q origin HEAD:main 2>/dev/null
 printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$LR/src" >"$LR/deployer/host.conf"; chmod 600 "$LR/deployer/host.conf"
 BOSSMAN_DEPLOYER="$LR/deployer" "$here/host-deployer.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (long range)"; }
-lr="$(node -e 'const o=require(process.argv[1]);process.stdout.write(`${o.commits.length} ${o.paths.length} ${o.infraPaths.join(",")} ${o.commits.at(-1).subject}`)' "$LR/deployer/outbox/available.json")"
+lr="$(node -e 'const o=require(process.argv[1]);process.stdout.write([o.commits.length,o.paths.length,o.infraPaths.join(","),o.commits.at(-1).subject].join(" "))' "$LR/deployer/outbox/available.json")"
 [[ $lr == "150 311 scripts/host-deployer.sh add 311 files" ]] || fail "long range: wanted 150 commits, 311 paths and host-deployer.sh, got: $lr"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
