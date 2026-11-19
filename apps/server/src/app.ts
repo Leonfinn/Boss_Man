@@ -555,12 +555,10 @@ export async function buildApp(opts: AppOptions) {
       }
       return reached;
     },
-    // BOS-1954: the swap waited past its expected finish. The CEO of the first company is woken once, through the reply lane
-    // (the only wake a drain lets through while work is going); the owner is not asked.
-    wakeCeo: async (note) => {
-      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
-      if (!home) return;
-      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, home.id), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+    // BOS-1954: the swap waited past its expected finish. Each affected company's CEO is woken once with only that
+    // company's own work, through the reply lane (the only wake a drain lets through while work is going); the owner is not asked.
+    wakeCeo: async (companyId, note) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (ceo) await scheduler.notify(ceo.id, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note });
     },
     // `sweeps` is built further down; this only runs when a hold lifts.

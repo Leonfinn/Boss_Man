@@ -341,7 +341,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(drainForecast({ runs: 0, checks: [], deadline, now })).toEqual({ phase: "swapping", expectedFinishAt: null, overdue: false });
     expect(drainForecast({ runs: 2, checks: [], deadline, now })).toEqual({ phase: "waiting", expectedFinishAt: null, overdue: false });
     expect(drainForecast({ runs: 2, checks: [], deadline, now: new Date("2026-11-19T14:01:00Z") }).overdue).toBe(true);
-    const check = { ticket: "BOS-1", kind: "merge", scope: "full", startedAt: "2026-11-19T13:20:00Z", runningForMinutes: 10, usuallyMinutes: 40 };
+    const check = { companyId: "c1", ticket: "BOS-1", kind: "merge", scope: "full", startedAt: "2026-11-19T13:20:00Z", runningForMinutes: 10, usuallyMinutes: 40 };
     expect(drainForecast({ runs: 0, checks: [check], deadline, now })).toMatchObject({ expectedFinishAt: "2026-11-19T14:00:00.000Z", overdue: false });
     expect(drainForecast({ runs: 0, checks: [{ ...check, usuallyMinutes: null }], deadline, now }).expectedFinishAt).toBeNull();
   });
@@ -426,6 +426,25 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await ceoWakes()).toHaveLength(1);
     expect(c.cancels).toEqual([]);
     expect((await getHold(c.db))!.ceoWokenAt).toBeDefined();
+  });
+
+  it("each company's CEO is told only about that company's own work (BOS-1954, security round 1)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Other Co", "other-co");
+    await c.wake(a);
+    await c.wake(b);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    const noteOf = async (ceo: string) => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, ceo), eq(wakes.reason, CEO_REPLY_REASON)))).map((w) => w.note ?? "").filter((n) => n.includes("runner update"));
+    const [forA, forB] = [await noteOf(a.ceo), await noteOf(b.ceo)];
+    expect(forA).toHaveLength(1);
+    expect(forB).toHaveLength(1);
+    // Each note lists one run (its own), never the other company's.
+    expect(forA[0]!.match(/running \d+ min/g)).toHaveLength(1);
+    expect(forB[0]!.match(/running \d+ min/g)).toHaveLength(1);
   });
 
   it("the general rule: a drain hold never lets work in between its start and its cap, whatever the deadline (BOS-1807)", () => {

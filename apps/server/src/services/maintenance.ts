@@ -11,6 +11,7 @@ import { agents, checkWorkers, companies, decisions, runnerEvents, runs, setting
 import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UPDATE, STOP_CHECKS_UPDATE_NOW, STOP_THESE_CARRY_ON, SWAP_WHEN_DONE, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
+import { untrusted } from "@boss-man/shared";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, type RunnerCheck } from "./runner-busy.js";
 
 export const MAINTENANCE_KEY = "maintenance";
@@ -186,7 +187,8 @@ export type MaintenanceDeps = {
   /** BOS-988: sends the message to just these runs and answers with the ids it reached, so a run is told once. */
   tellRuns?: (text: string, runIds: string[]) => Promise<string[]>;
   /** BOS-1954: wakes the CEO with this note (the swap waited past its expected finish). Once per hold. */
-  wakeCeo?: (note: string) => Promise<unknown>;
+  /** Wakes one company's CEO; the note only ever holds that company's own work (BOS-1954, security round 1). */
+  wakeCeo?: (companyId: string, note: string) => Promise<unknown>;
   /** The hold has lifted: wake the agents who ended their runs for it, as WRAP_UP promised (BOS-574). */
   afterHold?: (since: Date) => Promise<unknown>;
   /** The deployer folder; update-runner.sh drops inbox/drain.json there to ask for a drain. */
@@ -242,6 +244,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     const live = await db
       .select({
         runId: runs.id,
+        companyId: runs.companyId,
         agentId: runs.agentId,
         agentName: agents.name,
         ticketId: runs.ticketId,
@@ -298,6 +301,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       return {
         ...(activity.get(r.runId) ?? { gotMessage: false, step: null }),
         runId: r.runId,
+        companyId: r.companyId,
         agentId: r.agentId,
         agent: r.agentName,
         ticketId: r.ticketId,
@@ -710,15 +714,21 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const due = forecast.expectedFinishAt ? new Date(new Date(forecast.expectedFinishAt).getTime() + OVERDUE_GRACE_MS) : new Date(h.deadline);
         if (t >= due) {
           const live = await liveWorkRuns(db, h.since, { ...h.startTold, ...startTold });
-          const lines = [
-            ...live.map((r) => `- ${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"}): running ${r.runningForMinutes} min${r.gotMessage ? "" : ", has not read the wrap-up message (an agent that can't be steered, such as OpenCode, only reads it when its step ends)"}${r.step ? `, inside "${r.step.title}" for ${r.step.sinceMinutes} min` : ""}`),
-            ...checksNow.map((c) => `- ${c.kind} check${c.ticket ? ` for ${c.ticket}` : ""} (${c.scope}): running ${c.runningForMinutes} min${c.usuallyMinutes === null ? "" : `, usually ${c.usuallyMinutes} min`}`),
-            ...[...(await landing()).values()].map((n) => `- ${n} merge${n === 1 ? "" : "s"} being pushed to main`),
-          ];
-          if (lines.length) {
+          const landings = await landing();
+          // One note per company, with only that company's own work (security round 1: no other company's agents,
+          // tickets or step text). The step title is agent-written, so it is wrapped as untrusted.
+          const byCompany = new Map<string, string[]>();
+          const add = (companyId: string, line: string) => byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), line]);
+          for (const r of live) add(r.companyId, `- ${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"}): running ${r.runningForMinutes} min${r.gotMessage ? "" : ", has not read the wrap-up message (an agent that can't be steered, such as OpenCode, only reads it when its step ends)"}${r.step ? `, inside a tool step for ${r.step.sinceMinutes} min: ${untrusted("tool step", r.step.title)}` : ""}`);
+          for (const c of checksNow) add(c.companyId, `- ${c.kind} check${c.ticket ? ` for ${c.ticket}` : ""} (${c.scope}): running ${c.runningForMinutes} min${c.usuallyMinutes === null ? "" : `, usually ${c.usuallyMinutes} min`}`);
+          for (const [companyId, n] of landings) if (n > 0) add(companyId, `- ${n} merge${n === 1 ? "" : "s"} being pushed to main`);
+          if (byCompany.size) {
             h = { ...h, ceoWokenAt: t.toISOString() };
             await save(h);
-            await deps.wakeCeo(`The runner update started ${Math.round((t.getTime() - new Date(h.since).getTime()) / 60_000)} minutes ago and is still waiting. No new runs or checks start meanwhile, so the company is held. It waits on:\n${lines.join("\n")}\nNothing is stopped for you. The owner's card in Settings > Server and runner has the stop options ("Stop these and carry on", "Stop the checks and update now"); if a run is stuck, you can also stop it with the runs tool. Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
+            const minutes = Math.round((t.getTime() - new Date(h.since).getTime()) / 60_000);
+            for (const [companyId, lines] of byCompany) {
+              await deps.wakeCeo(companyId, `The runner update started ${minutes} minutes ago and is still waiting. No new runs or checks start meanwhile, so your company is held. It waits on this of yours:\n${lines.join("\n")}\nNothing is stopped for you. The owner's card in Settings > Server and runner has the stop options ("Stop these and carry on", "Stop the checks and update now"). Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
+            }
           }
         }
       }

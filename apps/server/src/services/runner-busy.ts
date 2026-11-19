@@ -60,7 +60,7 @@ export async function runnerBusy(db: Db, onRunnerOnly = false): Promise<RunnerBu
   return { runs: r, checks: c, byCompany, runsTotal: sum(r), checksTotal: sum(c) };
 }
 
-export type RunnerCheck = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
+export type RunnerCheck = { companyId: string; ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
 
 /**
  * The checks a runner swap waits on, for the banner (BOS-1600): which ticket, what kind, since when, and how long the
@@ -69,6 +69,7 @@ export type RunnerCheck = { ticket: string | null; kind: string; scope: string; 
 export async function runnerChecks(db: Db, at: Date): Promise<RunnerCheck[]> {
   const live = await db
     .select({
+      companyId: checkJobs.companyId,
       kind: checkJobs.kind,
       scope: checkJobs.scope,
       startedAt: checkJobs.startedAt,
@@ -91,7 +92,7 @@ export async function runnerChecks(db: Db, at: Date): Promise<RunnerCheck[]> {
         .limit(5);
       usual.set(key, done.length ? Math.max(1, Math.round(done.reduce((a, d) => a + d.secs, 0) / done.length / 60)) : null);
     }
-    out.push({ ticket: j.ticket, kind: j.kind, scope: j.scope, startedAt: j.startedAt ? new Date(j.startedAt).toISOString() : null, runningForMinutes: j.startedAt ? Math.max(0, Math.round((at.getTime() - new Date(j.startedAt).getTime()) / 60_000)) : 0, usuallyMinutes: usual.get(key) ?? null });
+    out.push({ companyId: j.companyId, ticket: j.ticket, kind: j.kind, scope: j.scope, startedAt: j.startedAt ? new Date(j.startedAt).toISOString() : null, runningForMinutes: j.startedAt ? Math.max(0, Math.round((at.getTime() - new Date(j.startedAt).getTime()) / 60_000)) : 0, usuallyMinutes: usual.get(key) ?? null });
   }
   return out;
 }
