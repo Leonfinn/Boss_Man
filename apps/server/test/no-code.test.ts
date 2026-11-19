@@ -86,6 +86,13 @@ describe("a ticket whose change shipped on another ticket", () => {
     expect(await toDone(t.id)).toMatch(/move the ticket to "review" instead/);
     expect((await row(t.id)).systemState).toBe("in_progress");
   });
+
+  it("BOS-1837: the assignee of an already merged, done ticket can replace its state note", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { systemState: "done", outcome: "completed", mergeCommit: "c".repeat(40), stateNote: "merge running" });
+    const out = await toDone(t.id);
+    expect(out).not.toMatch(/no changes of its own/);
+    expect(await row(t.id)).toMatchObject({ systemState: "done", stateNote: "Shipped on HOL-375; live since 23 Oct." });
+  });
 });
 
 describe("a ticket that changed nothing", () => {
