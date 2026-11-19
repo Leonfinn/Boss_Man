@@ -98,6 +98,7 @@ describe("tickets that can't move don't count towards the WIP limit", () => {
     expect(onBoard.wipExempt).toBe("live");
     // Criterion 7: an existing row (no watch recorded, no go-live time) shows the 14-day default from its merge.
     expect(onBoard.watchEndsAt).toBeTruthy();
+    // test-lines-ok: compares a date to a 1e6 ms tolerance (about 17 minutes), not a speed limit
     expect(Date.parse(onBoard.watchEndsAt!)).toBeCloseTo(Date.now() - 6 * 86_400_000, -6);
   });
 

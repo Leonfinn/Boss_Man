@@ -115,6 +115,7 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
     // Refused: not merged, a past date, a date without a line.
     const plain = await c.ticket();
     expect(await c.block(agent, plain.id, { watching_for: "x", blocked_until: tomorrow(), blocked_reason: "y" })).toMatch(/has not merged/);
+    // test-lines-ok: a date one second in the past is refused however slow the machine is
     expect(await c.block(agent, t.id, { watching_for: "x", watch_until: new Date(Date.now() - 1000).toISOString() })).toMatch(/must be in the future/);
     expect(await c.block(agent, t.id, { watch_until: until })).toMatch(/goes with watching_for/);
   });
