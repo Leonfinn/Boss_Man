@@ -36,7 +36,8 @@ describe("chat while a runner update waits (BOS-349)", () => {
       }),
     );
     render(<ChatPage companies={[company]} companyId="c1" agentId="a1" maintenance={{ on: true, runs: 0, chatOpen: false }} go={() => {}} onChanged={() => {}} />);
-    expect((await screen.findByRole("status")).textContent).toBe("Updating, back in a moment. New messages are saved and answered when it is done.");
+    // The loader is a status too while the first load runs, so find the banner by its words.
+    expect(await screen.findByText("Updating, back in a moment. New messages are saved and answered when it is done.")).toBeTruthy();
     // The message is still sent: it is stored and answered once the update is done.
     const box = (await screen.findByLabelText("Message to Radagast")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "wind up please" } });

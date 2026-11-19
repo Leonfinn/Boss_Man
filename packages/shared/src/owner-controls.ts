@@ -22,6 +22,8 @@ export const OWNER_CONTROLS = {
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
     "Switch company", "Create", "New company", "Close menu", "Menu …", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
+    // The error line a page shows when its first load fails (Features, Chat).
+    "Retry",
     // The owner's message box (Ticket, Board, Chat, Decisions and Run show it).
     "Send as a .txt file", "Sending",
     // A picture opened from Markdown text.
