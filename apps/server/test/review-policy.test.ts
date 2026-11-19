@@ -181,8 +181,10 @@ describe("an approval whose merge fails", () => {
     expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_failed"))))[0]?.summary).toBe("Approved, but the merge couldn't run: The runner went away");
     const [d] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`));
     expect(d).toMatchObject({ status: "open", tier: "ceo", options: ["Run the check again", "Send it back to the agent"] });
+    // BOS-1873: the CEO gets the first hour, so the owner's queue doesn't show it yet.
+    expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((x) => x.id)).not.toContain(d!.id);
     // It holds up the approved ticket, so it ranks above a question that blocks nothing.
-    const queued = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string; blocks: Array<{ ticketId: string }>; score: number }>;
+    const queued = (await c.decisions.queue({ companyId: c.company.id, includeAll: true })) as Array<{ id: string; blocks: Array<{ ticketId: string }>; score: number }>;
     expect(queued.find((x) => x.id === d!.id)).toMatchObject({ blocks: [expect.objectContaining({ ticketId: t.id })], score: expect.any(Number) });
     expect(queued.find((x) => x.id === d!.id)!.score).toBeGreaterThan(0);
 

@@ -29,6 +29,7 @@ import { noteBlockedPark, refusalForNamedAgent } from "./services/blocked-who-ac
 import { githubOnlyMarkWarning } from "./services/line-holder.js";
 import { OWNER_WAIT_REFUSAL, WAIT_LINK_REFUSAL, ticketHasOpenCard, waitsForNote, waitsOnOwnerNote } from "./services/owner-todo.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
+import { SIGNED_OFF_HEAD_REFUSAL, signedOffHeadOutsideReview } from "./services/signoff.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, stagingTexts, stagingWarning, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, unlinkedOrderWarning, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
@@ -289,7 +290,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
   );
 }
 
-export function registerScheduleCheck(server: McpServer, { work }: Pick<Services, "work">, scope: Scope, hooks: McpHooks) {
+export function registerScheduleCheck(server: McpServer, db: Db, { work, review }: Pick<Services, "work" | "review">, scope: Scope, hooks: McpHooks) {
   const noteRunTicket = runTicketNoter(scope, hooks);
   server.registerTool(
     "schedule_check",
@@ -302,6 +303,9 @@ export function registerScheduleCheck(server: McpServer, { work }: Pick<Services
       if (!scope.agentId) return fail("Only an agent can schedule a check.");
       if ((inMinutes === undefined) === (at === undefined)) return fail("Give exactly one of inMinutes or at.");
       const when = inMinutes !== undefined ? new Date(Date.now() + inMinutes * 60_000) : new Date(at!);
+      // BOS-1879: polling a signed-off head outside review only makes the ticket look active.
+      const [asked] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (asked && (await signedOffHeadOutsideReview(db, asked, (id) => review.diff(id, scope.companyId).then((d) => d.head || null)))) return fail(SIGNED_OFF_HEAD_REFUSAL);
       try {
         const u = await work.setMonitor(ticketId, { at: when, note, maxChecks, by: { agentId: scope.agentId, companyId: scope.companyId } });
         await noteRunTicket(ticketId);
@@ -597,6 +601,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (watching_for?.trim()) {
         const [m] = await db.select({ mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, ticketId));
         if (!m?.mergeCommit) return fail("A watch is for a merged ticket whose after-merge checks wait for a later event. This ticket has not merged.");
+      }
+      // BOS-1879: a head the owner signed off may only sit in review, where the gate merges it.
+      if ((state === "in_progress" || state === "blocked") && withCriteria.prev !== state) {
+        const [full] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+        if (full && (await signedOffHeadOutsideReview(db, { ...full, systemState: state }, (id) => review.diff(id, scope.companyId).then((d) => d.head || null)))) return fail(SIGNED_OFF_HEAD_REFUSAL);
       }
       // BOS-1571 backstop: a gated ticket made by a path that didn't add the usability criterion (or before it existed)
       // gets it on the move to review, so its author reports it like any other; it is stored with the move.

@@ -6,6 +6,7 @@ import { api, type Company } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
 import { when } from "./Runs";
+import { atTime } from "./settings/updates";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -17,7 +18,7 @@ import type { TraceBody } from "@boss-man/shared";
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
 type Chat = { agentId: string; items: Message[]; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; runs: number; chatOpen: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; runs: number; chatOpen: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -83,8 +84,12 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   return (
     <p className="banner" role="status">
       {m.chatOpen
-        ? `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
-        : "Updating, back in a moment. New messages are saved and answered when it is done."}
+        ? m.runs === 0
+          ? `Update waiting for running checks to finish${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
+          : `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
+        : m.phase === "swapping"
+          ? "Swapping the runners now, back in a moment. New messages are saved and answered when it is done."
+          : `Update pending${m.expectedFinishAt ? `: expected to finish about ${atTime(m.expectedFinishAt)}` : m.overdue ? ": taking longer than expected" : ""}. New messages are saved and answered when it is done.`}
     </p>
   );
 }

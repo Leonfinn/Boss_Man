@@ -11,7 +11,7 @@ import { agents, checkWorkers, companies, decisions, runnerEvents, runs, setting
 import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UPDATE, STOP_CHECKS_UPDATE_NOW, STOP_THESE_CARRY_ON, SWAP_WHEN_DONE, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
-import { runnerBusy, runnerChecks, runsByCompany } from "./runner-busy.js";
+import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, type RunnerCheck } from "./runner-busy.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 
@@ -114,6 +114,22 @@ export const runnerCardHold = (hold: Hold | null): Hold | null => (hold && hold.
 export const HOLD_CAP_MINUTES = 90;
 /** When the cap ends, for a hold: the later of its cap and its deadline (a "Wait 10 more minutes" the owner chose is honoured). */
 export const holdCapAt = (hold: Hold): Date => new Date(Math.max(new Date(hold.since).getTime() + HOLD_CAP_MINUTES * 60_000, new Date(hold.deadline).getTime()));
+
+/**
+ * BOS-1877: when the checks the swap waits on should be done, and whether the wait has run past what was said.
+ * `expectedFinishAt` is the latest "started + usual time" among the checks, and only when no agent run is waited on
+ * (a run has no usual time) and every check has a usual time. `overdue`: a check ran longer than usual, or the hold's
+ * own deadline passed with work still going. Pure, so the status and its tests share it.
+ */
+export function drainForecast(input: { runs: number; checks: RunnerCheck[]; deadline: string; now: Date }): { phase: "waiting" | "swapping"; expectedFinishAt: string | null; overdue: boolean } {
+  const { runs: n, checks, deadline } = input;
+  if (n === 0 && checks.length === 0) return { phase: "swapping", expectedFinishAt: null, overdue: false };
+  const ends = checks.map((c) => (c.startedAt && c.usuallyMinutes ? new Date(c.startedAt).getTime() + c.usuallyMinutes * 60_000 : null));
+  const checkLate = ends.some((e) => e !== null && e < input.now.getTime());
+  const overdue = checkLate || input.now >= new Date(deadline);
+  const known = n === 0 && checks.length > 0 && ends.every((e) => e !== null) && !checkLate;
+  return { phase: "waiting", expectedFinishAt: known ? new Date(Math.max(...(ends as number[]))).toISOString() : null, overdue };
+}
 
 /** A clock time for a card: 24-hour UTC, so it reads the same on any host. */
 const fmtTime = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
@@ -476,7 +492,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
       // A "stop the checks and update now" answer (force) means nothing is waited for any more.
       const checksList = h.kind === "wrapup" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, last };
+      // BOS-1877: the chat stays open while anything the swap waits on is still going (runs, or checks), not only runs.
+      const forecast = drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now() });
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0 || (h.kind !== "wrapup" && checksList.length > 0), blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows
@@ -656,10 +674,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const first = await runnerBusy(db, true); // BOS-1600: checks on a separate check worker do not hold a swap
       // BOS-1807: "Stop the checks and update now" with runs still going: the swap waits for the runs only.
       const waitedOn = (b: Awaited<ReturnType<typeof runnerBusy>>) => (h!.ignoreChecks ? b.runs : b.byCompany);
-      let active = waitedOn(first);
+      // BOS-1877: a chat or CEO-reply run is let through while checks run, so the swap waits for it too (never killed).
+      // It is not counted in the totals above: it is short and is not what the owner's ask or banner is about.
+      const withChat = async (m: Map<string, number>) => {
+        const out = new Map(m);
+        for (const [id, n] of await chatRunsByCompany(db, new Date(h!.since))) out.set(id, (out.get(id) ?? 0) + n);
+        return out;
+      };
+      let active = await withChat(waitedOn(first));
       const total = h.ignoreChecks ? first.runsTotal : first.runsTotal + first.checksTotal;
       // "Swap as soon as these finish" is the owner's answer: no more questions, the hold stays until the swap.
-      if (!h.force && !h.swapWhenDone && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, first.runsTotal, active.size, h.ignoreChecks ? 0 : first.checksTotal);
+      if (!h.force && !h.swapWhenDone && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, first.runsTotal, waitedOn(first).size, h.ignoreChecks ? 0 : first.checksTotal);
       // BOS-1807: the hard cap passed with work still going: new work is no longer held; say so once.
       if (!h.capNotified && total > 0 && !holdBlocksStarts(h, t)) {
         h = { ...h, capNotified: true };
@@ -678,7 +703,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         if (r.companyId && ((await landing()).get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
-        active = waitedOn(await runnerBusy(db, true));
+        active = await withChat(waitedOn(await runnerBusy(db, true)));
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         if (r.companyId && ((await landing()).get(r.companyId) ?? 0) > 0) continue;
         try {

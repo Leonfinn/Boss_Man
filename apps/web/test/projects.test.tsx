@@ -41,5 +41,15 @@ describe("projects page", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open Mobile app's Kanban" }));
     await waitFor(() => expect(go).toHaveBeenCalledWith("board/p2"));
+
+    // Settings start collapsed; an unsaved edit survives collapsing.
+    const form = screen.getAllByLabelText("Cost cap per task (USD)")[0]!;
+    expect(form.closest("[hidden]")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit settings" })[0]!);
+    expect(form.closest("[hidden]")).toBeNull();
+    fireEvent.change(form, { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Hide settings" }));
+    expect(form.closest("[hidden]")).toBeTruthy();
+    expect((form as HTMLInputElement).value).toBe("5");
   });
 });

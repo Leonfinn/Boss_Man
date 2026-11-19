@@ -217,7 +217,7 @@ Build the runner image and the network guard that runs beside each runner. The s
 scripts/update-runner.sh
 ```
 
-Expect a line saying no launcher is running, so it restarts runners at once. That is harmless on a first install: it is how the script brings the stack up. If the canary fails, it says so and leaves the runner image unset. Your Docker dashboard may later show "update check failed" on the runner and guard containers. That is expected: the images are built here, not pulled.
+Expect a line saying no launcher is running, so it restarts runners at once. That is harmless on a first install: it is how the script brings the stack up. If the canary fails, it says so and leaves the runner image unset; on a first install it still starts the database, server and launcher so you can open the web page, then exits with an error. Fix the cause it names and run `scripts/update-runner.sh` again. Your Docker dashboard may later show "update check failed" on the runner and guard containers. That is expected: the images are built here, not pulled.
 
 Check it worked:
 
@@ -266,6 +266,7 @@ Check it worked: you see "Saved." and the step shows a tick.
 **The runner.** It's the container where the company's agents work. It connects out to Boss Man, so it needs no open ports. This step only shows its status.
 - If the tag says **Connected**, there is nothing to do.
 - If it says **Not connected** and the launcher is on, choose **Start the runner**. Without the launcher, the step points you to **Settings → Server and runner**: follow the steps there.
+- If something is wrong (the launcher can't be reached, the runner's container has stopped, or its network guard won't start), the step says which, with a link to the fix in [docs/29](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
 - Wait for the tag to say **Connected**. This can take up to a minute; the page updates by itself.
 
 Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).

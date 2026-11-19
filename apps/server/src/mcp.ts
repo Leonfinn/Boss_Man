@@ -285,7 +285,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     },
   );
 
-  registerScheduleCheck(server, { work }, scope, hooks);
+  registerScheduleCheck(server, db, { work, review }, scope, hooks);
 
   server.registerTool(
     "request_check",
