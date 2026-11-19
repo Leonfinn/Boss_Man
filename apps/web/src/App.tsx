@@ -11,7 +11,7 @@ import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { lazyPage, PageSuspense } from "./lazy-page";
 import { settingsRedirect } from "./pages/settings-redirect";
-import { waitingFor, type RunnerCheckView } from "./pages/settings/updates";
+import { drainTiming, waitingFor, type RunnerCheckView } from "./pages/settings/updates";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 
 // BOS-1843: every page below loads when it is first opened. Login, the shell and the banners stay in the entry file.
@@ -105,7 +105,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -131,9 +131,15 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
         Update pending: {waiting}. It is past its deadline and waits for your answer in Settings → Server and runner. New runs are not held for it.
       </p>
     );
+  const timing = drainTiming(m);
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. Nothing new starts until it is done.{" "}
+      Update pending: {waiting}. {timing ? `${timing} ` : ""}Nothing new starts until it is done.{" "}
+      {m.overdue && m.phase === "waiting" ? (
+        <>
+          It is past the time given: <a href="#/settings">choose in Settings → Server and runner</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that.{" "}
+        </>
+      ) : null}
       {m.runs > 0
         ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.'
         : (m.checks ?? 0) > 0

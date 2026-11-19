@@ -27,7 +27,7 @@ import { createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold } from "
 import { CARRIED_NOTE_PREFIX } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
-import { cardHeld, CHECK_MERGED_KEY, highestRisk, MERGE_CARRY_KEY, MERGE_TURN_DEFAULT_MIN, MERGE_TURN_KEY, MERGE_TURN_MAX_MIN, MERGE_WAIT_MS, raiseCheckStuck, ReviewError, ReviewHeldError, SignoffPendingError, WAIT_FOR_CI_KEY, type CarriedInfo, type GitTemplates, type HoldInput, type LandingStatus, type NotifyHook } from "./review-common.js";
+import { cardHeld, CHECK_MERGED_KEY, highestRisk, MERGE_CARRY_KEY, MERGE_RETARGET_KEY, MERGE_TURN_DEFAULT_MIN, MERGE_TURN_KEY, MERGE_TURN_MAX_MIN, MERGE_WAIT_MS, raiseCheckStuck, ReviewError, ReviewHeldError, SignoffPendingError, WAIT_FOR_CI_KEY, type CarriedInfo, type GitTemplates, type HoldInput, type LandingStatus, type NotifyHook } from "./review-common.js";
 
 export type ReviewDeps = {
     runners: ReturnType<typeof runnersService>;
@@ -543,6 +543,12 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     return row?.value !== false && row?.value !== "false";
   }
 
+  /** BOS-1344/1820/1821: whether a waiting merge is rebuilt on a moved main while it waits. On unless the owner turned it off. */
+  async function mergeRetarget(): Promise<boolean> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
+    return row?.value !== false && row?.value !== "false";
+  }
+
   /** BOS-1762: the landing turn's cap in minutes; 0 means no turns. */
   async function mergeTurnMinutes(): Promise<number> {
     const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_TURN_KEY));
@@ -672,6 +678,7 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     checkMergedResult,
     waitForCi,
     mergeCarry,
+    mergeRetarget,
     mergeTurnMinutes,
     templates,
     checkHoldInput,

@@ -55,7 +55,7 @@ export function reviewService(
 ) {
   const ctx = reviewContext(db, deps);
   // `reviewState`, not `state`: settle and others have a local `state` (the review verdict) that would hide it.
-  const { state: reviewState, landings, gate, queue, scanListWarning, landingBeat, phases, ciWaits, ciPassedTrees, ciCardWaiting, ciTiming, beatNow, ticketWithRepo, clashOnMain, namedTickets, landingStale, prTarget, otherOpenBranches, carriedBetween, approvedAndWaiting, carriedOnHost, refuseUnchecked, refuseCarried, announceMerged, afterMergeLeft, closeAfterMerge, tellCeoLiveFix, pagePriorityMerge, tellCeo, mergeStuck, checkStuck, setGitNote, wait, tellAgent, checkMergedResult, waitForCi, mergeCarry, mergeTurnMinutes, templates, checkHoldInput, startHold, holdForWaits, ownerSignoffOpen, refuseIfHeld } = ctx;
+  const { state: reviewState, landings, gate, queue, scanListWarning, landingBeat, phases, ciWaits, ciPassedTrees, ciCardWaiting, ciTiming, beatNow, ticketWithRepo, clashOnMain, namedTickets, landingStale, prTarget, otherOpenBranches, carriedBetween, approvedAndWaiting, carriedOnHost, refuseUnchecked, refuseCarried, announceMerged, afterMergeLeft, closeAfterMerge, tellCeoLiveFix, pagePriorityMerge, tellCeo, mergeStuck, checkStuck, setGitNote, wait, tellAgent, checkMergedResult, waitForCi, mergeCarry, mergeRetarget, mergeTurnMinutes, templates, checkHoldInput, startHold, holdForWaits, ownerSignoffOpen, refuseIfHeld } = ctx;
 
   return {
     setWakeHook(hook: NotifyHook) {
@@ -1957,10 +1957,7 @@ export function reviewService(
       // "refreshed" (BOS-1820): with CI gating, the queued job took a new merge (`prep`) the old one's pass couldn't be carried onto.
       type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | { status: "handed_over" } | CheckFailed | { status: "refreshed"; prep: Prepared };
       const message = gateMergeMessage(t.title, ticketId);
-      const retargetSwitch = async () => {
-        const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
-        return row?.value !== false && row?.value !== "false";
-      };
+      const retargetSwitch = mergeRetarget;
       // Never while CI gating is on (BOS-1070): CI was published for this commit, and a retargeted tree is one CI never ran on.
       // With CI, ciRefreshOn below (BOS-1820) refreshes only a merge whose pass couldn't be carried, and restarts its CI run.
       const retargetOn = async () => !ci && (await retargetSwitch());
@@ -1979,7 +1976,7 @@ export function reviewService(
        * BOS-1820: with GitHub CI gating, a queued merge is refreshed only when main moved in a way its pass couldn't be carried
        * across (finish would refuse it and rebuild after both the check and GitHub had run). A file-disjoint move is left alone:
        * the carry lands it with no second GitHub run. Needs the carry itself, a runner that answers prepare's carryFrom, and
-       * the owner's merge_retarget switch (Settings → Checks), which turns both refreshes off.
+       * the owner's merge_retarget switch (Settings → Checks, "Rebuild waiting merges when main moves"), which turns both refreshes off.
        */
       const ciRefreshOn = async () => !!ci && carryOn && deps.runners.can(runner.id, "merge-refresh") && (await retargetSwitch());
       const turnCapMs = (await mergeTurnMinutes()) * 60_000;
@@ -2839,6 +2836,12 @@ export function reviewService(
     mergeCarry,
     async setMergeCarry(on: boolean) {
       await db.insert(settings).values({ key: MERGE_CARRY_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
+      return on;
+    },
+
+    mergeRetarget,
+    async setMergeRetarget(on: boolean) {
+      await db.insert(settings).values({ key: MERGE_RETARGET_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
       return on;
     },
 
