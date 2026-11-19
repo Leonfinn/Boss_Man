@@ -13,6 +13,9 @@
 #   publish-images.sh verify <name> <digest>   in EVERY registry: the signature, the SBOM and the provenance exist
 #   publish-images.sh release-json <version> <commit> <tag>
 #                                              print release.json: each image's digest, and its digest per architecture
+#   publish-images.sh resolve-commit <input> <default>
+#                                              the commit to release: <default> when <input> is empty, else <input> if it is
+#                                              a full 40-hex sha reachable from origin/main; otherwise fails
 #
 # Settings come from the environment (GitHub: repository variables and secrets), never from this file:
 #   IMAGE_PREFIXES      space or comma separated <registry>/<namespace> list, e.g. "ghcr.io/me docker.io/me".
@@ -114,6 +117,20 @@ cmd_verify() {
   done
 }
 
+cmd_resolve_commit() {
+  # <input> <default>: the commit a release is for. Empty input = the default (main's head, $GITHUB_SHA). A typed commit
+  # must be 40 hex and reachable from origin/main: the updater trusts release.json signed by release.yml on main, so a
+  # commit that never merged must never be released. Needs a full-history checkout with origin/main.
+  local input="${1:-}" default="${2:?default commit}" full
+  if [ -z "$input" ]; then echo "$default"; return; fi
+  [[ "$input" =~ ^[0-9a-f]{40}$ ]] || die "commit '$input' is not a full 40-character lower-case sha. Leave it blank for main's newest commit."
+  git cat-file -e "$input^{commit}" 2>/dev/null || die "commit $input is not in this repository."
+  full="$(git rev-parse "$input^{commit}")"
+  git rev-parse --verify -q origin/main >/dev/null || die "origin/main is not available to check commit $input against."
+  git merge-base --is-ancestor "$full" origin/main || die "commit $input is not on main. Only a commit that has merged to main can be released."
+  echo "$full"
+}
+
 cmd_release_json() {
   local version="${1:?version}" commit="${2:?commit}" tag="${3:?tag}" first p name d got images=() prefixes_json
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "version '$version' is not like 0.1.0 or 0.1.0-beta.1"
@@ -142,5 +159,6 @@ case "${1:-}" in
   copy) shift; cmd_copy "$@" ;;
   verify) shift; cmd_verify "$@" ;;
   release-json) shift; cmd_release_json "$@" ;;
-  *) sed -n '2,24p' "$0" >&2; exit 2 ;;
+  resolve-commit) shift; cmd_resolve_commit "$@" ;;
+  *) sed -n '2,27p' "$0" >&2; exit 2 ;;
 esac

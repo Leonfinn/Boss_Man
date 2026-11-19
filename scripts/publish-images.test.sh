@@ -86,4 +86,25 @@ echo "$json" | jq -e --arg d "$D1" --arg a "$DA" --arg b "$DB" '.schema == 1 and
 echo "$D2" >"$S/state/docker.io_me2_boss-man-launcher_sha-0123456789ab"
 if run "$V" DOCKERHUB_PUBLISH=true DOCKERHUB_USERNAME=u DOCKERHUB_TOKEN=t $P release-json 0.1.0 0123456789abcdef0123456789abcdef01234567 sha-0123456789ab 2>/dev/null; then fail "registries that disagree must fail"; fi
 if run "$V" $P release-json latest 0123456789abcdef0123456789abcdef01234567 sha-0123456789ab 2>/dev/null; then fail "a bad version must fail"; fi
+# resolve-commit: blank = main's head; a typed commit must be 40 hex and on main (a branch-only commit is refused).
+G="$S/repo"; mkdir -p "$G"
+git_t() { git -C "$G" -c user.name=t -c user.email=t@example.com "$@"; }
+git_t init -q -b main; git_t commit -q --allow-empty -m one; OLD=$(git_t rev-parse HEAD)
+git_t commit -q --allow-empty -m two; HEAD_SHA=$(git_t rev-parse HEAD)
+git_t update-ref refs/remotes/origin/main "$HEAD_SHA"
+git_t checkout -q -b side "$OLD"; git_t commit -q --allow-empty -m branch-only; SIDE=$(git_t rev-parse HEAD)
+rc() { (cd "$G" && env -i PATH="$PATH" "$OLDPWD/$P" resolve-commit "$@"); }
+[ "$(rc "" "$HEAD_SHA")" = "$HEAD_SHA" ] || fail "blank commit must give the default (main's head)"
+[ "$(rc "$OLD" "$HEAD_SHA")" = "$OLD" ] || fail "an older commit on main must be accepted"
+if rc "$SIDE" "$HEAD_SHA" 2>"$S/err"; then fail "a commit not on main must be refused"; fi
+grep -q "not on main" "$S/err" || fail "the refusal must say the commit is not on main"
+if rc "${OLD:0:12}" "$HEAD_SHA" 2>"$S/err"; then fail "a short sha must be refused"; fi
+grep -q "40-character" "$S/err" || fail "the refusal must say 40 characters"
+if rc "$(printf 'A%.0s' {1..40})" "$HEAD_SHA" 2>/dev/null; then fail "non-hex-lowercase must be refused"; fi
+if rc "$(printf '0%.0s' {1..40})" "$HEAD_SHA" 2>"$S/err"; then fail "an unknown commit must be refused"; fi
+grep -q "not in this repository" "$S/err" || fail "the refusal must say the commit is unknown"
+# release.yml must take its commit from resolve-commit, never trust the raw input or use GITHUB_SHA past it.
+grep -q "resolve-commit" .github/workflows/release.yml || fail "release.yml must call resolve-commit"
+grep -q 'inputs.commit' .github/workflows/release.yml || fail "release.yml must have the commit input"
+if grep -n 'GITHUB_SHA' .github/workflows/release.yml | grep -v 'resolve-commit' | grep -v '^[0-9]*: *#' >/dev/null; then fail "release.yml uses GITHUB_SHA outside resolve-commit"; fi
 echo "publish-images.test.sh: ok"
