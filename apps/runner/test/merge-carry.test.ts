@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { alwaysRetest, carryVerdict } from "../src/merge-carry.js";
+import { alwaysRetest, carryVerdict, retestFiles } from "../src/merge-carry.js";
 import { Workspaces } from "../src/workspace.js";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -54,7 +54,10 @@ async function ticket(o: ReturnType<typeof origin>, files: Record<string, string
   const ws = new Workspaces(tmp("bm-ws-root-"));
   const spec = { projectId: project, ticketId: A, repoUrl: o.url, baseRef: "main" };
   const w = await ws.ensure(spec);
-  for (const [file, content] of Object.entries(files)) writeFileSync(path.join(w.path, file), content);
+  for (const [file, content] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(w.path, file)), { recursive: true });
+    writeFileSync(path.join(w.path, file), content);
+  }
   git(w.path, "add", ".");
   git(w.path, "commit", "-qm", "ticket work");
   return { ws, spec, dir: w.path };
@@ -94,18 +97,46 @@ describe("carry a passed merge across a main move (BOS-1762)", () => {
   });
 
   it.each([
-    ["a package manifest", { "package.json": '{"x":1}\n' }, "package.json"],
-    ["a lockfile", { "pnpm-lock.yaml": "lockfileVersion: 9\n" }, "pnpm-lock.yaml"],
-    ["a CI workflow", { ".github/workflows/ci.yml": "on: push\n" }, ".github/workflows/ci.yml"],
-    ["a migration", { "apps/server/drizzle/0001_x.sql": "select 1;\n" }, "apps/server/drizzle/0001_x.sql"],
-  ])("re-tests when main changed %s, though the ticket's files are untouched", async (_what, change, file) => {
+    ["a package manifest", { "package.json": '{"x":1}\n' }, "package.json", "dependencies"],
+    ["a lockfile", { "pnpm-lock.yaml": "lockfileVersion: 9\n" }, "pnpm-lock.yaml", "dependencies"],
+    ["a check script", { "scripts/check-test-lines.mjs": "// new rule\n" }, "scripts/check-test-lines.mjs", "check scripts"],
+  ])("re-tests when main changed %s, though the ticket's files are untouched", async (_what, change, file, what) => {
     const o = origin();
     const { ws, spec } = await ticket(o, { "mine.txt": "mine\n" });
     const p = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare" })) as Prepared;
     o.pushChange(change);
     const moved = o.mainSha();
     const r = await ws.merge(spec, "main", "Merge A", {}, null, { phase: "finish", commit: p.commit, tree: p.tree, carry: true });
-    expect(r).toEqual({ status: "main_moved", notCarried: { why: "main changed dependencies, build, CI or migration files", files: [file] } });
+    expect(r).toEqual({ status: "main_moved", notCarried: { why: `main changed ${what}`, files: [file] } });
+    expect(o.mainSha()).toBe(moved);
+  });
+
+  // BOS-1925: main's migration, CI workflow or another package's build config no longer re-tests a merge that touches none
+  // of them (each was a forced re-check before: 17 of the 35 in the 24 h to 19 Nov 15:30).
+  it.each([
+    ["a migration", { "apps/server/drizzle/0001_x.sql": "select 1;\n", "apps/server/drizzle/meta/_journal.json": "{}\n" }],
+    ["a CI workflow", { ".github/workflows/ci.yml": "on: push\n" }],
+    ["another package's build config", { "apps/web/vite.config.ts": "export default {};\n" }],
+  ])("carries when main changed %s that the ticket doesn't touch", async (_what, change) => {
+    const o = origin();
+    // Server code only: a file at the root would re-test on another package's config (it may be built by it).
+    const { ws, spec } = await ticket(o, { "apps/server/src/mine.ts": "export {};\n" });
+    const p = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare" })) as Prepared;
+    o.pushChange(change);
+    const moved = o.mainSha();
+    const r = await ws.merge(spec, "main", "Merge A", {}, null, { phase: "finish", commit: p.commit, tree: p.tree, carry: true });
+    expect(r).toMatchObject({ status: "merged", carried: { to: moved } });
+    expect(git(o.url, "rev-parse", "main^1")).toBe(moved);
+  });
+
+  it("re-tests when main and the ticket both add a migration in the same folder (different files, no journal)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticket(o, { "db/migrations/002_mine.sql": "select 2;\n" });
+    const p = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare" })) as Prepared;
+    o.pushChange({ "db/migrations/002_theirs.sql": "select 3;\n" });
+    const moved = o.mainSha();
+    const r = await ws.merge(spec, "main", "Merge A", {}, null, { phase: "finish", commit: p.commit, tree: p.tree, carry: true });
+    expect(r).toEqual({ status: "main_moved", notCarried: { why: "main changed migrations (this ticket changes them too)", files: ["db/migrations/002_theirs.sql"] } });
     expect(o.mainSha()).toBe(moved);
   });
 
@@ -181,7 +212,7 @@ describe("prepare's carry answer for a queued merge (BOS-1820)", () => {
     const r = (await ws.merge(spec, "main", "Merge A", {}, null, { phase: "prepare", carryFrom: { commit: p.commit, tree: p.tree } })) as Prepared & { carry?: unknown };
     expect(r.status).toBe("prepared");
     expect(r.tree).not.toBe(p.tree);
-    expect(r.carry).toEqual({ ok: false, why: "main changed dependencies, build, CI or migration files", files: ["scripts/check-test-lines.mjs"] });
+    expect(r.carry).toEqual({ ok: false, why: "main changed check scripts", files: ["scripts/check-test-lines.mjs"] });
     expect(kept(repoOf(ws))).toBe(r.commit);
   });
 
@@ -218,11 +249,52 @@ describe("carryVerdict (BOS-1762)", () => {
   });
 
   it("names the whole-repo paths generically, at any depth", () => {
-    for (const p of ["package.json", "apps/web/package.json", "yarn.lock", "go.sum", "Cargo.lock", "poetry.lock", "pnpm-workspace.yaml", "apps/server/tsconfig.build.json", "apps/web/vite.config.ts", "vitest.config.mts", ".github/workflows/ci.yml", "apps/runner/Dockerfile", "scripts/check-all.sh", "db/migrations/001.sql", "apps/server/drizzle/meta/_journal.json"]) {
+    for (const p of ["package.json", "apps/web/package.json", "yarn.lock", "go.sum", "Cargo.lock", "poetry.lock", "pnpm-workspace.yaml", "vitest.config.mts", "tsconfig.base.json", "web/vite.config.ts", "apps/runner/Dockerfile", "docker-compose.yml", "scripts/check-all.sh"]) {
       expect(alwaysRetest(p), p).toBe(true);
     }
-    for (const p of ["apps/server/src/app.ts", "README.md", "docs/package.json.md", "scripts/deploy.sh", "src/migrationsHelper.ts"]) {
+    // BOS-1925: migrations, CI and a package's own config are no longer whole-repo (see retestFiles).
+    for (const p of ["apps/server/src/app.ts", "README.md", "docs/package.json.md", "scripts/deploy.sh", "src/migrationsHelper.ts", "apps/server/tsconfig.build.json", "apps/web/vite.config.ts", ".github/workflows/ci.yml", "db/migrations/001.sql", "apps/server/drizzle/meta/_journal.json"]) {
       expect(alwaysRetest(p), p).toBe(false);
     }
+  });
+});
+
+// BOS-1925: the decision table, one row per scope. Each "carries" row re-tested on the code before BOS-1925.
+describe("retestFiles: which of main's files re-test this merge (BOS-1925)", () => {
+  const SERVER = ["apps/server/src/review.ts", "apps/server/test/review.test.ts"];
+  const MIGRATION = ["apps/server/drizzle/0172_run_cost_check.sql", "apps/server/drizzle/meta/0172_snapshot.json", "apps/server/drizzle/meta/_journal.json"];
+
+  it.each<[string, string[], string[], string[]]>([
+    // [row, mine, theirs, files that re-test]
+    ["migration on main, merge has none", SERVER, MIGRATION, []],
+    ["migration on main, merge carries one in the same folder", [...SERVER, "apps/server/drizzle/0172_mine.sql"], MIGRATION, MIGRATION],
+    ["migration in another folder", ["db/migrations/001.sql"], MIGRATION, []],
+    ["CI workflow on main, merge has none", SERVER, [".github/workflows/ci.yml"], []],
+    ["CI workflow on main, merge changes CI too", [...SERVER, ".github/workflows/release.yml"], [".github/workflows/ci.yml"], [".github/workflows/ci.yml"]],
+    ["web's config, server-only merge", SERVER, ["apps/web/vite.config.ts"], []],
+    ["web's config, merge touches web", [...SERVER, "apps/web/src/App.tsx"], ["apps/web/vite.config.ts"], ["apps/web/vite.config.ts"]],
+    ["web's config, merge touches shared code", ["packages/shared/src/risk.ts"], ["apps/web/vite.config.ts"], ["apps/web/vite.config.ts"]],
+    ["web's config, merge touches a root file", ["README.md"], ["apps/web/vite.config.ts"], ["apps/web/vite.config.ts"]],
+    ["web's config, merge touches a file beside the packages", ["apps/README.md"], ["apps/web/vite.config.ts"], ["apps/web/vite.config.ts"]],
+    ["server's tsconfig, web-only merge", ["apps/web/src/App.tsx"], ["apps/server/tsconfig.json"], []],
+    ["config one folder deep stays global", SERVER, ["web/vite.config.ts"], ["web/vite.config.ts"]],
+    ["root config stays global", SERVER, ["tsconfig.base.json"], ["tsconfig.base.json"]],
+    ["lockfile stays global", SERVER, ["pnpm-lock.yaml"], ["pnpm-lock.yaml"]],
+    ["check script stays global", SERVER, ["scripts/check-quick.sh", "scripts/check-quick.test.sh"], ["scripts/check-quick.sh", "scripts/check-quick.test.sh"]],
+    ["compose stays global", SERVER, ["docker-compose.yml"], ["docker-compose.yml"]],
+    // The 18 Nov 21:49 burst: ci.yml + migration 0171 + the ratchet. The ratchet alone still re-tests.
+    ["ci.yml + migration + check script", SERVER, [".github/workflows/ci.yml", ...MIGRATION, "scripts/check-test-lines.mjs"], ["scripts/check-test-lines.mjs"]],
+  ])("%s", (_row, mine, theirs, want) => {
+    expect(retestFiles(mine, theirs).files).toEqual([...want].sort());
+    const v = carryVerdict({ mine, theirs, drift: theirs });
+    expect(v.ok).toBe(want.length === 0);
+  });
+
+  it("says which rules re-test, so the merge-line record names them", () => {
+    expect(carryVerdict({ mine: ["apps/server/drizzle/0002_a.sql"], theirs: ["apps/server/drizzle/0001_b.sql", "pnpm-lock.yaml"], drift: [] })).toEqual({
+      ok: false,
+      why: "main changed migrations (this ticket changes them too), dependencies",
+      files: ["apps/server/drizzle/0001_b.sql", "pnpm-lock.yaml"],
+    });
   });
 });

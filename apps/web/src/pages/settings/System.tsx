@@ -985,7 +985,7 @@ export function MergeCarrySetting() {
         <span>
           <strong>Land passed merges when main moved elsewhere</strong>{" "}
           <span className="muted">
-            When a change has passed its checks but main moved meanwhile, Boss Man lands it anyway if main's newer changes touch none of its files and none of the project's dependency, build, CI or migration files. Main's own CI checks the result. Off: every main move means testing the change again.
+            When a change has passed its checks but main moved meanwhile, Boss Man lands it anyway if main's newer changes touch none of its files and none of the project's dependency, container or check-script files. A new database migration, CI workflow or build setting on main still means testing again, but only for a change that touches the same kind of file (or the same app's code). Main's own CI checks the result. Off: every main move means testing the change again.
           </span>
         </span>
       </label>
