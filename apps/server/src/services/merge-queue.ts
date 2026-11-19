@@ -3,10 +3,10 @@
 // gate that stops can be seen rather than asked about. Reads only what the server already records:
 // the tickets in review, their latest check results, the one open merge card per ticket, and the
 // merges this process is running. Nothing here changes the queue.
-import { and, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
 import { softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
@@ -15,6 +15,34 @@ import { clashWords } from "./merge-line.js";
 import { mergeLineHealth, startBrakeOff, type StartBrakeOff, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { goLiveWaitWords } from "@boss-man/shared";
+
+/** BOS-1942: the place a check job's record names: a check worker by its name, or the company runner (the server's own machine). */
+const placeOf = (workerId: string | null, worker: string | null) => (workerId ? (worker ?? "a check worker") : "company runner");
+
+/** BOS-1942: the running check jobs of a company, oldest first, each with where it runs (read from the job's record). */
+export async function runningCheckJobs(db: Db, companyId: string) {
+  const rows = await db
+    .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt, workerId: checkJobs.workerId, worker: checkWorkers.name })
+    .from(checkJobs)
+    .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
+    .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
+    .orderBy(asc(checkJobs.startedAt));
+  return rows.map(({ workerId, worker, ...j }) => ({ ...j, ranOn: placeOf(workerId, worker) }));
+}
+
+/** BOS-1942: where the latest ended merge check of each ticket ran, for a landing that now waits only for GitHub CI. */
+export async function endedMergePlaces(db: Db, companyId: string, ticketIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!ticketIds.length) return out;
+  const rows = await db
+    .select({ ticketId: checkJobs.ticketId, workerId: checkJobs.workerId, worker: checkWorkers.name })
+    .from(checkJobs)
+    .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
+    .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.kind, "merge"), inArray(checkJobs.ticketId, ticketIds), isNotNull(checkJobs.startedAt), isNotNull(checkJobs.endedAt)))
+    .orderBy(desc(checkJobs.endedAt));
+  for (const r of rows) if (!out.has(r.ticketId)) out.set(r.ticketId, placeOf(r.workerId, r.worker));
+  return out;
+}
 
 /** A fix that has been landing this long with no result is stalled (R28). */
 export const FIX_LANDING_LIMIT_MIN = 60;

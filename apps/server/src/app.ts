@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
@@ -84,7 +84,7 @@ import { chatTraceService } from "./services/chat-trace.js";
 import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
-import { mergeQueueService } from "./services/merge-queue.js";
+import { mergeQueueService, runningCheckJobs, endedMergePlaces } from "./services/merge-queue.js";
 import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
 import { mainCiService } from "./services/main-ci.js";
@@ -1075,27 +1075,9 @@ export async function buildApp(opts: AppOptions) {
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
-    runningChecks: async (companyId) =>
-      (
-        await db
-          .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt, workerId: checkJobs.workerId, worker: checkWorkers.name })
-          .from(checkJobs)
-          .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
-          .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
-          .orderBy(asc(checkJobs.startedAt))
-      ).map(({ workerId, worker, ...j }) => ({ ...j, ranOn: workerId ? (worker ?? "a check worker") : "company runner" })),
-    // BOS-1942: where a finished merge check ran, for a landing that now waits only for GitHub CI (the latest ended job per ticket).
-    endedMergePlaces: async (companyId, ticketIds) => {
-      const rows = await db
-        .select({ ticketId: checkJobs.ticketId, workerId: checkJobs.workerId, worker: checkWorkers.name })
-        .from(checkJobs)
-        .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
-        .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.kind, "merge"), inArray(checkJobs.ticketId, ticketIds), isNotNull(checkJobs.startedAt), isNotNull(checkJobs.endedAt)))
-        .orderBy(desc(checkJobs.endedAt));
-      const out = new Map<string, string>();
-      for (const r of rows) if (!out.has(r.ticketId)) out.set(r.ticketId, r.workerId ? (r.worker ?? "a check worker") : "company runner");
-      return out;
-    },
+    // BOS-1942: where each running check runs, and where a finished merge check ran (read from the job records).
+    runningChecks: (companyId) => runningCheckJobs(db, companyId),
+    endedMergePlaces: (companyId, ticketIds) => endedMergePlaces(db, companyId, ticketIds),
     serverHost: () => hostFacts.serverHost(),
     // BOS-1942: which machine holds how many of the check slots (the server, then each ready worker), so the page can say what the total is made of.
     slotSplit: async (companyId) => {
