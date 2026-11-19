@@ -7,7 +7,7 @@ A **check worker** is a small container on another Docker host that takes check 
 You need Docker with the compose plugin on the second host (`docker compose version` shows 2.23.1 or newer). Nothing to clone, build or download by hand.
 
 1. In Boss Man: Settings → Server and runner → Limits and checks → Checks → **Add a check worker** (under Check workers). Give it a name, choose the company, set the number of checks at once, press **Add**.
-2. Boss Man shows a complete compose file with your server's address, the version and the token already filled in. Press **Copy compose file**. The token is inside it and is shown once.
+2. Boss Man shows a complete compose file with your server's address, the number of checks at once and the token already filled in. Press **Copy compose file**. The token is inside it and is shown once.
 3. On the worker host, put that text in a file called `compose.yaml` in an empty folder, and run:
    ```
    docker compose up -d
@@ -54,7 +54,7 @@ These are lines already in the file; change them in place. None has a host-speci
 - `BOSSMAN_CHECK_SLOTS`: checks at once. Boss Man's per-worker setting can lower it, never raise it.
 - `mem_limit` and `memswap_limit`: memory for the container (8g to start).
 - `cpuset` (pin to CPU threads, such as `"8-15"`) or `cpus` (a hard cap): remove the `#` in front. A cpuset is preferred, because test tools then size themselves to those threads.
-- Test workers per check and a memory hint per check are set per worker in the Add a check worker form, not in the file.
+- **Test threads per check** and **Memory per check, in GB** are set per worker in the Add a check worker form, not in the file. Both are optional; left empty, the machine decides.
 
 Sizing rule of thumb: a check wants about 4 threads and 4 GB when it is busy; leave the host enough to do its own job.
 

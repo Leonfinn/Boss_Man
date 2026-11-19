@@ -6,7 +6,7 @@ Status: built. The CEO's `propose_team` tool, the team-plan decision, the chat t
 
 - The owner can create agents by hand from a template.
 - The CEO can `propose_hire`: from a template, with a tailored title, instructions and model. Each hire waits for the owner unless approvals are off.
-- The CEO is told to hire only reactively: "if the same gap keeps coming up, propose_hire the missing role".
+- The CEO is told to hire only reactively: "Do it yourself only when nobody can; if a gap keeps coming up, propose_hire."
 - Creating a project, or growing its scope, wakes nobody.
 
 ## Change
