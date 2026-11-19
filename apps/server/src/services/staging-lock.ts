@@ -3,6 +3,7 @@
  * card's automatic request and the Settings button all do that pair of steps; without the lock two of them can both pass the check
  * and the later write replaces the earlier request, leaving its deploy row "running" for hours.
  */
+// lost on restart, harmless because a restart ends every waiting call too, and the request file itself is the durable record
 let tail: Promise<unknown> = Promise.resolve();
 
 export function withStagingLock<T>(fn: () => Promise<T>): Promise<T> {
