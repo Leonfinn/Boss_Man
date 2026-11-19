@@ -88,7 +88,7 @@ export const OWNER_CONTROLS = {
   Projects: ["Open …", "Unarchive", "Re-detect", "Check now", "Edit settings", "Hide settings"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
-  Runs: ["End all running runs", "Ending"],
+  Runs: ["End all running runs", "Ending", "Retry"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
