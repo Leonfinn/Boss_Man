@@ -418,3 +418,51 @@ describe("a sign-off and the branch moving on (BOS-734)", () => {
     expect((await diff.row(t2.id)).systemState).toBe("in_progress");
   });
 });
+
+describe("a signed-off head may only sit in review (BOS-1879)", () => {
+  const OUT = "This head is signed off; the gate only merges from review.";
+  it("refuses in_progress, blocked and schedule_check on a signed-off unchanged head, allows them on a new head", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    await c.signedOffCard(t.id, "b".repeat(40));
+    const client = await c.mcp(c.worker.id);
+    // In review a check may be booked; the move out is refused.
+    expect(textOf(await client.callTool({ name: "schedule_check", arguments: { ticketId: t.id, note: "poll", inMinutes: 60 } }))).not.toContain(OUT);
+    const v = (await c.row(t.id)).version;
+    const out = await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", expected_version: v } });
+    expect(textOf(out)).toContain(OUT);
+    expect((await c.row(t.id)).systemState).toBe("review");
+    // Outside review a booked check is refused (polling only makes it look active).
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, t.id));
+    expect(textOf(await client.callTool({ name: "schedule_check", arguments: { ticketId: t.id, note: "poll", inMinutes: 60 } }))).toContain(OUT);
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    const blocked = await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "blocked", summary: "waiting", blocked_until: new Date(Date.now() + 3_600_000).toISOString(), expected_version: v } });
+    expect(textOf(blocked)).toContain(OUT);
+    // A signed-off card for another commit does not cover the head: the move is allowed.
+    const t2 = await c.approvedHighRisk();
+    await c.signedOffCard(t2.id, "9".repeat(40));
+    const ok = await client.callTool({ name: "schedule_check", arguments: { ticketId: t2.id, note: "poll", inMinutes: 60 } });
+    expect(textOf(ok)).not.toContain(OUT);
+  });
+
+  it("the sweep moves a stuck signed-off ticket to review with a note, and leaves a fresh or unsigned one", async () => {
+    const c = await setup();
+    const { sweepSignedOffStuck } = await import("../src/services/signoff.js");
+    const old = new Date(Date.now() - 3 * 3_600_000);
+    const stuck = await c.approvedHighRisk();
+    await c.signedOffCard(stuck.id, "b".repeat(40));
+    const fresh = await c.approvedHighRisk();
+    await c.signedOffCard(fresh.id, "b".repeat(40));
+    const unsigned = await c.approvedHighRisk();
+    await c.db.update(tickets).set({ systemState: "in_progress", stateChangedAt: old }).where(eq(tickets.id, stuck.id));
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, fresh.id));
+    await c.db.update(tickets).set({ systemState: "in_progress", stateChangedAt: old }).where(eq(tickets.id, unsigned.id));
+    const head = async () => "b".repeat(40);
+    expect(await sweepSignedOffStuck(c.db, { headOf: head, now: new Date(), graceMs: 30 * 60_000 })).toBe(1);
+    const moved = await c.row(stuck.id);
+    expect(moved.systemState).toBe("review");
+    expect(moved.stateNote).toContain("Moved to review");
+    expect((await c.row(fresh.id)).systemState).toBe("in_progress");
+    expect((await c.row(unsigned.id)).systemState).toBe("in_progress");
+  });
+});
