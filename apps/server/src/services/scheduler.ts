@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { REAL_USE_LABEL, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
+import { REAL_USE_LABEL, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import { agentHold } from "./fence-default.js";
@@ -333,12 +333,14 @@ export function schedulerService(
   }
 
   /** The newest sample per window for a subscription. */
-  async function latestQuotaWindows(fundingSourceId: string) {
-    return db
+  async function latestQuotaWindows(source: { id: string; provider: string | null }) {
+    const rows = await db
       .selectDistinctOn([quotaSamples.window])
       .from(quotaSamples)
-      .where(eq(quotaSamples.fundingSourceId, fundingSourceId))
+      .where(eq(quotaSamples.fundingSourceId, source.id))
       .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
+    // Only limits the latest report included: a window the account stopped reporting never holds or switches (BOS-1916).
+    return source.provider === "synthetic" || !rows.length ? rows : currentReportSamples(rows);
   }
 
   /** Windows that count towards the hold: the owner can switch any adapter-reported name off (BOS-227). A reading taken before its reset is empty, so it never holds (BOS-1409). */
@@ -393,7 +395,7 @@ export function schedulerService(
   async function hasRoom(fundingSourceId: string): Promise<boolean> {
     const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, fundingSourceId));
     if (!source) return false;
-    const samples = await latestQuotaWindows(source.id);
+    const samples = await latestQuotaWindows(source);
     if (samples.length === 0) return false;
     return holdingWindows(source, samples, now()).length === 0;
   }
@@ -406,7 +408,7 @@ export function schedulerService(
     if (source.provider !== "anthropic") return "";
     const pool = await claudeAccounts(source);
     for (const other of pool.filter((p) => p.id !== source.id)) {
-      if (holdingWindows(other, await latestQuotaWindows(other.id), now()).length === 0) return ` New runs move to ${other.name} automatically.`;
+      if (holdingWindows(other, await latestQuotaWindows(other), now()).length === 0) return ` New runs move to ${other.name} automatically.`;
     }
     return " To keep agents working on a second Claude plan now: Settings → Secrets, find the Claude token and press Rotate, then paste the second plan's token. It moves every agent in the company at once; runs already going finish on the first plan. To undo, Rotate back to the first token (keep it saved elsewhere: Boss Man never shows it again). Or add the second plan on the Funding page so new runs switch by themselves.";
   }
@@ -422,7 +424,7 @@ export function schedulerService(
     const infinite = await infiniteSourceIds();
     for (const source of sources) {
       if (infinite.has(source.id)) continue;
-      const samples = await latestQuotaWindows(source.id);
+      const samples = await latestQuotaWindows(source);
       if (samples.length === 0) continue;
       const full = holdingWindows(source, samples, t);
       const overage = samples.some((s) => s.overageInUse);
@@ -1329,7 +1331,7 @@ export function schedulerService(
       if (ceo.fundingSourceId && !isInfiniteModel(ceo.model)) {
         const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, ceo.fundingSourceId));
         if (source) {
-          const samples = await latestQuotaWindows(source.id);
+          const samples = await latestQuotaWindows(source);
           const full = holdingWindows(source, samples, now());
           if (full.length && (source.quotaOverage !== "all" || full.some((s) => s.utilization >= 1))) return false;
         }
@@ -2060,7 +2062,7 @@ export function schedulerService(
             const accounts = usable.length ? usable : [source];
             const checked: { source: typeof source; rank: number; passes: boolean; hasRoom: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
             for (const a of accounts) {
-              const samples = await latestQuotaWindows(a.id);
+              const samples = await latestQuotaWindows(a);
               const full = holdingWindows(a, samples, t);
               // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
               // the limit itself, so the default "pause" never spends unapproved extra usage.
