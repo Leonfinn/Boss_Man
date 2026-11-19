@@ -58,6 +58,11 @@ export function parse(file: string): Parsed {
       imports.set((alias ?? orig)!.trim(), { file: target, name: orig!.trim() });
     }
   }
+  // A page loaded on demand (BOS-1843): `const Board = lazyPage(() => import("./pages/Board"), "Board");` counts as importing Board.
+  for (const m of text.matchAll(/^const\s+(\w+)\s*=\s*lazyPage\(\s*\(\)\s*=>\s*import\("(\.[^"]*)"\)\s*,\s*"(\w+)"/gm)) {
+    const target = resolveFrom(file, m[2]!);
+    if (target) imports.set(m[1]!, { file: target, name: m[3]! });
+  }
   for (const m of text.matchAll(/^export\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"(\.[^"]*)"/gm)) {
     const target = resolveFrom(file, m[2]!);
     if (!target) continue;
@@ -101,7 +106,7 @@ export function usesIn(file: string, code: string): Chunk[] {
     const used = m[1] === "<" || (m[1] === "={" && m[3] === "}") || m[3] === "(";
     if (!used) continue;
     const local = p.chunks.get(id);
-    if (local) {
+    if (local && !/=\s*lazyPage\(/.test(local.body.slice(0, 200))) {
       found.set(`${file}#${id}`, local);
       continue;
     }
