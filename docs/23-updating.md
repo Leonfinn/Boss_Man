@@ -64,7 +64,15 @@ To update the runners yourself, use Settings → Server and runner → Updates �
 scripts/update-runner.sh
 ```
 
-With the launcher, Boss Man drains first: nothing new starts and runs in progress finish. Each runner is then swapped when its company is idle. A banner shows on every page until every runner is on the new image, and then you get a notification. If runs are still going after 30 minutes (`BOSSMAN_DRAIN_MINUTES` in `.env`), you get one decision: stop them and update now, keep waiting, or cancel. Follow it in the status box at the top of Settings → Server and runner → Updates, which also has **Cancel the runner update**.
+With the launcher, Boss Man drains first: nothing new starts and runs in progress finish. Each runner is then swapped when its company is idle. A banner shows on every page until every runner is on the new image, and then you get a notification. If runs or checks are still going after 30 minutes (`BOSSMAN_DRAIN_MINUTES` in `.env`), you get one card. It lists each run and check still going, with each check's usual length, and when the swap is expected. Its options:
+
+- **Swap as soon as these finish** (recommended): new work stays held and the runners swap by themselves when the work ends. Nothing more to press.
+- **Stop these and carry on** (shown while runs are going): stops the listed runs. Anything they have not saved is lost; their tickets wake again after the update.
+- **Stop the checks and update now** (shown while checks are going): ends the checks on the runner. They start again from the beginning after the update. Runs still going are waited for.
+- **Wait 10 more minutes**: the card comes back if work is still going.
+- **Cancel the runner update**: the work going carries on.
+
+If nobody answers, the hold lifts by itself 90 minutes after the update began: new runs and checks start again, and you get a notification. The update still goes ahead by itself once a company has nothing going. Follow it in the status box at the top of Settings → Server and runner → Updates, which also has **Cancel the runner update**.
 
 Without the host deployer, the script cannot ask Boss Man to drain, and says so. Start the swap yourself with **Update runners (finish runs first)** on the same Updates page.
 
