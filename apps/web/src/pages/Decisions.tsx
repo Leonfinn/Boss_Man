@@ -1509,9 +1509,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             // (BOS-1691) In place of each card being re-checked: who has it, after what, and when it is back at the latest.
             <ul data-testid="recheck-lines" style={{ listStyle: "none", padding: 0, margin: "12px 0" }}>
               {recheckCards.map((d) => (
-                <li key={d.id} id={`decision-${d.id}`} role="status" className={`strip amber${d.id === linkedId ? " linked" : ""}`} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 6 }}>
+                <li key={d.id} id={`decision-${d.id}`} role="status" className={`strip amber stack-narrow${d.id === linkedId ? " linked" : ""}`} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 6 }}>
                   <TicketRefs about={d.about} />
-                  <strong>{d.question.split("\n")[0]}</strong>
+                  <strong className="strip-title">{d.question.split("\n")[0]}</strong>
                   <div style={{ fontSize: 13 }}>
                     Being re-checked by {d.rechecking!.by}
                     {d.staleReason ? (/^the owner\b/i.test(d.staleReason) ? ` after ${fromYou(d.staleReason)}` : ` because ${d.staleReason}`) : ""}.{" "}
@@ -1549,8 +1549,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           <h3 style={{ fontSize: 15, margin: "0 0 6px" }}>Left your list recently</h3>
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
             {recentNotices.map((n) => (
-              <li key={n.id} className="strip" style={{ fontSize: 14 }}>
-                <strong>{n.question.split("\n")[0]}</strong> <span className="muted">· {atTime(n.notice.at)}</span>
+              <li key={n.id} className="strip stack-narrow" style={{ fontSize: 14 }}>
+                <strong className="strip-title">{n.question.split("\n")[0]}</strong> <span className="muted strip-when">· {atTime(n.notice.at)}</span>
                 <div>{n.notice.text}</div>
                 {n.notice.newer && <a href={`#/decisions/${n.notice.newer.decisionId}`}>Open the newer card ›</a>}
               </li>
