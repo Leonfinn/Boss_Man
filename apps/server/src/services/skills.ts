@@ -153,8 +153,30 @@ export const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillN
 
 const realLookup = async (host: string) => (await dnsLookup(host, { all: true })).map((a) => a.address);
 
-export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (host: string) => Promise<string[]> } = {}) {
+/** The only hosts the company's git token is ever sent to (BOS-1891), matched exactly per request, so a redirect elsewhere goes without it. */
+const TOKEN_HOSTS = new Set(["github.com", "api.github.com", "raw.githubusercontent.com"]);
+
+/** Who a fetch is for: the company whose GIT_TOKEN may be used, and the agent run asking, if any (its per-agent grant limits apply). */
+export type FetchScope = { companyId?: string; runId?: string };
+
+/**
+ * One import's use of the token, resolved fresh per import (never cached, so a token added or rotated in Settings →
+ * Secrets counts on the next import). `refused` is set when GitHub answers 401: the token is dropped for the rest of
+ * the import so public links still work, and a later 404 can say the token was the problem.
+ */
+type Auth = { token: string | null; had: boolean; refused: boolean };
+
+const ADD_TOKEN = "add a git token that can read it: Settings → Secrets, a GIT_TOKEN granted to this company";
+
+export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (host: string) => Promise<string[]>; gitToken?: (companyId: string, runId?: string) => Promise<string | undefined> } = {}) {
   const get = deps.fetch ?? fetch;
+
+  /** `url`: a link to another host doesn't read the secret at all (each read is an entry in the secrets' access log). */
+  async function authFor(scope: FetchScope | undefined, url?: string): Promise<Auth> {
+    const forGitHub = url === undefined || TOKEN_HOSTS.has(URL.canParse(url) ? new URL(url).hostname : "");
+    const token = forGitHub && scope?.companyId && deps.gitToken ? ((await deps.gitToken(scope.companyId, scope.runId)) ?? null) : null;
+    return { token, had: !!token, refused: false };
+  }
   // A test that injects its own fetch never touches the network, so it needs no real DNS; production resolves every host.
   const lookup = deps.lookup ?? (deps.fetch ? undefined : realLookup);
 
@@ -166,17 +188,29 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
   }
 
   /** Fetches an https address: no private hosts (also after each redirect), redirects followed by hand, and the body read with a cap. */
-  async function fetchOk(url: string, as: "json" | "bytes", maxBytes = LIMITS.bytes) {
+  async function fetchOk(url: string, as: "json" | "bytes", maxBytes = LIMITS.bytes, auth?: Auth) {
     let res: Response | undefined;
     let at = url;
     for (let hop = 0; hop <= 5; hop++) {
       const u = new URL(at);
       if (u.protocol !== "https:") throw new SkillError(400, "Only https links are supported.");
       if (await privateHost(u.hostname).catch(() => true)) throw new SkillError(400, `${u.host} isn't a public address; skill links must point to the public internet.`);
+      // Checked on every hop: a redirect to any other host (codeload, a CDN, anyone's server) goes without the token.
+      const token = auth?.token && TOKEN_HOSTS.has(u.hostname) && !u.port ? auth.token : null;
+      const headers: Record<string, string> = { "user-agent": "Boss-Man", accept: as === "json" ? "application/vnd.github+json" : "*/*", ...(token ? { authorization: `Bearer ${token}` } : {}) };
       try {
-        res = await get(at, { headers: { "user-agent": "Boss-Man", accept: as === "json" ? "application/vnd.github+json" : "*/*" }, signal: AbortSignal.timeout(20_000), redirect: "manual" });
+        res = await get(at, { headers, signal: AbortSignal.timeout(20_000), redirect: "manual" });
       } catch {
         throw new SkillError(502, `Couldn't reach ${u.host}.`);
+      }
+      if (token && res.status === 401) {
+        // Expired or revoked: carry on without it (public links keep working); a later 404 says why.
+        auth!.token = null;
+        auth!.refused = true;
+        await res.body?.cancel().catch(() => {});
+        res = undefined;
+        hop--;
+        continue;
       }
       if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
         at = new URL(res.headers.get("location")!, at).toString();
@@ -188,8 +222,21 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     }
     if (!res) throw new SkillError(502, "Too many redirects.");
     const host = new URL(at).host;
-    if (res.status === 404) throw new SkillError(404, "Nothing found at that link. Private repositories aren't supported yet; check the link is public.");
-    if (res.status === 403 || res.status === 429) throw new SkillError(429, "GitHub is rate-limiting requests from this server. Try again in an hour.");
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => {});
+      if (auth?.refused) throw new SkillError(404, "GitHub refused the company's git token (it may have expired or been revoked), and without it nothing is visible at that link. Replace it: Settings → Secrets, find GIT_TOKEN and press Rotate.");
+      if (auth?.token) throw new SkillError(404, "Nothing found at that link, or the company's git token can't read that repository: give the token Contents: Read-only on it (GitHub → Settings → Developer settings → Personal access tokens), or check the link.");
+      throw new SkillError(404, `Nothing found at that link. If it's a private repository, ${ADD_TOKEN}.`);
+    }
+    // GitHub's primary limit is a 403 with x-ratelimit-remaining 0; its secondary limit a 403 or 429 with retry-after.
+    if (res.status === 429 || (res.status === 403 && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after")))) {
+      await res.body?.cancel().catch(() => {});
+      throw new SkillError(429, `GitHub is rate-limiting requests from this server. Try again in an hour.${auth?.token ? "" : " A git token in Settings → Secrets (GIT_TOKEN) raises GitHub's limit."}`);
+    }
+    if (res.status === 403) {
+      await res.body?.cancel().catch(() => {});
+      throw new SkillError(400, auth?.token ? "GitHub won't let the company's git token read that repository: give the token Contents: Read-only on it, or replace it in Settings → Secrets." : `${host} refused the request. If it's a private repository, ${ADD_TOKEN}.`);
+    }
     if (!res.ok) throw new SkillError(502, `${host} answered ${res.status}.`);
     const tooBig = new SkillError(400, `That file is over ${Math.round(maxBytes / 1024 / 1024) || maxBytes / 1024 / 1024} MB.`);
     if (Number(res.headers.get("content-length") ?? 0) > maxBytes) throw tooBig;
@@ -229,13 +276,14 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
   }
 
   /** Reads every skill under a GitHub link, pinned to the commit the link points at now. */
-  async function readGitHub(url: string, at?: string) {
+  async function readGitHub(url: string, at?: string, scope?: FetchScope) {
     const gh = parseGitHub(url);
     if (!gh) return null;
+    const auth = await authFor(scope);
     const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
-    const ref = gh.ref ?? ((await fetchOk(api, "json")) as { default_branch: string }).default_branch;
-    const commit = at ?? ((await fetchOk(`${api}/commits/${encodeURIComponent(ref)}`, "json")) as { sha: string }).sha;
-    const tree = (await fetchOk(`${api}/git/trees/${commit}?recursive=1`, "json")) as { tree: Array<{ path: string; type: string; size?: number }>; truncated?: boolean };
+    const ref = gh.ref ?? ((await fetchOk(api, "json", LIMITS.bytes, auth)) as { default_branch: string }).default_branch;
+    const commit = at ?? ((await fetchOk(`${api}/commits/${encodeURIComponent(ref)}`, "json", LIMITS.bytes, auth)) as { sha: string }).sha;
+    const tree = (await fetchOk(`${api}/git/trees/${commit}?recursive=1`, "json", LIMITS.bytes, auth)) as { tree: Array<{ path: string; type: string; size?: number }>; truncated?: boolean };
     const under = (p: string) => !gh.path || p === gh.path || p.startsWith(`${gh.path}/`);
     const all = tree.tree.filter((e) => e.type === "blob" && (e.path === "SKILL.md" || e.path.endsWith("/SKILL.md"))).map((e) => e.path.slice(0, -"SKILL.md".length).replace(/\/$/, ""));
     const isClaude = (d: string) => /(^|\/)\.claude\/skills\/[^/]+$/.test(d);
@@ -270,7 +318,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
       const files: SkillFile[] = [];
       // Eight downloads at a time: big skills have hundreds of files.
       for (let i = 0; i < blobs.length; i += 8) {
-        const batch = await Promise.all(blobs.slice(i, i + 8).map((b) => fetchOk(`https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`, "bytes") as Promise<Buffer>));
+        const batch = await Promise.all(blobs.slice(i, i + 8).map((b) => fetchOk(`https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`, "bytes", LIMITS.bytes, auth) as Promise<Buffer>));
         batch.forEach((bytes, j) => files.push({ path: dir ? blobs[i + j]!.path.slice(dir.length + 1) : blobs[i + j]!.path, content: bytes.toString("base64") }));
       }
       found.push({ folder: dir.split("/").at(-1) || gh.repo, files, url: `https://github.com/${gh.owner}/${gh.repo}/tree/${ref}${dir ? `/${dir}` : ""}` });
@@ -292,7 +340,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     /** For the proposals flow: read a link, optionally at an exact commit (never re-resolving a branch). */
     readGitHub,
     /** For the proposals flow: the bytes at a non-GitHub link. */
-    fetchBytes: (url: string) => fetchOk(url, "bytes", 1_000_000) as Promise<Buffer>,
+    fetchBytes: async (url: string, scope?: FetchScope) => fetchOk(url, "bytes", 1_000_000, await authFor(scope, url)) as Promise<Buffer>,
     save,
 
     async list(companyId: string) {
@@ -405,7 +453,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     /** Adds every skill under a GitHub link (or a link straight to one SKILL.md file). */
     async fromLink(companyId: string, url: string) {
       if (!/^https:\/\//.test(url)) throw new SkillError(400, "Give an https link to a GitHub repository, folder or SKILL.md.");
-      const gh = await readGitHub(url);
+      const gh = await readGitHub(url, undefined, { companyId });
       if (gh) {
         // Several skills from one link are a pack, given and updated together (e.g. obra/superpowers).
         const p = parseGitHub(url)!;
@@ -420,7 +468,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
         return added;
       }
       // Anything else must be a single SKILL.md file.
-      const bytes = (await fetchOk(url, "bytes")) as Buffer;
+      const bytes = (await fetchOk(url, "bytes", LIMITS.bytes, await authFor({ companyId }, url))) as Buffer;
       // Nothing versions a plain link, so it is pinned by its content: a later check can tell if it changed.
       return [await save(companyId, { files: [{ path: "SKILL.md", content: bytes.toString("base64") }], source: "link", sourceUrl: url, sourceRef: `sha256:${sha256(bytes)}` })];
     },

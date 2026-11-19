@@ -115,7 +115,7 @@ unset BOSSMAN_SCRATCH_TMP_DIR
 # The result store: a pass is kept and reused on identical content, the merge gate never reuses it, failures are not reused.
 # Needs a clean git checkout, so test in a scratch repo holding a copy of the script.
 if command -v git >/dev/null; then
-  repo="$t/repo"; mkdir -p "$repo/scripts"; cp "$here/check-all.sh" "$here/check-slot.sh" "$repo/scripts/"
+  repo="$t/repo"; mkdir -p "$repo/scripts"; cp "$here/check-all.sh" "$here/check-slot.sh" "$here/install-packages.sh" "$repo/scripts/"
   git -C "$repo" init -q; git -C "$repo" add -A
   git -C "$repo" -c user.name=t -c user.email=t@t commit -q -m init
   store="$t/store"
@@ -189,6 +189,23 @@ if command -v flock >/dev/null; then
 
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
+
+  # BOS-1628: the full check's install is retried on a machine error and then reports a machine fault (exit 75 + the marker the
+  # server requeues on, with the facts that show the cause), never a plain failure; a plain install failure is not retried.
+  mkdir "$t/bin2"; cp "$t/bin/node" "$t/bin2/node"
+  printf '%s\n' '#!/bin/sh' 'case "$1" in store) echo "$PWD"; exit 0;; esac' 'echo x >>"$INSTALL_COUNT"' 'echo "$INSTALL_MSG"; exit 1' >"$t/bin2/pnpm"
+  chmod +x "$t/bin2/pnpm"
+  : >"$t/icount"; rc=0
+  out=$(lock env PATH="$t/bin2:$PATH" INSTALL_COUNT="$t/icount" INSTALL_MSG="ERR_PNPM_EAGAIN: resource temporarily unavailable, copyfile 'a' -> 'b'" CHECK_QUICK_INSTALL_PAUSE=0 CHECK_ALL_PRE_DONE=) || rc=$?
+  [ "$rc" = 75 ] || fail "install EAGAIN: expected exit 75, got $rc: $out"
+  [ "$(grep -c . "$t/icount")" -eq 3 ] || fail "install EAGAIN: not three tries: $(cat "$t/icount")"
+  grep -q "^check-quick: install stopped on a machine fault" <<<"$out" || fail "install EAGAIN: no marker: $out"
+  grep -q "open files limit (ulimit -n)" <<<"$out" || fail "install EAGAIN: no cause facts: $out"
+  : >"$t/icount"; rc=0
+  out=$(lock env PATH="$t/bin2:$PATH" INSTALL_COUNT="$t/icount" INSTALL_MSG="ERR_PNPM_OUTDATED_LOCKFILE" CHECK_QUICK_INSTALL_PAUSE=0) || rc=$?
+  [ "$rc" = 1 ] || fail "plain install failure: expected exit 1, got $rc: $out"
+  [ "$(grep -c . "$t/icount")" -eq 1 ] || fail "plain install failure was retried: $(cat "$t/icount")"
+  ! grep -q "install stopped on a machine fault" <<<"$out" || fail "plain install failure: marker printed: $out"
 
   # An unusable lock folder (outside a fenced session's grant, or a planted non-file slot) fails at once with a
   # clear message instead of waiting forever as if the slot were busy (BOS-321, Freddy's hazard 2).

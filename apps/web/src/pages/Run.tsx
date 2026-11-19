@@ -7,7 +7,7 @@ import { useDraft } from "../drafts";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
-import { outcomeTag, usage, when } from "./Runs";
+import { failureReason, outcomeTag, usage, when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 
@@ -141,6 +141,11 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               <span className="mono" title={usage(run).title}>
                 {usage(run).text}
               </span>
+            </p>
+          )}
+          {run?.endedAt && failureReason(run.outcome) && (
+            <p role={run.outcome?.startsWith("error") ? "alert" : "status"} className={run.outcome?.startsWith("error") ? "error" : "muted"} style={{ margin: "6px 0 0", overflowWrap: "anywhere" }}>
+              {failureReason(run.outcome)}
             </p>
           )}
         </div>

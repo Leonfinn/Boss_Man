@@ -12,6 +12,7 @@ import { evaluate, latestRows } from "./review-kinds.js";
 import { effectivePolicy } from "./review-policy.js";
 import { addTicketDependency } from "./ticket-links.js";
 import { record } from "./activity.js";
+import { systemMoveTicket } from "./ticket-transition.js";
 
 type Ticket = typeof tickets.$inferSelect;
 export type SignedOff = { head: string; risk: string | null; at: string };
@@ -298,4 +299,43 @@ export async function sweepMissingSignoffs(db: Db, tellCeo?: (companyId: string,
     await tellCeo?.(t.companyId, `"${t.title}" (${t.id}) passed every review and waits on the owner's sign-off, but no sign-off card was open. Boss Man raised it again (card ${id}); it is in the owner's Decisions. Nothing to do unless it stays unanswered.`).catch(() => undefined);
   }
   return raised;
+}
+
+/** BOS-1879: said when a move out of review, or a booked check, is refused because the owner already signed off the unchanged head. */
+export const SIGNED_OFF_HEAD_REFUSAL = "This head is signed off; the gate only merges from review. Move it to review, or push a new head first.";
+
+/**
+ * BOS-1879: the owner signed off the ticket's current head (and nobody sent it back), yet the ticket sits outside
+ * review or done. The gate only merges from review, so such a ticket never lands. False when the head can't be read.
+ */
+export async function signedOffHeadOutsideReview(db: Db, t: Ticket, headOf: (ticketId: string) => Promise<string | null>): Promise<boolean> {
+  if (t.systemState === "review" || t.systemState === "done" || t.mergeCommit) return false;
+  // Ask the database first: only a ticket with a standing sign-off is worth a runner call for its head.
+  const { current } = await priorSignoff(db, { id: t.id, risk: t.risk }, null);
+  if (!current) return false;
+  const head = await headOf(t.id).catch(() => null);
+  return !!head && current.head === head;
+}
+
+/**
+ * BOS-1879 sweep: moves every ticket that is In progress or Blocked on a head the owner signed off back to review,
+ * with a note, so the gate can merge it. Leaves alone a ticket that changed state in the last `graceMs` or has a live
+ * run (the gate's own bounce hands the author the work first), and a paused company's.
+ */
+export async function sweepSignedOffStuck(db: Db, deps: { headOf: (ticketId: string) => Promise<string | null>; now: Date; graceMs: number }): Promise<number> {
+  const rows = await db
+    .select({ t: tickets })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .where(and(inArray(tickets.systemState, ["in_progress", "blocked"]), eq(companies.paused, false), sql`${tickets.mergeCommit} is null`, sql`${tickets.stateChangedAt} < ${new Date(deps.now.getTime() - deps.graceMs)}`, sql`not exists (select 1 from runs r where r.ticket_id = ${tickets.id} and r.ended_at is null)`, sql`exists (select 1 from decisions d where d.status = 'answered' and d.context->>'type' = 'risk_review' and d.context->>'ticketId' = ${tickets.id}::text and d.context->'signedOff' is not null)`));
+  let moved = 0;
+  for (const { t } of rows) {
+    if (!(await signedOffHeadOutsideReview(db, t, deps.headOf))) continue;
+    const note = "Boss Man: the owner signed off this head and it hasn't changed, but the ticket was not in review, where the gate merges from. Moved to review.";
+    const done = await systemMoveTicket(db, { ticketId: t.id, from: ["in_progress", "blocked"], to: "review", reason: note, now: deps.now, stateNote: note });
+    if (!done) continue;
+    await record(db, { companyId: t.companyId, ticketId: t.id, kind: "signoff_stuck_moved", summary: `Moved ${t.systemState.replace("_", " ")} to review: the owner's sign-off covers the unchanged head, and the gate only merges from review.` });
+    moved++;
+  }
+  return moved;
 }

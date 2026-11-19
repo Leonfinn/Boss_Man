@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
 import { CHECK_QUEUE_MODE_KEY, checkQueue } from "../src/services/check-queue.js";
-import { checkDispatcher } from "../src/services/check-dispatcher.js";
+import { checkDispatcher, MACHINE_FAULT_MARKER, MACHINE_FAULT_RETRIES } from "../src/services/check-dispatcher.js";
 
 const shared = openPglite();
 afterAll(async () => (await shared).close());
@@ -204,6 +204,35 @@ describe("check dispatcher", () => {
     expect(s.woken[0]!.note).toContain("passed");
     expect(s.sent.map((m) => m.command.type)).toEqual(["check.run", "check.ack", "check.run"]);
     expect(s.sent[2]!.command.jobId).toBe(b.id);
+  });
+
+  it("puts a check back in line when its install stopped on a machine fault, a few times, then lets it fail (BOS-1628)", async () => {
+    const s = await setup();
+    const a = await s.req("mf1");
+    await s.d.pump();
+    const fault = (n: number) => `ERR_PNPM_EAGAIN (try ${n})\n${MACHINE_FAULT_MARKER} (exit 75)`;
+    for (let i = 1; i <= MACHINE_FAULT_RETRIES; i++) {
+      await s.d.onDone(s.runner.id, { jobId: a.id, commit: a.commit, exitCode: 75, timedOut: false, tail: fault(i) });
+      // Back in line and started again, and the agent was not woken with a failure.
+      expect(s.woken).toHaveLength(0);
+      const [row] = await (await shared).db.select().from(checkJobs).where(eq(checkJobs.id, a.id));
+      expect(row!.state).toBe("running");
+    }
+    expect(s.sent.filter((m) => m.command.type === "check.run")).toHaveLength(MACHINE_FAULT_RETRIES + 1);
+    // One more: the retries are used up, so it ends as a failed check with its log.
+    await s.d.onDone(s.runner.id, { jobId: a.id, commit: a.commit, exitCode: 75, timedOut: false, tail: fault(4) });
+    const [row] = await (await shared).db.select().from(checkJobs).where(eq(checkJobs.id, a.id));
+    expect(row!.state).toBe("failed");
+    expect(s.woken).toHaveLength(1);
+  });
+
+  it("does not retry an exit 75 without the machine-fault marker (the lock wait has its own handling)", async () => {
+    const s = await setup();
+    const a = await s.req("mf2");
+    await s.d.pump();
+    await s.d.onDone(s.runner.id, { jobId: a.id, commit: a.commit, exitCode: 75, timedOut: false, tail: "check-all: gave up waiting for the heavy-phase lock" });
+    const [row] = await (await shared).db.select().from(checkJobs).where(eq(checkJobs.id, a.id));
+    expect(row!.state).toBe("failed");
   });
 
   it("ignores an answer for another commit, and still acknowledges it", async () => {

@@ -1121,13 +1121,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           >
             Save summary
           </button>
-          <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
-            <input type="checkbox" checked={f.showPublicly} disabled={!(f.publicSummary ?? "").trim()} onChange={(e) => patch({ showPublicly: e.target.checked })} />
-            Show publicly
-          </label>
-          {f.showPublicly && <span className="tag green">On</span>}
         </div>
-        {!(f.publicSummary ?? "").trim() && <p className="muted" style={{ fontSize: 13 }}>Write and save a public summary before showing it publicly.</p>}
       </section>
 
       <section className="card" aria-labelledby="f-insights-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>

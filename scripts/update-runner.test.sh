@@ -12,6 +12,7 @@ echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
   "run --rm"*) exit "${CANARY_RC:-0}" ;;
   "image inspect --format"*) echo sha256:oldguard ;;
+  "image inspect boss-man-runner:current") [[ ${HAVE_CURRENT:-1} == 1 ]] || exit 1 ;;
   "ps -q"*) [[ ${HAVE_LAUNCHER:-1} == 1 ]] && echo launcher-1 || true ;;
 esac
 FAKE
@@ -143,5 +144,13 @@ if CANARY_RC=1 run; then fail "a failed canary succeeded"; fi
 logged "docker tag boss-man-runner:candidate" && fail "a failed canary was promoted"
 logged "boss-man-netguard:previous" && fail "a failed canary moved the network guard's :previous tag"
 [[ ! -e $T/deployer/inbox/drain.json ]] || fail "a failed canary asked for a drain"
+grep -q "runners keep running it" "$T/out" || fail "an update's failed canary lost its message"
+logged "compose up" && fail "a failed canary on an existing install started services"
+# BOS-1893: on a first install (no :current image) a failed canary still starts db, server and launcher, says so, and exits non-zero.
+if HAVE_CURRENT=0 CANARY_RC=1 run; then fail "a failed first-install canary succeeded"; fi
+logged "docker compose up -d --no-build db server launcher" || fail "a failed first-install canary did not start db, server, launcher"
+grep -q "first install" "$T/out" || fail "no first-install message"
+grep -q "runners keep running it" "$T/out" && fail "first install got the existing-install message"
+logged "recreate-all" && fail "a failed first-install canary recreated runners"
 if ./update-runner.sh --bogus >/dev/null 2>&1; then fail "unknown flag accepted"; fi
 echo "update-runner.test.sh: ok"

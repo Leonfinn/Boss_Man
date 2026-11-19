@@ -667,7 +667,8 @@ export async function buildApp(opts: AppOptions) {
   const images = ticketImagesService(db, { runners });
   const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status(), runLimit: async () => (await scheduler.limitsInForce()).allCompanies });
   const workflow = workflowService(db, { now: opts.now });
-  const skillsSvc = skillsService(db, { fetch: opts.fetch });
+  // Read fresh on each import (BOS-1891): a token added or rotated in Settings → Secrets counts at once. With a run, that agent's grant limits apply.
+  const skillsSvc = skillsService(db, { fetch: opts.fetch, gitToken: async (companyId, runId) => (await secretsSvc.resolveCompanyEnv(companyId, "skill_import", runId)).GIT_TOKEN });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).

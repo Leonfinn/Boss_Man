@@ -630,7 +630,7 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
     .values({
       companyId: t.companyId,
       kind: "question",
-      question: `${heading}\n\n${whyLines}\n\n${others.length ? "Steps for them all:" : "Steps:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
+      question: `${heading}\n\n${whyLines}${check.where.length ? `\nWhere: ${check.where.join("; ")}` : ""}\n\n${others.length ? "Steps for them all:" : "Steps:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
       options: [TODO_DONE],
       recommendedOption: TODO_DONE,
       tier: "owner",

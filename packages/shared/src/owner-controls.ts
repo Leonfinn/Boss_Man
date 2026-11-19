@@ -70,7 +70,7 @@ export const OWNER_CONTROLS = {
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
-    "Make Priority 1", "Priority 1 is on", "Edit steps", "Save steps", "Discard draft",
+    "Make Priority 1", "Priority 1 is on", "Edit steps and lines", "Save steps", "Discard draft",
     // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
     "Reload the latest",
     // A Details row's own request failed: fetch it again (BOS-1195).
@@ -88,7 +88,7 @@ export const OWNER_CONTROLS = {
   Projects: ["Open …", "Unarchive", "Re-detect", "Check now", "Edit settings", "Hide settings"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
-  Runs: ["End all running runs", "Ending"],
+  Runs: ["End all running runs", "Ending", "Retry"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
@@ -224,7 +224,7 @@ export const OWNER_FIELDS = {
   ],
   Ticket: [
     "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
-    "What you have to do, one step per line", "What should the agent change",
+    "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
     "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
   ],
@@ -251,7 +251,7 @@ export const OWNER_FIELDS = {
     "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
-    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Show publicly", "Not shown yet",
+    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Not shown yet",
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
@@ -294,6 +294,8 @@ export const OWNER_FIELDS = {
     "Background lane gives way for (minutes, 0 to",
     // Settings → Checks: carry a passed merge across file-disjoint main moves, and the landing turn (BOS-1762).
     "Land passed merges when main moved elsewhere", "Landing turn",
+    // Settings → Checks: rebuild a waiting merge on a moved main while it waits (merge_retarget; BOS-1344/1820/1821, BOS-1900).
+    "Rebuild waiting merges when main moves",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
     "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Settings → Checks: each machine's split between merge checks and quick checks (BOS-1602).

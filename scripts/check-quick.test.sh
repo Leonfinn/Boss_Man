@@ -10,7 +10,7 @@ t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/nul
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -21,7 +21,9 @@ cat >"$t/bin/pnpm" <<'S'
 #!/usr/bin/env bash
 echo "pnpm $*" >>"$LOG"
 echo "threads=${BOSSMAN_CHECK_THREADS:-} go=${GOMAXPROCS:-} rayon=${RAYON_NUM_THREADS:-} tokio=${TOKIO_WORKER_THREADS:-} for $*" >>"$LOG"
-if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1; fi
+# FAIL_ONCE=<file>: the first matching call fails (and makes the file), later ones pass (BOS-1628).
+if [ -n "${FAIL_ONCE:-}" ] && [[ "$*" == *install* ]] && [ ! -e "$FAIL_ONCE" ]; then : >"$FAIL_ONCE"; echo "${FAIL_MSG:-boom}"; exit 1; fi
+if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "${FAIL_MSG:-boom}"; exit 1; fi
 S
 cat >"$t/bin/node" <<'S'
 #!/usr/bin/env bash
@@ -316,6 +318,19 @@ grep -q "^FAIL  install packages" "$t/out" || fail "failed install: no FAIL line
 grep -q "^SKIP  typecheck, related tests, web build: the install failed" "$t/out" || fail "failed install: no SKIP line: $(cat "$t/out")"
 for s in typecheck "vitest related" build; do notlogged "$s" "failed install"; done
 grep -q "check-quick: FAILED" "$t/out" || fail "failed install: no FAILED summary: $(cat "$t/out")"
+[ "$(grep -c "^pnpm install" "$LOG")" -eq 1 ] || fail "failed install (not a machine error) was retried: $(cat "$LOG")"
+# BOS-1628: an install that dies of the machine (EAGAIN) is tried again with fewer files at once, and passes the second time.
+eagain="ERR_PNPM_EAGAIN: resource temporarily unavailable, copyfile 'store/v10/files/ab' -> 'job/node_modules/.pnpm/ab'"
+rm -f "$t/once"
+run 0 "EAGAIN once" env CHECK_QUICK_INSTALL_PAUSE=0 FAIL_ONCE="$t/once" FAIL_MSG="$eagain"
+grep -q "^PASS  install packages" "$t/out" || fail "EAGAIN once: no install PASS: $(cat "$t/out")"
+logged "pnpm install --frozen-lockfile --prefer-offline --network-concurrency 2 --child-concurrency 1" "EAGAIN once: gentler retry"
+logged "pnpm --filter @boss-man/web typecheck" "EAGAIN once: later steps still run"
+# Still failing after three tries: exit 75 and the marker the server reads, never the plain FAILED line.
+run 75 "EAGAIN always" env CHECK_QUICK_INSTALL_PAUSE=0 FAIL_ON=install FAIL_MSG="$eagain"
+[ "$(grep -c "^pnpm install" "$LOG")" -eq 3 ] || fail "EAGAIN always: not three tries: $(cat "$LOG")"
+grep -q "^check-quick: install stopped on a machine fault" "$t/out" || fail "EAGAIN always: no marker: $(cat "$t/out")"
+! grep -q "check-quick: FAILED" "$t/out" || fail "EAGAIN always: said FAILED: $(cat "$t/out")"
 # A change with no pnpm step (a shell script only) installs nothing.
 g checkout -q -B freshsh origin/main; commit scripts/only.sh
 run 0 "shell-only change does not install" env
