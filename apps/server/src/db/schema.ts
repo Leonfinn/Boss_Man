@@ -372,6 +372,9 @@ export const tickets = pgTable(
     liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
     /** BOS-1586: when the merge went live (the go-live wait ended). Null when none was recorded; readers fall back to mergedAt. A host report older than this proves nothing about the new code. */
     liveAt: timestamp("live_at", { withTimezone: true }),
+    /** BOS-1907: what a merged ticket still watches for after go-live (one line) and until when. Null date: 14 days after go-live (watchEndsAt, shared). */
+    watchingFor: text("watching_for"),
+    watchUntil: timestamp("watch_until", { withTimezone: true }),
     liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),

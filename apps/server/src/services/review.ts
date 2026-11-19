@@ -668,9 +668,10 @@ export function reviewService(
     const runners = !marked && t.touchesRunner;
     await record(db, { companyId: t.companyId, ticketId: t.id, kind: "go_live", summary: marked ? `The CEO marked the merge live (${marked}): the after-merge checks can be made now.` : `The merge is live${runners ? " and the runners have it" : ""}: the after-merge checks can be made now.` });
     const text = `${t.mergeCommit ? `Merged as ${t.mergeCommit.slice(0, 12)}, and it is live now` : "It is live now"}${marked ? ` (the CEO marked it live: ${marked})` : runners ? ", with the runners rebuilt" : ""}. These checks can only be made now: ${quoted}. Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have. If a check fails on the live work, report it as fail and move the ticket to done: Boss Man opens the follow-up ticket for it, assigned to you, so don't make one by hand.`;
-    // BOS-1171: the checks are work now, so the ticket leaves Blocked (resuming never counts as a new start).
-    if (t.systemState === "blocked") await deps.work.updateTicket(t.id, { state: "in_progress", overLimit: true, internal: true }).catch(() => undefined);
-    return !!(await tellAgent({ ...t, systemState: "in_progress" }, text, "after merge").catch(() => null));
+    // BOS-1907: the ticket stays in Blocked, in the "Merged, watching" lane, where it counts toward no limit: the agent is
+    // woken to report what it can now see, and records a watch for a check that needs a later event (BOS-1171 used to move it to In progress).
+    const watch = " For a check that needs a later event (a week of real use, a scheduled job), call set_ticket_state with state blocked, watching_for (one line: what you wait to see) and watch_until (an end date; 14 days from now if you give none): the ticket stays in the Merged, watching lane and nothing alerts before that date.";
+    return !!(await tellAgent({ ...t, systemState: "in_progress" }, text + watch, "after merge").catch(() => null));
   }
 
   /** After a real merge: close the ticket, or send it back to show the checks only a live host can settle. */
@@ -689,7 +690,7 @@ export function reviewService(
     // can't pass, so nobody is woken and no owner card is asked for. Boss Man wakes the assignee at go-live.
     const waitsFor = commit ? await goLiveWaitOf(db, { companyId: t.companyId, mergeCommit: commit, touchesRunner: files ? touchesRunnerCode(files) : true, liveMarkedAt: null, deploysNothing: files ? deploysNothing(files) : null }) : null;
     // BOS-1171: while the checks only wait for go-live the ticket sits in Blocked, so it holds no in-progress slot;
-    // releaseGoLiveWaiters moves it to in progress when it wakes the assignee.
+    // at go-live (releaseGoLive) it stays there and the assignee is woken (BOS-1907).
     if (repoUrl?.repoUrl) await deps.work.updateTicket(t.id, { state: waitsFor ? "blocked" : "in_progress", overLimit: true, internal: true, noCode: true });
     const carried = r.detail.carried ?? [];
     const quoted = (list: string[]) => list.map((c) => `"${c}"`).join(", ");

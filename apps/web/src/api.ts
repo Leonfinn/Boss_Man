@@ -281,7 +281,12 @@ export type Ticket = {
   reviewWait?: string | null;
   /** BOS-1546: a merged ticket that only waits to go live, in plain words, and the owner's open update card if there is one. */
   goLiveNote?: { text: string; cardId: string | null } | null;
-  /** The merge commit, set once merged; with systemState "blocked" it puts the card in the "Merged, waiting for a live check" lane (BOS-1636). */
+  /** BOS-1907: what a merged ticket watches for after go-live, when the watch ends (the agent's date, else 14 days after go-live), and whether this split-out check ticket's parent is merged. */
+  watchingFor?: string | null;
+  watchUntil?: string | null;
+  watchEndsAt?: string | null;
+  checksParentMerged?: boolean;
+  /** The merge commit, set once merged; with systemState "blocked" or "in_progress" it puts the card in the "Merged, watching" lane (BOS-1636, BOS-1907). */
   mergeCommit?: string | null;
   /** In review and not the owner's to act on: still with its reviewers, or approved by all of them and only merging (BOS-667). */
   reviewStage?: "awaiting_review" | "merging" | "held" | null;

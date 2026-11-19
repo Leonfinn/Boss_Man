@@ -30,7 +30,7 @@ export const NAMED_AGENT_REFUSAL = (name: string) =>
 
 /** Whether a Blocked move names a colleague and has nothing but a date (or nothing) behind it. Go-live and checks holds don't need a name. */
 export async function refusalForNamedAgent(db: Db, input: { companyId: string; agentId: string | null | undefined; text: string; holds: BlockedHold[] }): Promise<string | null> {
-  if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live")) return null;
+  if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live" || h.kind === "merged_watch")) return null;
   const name = await namedColleague(db, input.companyId, input.agentId, input.text);
   return name ? NAMED_AGENT_REFUSAL(name) : null;
 }

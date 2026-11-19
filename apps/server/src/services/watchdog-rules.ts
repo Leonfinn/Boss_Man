@@ -11,6 +11,8 @@ export type SnapTicket = {
   blockedUntil: Date | null;
   /** Something is set to wake the assignee and will happen: a scheduled check or a wake that is not parked behind a paused agent. */
   scheduled: boolean;
+  /** BOS-1907: merged, and its watch (the agent's date, else 14 days after go-live) has not ended: no stall rule applies. */
+  watching?: boolean;
   /** Plan-first and its plan isn't approved yet: it waits on the approver, not the assignee. */
   awaitingPlan: boolean;
   /** Already in the owner's queue through another sweep (missed work, merge stuck, review stall). */
@@ -113,6 +115,9 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
     // Rule 1: held by another ticket or an engagement. The holder is judged on its own.
     if (holds.length) continue;
     if (x.withOwner || x.assignedToOwner) continue;
+
+    // BOS-1907: a merged ticket in its watch ("Merged, watching") is quiet until the watch date, in Blocked or In progress.
+    if (x.watching && (x.state === "blocked" || x.state === "in_progress")) continue;
 
     if (x.state === "ready" || x.state === "in_progress") {
       if (!x.assigneeAgentId) {

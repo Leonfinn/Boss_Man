@@ -199,19 +199,28 @@ describe("board lanes", () => {
         card({ id: "t21", title: "Waits for server", systemState: "blocked", mergeCommit: "a".repeat(40), goLiveNote: { text: "Merged. Waiting to go live: the server update.", cardId: "d1" } }),
         card({ id: "t22", title: "Waits for report", systemState: "blocked", mergeCommit: "b".repeat(40) }),
         card({ id: "t23", title: "Waits for owner", systemState: "blocked", mergeCommit: "c".repeat(40), ownerQuestionId: "d9" }),
+        // BOS-1907: a split-out check ticket joins through its parent; a recorded watch shows its line and end date.
+        card({ id: "t24", title: "Check ticket", systemState: "blocked", checksParentMerged: true }),
+        card({ id: "t25", title: "Watches a week", systemState: "blocked", mergeCommit: "d".repeat(40), watchingFor: "a week of real use", watchEndsAt: "2026-12-03T00:00:00.000Z", watchUntil: "2026-12-03T00:00:00.000Z" }),
       ],
     });
+    // An older merged ticket still in In progress shows in the same lane, not in In progress (criterion 7).
+    columns.push({ id: "c2", name: "In progress", systemState: "in_progress", wipLimit: null, tickets: [card({ id: "t26", title: "Old merged row", systemState: "in_progress", mergeCommit: "e".repeat(40), watchEndsAt: "2026-12-03T00:00:00.000Z" })] });
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    const lane = await screen.findByRole("region", { name: "Merged, waiting for a live check" });
+    const lane = await screen.findByRole("region", { name: "Merged, watching" });
+    expect(within(lane).getByText("Check ticket")).toBeTruthy();
+    expect(within(lane).getByText("Old merged row")).toBeTruthy();
+    expect(within(lane).getByText(/Watching for: a week of real use\. Watch runs to/)).toBeTruthy();
     expect(within(lane).getByText("Waits for server")).toBeTruthy();
     expect(within(lane).getByText("Merged. Waiting to go live: the server update.")).toBeTruthy();
-    expect(within(lane).getByText(/Waiting for the agent to report the after-merge check/)).toBeTruthy();
+    expect(within(lane).getAllByText(/Waiting for the agent to report the after-merge check/).length).toBeGreaterThan(0);
     expect(within(lane).getAllByRole("link", { name: "Open the card" }).map((a) => a.getAttribute("href")).sort()).toEqual(["#/decisions/d1", "#/decisions/d9"]);
     expect(within(lane).queryByText("Really stuck")).toBeNull();
     const blocked = screen.getByRole("region", { name: "Blocked" });
     expect(within(blocked).getByText("Really stuck")).toBeTruthy();
     expect(within(blocked).queryByText("Waits for report")).toBeNull();
+    columns.pop();
     columns.pop();
   });
 
