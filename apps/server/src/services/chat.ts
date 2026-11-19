@@ -16,6 +16,7 @@ import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-reco
 import { namedThingsSection, type NamedSources } from "./named-things.js";
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
+import { reportBackSection, settleReports } from "./chat-report-back.js";
 
 export const CHAT_REASON = "owner_chat";
 
@@ -275,6 +276,8 @@ export function chatService(
         "- When your answer is substantial (an analysis, a comparison, research into options), also save it as a wiki page (Product/Analysis, or the folder it belongs in) and link it, so it isn't lost in the chat.",
         "- To link a wiki page, name it as [[slug]] (or [[slug#Section]]): the chat turns that into a working link. The wiki tools' replies give the exact link too (Link: #/wiki/<company>/<slug>), so copy that rather than writing the company id and page name yourself.",
         "- End with a short reply that lists everything you created or changed, each as `#/tickets/<id>` followed by its title, so the owner can open it.",
+        // R52: tickets asked for in this chat that have closed or handed out follow-ups since, to be reported back here.
+        ...(await reportBackSection(db, companyId, agentId, new Date()).catch(() => [])),
         "",
         "The conversation so far, oldest first:",
         ...recent.map((m) => `${m.role === "owner" ? "Owner" : m.role === "assistant" ? "You" : "Boss Man"}: ${m.text}`),
@@ -333,6 +336,8 @@ export function chatService(
         .innerJoin(agents, eq(agents.id, runs.agentId))
         .where(eq(runs.id, runId));
       if (r?.purpose !== "chat") return;
+      // R52: tickets this chat was owed a report on are kept by a reply that names them, or Boss Man says it itself, whatever way the run ended.
+      if (!interrupted && r.duty !== "assistant" && r.agentId && r.startedAt) await settleReports(db, r.companyId, r.agentId, r.startedAt, runId).catch(() => 0);
       if (error) {
         await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "system", text: `The reply couldn't be finished: ${error.slice(0, 500)}`, runId });
         return;
