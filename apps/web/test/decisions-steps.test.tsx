@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions } from "../src/pages/Decisions";
@@ -54,8 +54,16 @@ describe("command blocks say where and as whom (BOS-427)", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
-      // Let the copy promise settle (microtasks only) so the 2 s timer is started.
-      await vi.advanceTimersByTimeAsync(0);
+      // Wait for the event, not a fixed number of microtask turns: the copy promise settles, the label
+      // becomes "Copied" and the 2 s timer starts. React renders that on its own tick, which one
+      // advanceTimersByTimeAsync(0) does not wait for; on a slow GitHub runner the single settle missed it (BOS-1949).
+      // Each turn runs inside act (it flushes React's work) and yields to a real tick; the cap bounds a copy that never lands.
+      for (let turn = 0; turn < 200 && screen.getByRole("button", { name: "Copy this command" }).textContent !== "Copied"; turn++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+          await new Promise<void>((r) => setImmediate(r));
+        });
+      }
       expect(screen.getByRole("button", { name: "Copy this command" }).textContent).toBe("Copied");
       expect(vi.getTimerCount()).toBeGreaterThan(0);
       unmount();

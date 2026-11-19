@@ -220,13 +220,27 @@ async function setScroll(page: Page, s: ScrollState): Promise<void> {
 }
 const read = (page: Page): Promise<ScrollState> => page.evaluate(() => ({ y: window.scrollY, left: (document.querySelector(".board-scroll") as HTMLElement).scrollLeft }));
 
+// One browser debug session per page, opened on the first wheel and dropped with the page: opening
+// one per wheel (about 80 in the first test) was the slowest part on a busy GitHub runner (BOS-1949).
+const sessions = new WeakMap<object, Promise<any>>();
+function cdpFor(page: Page): Promise<any> {
+  let s = sessions.get(page);
+  if (!s) sessions.set(page, (s = page.context().newCDPSession(page)));
+  return s;
+}
+
+// The first test sends ~80 real wheel turns, each waiting for the scroll to settle (3 quiet reads);
+// on a runner several times slower than ours that is over the 30 s default. Each wait inside has its
+// own 10 s deadline, so this limit only bounds the whole walk: a hung wheel still fails.
+const WALK_TIMEOUT_MS = 150_000;
+
 /**
  * Real wheel events at one point (one per entry in `ticks`, sent back to back like one gesture),
  * then wait for the page or the board to move. A timeout is not an error here: the caller's
  * assertion reports a wheel that did nothing.
  */
 async function wheel(page: Page, x: number, y: number, ticks: Array<{ dx: number; dy: number }>, modifiers = 0): Promise<{ moved: ScrollState; under: string }> {
-  const cdp = await page.context().newCDPSession(page);
+  const cdp = await cdpFor(page);
   const before = await read(page);
   const under = await page.evaluate(([x, y]: [number, number]) => {
     const e = document.elementFromPoint(x, y);
@@ -252,7 +266,6 @@ async function wheel(page: Page, x: number, y: number, ticks: Array<{ dx: number
   }
   await page.evaluate(() => { delete (window as unknown as { __wheelSeen?: string[] }).__wheelSeen; });
   const after = await read(page);
-  await cdp.detach();
   return { moved: { y: after.y - before.y, left: after.left - before.left }, under };
 }
 
@@ -300,7 +313,7 @@ describe.skipIf(!browser || !server)("the mouse wheel over the real Kanban board
     } finally {
       await page.close();
     }
-  });
+  }, WALK_TIMEOUT_MS);
 
   it("a whole gesture with a little sideways movement keeps scrolling the page (the Magic Mouse and trackpad case)", async () => {
     const page = await openBoard(desktop);
