@@ -240,8 +240,10 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
   5. every few seconds the drain step looks at each runner:
        its company has no active run  ->  launcher recreates that runner on :current
        its company is still busy      ->  wait
-  6. deadline (30 min) with runs still going -> ONE owner decision:
-       Stop the remaining runs and update now / Keep waiting another 30 min / Cancel the update
+  6. deadline (30 min) with runs or checks still going -> ONE owner decision:
+       Stop these and carry on (runs going) / Stop the checks and update now (checks going) /
+       Swap as soon as these finish (recommended) / Wait 10 more minutes / Cancel the runner update
+     unanswered: the hold lifts 90 min after it began (HOLD_CAP_MINUTES); the swap still happens when idle
   7. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
 ```
 
@@ -253,7 +255,14 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
    - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Server and runner > Updates has **Update runners (finish runs first)** (start by hand, for a manual `update-runner.sh` run; under **For a hand-built runner image** when self-deploy is on) and, in the status box while a drain runs, **Cancel the runner update**.
    - A CEO's brief (and the owner's plain brief page) starts with an `UPDATE PENDING` line: finish what is in flight, do not delegate new work. A CEO run that was already going when the hold started has its old brief; the hold is what actually stops its delegations from launching anything.
    - The stall and missed-work sweeps: held wakes are `queued`, so a ticket with one counts as busy (not forgotten), and watchers' "tree stopped" check treats queued wakes as work. The missed-work sweep is skipped while the hold is on, so it cannot pile up wakes or raise "looks stuck" decisions for tickets that simply cannot start.
-4. **Drain and the deadline.** The first wait is `BOSSMAN_DRAIN_MINUTES` (default 30). If runs are still going at the deadline the owner gets one `maintenance` decision, owner tier, key `maintenance:<since>:<deadline>`. "Keep waiting" moves the deadline by the same number of minutes and the next deadline asks again; "Stop the remaining runs" sets `force`, so the next step recreates every runner whatever is running (crash recovery restarts those runs once the hold lifts); "Cancel" lifts the hold. Runners already swapped stay on the new image.
+4. **Drain and the deadline.** The first wait is `BOSSMAN_DRAIN_MINUTES` (default 30). If runs or checks are still going at the deadline the owner gets one `maintenance` decision, owner tier, key `maintenance:<since>:<deadline>`. It lists each check (with its usual length) and run still going and the expected swap time. The options (`decisions.ts`, answered in `maintenance.ts` `answered`, BOS-1377, BOS-1600, BOS-1807):
+   - **Swap as soon as these finish** (recommended) sets `swapWhenDone`: the hold stays, with no cap and no more questions, until the swap.
+   - **Stop these and carry on** (only while runs go) stops the listed runs through the per-run Stop and moves the deadline 10 minutes on.
+   - **Stop the checks and update now** (only while checks go) sets `ignoreChecks` and moves the deadline 10 minutes on: checks on the runner are no longer waited for (they restart from the beginning afterwards); runs still are.
+   - **Wait 10 more minutes** (`DEADLINE_WAIT_MINUTES`) moves the deadline; the next deadline asks again.
+   - **Cancel the runner update** lifts the hold.
+
+   **The cap.** An unanswered hold blocks new runs and checks for at most `HOLD_CAP_MINUTES` (90) from `since`, or until a later "Wait 10 more minutes" deadline. Past it new work starts again, the owner gets one note (`capNotified`), and each runner still swaps when its company is idle. `swapWhenDone` and `ignoreChecks` hold until the swap regardless. Cards raised before BOS-1377 ("Stop the remaining runs and update now", which sets `force`) keep their old meaning. Runners already swapped stay on the new image.
 5. **Swap per company.** The launcher gained `POST /runners/<slug>/recreate` (one runner, same token and data, new image) and `current: true|false` in `GET /runners` (the container's image id against the id `boss-man-runner:current` points at now). It is still the only container with `docker.sock`, and the server still only calls its HTTP API. Before recreating, the step waits for any scheduling pass in flight (`scheduler.settled()`) and counts the company's runs again, so a launch that started just before the hold cannot be killed.
 6. **Release.** When every runner is `current` and each swapped runner is connected, the row is deleted, any open deadline question is withdrawn, the owner gets a note ("Runners updated"), and the scheduler ticks. **If a swapped runner has not reconnected after 5 minutes, or a recreate failed, the owner gets a page naming the companies and the hold lifts anyway.** One broken runner would otherwise keep every company stopped; the rest are healthy and the page says which one is not.
 7. **No launcher, no drain.** Without `BOSSMAN_LAUNCHER=1` there is no per-runner recreate, so `update-runner.sh` restarts the compose runners at once (with a warning), as before. A launcher older than the server (no `current` in its list) ends the hold with a page asking for `scripts/deploy.sh --runner`.

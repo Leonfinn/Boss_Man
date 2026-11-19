@@ -34,6 +34,13 @@ If the pauses get in your way, you can:
 
 Both are explained in [Agents and models](/guides/agents-and-models#when-a-plan-is-nearly-used-up).
 
+## Why don't a project's tokens match its dollars?
+
+Open the project's **Budget** tab (the same figures are under **Settings > Funding > Budgets**). There are two reasons the numbers look apart:
+
+- **Cached tokens.** "In" counts new input only. Prompt text that is re-read or written to the cache shows on the **Cache read / written** line under each in / out figure. The dollar figures include it.
+- **Subscription runs.** The token figures count every run, subscription runs included. The dollar figures are list-price estimates for API and credit runs only.
+
 ## How many agents should I start with?
 
 Start with the CEO and one or two agents. All of them share one plan's allowance, so a small team gets more done before a pause. Once you know how far your plan goes, hire more on the **Agents** page.
