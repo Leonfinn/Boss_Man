@@ -48,4 +48,28 @@ describe("runner add-ons (docs/12)", () => {
     // Off by default: a plain build holds no add-ons.
     expect(docker).toMatch(/^ARG RUNNER_ADDONS=""$/m);
   });
+
+  // BOS-1917: any check worker must be able to run a full merge check, which includes the web render tests (they need the
+  // playwright module and a browser with its system libraries). The worker image is the runner image built with
+  // WITH_HARNESS=0, so one rule in the Dockerfile and one CI job keep them from drifting. Cheap guard here; the real proof
+  // is the CI job that runs the project's own typecheck and tests inside the built worker image.
+  it("the worker image always carries the browsers a full check needs, and CI runs the full check inside it", () => {
+    const docker = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+    // A worker build adds both add-ons itself, whatever RUNNER_ADDONS the worker's compose file passes.
+    expect(docker).toMatch(/if \[ "\$WITH_HARNESS" = 0 \]; then RUNNER_ADDONS="\$\{RUNNER_ADDONS\},agent-browser,webkit"; fi/);
+    // webkit installs Playwright's browser together with the system libraries it needs.
+    expect(docker).toMatch(/playwright install --with-deps webkit/);
+    expect(docker).toMatch(/chmod -R a\+rX \/ms-playwright/);
+    // The node user (the image's user) can find the playwright module and its browser folder.
+    expect(docker).toMatch(/PLAYWRIGHT_BROWSERS_PATH=\/ms-playwright/);
+    expect(docker).toMatch(/NODE_PATH=\/usr\/local\/lib\/node_modules/);
+    const ci = readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const job = ci.slice(ci.indexOf("check-worker-image:"));
+    expect(job).toContain("--build-arg WITH_HARNESS=0");
+    // A missing browser must fail the tests, not skip them, and the whole suite runs, not a subset.
+    expect(job).toContain("BOSSMAN_REQUIRE_BROWSER=1");
+    expect(job).toMatch(/pnpm -r --no-bail typecheck/);
+    expect(job).toMatch(/pnpm -r --no-bail --reporter-hide-prefix test/);
+    expect(job).toContain("playwright --version");
+  });
 });
