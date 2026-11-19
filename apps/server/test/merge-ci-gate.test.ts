@@ -201,6 +201,12 @@ describe("the sweep of leftover CI branches (BOS-1749)", () => {
   });
 });
 
+/** BOS-1871: the ticket's ci_wait_* merge-line rows, oldest first. */
+const ciWaitRows = async (c: Awaited<ReturnType<typeof setup>>) =>
+  (await c.db.select({ detail: activity.detail, at: activity.at }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, MERGE_LINE_KIND))).orderBy(activity.at))
+    .map((r) => r.detail as { event: string; outcome?: string })
+    .filter((e) => e.event.startsWith("ci_wait_"));
+
 describe("merge gate waits for GitHub CI (BOS-1070)", () => {
   it("publishes the merge commit, merges once CI passes on it, records the pass and deletes the CI branch", async () => {
     const c = (ctx = await setup());
@@ -215,6 +221,11 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     // The owner's kind of token: nothing was asked of the Checks API, and no card.
     expect(c.gh.calls.filter((u) => /check-runs|check-suites/.test(u))).toEqual([]);
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+    // BOS-1871: the CI wait's start and end are in the merge-line records, the end saying how it ended.
+    expect(await ciWaitRows(c)).toEqual([
+      { event: "ci_wait_started", commit: MERGE },
+      { event: "ci_wait_ended", commit: MERGE, outcome: "passed", waitedMs: expect.any(Number) },
+    ]);
   });
 
   it("a token with Actions: Read-only and no Checks: a red CI goes back naming the failing job and step, with no card (BOS-1630)", async () => {
@@ -233,6 +244,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(c.gh.calls.some((u) => u.includes("/check-runs/7/annotations"))).toBe(true);
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
     expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
+    expect((await ciWaitRows(c)).map((e) => `${e.event}:${e.outcome ?? ""}`)).toEqual(["ci_wait_started:", "ci_wait_ended:failed"]);
   });
 
   it("a red CI goes back with the failed job's log lines, secrets redacted, and says plainly when the log can't be read (BOS-1667)", async () => {
