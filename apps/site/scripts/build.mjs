@@ -177,6 +177,23 @@ function footer(vars) {
 </footer>`;
 }
 
+// Structured data for the home page: what Boss Man is, for search engines. Data blocks are not run, so the CSP does not block them.
+function softwareApplication(config, meta, siteUrl) {
+  return {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: config.name,
+    description: meta.description,
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Linux, macOS, Windows (with Docker)",
+    isAccessibleForFree: true,
+    license: "https://www.apache.org/licenses/LICENSE-2.0",
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+    ...(siteUrl && { url: siteUrl + "/", image: siteUrl + config.ogImage }),
+    sameAs: [config.repo],
+  };
+}
+
 function headTags(config, meta, siteUrl, umami) {
   const title = escapeHtml(meta.title);
   const description = escapeHtml(meta.description);
@@ -204,6 +221,7 @@ function headTags(config, meta, siteUrl, umami) {
     `<meta name="twitter:description" content="${description}">`,
     `<meta name="twitter:image" content="${abs(config.ogImage)}">`,
     meta.robots && `<meta name="robots" content="${escapeHtml(meta.robots)}">`,
+    meta.path === "/" && `<script type="application/ld+json">${JSON.stringify(softwareApplication(config, meta, siteUrl)).replace(/</g, "\\u003c")}</script>`,
     `<script src="/menu.js" defer></script>`,
     // No cookies are set by this script. data-exclude-search keeps anything after "?" out of the recorded address.
     umami && `<script defer src="${escapeHtml(umami.scriptUrl)}" data-website-id="${umami.websiteId}" data-do-not-track="true" data-exclude-search="true"></script>`,

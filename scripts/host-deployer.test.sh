@@ -1247,6 +1247,14 @@ sreq "$s1"; host
 has "$D/outbox/staging-status.json" "not configured"
 [[ ! -e $D/inbox/staging-request.json ]] || fail "lane off left the request in the inbox"
 hasnt "$STUB_LOG" "deploy-staging.sh"
+# A symlinked request is never read (BOS-1775): the id behind it must not reach the world-readable status file.
+printf '{"id":"secret"}\n' >"$T/secret-target.json"; ln -s "$T/secret-target.json" "$D/inbox/staging-request.json"; host
+[[ $(sstatus result) == rejected ]] || fail "lane off, symlink: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-status.json" "secret"
+hasnt "$D/outbox/staging-history.jsonl" "secret"
+# A plain file whose id is not a UUID is not echoed either.
+printf '{"id":"secret"}\n' >"$D/inbox/staging-request.json"; host
+hasnt "$D/outbox/staging-status.json" "secret"
 
 # Lane on: a main commit deploys, then the smoke checks run, with production's folder passed for the isolation checks.
 conf 0; printf 'STAGING_DIR=%s\nSTAGING_RATE_LIMIT_SECONDS=3600\n' "$T/stg" >>"$D/host.conf"

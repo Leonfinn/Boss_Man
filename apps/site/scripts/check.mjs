@@ -15,6 +15,17 @@ function resolves(dist, target) {
   return [file, `${file}.html`, path.join(file, "index.html")].some((f) => existsSync(f) && !f.endsWith(path.sep));
 }
 
+// robots.txt must exist, must not shut search engines out (a "Disallow: /" for any agent), and must name the sitemap when the site has one.
+function checkRobots(dist, problems, siteUrl) {
+  const file = path.join(dist, "robots.txt");
+  if (!existsSync(file)) return problems.push("robots.txt is missing");
+  const text = readFileSync(file, "utf8");
+  if (/^\s*disallow:\s*\/\s*$/im.test(text)) problems.push("robots.txt blocks the whole site (Disallow: /)");
+  if (!/^\s*user-agent:/im.test(text)) problems.push("robots.txt has no User-agent line");
+  if (existsSync(path.join(dist, "sitemap.xml")) && !/^\s*sitemap:\s*https?:\/\//im.test(text)) problems.push("robots.txt does not point to sitemap.xml");
+  if (siteUrl && !text.includes(`Sitemap: ${siteUrl}/sitemap.xml`)) problems.push(`robots.txt: expected "Sitemap: ${siteUrl}/sitemap.xml"`);
+}
+
 /** `umami` ({ scriptUrl, origin, websiteId }, from checkUmami in build.mjs) makes every page need the Umami script and the policy allow it. */
 export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
   const problems = [];
@@ -28,6 +39,9 @@ export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
     if (!resolves(dist, url)) problems.push(`${page}: ${kind} "${url}" does not exist`);
   };
 
+  checkRobots(dist, problems, siteUrl);
+  const titles = new Map();
+  const descriptions = new Map();
   for (const page of pages) {
     const html = readFileSync(path.join(dist, page), "utf8");
     const tags = (name) => html.match(new RegExp(`<${name}\\b[^>]*>`, "gi")) ?? [];
@@ -40,8 +54,22 @@ export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
     const title = /<title>([\s\S]*?)<\/title>/i.exec(html)?.[1].trim();
     if (!title) problems.push(`${page}: missing <title>`);
     if (!metaContent("name", "description")) problems.push(`${page}: missing meta description`);
-    for (const [key, value] of [["property", "og:title"], ["property", "og:description"], ["property", "og:image"], ["name", "twitter:image"]]) {
+    for (const [key, value] of [["property", "og:title"], ["property", "og:description"], ["property", "og:image"], ["name", "twitter:card"], ["name", "twitter:title"], ["name", "twitter:description"], ["name", "twitter:image"]]) {
       if (!metaContent(key, value)) problems.push(`${page}: missing ${value}`);
+    }
+    // Every page needs its own title and description, or search results show the same words for different pages.
+    for (const [what, value, seen] of [["title", title, titles], ["description", metaContent("name", "description"), descriptions]]) {
+      if (!value) continue;
+      if (seen.has(value)) problems.push(`${page}: same ${what} as ${seen.get(value)}`);
+      else seen.set(value, page);
+    }
+    // 404 is the one page that may keep itself out of search; every other page must not.
+    if (page !== "404.html" && /noindex/i.test(metaContent("name", "robots") ?? "")) problems.push(`${page}: has a noindex robots tag on a public page`);
+    if (page === "index.html") {
+      const ld = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].flatMap((m) => {
+        try { return [JSON.parse(m[1])]; } catch { problems.push(`${page}: JSON-LD is not valid JSON`); return []; }
+      });
+      if (!ld.some((d) => d["@type"] === "SoftwareApplication" && d.name)) problems.push(`${page}: missing SoftwareApplication structured data`);
     }
     if (siteUrl && page !== "404.html" && !tags("link").some((t) => attr(t, "rel") === "canonical")) problems.push(`${page}: missing canonical link`);
     const h1s = (html.match(/<h1[\s>]/gi) ?? []).length;
@@ -49,7 +77,7 @@ export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
     if (!/id="main"/.test(html)) problems.push(`${page}: no #main target for the skip link`);
     // The Content-Security-Policy allows only the site's own files, so an inline style or script would silently not apply.
     if (/<style[\s>]/i.test(html) || /\sstyle=["']/i.test(html)) problems.push(`${page}: inline style (the Content-Security-Policy blocks it)`);
-    if (/<script(?![^>]*\ssrc=)[^>]*>/i.test(html)) problems.push(`${page}: inline script (the Content-Security-Policy blocks it)`);
+    if (/<script(?![^>]*(\ssrc=|type="application\/ld\+json"))[^>]*>/i.test(html)) problems.push(`${page}: inline script (the Content-Security-Policy blocks it)`);
     if (umami && !tags("script").some((t) => attr(t, "src") === umami.scriptUrl && attr(t, "data-website-id") === umami.websiteId)) {
       problems.push(`${page}: missing the Umami tracking script (visits to this page would not be counted)`);
     }

@@ -285,6 +285,44 @@ describe("check", () => {
     expect(problems).toContain('404.html: image "/img/none.webp" does not exist');
   });
 
+  it("puts SoftwareApplication structured data on the home page only, and the check catches its loss", () => {
+    const m = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(read("index.html"));
+    expect(JSON.parse(m![1])).toMatchObject({ "@type": "SoftwareApplication", name: "Boss Man", isAccessibleForFree: true });
+    expect(read("about.html")).not.toContain("ld+json");
+    const undo = edit("index.html", (h) => h.replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, ""));
+    const problems: string[] = checkSite(dist);
+    undo();
+    expect(problems).toContain("index.html: missing SoftwareApplication structured data");
+  });
+
+  it("catches missing preview tags, a repeated title or description, and a noindex on a public page", () => {
+    const undo = edit("about.html", (h) => h.replace(/<meta name="twitter:title"[^>]*>/, "").replace(/<title>[^<]*<\/title>/, "<title>Same</title>").replace("</head>", '<meta name="robots" content="noindex"></head>'));
+    const undo2 = edit("whats-new.html", (h) => h.replace(/<title>[^<]*<\/title>/, "<title>Same</title>"));
+    const problems: string[] = checkSite(dist);
+    undo();
+    undo2();
+    expect(problems).toContain("about.html: missing twitter:title");
+    expect(problems).toContain("about.html: has a noindex robots tag on a public page");
+    expect(problems.some((p) => /whats-new\.html: same title as about\.html/.test(p))).toBe(true);
+    expect(problems.some((p) => /404\.html: has a noindex/.test(p))).toBe(false);
+  });
+
+  it("catches a robots.txt that blocks search engines, is missing, or ignores the sitemap", () => {
+    const f = path.join(dist, "robots.txt");
+    const original = readFileSync(f, "utf8");
+    writeFileSync(f, "User-agent: *\nDisallow: /\n");
+    const blocked: string[] = checkSite(dist);
+    rmSync(f);
+    const missing: string[] = checkSite(dist);
+    writeFileSync(f, original);
+    expect(blocked).toContain("robots.txt blocks the whole site (Disallow: /)");
+    expect(missing).toContain("robots.txt is missing");
+    const withUrl = path.join(tmp, "dist-robots");
+    build({ outDir: withUrl, siteUrl: "https://example.test", portalUrl: "" });
+    writeFileSync(path.join(withUrl, "robots.txt"), "User-agent: *\nAllow: /\n");
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toContain("robots.txt does not point to sitemap.xml");
+  });
+
   it("catches a phone picture that points at nothing", () => {
     const undo = edit("index.html", (h) => h.replace('srcset="/img/card-phone.webp"', 'srcset="/img/gone.webp"'));
     const problems: string[] = checkSite(dist);

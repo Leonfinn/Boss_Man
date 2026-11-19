@@ -107,6 +107,35 @@ describe("the staging lane (BOS-1472)", () => {
     await expect(c.deploys.request(c.actor, { target: "staging", ref: "main" })).rejects.toThrow(/already queued or running/);
   });
 
+  it("keeps the staging target and its running deploy when the host reports no origin for one tick (BOS-1796)", async () => {
+    const c = (ctx = await setup());
+    lane(true);
+    await c.deploys.syncStaging();
+    const r = await c.deploys.request(c.actor, { target: "staging", ref: "main" });
+    writeFileSync(out("staging-lane.json"), JSON.stringify({ configured: "true", origin: "" }));
+    await c.deploys.syncStaging();
+    expect(await c.deploys.listTargets(c.company.id)).toHaveLength(1);
+    expect(await c.db.select().from(deploys).where(eq(deploys.id, r.deploy.id))).toHaveLength(1);
+    // A target that is really not ours still goes, unless a deploy is running on it.
+    await c.db.update(projects).set({ repoUrl: "https://example.com/someone-else/bossman.git" }).where(eq(projects.id, c.project.id));
+    lane(true);
+    await c.deploys.syncStaging();
+    expect(await c.deploys.listTargets(c.company.id)).toHaveLength(1); // the running deploy holds it
+    await c.db.update(deploys).set({ status: "failed" }).where(eq(deploys.id, r.deploy.id));
+    await c.deploys.syncStaging();
+    expect(await c.deploys.listTargets(c.company.id)).toEqual([]);
+  });
+
+  it("lets only one of two simultaneous staging requests through (BOS-1796)", async () => {
+    const c = (ctx = await setup());
+    lane(true);
+    await c.deploys.syncStaging();
+    const results = await Promise.allSettled([c.deploys.request(c.actor, { target: "staging", ref: "main" }), c.deploys.request(c.actor, { target: "staging", ref: "main" })]);
+    expect(results.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((x) => x.status === "rejected")).toHaveLength(1);
+    expect(await c.db.select().from(deploys)).toHaveLength(1);
+  });
+
   it("records a passing result, shows each check to agents, and wakes the requester", async () => {
     const c = (ctx = await setup());
     lane(true);

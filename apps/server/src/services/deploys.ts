@@ -14,6 +14,7 @@ import { record } from "./activity.js";
 import { readyUrgentFor } from "./priority-group.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { ownerActed } from "./stale-requests.js";
+import { withStagingLock } from "./staging-lock.js";
 
 export class DeployError extends Error {
   constructor(
@@ -339,23 +340,27 @@ export function deploysService(
     const lane = deps.staging;
     if (!lane || !(await lane.on())) throw new DeployError(409, "Staging isn't set up on this host yet (the host deployer's staging lane is off). The owner's one-time setup is in docs/22-staging.md. Don't wait for it: say 'not checked' and check live.");
     if (!commit) throw new DeployError(422, `Couldn't read the commit that ${input.ref} names, so it can't go to staging. Name a merged commit or main.`);
-    const busy = await db
-      .select({ id: deploys.id })
-      .from(deploys)
-      .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
-      .where(and(eq(deploys.status, "running"), sql`${deployTargets.rules}->>'hostStaging' = 'true'`))
-      .limit(1);
-    if (busy.length || (await lane.pending())) throw new DeployError(409, "A staging deploy is already queued or running. Staging does one at a time; ask again when you're woken with its result.");
-    const [d] = await db
-      .insert(deploys)
-      .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, status: "running", createdAt: now(), commit })
-      .returning();
-    try {
-      await lane.submit(d!.id, commit, "agent-request");
-    } catch (err) {
-      const [row] = await db.update(deploys).set({ status: "failed", outcome: `Couldn't hand the request to the host: ${(err as Error).message}`, finishedAt: now() }).where(eq(deploys.id, d!.id)).returning();
-      throw new DeployError(502, row!.outcome!);
-    }
+    // One writer at a time (staging-lock.ts): the check and the request-file write must not interleave with another request.
+    const d = await withStagingLock(async () => {
+      const busy = await db
+        .select({ id: deploys.id })
+        .from(deploys)
+        .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
+        .where(and(eq(deploys.status, "running"), sql`${deployTargets.rules}->>'hostStaging' = 'true'`))
+        .limit(1);
+      if (busy.length || (await lane.pending())) throw new DeployError(409, "A staging deploy is already queued or running. Staging does one at a time; ask again when you're woken with its result.");
+      const [row0] = await db
+        .insert(deploys)
+        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, status: "running", createdAt: now(), commit })
+        .returning();
+      try {
+        await lane.submit(row0!.id, commit, "agent-request");
+      } catch (err) {
+        const [row] = await db.update(deploys).set({ status: "failed", outcome: `Couldn't hand the request to the host: ${(err as Error).message}`, finishedAt: now() }).where(eq(deploys.id, row0!.id)).returning();
+        throw new DeployError(502, row!.outcome!);
+      }
+      return row0;
+    });
     return { deploy: d!, note: `Sent to the host's staging lane for ${short(commit)} (main commits only). No approval is needed and no secrets are involved. You'll be woken with the result and each smoke check; don't wait in this turn.` };
   }
 
@@ -427,9 +432,17 @@ export function deploysService(
       const rows = await db.select({ companyId: projects.companyId, repoUrl: projects.repoUrl }).from(projects).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
       const own = [...new Set(rows.filter((r) => sameRepo(r.repoUrl, origin)).map((r) => r.companyId))];
       await this.ensureHostStagingTargets(own);
-      if (await deps.staging.on()) {
+      // An unreadable origin (one bad tick of the host's git call) must not look like "nobody owns it": that would delete every
+      // staging target, and deploys.targetId cascades, so every deploy row would go with them (BOS-1796).
+      if (origin && (await deps.staging.on())) {
         const stale = await db.select({ id: deployTargets.id, companyId: deployTargets.companyId }).from(deployTargets).where(sql`${deployTargets.rules}->>'hostStaging' = 'true'`);
-        for (const t of stale) if (!own.includes(t.companyId)) await db.delete(deployTargets).where(eq(deployTargets.id, t.id));
+        for (const t of stale) {
+          if (own.includes(t.companyId)) continue;
+          // A target with a deploy still running keeps its row (and the deploy's history) until the deploy is recorded.
+          const live = await db.select({ id: deploys.id }).from(deploys).where(and(eq(deploys.targetId, t.id), eq(deploys.status, "running"))).limit(1);
+          if (live.length) continue;
+          await db.delete(deployTargets).where(eq(deployTargets.id, t.id));
+        }
       }
       await syncHostStaging();
     },

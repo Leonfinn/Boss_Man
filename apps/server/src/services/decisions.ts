@@ -809,6 +809,8 @@ export const CANCEL_RUNNER_UPDATE = "Cancel the runner update";
 /** BOS-1600: the deadline card when only checks remain. The checks on the runner end and start again from the beginning afterwards. */
 export const STOP_CHECKS_UPDATE_NOW = "Stop the checks and update now";
 export const DEADLINE_WAIT_MINUTES = 10;
+/** BOS-1807: the deadline card's "keep the hold and swap by itself once the work going has finished": no further presses needed. */
+export const SWAP_WHEN_DONE = "Swap as soon as these finish";
 /** The quiet-host wait's deadline question (BOS-420): send the update now, past the host's memory floor too. */
 export const UPDATE_NOW_ANYWAY = "Update now anyway";
 
