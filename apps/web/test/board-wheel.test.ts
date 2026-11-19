@@ -232,8 +232,8 @@ function cdpFor(page: Page): Promise<any> {
   return s;
 }
 
-// The first test sends ~80 real wheel turns, each waiting for the scroll to settle (3 quiet reads);
-// on a runner several times slower than ours that is over the 30 s default. Each wait inside has its
+// Each walk sends ~20 real wheel turns, each waiting for the scroll to settle (3 quiet reads);
+// on a runner several times slower than ours that can pass the 30 s default. Each wait inside has its
 // own 10 s deadline, so this limit only bounds the whole walk: a hung wheel still fails.
 const WALK_TIMEOUT_MS = 150_000;
 
@@ -287,14 +287,20 @@ async function expectSidewaysOnly(page: Page, selector: string): Promise<void> {
 }
 
 describe.skipIf(!browser || !server)("the mouse wheel over the real Kanban board scrolls the page (BOS-962, BOS-1915)", () => {
-  it("at the owner's desktop: every area, top and part-way down, board scrolled sideways or not, plain and slightly sideways wheels", async () => {
+  // One test per starting position (BOS-1949): the whole walk in one test was ~80 wheel turns and went over the limit on a slow runner.
+  it.each([
+    { label: "top of the page, board at its left edge", y: 0, at: 0 },
+    { label: "top of the page, board half way across", y: 0, at: 0.5 },
+    { label: "400 px down, board at its left edge", y: 400, at: 0 },
+    { label: "400 px down, board at its right end", y: 400, at: 1 },
+  ])("at the owner's desktop, $label: every area, plain and slightly sideways wheels", async ({ y, at }) => {
     const page = await openBoard(desktop);
     try {
       await expectSidewaysOnly(page, ".board-scroll");
       const maxLeft = await page.evaluate(() => { const b = document.querySelector(".board-scroll") as HTMLElement; return b.scrollWidth - b.clientWidth; });
       expect(maxLeft, "the full board must be wider than the window, as the owner's is").toBeGreaterThan(100);
       const failures: string[] = [];
-      for (const start of [{ y: 0, left: 0 }, { y: 0, left: Math.round(maxLeft / 2) }, { y: 400, left: 0 }, { y: 400, left: maxLeft }]) {
+      for (const start of [{ y, left: Math.round(maxLeft * at) }]) {
         for (const area of AREAS) {
           // At the top of the page every area must be on screen, so none is skipped by accident.
           await setScroll(page, start);
