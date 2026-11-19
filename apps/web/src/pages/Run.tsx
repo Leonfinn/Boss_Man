@@ -144,7 +144,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
             </p>
           )}
           {run?.endedAt && failureReason(run.outcome) && (
-            <p role="status" className={run.outcome?.startsWith("error") ? "error" : "muted"} style={{ margin: "6px 0 0", overflowWrap: "anywhere" }}>
+            <p role={run.outcome?.startsWith("error") ? "alert" : "status"} className={run.outcome?.startsWith("error") ? "error" : "muted"} style={{ margin: "6px 0 0", overflowWrap: "anywhere" }}>
               {failureReason(run.outcome)}
             </p>
           )}
