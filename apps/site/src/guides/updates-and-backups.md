@@ -61,7 +61,7 @@ The host deployer will not apply changes to these files:
 - `.env` files, `.npmrc` and `.dockerignore`
 - the scripts `deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh` and `install-deployer.sh`
 
-Boss Man shows a card for these. Choose **Approve** to get a to-do with the steps, then run them on the machine.
+Boss Man shows a card for these. The card lists the steps under **What you'll need to do**, so you can read them before you choose **Approve**. Then run them on the machine. If the card says "Don't press Approve yet", the machine has not reported where Boss Man is installed, so there are no steps to show. Ask on the ticket for the exact commands.
 
 ## Where backups are kept
 

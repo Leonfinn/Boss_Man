@@ -79,13 +79,15 @@ On the ticket page you can also:
 
 - tick **Priority 1**. The ticket goes first in the check queue and the merge line, and keeps running when a plan is nearly used up (the quota hold). You get one alert when it is ready to go live.
 - tick **Doesn't need code changes** for research, wiki or docs work, so it can close with no change to the repository
-- under **After it goes live**, write what you must do once the change is live, one step per line
+- under **After it goes live**, write what you must do once the change is live, one step per line. When the change is live, a card on Decisions brings these steps to you. It names the ticket that went live, says why the steps matter and what happens if you skip them, then lists the steps.
 
 ## Decisions
 
 Open **Decisions** in the sidebar. The number beside it counts only the cards that need you now. Cards in "Waiting, nothing to do yet" are not in that number: the page heading shows them separately, for example "3 need you · 2 with the team". Alerts the team is still handling are folded under **Being handled by the team**.
 
 Each card shows what kind it is (Plan, Permission, Approval, Question, Stale blocker, Stalled run and others), what is being asked and the options.
+
+Each card also says which project it is for, or **Company-wide** when it is not about one project. When cards come from more than one project, chips at the top filter the list: **All projects**, one chip per project, and **Company-wide**. Decisions remembers your choice in this browser. If no open card belongs to the project you chose any more, the list goes back to **All projects**.
 
 Cards are newest first, with these exceptions:
 
@@ -111,7 +113,7 @@ A red **Not re-checked** strip means nobody re-checked the card in time. It says
 
 ![A Decisions card showing what is being asked, what the agent already tried, a recommended option and the option buttons.](/img/card-wide.webp =1600x567 "A Decisions card, with its options as buttons.")
 
-1. Read the card. The heading is the question. The text under it says what the agent wants and what it already tried.
+1. Read the card. The heading is the question. The text under it says what the agent wants and what it already tried. A card that asks you to do steps starts with three lines: **Why** it matters, **Where** you do the steps, and **How long** they take, for example "About 5 minutes".
 2. Look under **Your answer**. The recommended button is marked **Recommended**. On plan, sign-off, permission and stalled-run cards, a line under each button says what happens if you press it.
 3. Choose a button.
 4. Or, on a question card, choose **Write my own answer**, type it, and choose **Send my answer**.
@@ -133,6 +135,8 @@ For high and critical work, the sign-off card lists what was checked, so you can
 **Approve and merge** runs the full check and merges the work. If that check fails, the ticket goes back to the agent, not to you. **Send it back** returns it to the agent with your note, and the reviews start again when it comes back.
 
 ### Closed cards
+
+When a card leaves your list before you answer it, for example because the update is already live, a newer card replaced it or the agent withdrew it, the card shows for 2 hours under **Left your list recently**. Each line says why it left. If a newer card replaced it, choose **Open the newer card ›** to go to it.
 
 Cards closed in the last 30 days are folded at the bottom under **Closed in the last 30 days**. Each line starts with what happened: **Answered**, **Allowed**, **Denied**, **Withdrawn** or **Replaced**.
 
