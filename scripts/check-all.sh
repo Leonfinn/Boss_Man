@@ -274,10 +274,13 @@ step test-lines node scripts/check-test-lines.mjs
 step guard:wake-classes scripts/check-guards.sh wake-classes
 step guard:owner-controls scripts/check-guards.sh owner-controls
 step guard:screen-inventory scripts/check-guards.sh screen-inventory
-# Memory-safe on a shared runner (a 12 GB cgroup shared with other agents, two checks at once): one package at a time,
-# at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
-# and a capped heap for tsc only. Callers can override any of these.
-export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-2}"
+# Memory-safe on a shared runner: one package at a time, at most 4 PGlite workers, and a capped heap for tsc only.
+# Callers can override any of these. The 4 is only a ceiling: apps/server/vitest.config.ts also takes the smaller of
+# this slot's CPU and free-memory share (scripts/check-threads.mjs, split across the check slots) and backs off by the
+# cgroup's free memory (~0.9 GB per worker), so a busy or small host still gets fewer (BOS-117, BOS-674).
+# Was 2 until BOS-1924: measured on 19 Nov with all 3 slots busy, the server tests took 1049-1072 s at 2 workers and
+# 520-707 s at 4, and the check peaked at 4.1 GB (2.5-2.8 GB at 2) of its 6.9 GB ceiling.
+export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-4}"
 # /tmp fills with the tests' own scratch (BOS-568), and a check that starts on a full one fails oddly. Say so up front,
 # in the kept log, instead: 64 MB written and read back once per check. A probe that can't finish in 20 s is left as is.
 if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ] && [ -z "${BOSSMAN_SKIP_TMP_PROBE:-}" ]; then
