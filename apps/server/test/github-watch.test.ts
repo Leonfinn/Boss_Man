@@ -24,7 +24,7 @@ type Item = { id: number; number: number; title: string; body: string; user: str
 type Comment = { id: number; number: number; body: string; user: string; updated: string };
 type Disc = { id: string; number: number; title: string; body: string; user: string; updated: string; comments: Array<{ id: string; databaseId: number; body: string; user: string; updated: string }> };
 
-type DepAlert = { number: number; state: "open" | "fixed"; pkg: string; severity: string; summary: string };
+type DepAlert = { number: number; state: "open" | "fixed"; pkg: string; severity: string; summary: string; classification?: "general" | "malware" };
 type SecAlert = { number: number; state: "open" | "resolved"; type: string; value: string };
 
 /** A made-up GitHub. `mode` makes every call fail the way GitHub does. */
@@ -51,7 +51,7 @@ function stub() {
     if (u.pathname === `/repos/${REPO}/dependabot/alerts`) {
       if (gh.dependabot === "disabled") return json(403, { message: "Dependabot alerts are disabled for this repository." });
       if (gh.dependabot === "forbidden") return json(403, { message: "Resource not accessible by personal access token" });
-      return json(200, gh.dependabot.filter((a) => a.state === "open").map((a) => ({ number: a.number, state: a.state, html_url: "x", dependency: { package: { name: a.pkg, ecosystem: "npm" }, manifest_path: "pnpm-lock.yaml" }, security_advisory: { severity: a.severity, ghsa_id: "GHSA-aaaa-bbbb-cccc", summary: a.summary }, security_vulnerability: { vulnerable_version_range: "< 2.0.0", first_patched_version: { identifier: "2.0.0" } } })));
+      return json(200, gh.dependabot.filter((a) => a.state === "open").map((a) => ({ number: a.number, state: a.state, html_url: "x", dependency: { package: { name: a.pkg, ecosystem: "npm" }, manifest_path: "pnpm-lock.yaml" }, security_advisory: { severity: a.severity, classification: a.classification ?? "general", ghsa_id: "GHSA-aaaa-bbbb-cccc", summary: a.summary }, security_vulnerability: { vulnerable_version_range: "< 2.0.0", first_patched_version: { identifier: "2.0.0" } } })));
     }
     if (u.pathname === `/repos/${REPO}/secret-scanning/alerts`) {
       if (gh.secrets === "disabled") return json(404, { message: "Secret scanning is disabled on this repository." });
@@ -402,6 +402,24 @@ describe("security alerts (BOS-1929)", () => {
     c.advance(61 * MIN);
     await c.svc.runOne(c.project.id);
     expect(await allTickets(c.company.id)).toHaveLength(3);
+  });
+
+  it("treats malware-type Dependabot alerts as high risk even when GitHub rates them low, and still handles vulnerability alerts", async () => {
+    const c = await setup();
+    c.gh.dependabot = [
+      { number: 1, state: "open", pkg: "evil-pkg", severity: "low", summary: "Malicious code", classification: "malware" },
+      { number: 2, state: "open", pkg: "bad-crit", severity: "critical", summary: "Malicious code", classification: "malware" },
+      { number: 3, state: "open", pkg: "old-lib", severity: "low", summary: "Minor", classification: "general" },
+    ];
+    await c.svc.runOne(c.project.id);
+    const rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(3);
+    const evil = rows.find((r) => r.title.includes("evil-pkg"))!;
+    expect(evil).toMatchObject({ risk: "high", assigneeAgentId: c.ceo!.id });
+    expect(evil.title).toContain("malware");
+    expect(evil.body).toContain("MALICIOUS");
+    expect(rows.find((r) => r.title.includes("bad-crit"))).toMatchObject({ risk: "critical", urgent: true });
+    expect(rows.find((r) => r.title.includes("old-lib"))!.risk).toBe("low");
   });
 
   it("falls back to the CEO for a secret alert when the company has no security reviewer", async () => {
