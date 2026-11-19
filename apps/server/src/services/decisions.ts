@@ -2844,11 +2844,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // The work settles it and no option says so: a written answer, like the owner's own words.
         r = await this.answer(d.id, `Handled by the CEO: ${summary}`.slice(0, 4000), { custom: true, by: "ceo", handled });
       } else {
-        // A lesson-replace option holds the whole lesson, so it can pass the tool's 200-character cap: "Replace #N" names it (BOS-1874).
-        const shortN = (d.context as DecisionContext).type === "lesson_replace" ? /^Replace #(\d+)$/.exec(input.answer.trim())?.[1] : undefined;
-        const chosen = shortN ? options.find((o) => o.startsWith(`Replace #${shortN}: `)) ?? input.answer : input.answer;
-        if (!options.includes(chosen)) throw new AnswerError(`Give answer: one of ${options.map(shortLabel).join(", ")}.`);
-        r = await this.answer(d.id, chosen, { by: "ceo", handled });
+        if (!options.includes(input.answer)) throw new AnswerError(`Give answer: one of ${options.join(", ")}.`);
+        r = await this.answer(d.id, input.answer, { by: "ceo", handled });
       }
       if (!r) return null;
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_handled", summary: `CEO handled "${d.question}": ${summary}${via}`, at: now() });
