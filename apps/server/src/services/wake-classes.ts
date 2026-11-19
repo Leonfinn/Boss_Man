@@ -76,6 +76,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "live commit not placed": "scheduled",
   // The owner's approved server update left the live commit unchanged (BOS-1805): once per deploy, never dropped.
   "deploy left the server unchanged": "scheduled",
+  // The nightly secrets pass found a key-shaped string on main, or one whose closed ticket is still there (BOS-1932). Never dropped.
+  "secret scan": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

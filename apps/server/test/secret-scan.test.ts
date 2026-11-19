@@ -97,7 +97,9 @@ describe("the nightly secrets pass (BOS-1932)", () => {
     ctx = await setup();
     ctx.find([KEY, PEM]);
     await ctx.secretScan.run();
-    const [k, p] = ["tailscale", "private-key"].map((w) => async () => (await ctx!.ticketsNow()).find((t) => t.title.includes(w))!);
+    const byTitle = (w: string) => async () => (await ctx!.ticketsNow()).find((t) => t.title.includes(w))!;
+    const k = byTitle("tailscale");
+    const p = byTitle("private-key");
     // Someone closes the key's ticket, but the key is still on main.
     await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, (await k()).id));
     ctx.later(SECRET_SCAN_EVERY_MS + 1);

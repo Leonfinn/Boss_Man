@@ -66,6 +66,7 @@ export function validFindings(r: Pick<SecretScanResult, "findings">): SecretScan
  * `gone` (has one, no longer on main). Pure, so the rules are tested without a runner.
  */
 export function plan(open: Record<string, OpenMatch>, found: SecretScanFinding[]) {
+  // not state: a local of this pure function, built fresh on each call.
   const byKey = new Map<string, SecretScanFinding>();
   for (const f of found) if (!byKey.has(matchKey(f))) byKey.set(matchKey(f), f);
   const fresh: SecretScanFinding[] = [];
