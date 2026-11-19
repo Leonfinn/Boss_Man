@@ -76,6 +76,34 @@ Each row in Waiting to merge has one state word:
 
 The row then says what is happening and who is acting. If a card holds the work, the row names the card and who raised it, with a link to open it.
 
+Work from background agents (an agent whose job title includes "Background", such as a Background Developer) lets newer ordinary work merge first, then takes its place by when it joined. Its row says so, for example "background lane: newer ordinary work goes first for up to 40 min more". You set how long in **Background lane gives way for**, in the **Checks** box under **Settings > Server and runner > Limits and checks**: 120 minutes by default, up to 1440. 0 means it always goes after ordinary work.
+
+### The landing turn
+
+While a passed change waits to land, other changes can reach main first. If they touch the same files, the change is rebuilt and checked again. A change rebuilt twice this way gets the project's **landing turn**: for up to an hour, other passed changes wait to land so it can go first. Their checks carry on meanwhile.
+
+A ticket waiting behind a turn says so in its history, for example: "Merge line: waiting behind another ticket's landing turn: "Fix the login page" has the landing turn; this merge pushes when it lands or the turn ends". If main changes its files meanwhile, it does not wait for the turn to end: it is rebuilt and checked again at once, and its history says so. You do not need to do anything.
+
+Two settings in the **Checks** box under **Settings > Server and runner > Limits and checks** control this. Both are on by default:
+
+- **Land passed merges when main moved elsewhere**: a passed change lands even though main moved, as long as main's newer changes touch none of its files and none of the project's dependency, build, CI or migration files. Main's own CI checks the result. Turn it off to test every change again whenever main moves.
+- **Landing turn**: how many minutes a turn lasts, from 0 to 240 (60 by default). 0 turns landing turns off. Choose **Save landing turn**.
+
+### Wait for GitHub CI
+
+In the same place, tick **Wait for GitHub CI before merging** to merge only once GitHub CI passes as well as Boss Man's own check. It is off by default and works for projects on GitHub only. Each merge then uses GitHub Actions minutes, which a private repository pays for. If CI fails, the ticket goes back to the agent with the failing jobs and tests.
+
+### The merge banner
+
+When the merge line needs your attention, a banner shows at the top of the **Dashboard** and **Decisions**. Choose it to open the page it names. It goes away by itself when the problem does.
+
+| Banner | What it means | What to do |
+|---|---|---|
+| **Merges are stuck:** and a cause | Nothing is moving and someone has to act. The banner is red. | Do what its **Fix:** line says. |
+| **Merging, but slowly:** | Merges land, but the line is long, so the wait is long. The banner is calm, not red. It says how many are waiting, about how long they will take at the current rate, and when the last one landed. For example: "Merging, but slowly: 17 for Boss Man to merge, about 4 h to clear at the current rate, last landed 19:03." | Nothing. The line clears by itself. |
+| **Paused for a server update** | New checks wait for an update (see above). | Nothing. |
+| **Start brake off** | The merge line has grown for an hour and new starts are not held. It says how many merges are waiting and suggests a limit, for example "Start brake off, 24 waiting; suggested limit 12". | Choose **Open Settings** and set **Hold new starts while this many merges are waiting** ([Guide 4](/guides/board-and-decisions#in-progress-limits)). |
+
 On each ticket, Boss Man runs the check you chose for the project under **Before merging, Boss Man will**. If it passes, Boss Man merges the branch or opens a pull request, as your project is set. If you chose **Nothing: merge after review only**, it merges straight after the review.
 
 ### Quick checks
@@ -92,6 +120,8 @@ When the main branch is really failing its check (main is red), new checks are *
 When main is not red but a marked fix for it is on its way, the banner starts "Merges are held." instead. It says how many approved tickets are held until the fix is merged and live, and links to the fix. Checks that fix main, and merges already running, carry on.
 
 When nothing is queued, the tab says "No quick checks queued." and how many slots are free.
+
+If a check slot is free but a queued check is not taking it, the tab says **Idle check capacity.** and which machine it is, which check and why. If it lasts 5 minutes, the CEO is told. If it lasts 30 minutes, Boss Man sends you a notification. A slot that is idle for a reason you already know about, such as a server update, is listed without the alert.
 
 The line at the top says how many check slots are busy, for example "1 of 4 check slots busy, shared with merge checks". Quick checks and merge checks take turns on the same slots. You set the number under **Settings > Server and runner > Limits and checks**, in **Checks at once**. The tab is read-only.
 
@@ -111,7 +141,7 @@ Some Done when lines can only be checked on the running system, such as "the hea
 
 After the merge, the ticket stays open until each of these checks has a pass or fail:
 
-1. If the change is not live yet, the ticket waits in **Blocked**. The ticket page says what it waits for, such as "waiting for go-live: the server update". On the board it shows **Not counted: merged, waiting to go live**, so it does not take one of the agent's in-progress places.
+1. If the change is not live yet, the ticket waits in **Blocked**. A change to tests, the `docs/` folder, top-level notes such as `README.md`, or GitHub CI only counts as live as soon as it merges, so it never waits for a server update. The ticket page says what it waits for, such as "waiting for go-live: the server update". On the board it shows **Not counted: merged, waiting to go live**, so it does not take one of the agent's in-progress places.
 2. When the change is live, Boss Man moves the ticket to **In progress** and wakes the agent to make the checks.
 3. The agent reports pass or fail for each one, then closes the ticket. It cannot close it before then.
 
