@@ -6,7 +6,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[] }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -29,6 +29,19 @@ export function waitingFor(m: { runs: number; companies: number; checks?: number
   if (k > 0) return `waiting for ${checks}`;
   return "swapping the runners now";
 }
+/**
+ * BOS-1877: when a drain started and when it should end, in plain words, from the server's forecast. All fields are
+ * absent from an older server, which then gets no timing line. `overdue` says so plainly instead of promising a time.
+ */
+export function drainTiming(m: { since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; runs: number }): string {
+  if (!m.phase) return "";
+  if (m.phase === "swapping") return "The runners are being swapped now.";
+  const started = m.since ? `Started ${atTime(m.since)}. ` : "";
+  if (m.overdue) return `${started}This is taking longer than expected.`;
+  if (m.expectedFinishAt) return `${started}Expected to finish about ${atTime(m.expectedFinishAt)}.`;
+  return `${started}${m.runs > 0 ? "No time estimate: it goes ahead when those agents end." : ""}`.trim();
+}
+
 /** `gotMessage` and `step` (BOS-1016) are absent from an older server. */
 export type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null; gotMessage?: boolean; step?: { title: string; sinceMinutes: number } | null };
 /** The owner's wrap-up ask is on: its own hold, or asked while an update waits (BOS-988), which keeps the update's kind. */

@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, ceoChapters, checkWorkers, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, ceoChapters, checkJobs, checkWorkers, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp-trace.js";
 
@@ -159,6 +159,17 @@ describe("owner chat", () => {
       expect(c.sent.some((x) => x.type === "run.start")).toBe(false);
       expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: update pending");
     })();
+  });
+
+  it("stays open while an update waits only on a running check, not only on agents (BOS-1877)", async () => {
+    const c = await setup();
+    const [t] = await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.maintenance.start({ minutes: 30 });
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What's the update waiting on?" })).statusCode).toBe(201);
+    await c.scheduler.tick();
+    expect(c.sent.find((x): x is Start => x.type === "run.start")).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("answering");
   });
 
   it("answers with a board-only run beside the CEO's own work, and the reply lands in the chat", async () => {
