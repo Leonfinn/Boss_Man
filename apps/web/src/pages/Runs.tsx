@@ -2,6 +2,7 @@ import { useState } from "react";
 import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
+import { Loader } from "../components/Loader";
 
 export const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 
@@ -103,6 +104,24 @@ export function outcomeTag(outcome: string | null | undefined) {
   return <span className="tag green">Finished</span>;
 }
 
+/**
+ * Why a run ended badly, in plain words, or null when it ended well (BOS-1887). The server stores a failure as
+ * `error: <reason>`; Interrupted and Lost get a short line of their own.
+ */
+export function failureReason(outcome: string | null | undefined): string | null {
+  if (!outcome) return null;
+  if (outcome.startsWith("error")) {
+    const reason = outcome.replace(/^error:?\s*/, "").trim();
+    return reason ? `Failed: ${reason}` : "Failed, and the run didn't say why.";
+  }
+  if (outcome === "interrupted") return "Interrupted: it was stopped part-way, for example by a restart, and can be started again.";
+  if (outcome.startsWith("lost")) {
+    const detail = outcome.replace(/^lost:?\s*/, "").trim();
+    return `Lost: Boss Man lost contact with the runner and doesn't know how it ended.${detail ? ` (${detail})` : ""}`;
+  }
+  return null;
+}
+
 function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Company[]; finished: boolean }) {
   return (
     <div className="table-wrap">
@@ -142,7 +161,14 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
                 )}
               </td>
               <td className="mono">{r.model ?? "default"}</td>
-              <td>{outcomeTag(finished ? r.outcome : null)}</td>
+              <td>
+                {outcomeTag(finished ? r.outcome : null)}
+                {finished && failureReason(r.outcome) && (
+                  <div className="muted" style={{ fontSize: 13, marginTop: 4, maxWidth: 360, overflowWrap: "anywhere" }}>
+                    {failureReason(r.outcome)}
+                  </div>
+                )}
+              </td>
               {finished && (
                 <td className="mono" style={{ textAlign: "right", whiteSpace: "nowrap" }} title={usage(r).title}>
                   {usage(r).text}
@@ -198,9 +224,91 @@ function EndAllRuns({ count, onDone }: { count: number; onDone: () => void }) {
   );
 }
 
+const PAGE = 50;
+const FILTER_KEY = "bm.runs.filter";
+type Filter = { companyId: string; agentId: string; result: "" | "finished" | "failed" | "interrupted" };
+const NO_FILTER: Filter = { companyId: "", agentId: "", result: "" };
+
+/** The owner's last filter, so a reload (or coming back later) keeps it. */
+function savedFilter(): Filter {
+  try {
+    const f = JSON.parse(localStorage.getItem(FILTER_KEY) ?? "{}") as Partial<Filter>;
+    return { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "" };
+  } catch {
+    return NO_FILTER;
+  }
+}
+
+function Chips({ label, value, options, onPick }: { label: string; value: string; options: Array<{ id: string; name: string }>; onPick: (id: string) => void }) {
+  return (
+    <div className="segmented" role="group" aria-label={label} style={{ flexWrap: "wrap" }}>
+      {[{ id: "", name: "All" }, ...options].map((o) => (
+        <button key={o.id} type="button" className="chip" aria-pressed={value === o.id} onClick={() => onPick(o.id)}>
+          {o.name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A failed load says so and offers Retry, instead of passing for an empty list (BOS-1887). */
+function LoadFailed({ what, message, onRetry }: { what: string; message: string; onRetry: () => void }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <p role="alert" className="error" style={{ margin: 0 }}>
+        Couldn't load {what}: {message}
+      </p>
+      <button type="button" className="btn" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
 export function Runs({ companies }: { companies: Company[] }) {
+  const [filter, setFilter] = useState<Filter>(savedFilter);
+  // Older runs loaded by "Show more", for the filter they were loaded under.
+  const [older, setOlder] = useState<{ key: string; rows: RunRow[]; done: boolean }>({ key: "", rows: [], done: false });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const company = companies.find((c) => c.id === filter.companyId);
+  const filterKey = JSON.stringify(filter);
+  const change = (patch: Partial<Filter>) => {
+    const next = { ...filter, ...patch };
+    // An agent belongs to one company, so changing company clears the agent.
+    if (patch.companyId !== undefined) next.agentId = "";
+    localStorage.setItem(FILTER_KEY, JSON.stringify(next));
+    setFilter(next);
+  };
+  const query = (extra = "") => {
+    const p = new URLSearchParams({ limit: String(PAGE) });
+    // A saved company that no longer exists is ignored, not sent (it would show an empty list with no way out).
+    if (company) p.set("companyId", filter.companyId);
+    if (company && filter.agentId) p.set("agentId", filter.agentId);
+    if (filter.result) p.set("result", filter.result);
+    return `/api/runs/recent?${p.toString()}${extra}`;
+  };
   const active = usePoll((signal) => api<RunRow[]>("/api/runs", { signal }), 5_000, "active");
-  const recent = usePoll((signal) => api<RunRow[]>("/api/runs/recent?limit=50", { signal }), 15_000, "recent");
+  const recent = usePoll((signal) => api<RunRow[]>(query(), { signal }), 15_000, `recent:${filterKey}`);
+  const olderRows = older.key === filterKey ? older.rows : [];
+  const seen = new Set((recent.data ?? []).map((r) => r.id));
+  const shown = recent.data ? [...recent.data, ...olderRows.filter((r) => !seen.has(r.id))] : null;
+  const canMore = !!shown && (recent.data?.length ?? 0) >= PAGE && !(older.key === filterKey && older.done);
+  const showMore = async () => {
+    const last = shown?.[shown.length - 1];
+    if (!last?.endedAt) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const rows = await api<RunRow[]>(query(`&before=${encodeURIComponent(last.endedAt)}`));
+      setOlder({ key: filterKey, rows: [...olderRows, ...rows], done: rows.length < PAGE });
+    } catch (err) {
+      setMoreError((err as Error).message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+  const filtered = !!(filter.companyId || filter.agentId || filter.result);
   return (
     <>
       <header className="page-head">
@@ -218,15 +326,53 @@ export function Runs({ companies }: { companies: Company[] }) {
             <RunTable rows={active.data} companies={companies} finished={false} />
             <EndAllRuns count={active.data.length} onDone={() => (active.reload(), recent.reload())} />
           </>
-        ) : (
+        ) : active.data ? (
           <p className="muted">No agents are running.</p>
+        ) : active.error ? (
+          <LoadFailed what="the running runs" message={active.error.message} onRetry={active.reload} />
+        ) : (
+          <Loader label="Loading the running runs" />
         )}
       </section>
       <section aria-labelledby="recent-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <h2 id="recent-h" style={{ fontSize: 18, fontWeight: 600 }}>
           Finished
         </h2>
-        {recent.data?.length ? <RunTable rows={recent.data} companies={companies} finished /> : <p className="muted">No runs have finished yet.</p>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {companies.length > 1 && <Chips label="Company" value={filter.companyId} options={companies} onPick={(id) => change({ companyId: id })} />}
+          {company && company.agents.length > 0 && <Chips label="Agent" value={filter.agentId} options={company.agents} onPick={(id) => change({ agentId: id })} />}
+          <Chips
+            label="Result"
+            value={filter.result}
+            options={[
+              { id: "finished", name: "Finished" },
+              { id: "failed", name: "Failed" },
+              { id: "interrupted", name: "Interrupted" },
+            ]}
+            onPick={(id) => change({ result: id as Filter["result"] })}
+          />
+        </div>
+        {shown?.length ? (
+          <RunTable rows={shown} companies={companies} finished />
+        ) : shown ? (
+          <p className="muted">{filtered ? "No finished runs match these filters." : "No runs have finished yet."}</p>
+        ) : recent.error ? (
+          <LoadFailed what="the finished runs" message={recent.error.message} onRetry={recent.reload} />
+        ) : (
+          <Loader label="Loading the finished runs" />
+        )}
+        {canMore && (
+          <div>
+            <button type="button" className="btn" disabled={loadingMore} onClick={() => void showMore()}>
+              {loadingMore ? "Loading…" : "Show more"}
+            </button>
+          </div>
+        )}
+        {moreError && (
+          <p role="alert" className="error">
+            {moreError}
+          </p>
+        )}
       </section>
     </>
   );

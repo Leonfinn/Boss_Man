@@ -1,11 +1,13 @@
 # Boss Man: server + Postgres. Runs on any Docker host.
 # On TrueNAS SCALE, follow docs/06-install-truenas.md instead of the steps below.
 #
-# First run:
+# First run: follow docs/00-first-time-install.md (steps 3-5). In short, from the repo folder:
 #   mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
-#   sudo chown 1000:1000 secrets/master.key && chmod 600 secrets/master.key   # the server runs as uid 1000
-#   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" > .env
+#   touch secrets/runner-app-co.token        # compose refuses to start while any secret file below is missing
+#   sudo chown 1000:1000 secrets/master.key secrets/runner-app-co.token && chmod 600 secrets/master.key secrets/runner-app-co.token   # the server runs as uid 1000
+#   write .env as in step 4 (POSTGRES_PASSWORD, plus the launcher settings listed below)
 #   docker compose up -d
+# If the server shows Restarting, run: docker compose logs server (an unreadable master key says so in one line).
 # Then open http://<host>:3100 and create the owner account.
 #
 # Back up secrets/master.key: without it, stored secrets cannot be decrypted.

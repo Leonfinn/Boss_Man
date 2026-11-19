@@ -10,6 +10,7 @@ import { State } from "../components/State";
 import { Loader } from "../components/Loader";
 import { statusLineText, type StatusLine } from "./MergeQueue";
 import { usePoll } from "../hooks";
+import { useWheelToPage } from "../wheel-to-page";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
@@ -695,6 +696,8 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
 }
 
 export function Board({ companies, projectId, subpage, go, onCompaniesChanged }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void }) {
+  // The wheel over the sideways board must scroll the page even when the hand adds a little sideways movement (BOS-1915).
+  const boardScrollRef = useWheelToPage();
   const projects = usePoll(
     async (signal) => (await Promise.all(companies.map((c) => api<Project[]>(`/api/companies/${c.id}/projects`, { signal })))).flat(),
     60_000,
@@ -1064,7 +1067,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view === "features" && featureList.length > 0 && !visibleFeatures.length && <p className="muted">No features in the states you have switched on. Switch more states on above.</p>}
       {view === "features" && <FeatureCards features={visibleFeatures} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
       {view !== "features" && (
-      <div className="board-scroll">
+      <div className="board-scroll" ref={boardScrollRef}>
         <div className="board">
           {!board.data && current && !board.error && (
             <section className="lane" aria-label="Loading tasks"><Loader label="Loading tasks" /></section>

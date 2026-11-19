@@ -71,7 +71,7 @@ export function registerAgentAdminTools(server: McpServer, db: Db, { notes, skil
             const team_ = names.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) in (${sql.join(names.map((n) => sql`${n.toLowerCase()}`), sql`, `)})`)) : [];
             const missing = names.filter((n) => !team_.some((t) => t.name.toLowerCase() === n.toLowerCase()));
             if (missing.length) return fail(`No agent called ${missing.join(", ")}. Use board to see who there is.`);
-            const base = { companyId: scope.companyId, byAgentId: scope.agentId, why: input.why ?? "", agentIds: team_.map((t) => t.id) };
+            const base = { companyId: scope.companyId, byAgentId: scope.agentId, runId: scope.runId, why: input.why ?? "", agentIds: team_.map((t) => t.id) };
             const p = input.url
               ? await skillProposals.propose({ ...base, source: "link", url: input.url, skill: input.skill })
               : await skillProposals.propose({ ...base, source: "draft", name: input.name, files: (input.files ?? []).map((f) => ({ path: f.path, content: f.encoding === "base64" ? f.content : Buffer.from(f.content, "utf8").toString("base64") })) });

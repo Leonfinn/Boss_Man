@@ -3,6 +3,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkUmami } from "./umami.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -128,7 +129,6 @@ export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const dist = process.argv[2] ?? path.join(root, "dist");
-  const { checkUmami } = await import("./build.mjs");
   const problems = checkSite(dist, { siteUrl: (process.env.SITE_URL ?? "").replace(/\/+$/, ""), umami: checkUmami(process.env.UMAMI_SCRIPT_URL, process.env.UMAMI_WEBSITE_ID) });
   if (problems.length) {
     console.error(problems.map((p) => "- " + p).join("\n"));

@@ -127,3 +127,36 @@ describe("request_check", () => {
     expect(await s.db.select().from(checkJobs)).toHaveLength(0);
   });
 });
+
+// BOS-1922: the move to review waits for the quick check on the current head.
+describe("review refusal for the quick check", () => {
+  it("no check on the head, or a no-code ticket: allowed", async () => {
+    const s = await setup();
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    await s.db.update(tickets).set({ noCode: true }).where(eq(tickets.id, s.ticket));
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+  it("queued, running and failed refuse with the head and state; passed allows", async () => {
+    const s = await setup();
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    for (const state of ["queued", "running", "failed"]) {
+      await s.db.update(checkJobs).set({ state }).where(eq(checkJobs.ticketId, s.ticket));
+      expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBe(`the quick check on headcomm hasn't passed yet (${state}). It wakes you when it finishes; move to review then.`);
+    }
+    await s.db.update(checkJobs).set({ state: "passed" }).where(eq(checkJobs.ticketId, s.ticket));
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+  it("a check on an older head does not hold a new head, and a cancelled one is not a hold", async () => {
+    const s = await setup();
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    const newer = checkRequestService(s.db, { diff: async () => diff({ head: "headcommit2", tree: "tree2" }) });
+    expect(await newer.reviewRefusal(s.co, s.ticket)).toBeNull();
+    await s.db.update(checkJobs).set({ state: "cancelled" }).where(eq(checkJobs.ticketId, s.ticket));
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+  it("queue switched off: no hold", async () => {
+    const s = await setup(diff(), "legacy");
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+});

@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, runners, runs } from "../src/db/schema.js";
+import { agents, costEvents, runners, runs } from "../src/db/schema.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -65,5 +65,26 @@ describe("run transcripts (R43)", () => {
       [newer, 0, "CEO"],
       [older, 412_000, "CEO"],
     ]);
+  });
+
+  it("filters finished runs by agent and result, and pages older ones with before", async () => {
+    const c = await setup();
+    const [other] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Helper", role: "worker", agentKind: "claude" }).returning();
+    const t = (n: number) => new Date(Date.UTC(2026, 0, 1, 12, 0, 0) - n * 60_000);
+    const ids = { ok: randomUUID(), bad: randomUUID(), int: randomUUID(), otherBad: randomUUID(), stopped: randomUUID() };
+    await c.db.insert(runs).values([
+      { id: ids.ok, companyId: c.company.id, agentId: c.ceo.id, endedAt: t(1), outcome: "end_turn" },
+      { id: ids.bad, companyId: c.company.id, agentId: c.ceo.id, endedAt: t(2), outcome: "error: boom" },
+      { id: ids.int, companyId: c.company.id, agentId: c.ceo.id, endedAt: t(3), outcome: "interrupted" },
+      { id: ids.otherBad, companyId: c.company.id, agentId: other!.id, endedAt: t(4), outcome: "error: x" },
+      { id: ids.stopped, companyId: c.company.id, agentId: c.ceo.id, endedAt: t(5), outcome: "cancelled" },
+    ]);
+    const idsOf = async (q: string) => ((await c.get(`/api/runs/recent?${q}`)).json() as Array<{ id: string }>).map((r) => r.id);
+    expect(await idsOf("result=failed")).toEqual([ids.bad, ids.otherBad]);
+    expect(await idsOf("result=interrupted")).toEqual([ids.int]);
+    expect(await idsOf("result=finished")).toEqual([ids.ok]);
+    expect(await idsOf(`agentId=${c.ceo.id}&result=failed`)).toEqual([ids.bad]);
+    expect(await idsOf(`before=${encodeURIComponent(t(2).toISOString())}`)).toEqual([ids.int, ids.otherBad, ids.stopped]);
+    expect((await c.get("/api/runs/recent?result=bogus")).statusCode).toBe(400);
   });
 });

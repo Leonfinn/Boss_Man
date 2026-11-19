@@ -153,4 +153,9 @@ grep -q "first install" "$T/out" || fail "no first-install message"
 grep -q "runners keep running it" "$T/out" && fail "first install got the existing-install message"
 logged "recreate-all" && fail "a failed first-install canary recreated runners"
 if ./update-runner.sh --bogus >/dev/null 2>&1; then fail "unknown flag accepted"; fi
+# BOS-1913: each step prints its own Timing line, including the switch, and a total.
+run
+for step in "network guard build" "runner image build" "canary" "launcher rebuild" "runner switch" "total"; do
+  grep -q "^Timing: $step" "$T/out" || fail "no Timing line for $step: $(cat "$T/out")"
+done
 echo "update-runner.test.sh: ok"

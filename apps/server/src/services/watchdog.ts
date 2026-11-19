@@ -4,7 +4,7 @@
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { GO_LIVE_WAIT_MAX_MS, watchEndsAt, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+import { GO_LIVE_WAIT_MAX_MS, currentReportSamples, watchEndsAt, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { PREFLIGHT_KIND, PREFLIGHT_STARTED_KIND } from "./ci-preflight.js";
@@ -551,8 +551,10 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
 
   /** Whether an account has room: it has readings and none of its windows is past its hold threshold. The scheduler's own test (hasRoom). */
   async function accountHasRoom(source: typeof fundingSources.$inferSelect, t: Date) {
-    const samples = await db.selectDistinctOn([quotaSamples.window]).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
-    if (!samples.length) return false;
+    const newest = await db.selectDistinctOn([quotaSamples.window]).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
+    if (!newest.length) return false;
+    // Only limits the latest report included (BOS-1916).
+    const samples = source.provider === "synthetic" ? newest : currentReportSamples(newest);
     const off = new Set(source.quotaDisabledWindows ?? []);
     return !samples.some((x) => !off.has(x.window) && !windowHasReset(x.resetsAt, t) && x.utilization >= source.quotaHoldAt);
   }

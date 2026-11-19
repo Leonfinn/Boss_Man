@@ -2,16 +2,24 @@ import { createRequire } from "node:module";
 import { afterAll, describe, expect, it } from "vitest";
 import { DeviceReport, tallestReading } from "@boss-man/shared";
 
-// Real wheel over the REAL Kanban board (BOS-962, regression of BOS-554). The old guard only read
-// the CSS text, so a layout change could bring the fault back with every test still green. This
-// mounts the actual Board page in a browser (Vite in-process, /api answered with fixtures) and turns
-// the mouse wheel with real input events over the middle of the board at a wide desktop size and at
-// the owner's foldable profile, asserting the page moves. A sideways-only box that is a pixel taller
-// than its frame eats the wheel, so one wheel anywhere over the board must scroll the page.
+// Real wheel over the REAL Kanban board (BOS-962, regression of BOS-554; BOS-1915 the third time).
+// This mounts the actual Board page in a browser (Vite in-process, /api answered with fixtures) and
+// turns the mouse wheel with real input events, asserting the page moves.
 //
-// The tabs are checked too: their buttons carry a 3px border and a -1px margin, so the strip is one
-// pixel taller than its frame. If `overflow-y: hidden` is ever dropped there, the wheel died over it
-// on 6 Nov (BOS-554); this test then fails.
+// Why the BOS-962 version missed BOS-1915: it only sent perfectly vertical wheel ticks (deltaX 0),
+// from the top of the page, over three points of a small board. A real mouse or trackpad on a Mac
+// adds a pixel or two of sideways movement. The browser hands such an event to the board (it can
+// scroll sideways) and the board drops the vertical part; Safari then keeps the whole gesture on
+// the board, so the page stops responding. A vertical-only tick never shows that. So this version:
+//   - fills the board like the owner's (19+ cards in the busy lanes, the live-check, merging and
+//     "Your review" lanes, the "waiting on you" and "other projects" banners at the top),
+//   - points at every area (banners, filter row, lane headers, the long lane description, cards,
+//     the gap between two cards, the empty part of a short lane, an empty lane's text, the cut-off
+//     column at the right edge, the tabs),
+//   - from the top and part-way down the page, with the board's sideways scroll at 0 and not at 0,
+//   - sends both a vertical-only tick and a tick with a little sideways movement, and a whole
+//     gesture of such ticks,
+//   - and checks sideways input (a sideways swipe, shift+wheel) still scrolls the board.
 //
 // Skipped, not failed, where no browser or Vite is installed (the runner and CI have both).
 
@@ -66,6 +74,12 @@ const foldable: DeviceReport = DeviceReport.parse({
     { width: 1667, height: 1668, pixelRatio: 3, coarsePointer: true, displayMode: "standalone", units: { vh: 724, dvh: 724, svh: 724, lvh: 724, visual: 724 }, afterScroll: false },
   ],
 });
+// The owner's desktop with a mouse (BOS-1915 was reported there), as the devices tool recorded it:
+// 1550 CSS px wide, a 1594 px visual viewport. Its pixel ratio is 2, but this runs at 1: Playwright's
+// emulated ratio hands the page half the wheel amount (deltaY 30 for a 60 px tick) while the
+// browser's own scroll moves the full 60, which a real Retina screen doesn't do, and which would
+// make the page-scrolled-by-code case look short. The ratio plays no part in which element gets the wheel.
+const desktop = { width: 1550, height: 1594, deviceScaleFactor: 1 };
 
 const browser = await launch();
 const server = await startVite();
@@ -74,14 +88,26 @@ afterAll(async () => {
   await server?.close();
 });
 
-// A small, real-shaped board: a project, its columns, and enough cards that the columns run below
-// the fold. `waitingOnOwner` puts two tasks in the "Your review" lane, as the owner saw.
+// A board as full as the owner's on 19 Nov: 13 in Backlog, 1 in Ready, 19 in progress, 19 blocked
+// plus 16 merged and waiting for a live check (their own lane, with its long description), an empty
+// "Awaiting review" lane, 8 approved and merging, 2 waiting on the owner ("Your review" lane and the
+// banner at the top), Done, and the "Working on other projects" banner.
 const agent = { id: "a1", name: "Bungle - Web Developer", role: "engineer", status: "idle" };
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", agents: [agent] };
 const project = { id: "p1", companyId: "c1", name: "Development", repoUrl: null, defaultBranch: "main", verifyCommand: null, deepVerifyCommand: null, landing: "merge", gitHost: null, gitApiBase: null, starred: false, ticketCostCapMicros: null, monthlyCapMicros: null };
-const ticket = (id: string, state: string, n: number, waiting = false) => ({ id, title: `Ticket number ${n} with a title long enough to wrap onto two lines in a card`, number: n, systemState: state, outcome: null, assigneeAgentId: "a1", assignedToOwner: false, dueDate: null, blockedBy: [], branch: "b", risk: "low", size: 2, planFirst: false, plan: null, planApprovedAt: null, featureId: null, body: null, lastActivityAt: new Date().toISOString(), waitingOnOwner: waiting });
-const columns = (["ready", "in_progress", "blocked", "review", "done"] as const).map((state, i) => ({ id: `col${i}`, name: state, systemState: state, wipLimit: null, tickets: Array.from({ length: 12 }, (_, j) => ticket(`t${i}-${j}`, state, i * 100 + j, state === "review")) }));
-const board = { project, workingAgents: 0, withoutTicket: [], columns };
+const ticket = (id: string, state: string, n: number, extra: Record<string, unknown> = {}) => ({ id, title: `Ticket number ${n} with a title long enough to wrap onto two lines in a card`, number: n, systemState: state, outcome: null, assigneeAgentId: "a1", assignedToOwner: false, dueDate: null, blockedBy: [], branch: "b", risk: "low", size: 2, planFirst: false, plan: null, planApprovedAt: null, featureId: null, body: null, lastActivityAt: new Date().toISOString(), waitingOnOwner: false, ...extra });
+const counts = { backlog: 13, ready: 1, in_progress: 19, blocked: 19, review: 0, done: 20 } as const;
+const columns = (Object.keys(counts) as Array<keyof typeof counts>).map((state, i) => {
+  const tickets = Array.from({ length: counts[state] }, (_, j) => ticket(`t${i}-${j}`, state, i * 100 + j));
+  if (state === "blocked") for (let j = 0; j < 16; j++) tickets.push(ticket(`lc${j}`, state, 900 + j, { mergeCommit: "abc1234", goLiveNote: "Merged and live. Waiting for the agent to report the after-merge check. Nothing for you to do." }));
+  if (state === "review") {
+    for (let j = 0; j < 8; j++) tickets.push(ticket(`m${j}`, state, 800 + j, { reviewStage: "merging" }));
+    tickets.push(ticket("w1", state, 700, { waitingOnOwner: true }), ticket("w2", state, 701, { waitingOnOwner: true }));
+  }
+  return { id: `col${i}`, name: state, systemState: state, wipLimit: null, tickets };
+});
+const otherProjects = [{ id: "r1", agent: "Brian - Release Manager", ticketId: "x1", ticketNumber: 1912, ticketTitle: "Website: set the analytics settings for the site publish, republish, then run the live visit and click check", projectId: "p2", projectName: "Boss Man Website", startedAt: new Date().toISOString() }];
+const board = { project, workingAgents: 0, withoutTicket: [], otherProjects, columns };
 const api: Record<string, unknown> = {
   "/api/setup": { needsSetup: false },
   "/api/me": { username: "owner" },
@@ -105,8 +131,8 @@ const api: Record<string, unknown> = {
   "/api/policy": {},
 };
 
-async function openBoard(width: number, height: number, hasTouch: boolean): Promise<Page> {
-  const page = (await browser!.newPage({ viewport: { width, height }, hasTouch, isMobile: hasTouch })) as Page;
+async function openBoard(opts: { width: number; height: number; deviceScaleFactor?: number; hasTouch?: boolean }): Promise<Page> {
+  const page = (await browser!.newPage({ viewport: { width: opts.width, height: opts.height }, deviceScaleFactor: opts.deviceScaleFactor, hasTouch: !!opts.hasTouch, isMobile: !!opts.hasTouch })) as Page;
   await page.route("**/api/**", (route: any) => {
     const path = new URL(route.request().url()).pathname;
     // An answer in flight when the test closes its page rejects with "has been closed": expected, not a failure (BOS-1708).
@@ -115,12 +141,13 @@ async function openBoard(width: number, height: number, hasTouch: boolean): Prom
     });
   });
   await page.goto(`${server!.resolvedUrls.local[0]}#board/p1`, { waitUntil: "networkidle" });
-  // The board paints once its data poll answers; wait for a real card.
+  // The board paints once its data poll answers; wait for the last lane's cards, so every lane is there.
+  await page.waitForSelector(".board-scroll #lane-live-check", { timeout: 15_000 });
   await page.waitForSelector(".board-scroll .ticket h3", { timeout: 15_000 });
   return page;
 }
 
-/** The pixel point of the middle of an element, clipped into the window. */
+/** The pixel point of an element, clipped into the window. */
 async function pointOf(page: Page, selector: string, fx = 0.5, fy = 0.5): Promise<{ x: number; y: number }> {
   return page.evaluate(([sel, fx, fy]: [string, number, number]) => {
     const r = (document.querySelector(sel) as HTMLElement).getBoundingClientRect();
@@ -128,6 +155,105 @@ async function pointOf(page: Page, selector: string, fx = 0.5, fy = 0.5): Promis
     const vw = window.innerWidth;
     return { x: Math.round(Math.min(vw - 4, Math.max(1, r.left + r.width * fx))), y: Math.round(Math.min(vh - 4, Math.max(1, r.top + r.height * fy))) };
   }, [selector, fx, fy]);
+}
+
+/**
+ * Every area of the board the pointer can rest on, as a point in the window right now, or null
+ * when that area is scrolled out of view. Run in the page.
+ */
+const AREAS = ["waiting-on-you banner", "other-projects banner", "filter row", "lane header", "live-check lane description", "card", "gap between cards", "below a short lane", "empty lane text", "cut-off column at the right edge", "tabs"] as const;
+type Area = (typeof AREAS)[number];
+
+async function areaPoint(page: Page, area: Area): Promise<{ x: number; y: number } | null> {
+  return page.evaluate((area: string) => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const r = (sel: string, i = 0) => (document.querySelectorAll(sel)[i] as HTMLElement | undefined)?.getBoundingClientRect() ?? null;
+    const inside = (x: number, y: number) => (x >= 1 && x <= vw - 4 && y >= 1 && y <= vh - 4 ? { x: Math.round(x), y: Math.round(y) } : null);
+    const mid = (b: DOMRect | null) => (b ? inside(Math.max(b.left, 0) + Math.min(b.width, vw - Math.max(b.left, 0)) / 2, Math.max(b.top, 0) + Math.min(b.height, vh - Math.max(b.top, 0)) / 2) : null);
+    const lanes = Array.from(document.querySelectorAll(".board-scroll .lane")) as HTMLElement[];
+    const visibleLane = lanes.find((l) => { const b = l.getBoundingClientRect(); return b.left >= 0 && b.right <= vw; });
+    switch (area) {
+      case "waiting-on-you banner": return mid(r("a.strip"));
+      case "other-projects banner": return mid(r(".unticketed"));
+      case "filter row": { const b = r(".board-bar"); return b ? inside(b.left + b.width * 0.7, b.top + b.height / 2) : null; }
+      case "lane header": return visibleLane ? mid(visibleLane.querySelector(".lane-head")!.getBoundingClientRect()) : null;
+      case "live-check lane description": { const l = document.getElementById("lane-live-check")?.closest(".lane"); return mid(l?.querySelector(".lane-hint")?.getBoundingClientRect() ?? null); }
+      case "card": { const cards = Array.from(document.querySelectorAll(".board-scroll .ticket")) as HTMLElement[]; const c = cards.find((c) => mid(c.getBoundingClientRect()) && c.getBoundingClientRect().right <= vw); return c ? mid(c.getBoundingClientRect()) : null; }
+      case "gap between cards": {
+        for (const lane of lanes) {
+          const cards = Array.from(lane.querySelectorAll(":scope > .ticket, :scope > * > .ticket")) as HTMLElement[];
+          for (let i = 0; i + 1 < cards.length; i++) {
+            const a = cards[i]!.getBoundingClientRect();
+            const b = cards[i + 1]!.getBoundingClientRect();
+            const p = a.right <= vw ? inside(a.left + a.width / 2, (a.bottom + b.top) / 2) : null;
+            if (p && b.top - a.bottom >= 2) return p;
+          }
+        }
+        return null;
+      }
+      case "below a short lane": {
+        const ready = lanes.find((l) => l.querySelector("h2")?.textContent === "ready")?.getBoundingClientRect();
+        return ready ? inside(ready.left + ready.width / 2, Math.max(ready.bottom + 60, 60)) : null;
+      }
+      case "empty lane text": { const e = Array.from(document.querySelectorAll(".board-scroll .lane-empty")).map((e) => e.getBoundingClientRect()).find((b) => b.right <= vw); return mid(e ?? null); }
+      case "cut-off column at the right edge": {
+        // The board's own right edge cuts the column (the board stops short of the window edge).
+        const edge = Math.min(vw, (document.querySelector(".board-scroll") as HTMLElement).getBoundingClientRect().right);
+        // The last few pixels before that edge: the cut-off column's sliver (or, at a width where a
+        // gap falls there, the gap beside it), whichever the layout puts under the pointer.
+        const top = lanes[0]!.getBoundingClientRect().top;
+        return inside(edge - 4, Math.max(top + 120, 120));
+      }
+      case "tabs": return mid(r(".tabs"));
+      default: return null;
+    }
+  }, area);
+}
+
+type ScrollState = { y: number; left: number };
+async function setScroll(page: Page, s: ScrollState): Promise<void> {
+  await page.evaluate(([y, left]: [number, number]) => {
+    window.scrollTo(0, y);
+    (document.querySelector(".board-scroll") as HTMLElement).scrollLeft = left;
+  }, [s.y, s.left]);
+}
+const read = (page: Page): Promise<ScrollState> => page.evaluate(() => ({ y: window.scrollY, left: (document.querySelector(".board-scroll") as HTMLElement).scrollLeft }));
+
+/**
+ * Real wheel events at one point (one per entry in `ticks`, sent back to back like one gesture),
+ * then wait for the page or the board to move. A timeout is not an error here: the caller's
+ * assertion reports a wheel that did nothing.
+ */
+async function wheel(page: Page, x: number, y: number, ticks: Array<{ dx: number; dy: number }>, modifiers = 0): Promise<{ moved: ScrollState; under: string }> {
+  const cdp = await page.context().newCDPSession(page);
+  const before = await read(page);
+  const under = await page.evaluate(([x, y]: [number, number]) => {
+    const e = document.elementFromPoint(x, y);
+    return e ? `${e.tagName}.${String((e as HTMLElement).className)}` : "nothing";
+  }, [x, y]);
+  for (const t of ticks) await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: t.dx, deltaY: t.dy, modifiers, pointerType: "mouse" });
+  // Wait for the move to finish (smooth scrolling on a slow GitHub runner can still be under way):
+  // until the position stops changing for 3 reads in a row after it first moved.
+  try {
+    await page.waitForFunction(
+      ([y0, l0]: [number, number]) => {
+        const w = window as unknown as { __wheelSeen?: string[] };
+        const now = `${window.scrollY},${(document.querySelector(".board-scroll") as HTMLElement).scrollLeft}`;
+        if (now === `${y0},${l0}`) return false;
+        const seen = (w.__wheelSeen = [...(w.__wheelSeen ?? []), now].slice(-3));
+        return seen.length === 3 && seen.every((s) => s === now);
+      },
+      [before.y, before.left],
+      { timeout: 10_000, polling: 50 },
+    );
+  } catch {
+    /* fall through to the read below */
+  }
+  await page.evaluate(() => { delete (window as unknown as { __wheelSeen?: string[] }).__wheelSeen; });
+  const after = await read(page);
+  await cdp.detach();
+  return { moved: { y: after.y - before.y, left: after.left - before.left }, under };
 }
 
 /**
@@ -144,40 +270,54 @@ async function expectSidewaysOnly(page: Page, selector: string): Promise<void> {
   expect(m.oy, `${selector} must set overflow-y: hidden`).toBe("hidden");
 }
 
-/** A real wheel notch, then how far the page moved and which element was under the pointer. */
-async function wheel(page: Page, x: number, y: number, deltaY: number, deltaX = 0): Promise<{ scrollY: number; under: string }> {
-  const cdp = await page.context().newCDPSession(page);
-  await page.evaluate(() => window.scrollTo(0, 0));
-  const under = await page.evaluate(([x, y]: [number, number]) => {
-    const e = document.elementFromPoint(x, y);
-    return e ? `${e.tagName}.${String((e as HTMLElement).className)}` : "nothing";
-  }, [x, y]);
-  await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX, deltaY, pointerType: "mouse" });
-  // Wait for the page to actually move (smooth scrolling on a slow GitHub runner can still be at 0
-  // after a fixed sleep). A sideways wheel moves the board instead, so wait for that: once the
-  // board has scrolled, the wheel has been handled, and a stray page scroll would have shown by
-  // now. A timeout is not an error here: the caller's assertion reports a wheel that did nothing.
-  try {
-    if (deltaY !== 0) await page.waitForFunction(() => window.scrollY > 0, undefined, { timeout: 10_000 });
-    else await page.waitForFunction(() => (document.querySelector(".board-scroll") as HTMLElement).scrollLeft > 0, undefined, { timeout: 10_000 });
-  } catch {
-    /* fall through to the read below */
-  }
-  const scrollY = await page.evaluate(() => window.scrollY);
-  await cdp.detach();
-  return { scrollY, under };
-}
-
-describe.skipIf(!browser || !server)("the mouse wheel over the real Kanban board scrolls the page (BOS-962)", () => {
-  it("at a wide desktop: over a card, a gap and a lane, the page moves", async () => {
-    const page = await openBoard(1440, 900, false);
+describe.skipIf(!browser || !server)("the mouse wheel over the real Kanban board scrolls the page (BOS-962, BOS-1915)", () => {
+  it("at the owner's desktop: every area, top and part-way down, board scrolled sideways or not, plain and slightly sideways wheels", async () => {
+    const page = await openBoard(desktop);
     try {
       await expectSidewaysOnly(page, ".board-scroll");
-      // A card in the middle of the board, the gap beside the lanes, and the lane's blank lower part.
-      for (const [sel, fx, fy] of [[" .board-scroll .ticket", 0.5, 0.4], [".board-scroll", 0.98, 0.6], [".board", 0.5, 0.95]] as const) {
-        const p = await pointOf(page, sel.trim(), fx, fy);
-        const r = await wheel(page, p.x, p.y, 400);
-        expect(r.scrollY, `wheel over ${r.under} (${sel}) should scroll the page`).toBeGreaterThan(0);
+      const maxLeft = await page.evaluate(() => { const b = document.querySelector(".board-scroll") as HTMLElement; return b.scrollWidth - b.clientWidth; });
+      expect(maxLeft, "the full board must be wider than the window, as the owner's is").toBeGreaterThan(100);
+      const failures: string[] = [];
+      for (const start of [{ y: 0, left: 0 }, { y: 0, left: Math.round(maxLeft / 2) }, { y: 400, left: 0 }, { y: 400, left: maxLeft }]) {
+        for (const area of AREAS) {
+          // At the top of the page every area must be on screen, so none is skipped by accident.
+          await setScroll(page, start);
+          const p = await areaPoint(page, area);
+          if (!p) {
+            if (start.y === 0 && !(area === "cut-off column at the right edge" && start.left > 0)) failures.push(`${area} not found on screen at ${JSON.stringify(start)}`);
+            continue;
+          }
+          for (const ticks of [[{ dx: 0, dy: 100 }], [{ dx: 2, dy: 100 }]]) {
+            await setScroll(page, start);
+            const r = await wheel(page, p.x, p.y, ticks);
+            const what = `${area} at ${JSON.stringify(start)}, wheel ${JSON.stringify(ticks[0])} over ${r.under}`;
+            if (r.moved.y <= 0) failures.push(`${what}: the page did not move`);
+            if (r.moved.left !== 0) failures.push(`${what}: the board moved sideways by ${r.moved.left}`);
+          }
+        }
+      }
+      expect(failures, failures.join("\n")).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("a whole gesture with a little sideways movement keeps scrolling the page (the Magic Mouse and trackpad case)", async () => {
+    const page = await openBoard(desktop);
+    try {
+      for (const area of ["card", "gap between cards", "below a short lane"] as const) {
+        await setScroll(page, { y: 0, left: 0 });
+        const p = (await areaPoint(page, area))!;
+        // The baseline: the same six ticks straight down, which the browser hands to the page. (The
+        // pixel ratio scales the delivered amount, so compare with this, not with 6 x 60.)
+        const straight = await wheel(page, p.x, p.y, Array.from({ length: 6 }, () => ({ dx: 0, dy: 60 })));
+        expect(straight.moved.y, `straight-down gesture over ${area} (${straight.under}) should scroll the page`).toBeGreaterThan(0);
+        await setScroll(page, { y: 0, left: 0 });
+        const r = await wheel(page, p.x, p.y, Array.from({ length: 6 }, (_, i) => ({ dx: i % 2 ? 0 : 1, dy: 60 })));
+        // Every tick must reach the page, not just the purely vertical ones: before BOS-1915 the
+        // ones with a sideways pixel went to the board and the page moved half as far.
+        expect(r.moved.y, `gesture over ${area} (${r.under}) should scroll the page as far as a straight-down one`).toBeGreaterThanOrEqual(straight.moved.y - 1);
+        expect(r.moved.left, `gesture over ${area} must not move the board sideways`).toBe(0);
       }
     } finally {
       await page.close();
@@ -186,34 +326,41 @@ describe.skipIf(!browser || !server)("the mouse wheel over the real Kanban board
 
   it("at the owner's foldable: over the middle of the board, the page moves", async () => {
     const t = tallestReading(foldable);
-    const page = await openBoard(t.width, t.units.visual, t.coarsePointer);
+    const page = await openBoard({ width: t.width, height: t.units.visual, hasTouch: t.coarsePointer });
     try {
       await expectSidewaysOnly(page, ".board-scroll");
       const p = await pointOf(page, ".board-scroll .ticket", 0.5, 0.5);
-      const r = await wheel(page, p.x, p.y, 400);
-      expect(r.scrollY, `wheel over ${r.under} should scroll the page`).toBeGreaterThan(0);
+      for (const ticks of [[{ dx: 0, dy: 400 }], [{ dx: 3, dy: 400 }]]) {
+        await setScroll(page, { y: 0, left: 0 });
+        const r = await wheel(page, p.x, p.y, ticks);
+        expect(r.moved.y, `wheel ${JSON.stringify(ticks[0])} over ${r.under} should scroll the page`).toBeGreaterThan(0);
+      }
     } finally {
       await page.close();
     }
   });
 
-  it("sideways still works: a horizontal wheel or trackpad swipe reaches the columns past the edge", async () => {
-    const page = await openBoard(1440, 900, false);
+  it("sideways still works: a sideways swipe or shift+wheel reaches the columns past the edge, and the page stays put", async () => {
+    const page = await openBoard(desktop);
     try {
-      const before = await page.evaluate(() => (document.querySelector(".board-scroll") as HTMLElement).scrollLeft);
-      // Start at the left of the board and push sideways; the board must move, not the page.
-      const p = await pointOf(page, ".board-scroll", 0.5, 0.5);
-      const r = await wheel(page, p.x, p.y, 0, 300);
-      const after = await page.evaluate(() => (document.querySelector(".board-scroll") as HTMLElement).scrollLeft);
-      expect(after, "the board should scroll sideways to reach the Done column").toBeGreaterThan(before);
-      expect(r.scrollY, "a sideways wheel must not scroll the page").toBe(0);
+      const p = (await areaPoint(page, "card"))!;
+      for (const [label, ticks, modifiers] of [
+        ["a sideways trackpad swipe", [{ dx: 300, dy: 0 }], 0],
+        ["a mostly sideways swipe", [{ dx: 300, dy: 20 }], 0],
+        ["shift+wheel", [{ dx: 0, dy: 300 }], 8],
+      ] as const) {
+        await setScroll(page, { y: 0, left: 0 });
+        const r = await wheel(page, p.x, p.y, [...ticks], modifiers);
+        expect(r.moved.left, `${label} should scroll the board sideways`).toBeGreaterThan(0);
+        expect(r.moved.y, `${label} must not scroll the page`).toBe(0);
+      }
     } finally {
       await page.close();
     }
   });
 
   it("the tabs' one-pixel-taller strip does not eat the wheel either", async () => {
-    const page = await openBoard(1440, 900, false);
+    const page = await openBoard({ width: 1440, height: 900 });
     try {
       // The tabs are 1px taller than their frame (3px border, -1px margin): without
       // `overflow-y: hidden` the wheel over them scrolls a pixel and stops (BOS-554).
@@ -224,8 +371,9 @@ describe.skipIf(!browser || !server)("the mouse wheel over the real Kanban board
       expect(strip.sh).toBeGreaterThan(strip.ch);
       expect(strip.oy).toBe("hidden");
       const p = await pointOf(page, ".tabs", 0.5, 0.5);
-      const r = await wheel(page, p.x, p.y, 400);
-      expect(r.scrollY, `wheel over ${r.under} should scroll the page`).toBeGreaterThan(0);
+      await setScroll(page, { y: 0, left: 0 });
+      const r = await wheel(page, p.x, p.y, [{ dx: 0, dy: 400 }]);
+      expect(r.moved.y, `wheel over ${r.under} should scroll the page`).toBeGreaterThan(0);
     } finally {
       await page.close();
     }

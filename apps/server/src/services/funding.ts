@@ -5,6 +5,7 @@ import {
   budgetStatus,
   creditStatus,
   dateIn,
+  currentReportSamples,
   forecastQuota,
   FORECAST_WINDOW_MS,
   formatDate,
@@ -396,14 +397,14 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     return Math.max(FORECAST_WINDOW_MS, left);
   }
 
-  async function latestQuota(fundingSourceId: string) {
-    // The newest sample per window.
+  async function latestQuota(source: typeof fundingSources.$inferSelect) {
+    // The newest sample per window, limited to the windows the latest report included (BOS-1916).
     const rows = await db
       .selectDistinctOn([quotaSamples.window])
       .from(quotaSamples)
-      .where(eq(quotaSamples.fundingSourceId, fundingSourceId))
+      .where(eq(quotaSamples.fundingSourceId, source.id))
       .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
-    return rows;
+    return source.provider === "synthetic" || !rows.length ? rows : currentReportSamples(rows);
   }
 
   /**
@@ -414,7 +415,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
    */
   async function quotaForecasts(source: typeof fundingSources.$inferSelect, now: Date) {
     const fundingSourceId = source.id;
-    const quota = source.kind === "subscription" ? await latestQuota(fundingSourceId) : [];
+    const quota = source.kind === "subscription" ? await latestQuota(source) : [];
     const since = new Date(now.getTime() - lookbackFor(quota, now));
     const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, fundingSourceId), gte(quotaSamples.observedAt, since))) : [];
     return { quota, forecasts: Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)])) };
@@ -463,8 +464,10 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
           ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, [], now, spend.ranges[0])
           : null;
       const { quota, forecasts } = await quotaForecasts(source, now);
-      // Every window name the adapter has reported, so the owner can switch each one on or off (BOS-227).
-      const windowsSeen = source.kind === "subscription" ? [...new Set((await db.selectDistinct({ window: quotaSamples.window }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id))).map((r) => r.window))].sort() : [];
+      // The window names the latest report includes, so the owner can switch each one on or off (BOS-227). A limit
+      // the account stopped reporting leaves the list; its saved on/off choice stays in quotaDisabledWindows (BOS-1916).
+      // Synthetic keeps every name it has fed in, as before.
+      const windowsSeen = source.kind !== "subscription" ? [] : source.provider === "synthetic" ? [...new Set((await db.selectDistinct({ window: quotaSamples.window }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id))).map((r) => r.window))].sort() : quota.map((q) => q.window).sort();
       return {
         source,
         credit,

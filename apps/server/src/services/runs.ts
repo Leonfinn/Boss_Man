@@ -1,7 +1,7 @@
 // Steering and stopping agents (R37). The owner, or a CEO for its own company, can send a
 // message into a running agent's session or stop it. A message for a run that has already
 // ended wakes the agent again on the same ticket with the message instead.
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, fundingSources, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
@@ -40,6 +40,17 @@ export async function liveRuns(db: Db, companyId: string) {
     .orderBy(asc(runs.startedAt));
 }
 
+/** The Runs page's result filter. The same split as its Failed / Interrupted / Finished tags (Runs.tsx outcomeTag). */
+export type RunResult = "finished" | "failed" | "interrupted";
+
+function resultWhere(result: RunResult) {
+  const failed = sql`${runs.outcome} like 'error%'`;
+  if (result === "failed") return failed;
+  if (result === "interrupted") return eq(runs.outcome, "interrupted");
+  // Finished is every other end (the tag's fallback), so a null outcome counts as finished too.
+  return sql`not (coalesce(${runs.outcome}, '') like 'error%' or coalesce(${runs.outcome}, '') in ('interrupted', 'cancelled') or coalesce(${runs.outcome}, '') like 'stopped%' or coalesce(${runs.outcome}, '') like 'lost%')`;
+}
+
 export class RunError extends Error {
   constructor(
     readonly status: number,
@@ -71,7 +82,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     },
 
     /** Runs that have finished, newest first, with what they cost. */
-    async recent(limit = 50, companyId?: string) {
+    async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date } = {}) {
       const rows = await db
         .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome , purpose: runs.purpose, reason: wakes.reason, note: wakes.note, ...runOriginQuery("runs"), inputTokens: runs.inputTokens, outputTokens: runs.outputTokens, cachedReadTokens: runs.cachedReadTokens, cachedWriteTokens: runs.cachedWriteTokens, fundingKind: fundingSources.kind })
         .from(runs)
@@ -80,7 +91,15 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
         .leftJoin(wakes, eq(wakes.runId, runs.id))
         // How the agent is paid for decides whether the page shows tokens or money (R67).
         .leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId))
-        .where(companyId ? and(isNotNull(runs.endedAt), eq(runs.companyId, companyId)) : isNotNull(runs.endedAt))
+        .where(
+          and(
+            isNotNull(runs.endedAt),
+            companyId ? eq(runs.companyId, companyId) : undefined,
+            filter.agentId ? eq(runs.agentId, filter.agentId) : undefined,
+            filter.before ? lt(runs.endedAt, filter.before) : undefined,
+            filter.result ? resultWhere(filter.result) : undefined,
+          ),
+        )
         .orderBy(desc(runs.endedAt))
         .limit(limit);
       const costs = rows.length
