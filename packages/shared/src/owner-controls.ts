@@ -294,6 +294,8 @@ export const OWNER_FIELDS = {
     "Background lane gives way for (minutes, 0 to",
     // Settings → Checks: carry a passed merge across file-disjoint main moves, and the landing turn (BOS-1762).
     "Land passed merges when main moved elsewhere", "Landing turn",
+    // Settings → Checks: rebuild a waiting merge on a moved main while it waits (merge_retarget; BOS-1344/1820/1821, BOS-1900).
+    "Rebuild waiting merges when main moves",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
     "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Settings → Checks: each machine's split between merge checks and quick checks (BOS-1602).

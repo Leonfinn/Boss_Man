@@ -849,6 +849,12 @@ export function reviewService(
     return row?.value !== false && row?.value !== "false";
   }
 
+  /** BOS-1344/1820/1821: whether a waiting merge is rebuilt on a moved main while it waits. On unless the owner turned it off. */
+  async function mergeRetarget(): Promise<boolean> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
+    return row?.value !== false && row?.value !== "false";
+  }
+
   /** BOS-1762: the landing turn's cap in minutes; 0 means no turns. */
   async function mergeTurnMinutes(): Promise<number> {
     const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_TURN_KEY));
@@ -2936,10 +2942,7 @@ export function reviewService(
       // "refreshed" (BOS-1820): with CI gating, the queued job took a new merge (`prep`) the old one's pass couldn't be carried onto.
       type RoundEnd = { status: "passed" } | { status: "stopped" } | { status: "branch_moved"; head: string; pinned: string } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | { status: "handed_over" } | CheckFailed | { status: "refreshed"; prep: Prepared };
       const message = gateMergeMessage(t.title, ticketId);
-      const retargetSwitch = async () => {
-        const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
-        return row?.value !== false && row?.value !== "false";
-      };
+      const retargetSwitch = mergeRetarget;
       // Never while CI gating is on (BOS-1070): CI was published for this commit, and a retargeted tree is one CI never ran on.
       // With CI, ciRefreshOn below (BOS-1820) refreshes only a merge whose pass couldn't be carried, and restarts its CI run.
       const retargetOn = async () => !ci && (await retargetSwitch());
@@ -2958,7 +2961,7 @@ export function reviewService(
        * BOS-1820: with GitHub CI gating, a queued merge is refreshed only when main moved in a way its pass couldn't be carried
        * across (finish would refuse it and rebuild after both the check and GitHub had run). A file-disjoint move is left alone:
        * the carry lands it with no second GitHub run. Needs the carry itself, a runner that answers prepare's carryFrom, and
-       * the owner's merge_retarget switch (Settings → Checks), which turns both refreshes off.
+       * the owner's merge_retarget switch (Settings → Checks, "Rebuild waiting merges when main moves"), which turns both refreshes off.
        */
       const ciRefreshOn = async () => !!ci && carryOn && deps.runners.can(runner.id, "merge-refresh") && (await retargetSwitch());
       const turnCapMs = (await mergeTurnMinutes()) * 60_000;
@@ -3818,6 +3821,12 @@ export function reviewService(
     mergeCarry,
     async setMergeCarry(on: boolean) {
       await db.insert(settings).values({ key: MERGE_CARRY_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
+      return on;
+    },
+
+    mergeRetarget,
+    async setMergeRetarget(on: boolean) {
+      await db.insert(settings).values({ key: MERGE_RETARGET_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
       return on;
     },
 
