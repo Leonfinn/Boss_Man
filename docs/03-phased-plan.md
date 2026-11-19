@@ -127,6 +127,7 @@ From the owner's first install: no-faff runners through a launcher, a setup wiza
 - **Review before any public release:**
   - Anthropic policy on subscription credentials.
   - The Claude Code licence. Claude Code is "© Anthropic PBC. All rights reserved. Use is subject to Anthropic's Commercial Terms", so publish the Dockerfile and **not** images that contain it.
+    - *Now (Nov 2026):* signed images are published ([25-published-images.md](25-published-images.md)). They contain no Claude Code: the Claude pack installs it on first start (DR-050).
   - Multiple users.
   - Security hardening.
 
@@ -139,4 +140,4 @@ From the owner's first install: no-faff runners through a launcher, a setup wiza
 | Quota data unavailable or undocumented | Spike S1 first. Label estimates as estimates. Never block work on quota data |
 | Agents with production access make mistakes | Production deploys go to the owner. Use a socket proxy or GitOps. Audit every use of a secret |
 | Scope creep and solo maintenance | v1 is kept deliberately small. Boss Man takes over its own backlog after v1 |
-| Claude Code redistribution | Publish the Dockerfile only. Users build the image, which installs Claude Code with Anthropic's own installer |
+| Claude Code redistribution | Publish the Dockerfile only. Users build the image, which installs Claude Code with Anthropic's own installer. *Now (Nov 2026):* signed images are published, with no Claude Code inside; the Claude pack installs it on the host at first start (DR-050) |
