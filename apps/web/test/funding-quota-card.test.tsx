@@ -180,3 +180,33 @@ describe("Synthetic quota", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });
+
+// BOS-1916: every Claude subscription lists the same three limits, with or without a Fable reading.
+describe("Claude subscriptions list the same limits", () => {
+  const mk = (id: string, name: string, windows: string[]) => ({
+    source: { id, name, kind: "subscription", provider: "anthropic" },
+    credit: null,
+    quota: windows.map((window) => ({ window, utilization: 0.4, resetsAt: later, status: null, overageInUse: false, observedAt: new Date().toISOString() })),
+    windowsSeen: windows,
+    forecasts: {},
+    daily: [],
+    totalSpentMicros: 0,
+    coverage: "all",
+  });
+  it("shows Fable and its hold switch on a source that has no Fable reading", async () => {
+    const a = mk("a1", "Claude Max", ["five_hour", "seven_day", "seven_day_overage_included"]);
+    const b = mk("a2", "Claude Max 2", ["five_hour", "seven_day"]);
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const body = url.includes("/a1/status") ? a : url.includes("/a2/status") ? b : url.includes("funding-sources") ? [a.source, b.source] : [];
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    render(<FundingCards />);
+    await screen.findAllByText("Fable (this week)");
+    expect(screen.getAllByText("Fable (this week)")).toHaveLength(2);
+    expect(screen.getAllByText("5-hour window")).toHaveLength(2);
+    expect(screen.getAllByText("This week")).toHaveLength(2);
+    expect(screen.getAllByText(/Can trigger the hold: Fable \(this week\)/)).toHaveLength(2);
+    expect(screen.getAllByText(/Can trigger the hold/).filter((e) => e.tagName === "SPAN" && e.textContent?.startsWith("Can trigger"))).toHaveLength(6);
+    expect(screen.getAllByText("No reading yet; updates on the next run")).toHaveLength(1);
+  });
+});
