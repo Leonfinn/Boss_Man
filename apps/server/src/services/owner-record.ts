@@ -96,7 +96,7 @@ export function ownerSetupLines(f: OwnerRecordFacts): string[] {
   ];
 }
 
-const kindsOf = (w: { takes: string; mergeKept: number }) =>
+export const kindsOf = (w: { takes: string; mergeKept: number }) =>
   w.takes === "merge" ? "merge checks only" : w.takes === "checks" ? "quick checks only" : w.mergeKept > 0 ? `all checks, ${w.mergeKept} slot${w.mergeKept === 1 ? "" : "s"} kept for merges` : "all checks";
 
 /**

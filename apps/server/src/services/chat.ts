@@ -13,6 +13,7 @@ import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
 import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
+import { namedThingsSection, type NamedSources } from "./named-things.js";
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
 
@@ -22,6 +23,16 @@ export const CHAT_REASON = "owner_chat";
 async function ownerSetupSection(db: Db, companyId: string): Promise<string[]> {
   const lines = [...ownerSetupLines(await ownerSetupFacts(db, companyId)), ...(await workerSetupLines(db, companyId).catch(() => []))];
   return lines.length ? ["", "## Owner's setup (from the record: say nothing about it that this contradicts)", ...lines] : [];
+}
+
+/**
+ * The text the named-things lookup reads (DR-069 D2): the owner's messages after the CEO's last reply (the ones this run answers)
+ * and that reply itself, since a slip is often in a follow-up to what the CEO said before.
+ */
+export function namedTexts(recent: Array<{ role: string; text: string }>): string[] {
+  const lastReply = recent.map((m) => m.role).lastIndexOf("assistant");
+  const unanswered = recent.slice(lastReply + 1).filter((m) => m.role === "owner");
+  return [...(lastReply >= 0 ? [recent[lastReply]!.text] : []), ...unanswered.map((m) => m.text)];
 }
 
 /**
@@ -102,6 +113,8 @@ export function chatService(
     trace?: ChatTraceService;
     /** A "flag" in the owner's feed (BOS-1734): a chat run asked again still ended without a reply. */
     flag?: (n: { companyId: string; agentId: string; title: string; body: string; link: string }) => Promise<unknown>;
+    /** What the named-things lookup may read besides the database (DR-069 D2, BOS-1854). */
+    named?: NamedSources;
   },
 ) {
   // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
@@ -241,6 +254,8 @@ export function chatService(
         ...(ceo ? await ceoNotesLines(db, companyId, agentId) : []),
         // DR-069 D1: the CEO's chat sees the same "Owner's setup" record as its ticket runs' brief (workers, runner, the owner's last word per worker).
         ...(ceo ? await ownerSetupSection(db, companyId) : []),
+        // DR-069 D2: the things the owner's unanswered messages and the CEO's last reply name, with the record and the owner's newest answers on each.
+        ...(ceo ? await namedThingsSection(db, companyId, namedTexts(recent), deps.named).catch(() => []) : []),
         "",
         // The same built-in rules as a ticket run (BOS-754); here they mostly guard what goes into tickets and pages.
         ...BUILT_IN_RULES,
