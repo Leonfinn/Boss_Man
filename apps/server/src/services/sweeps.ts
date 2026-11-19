@@ -26,7 +26,7 @@ import { heldTicketIds, mergeHolds, mergeWaits, wakeReadyHolds } from "./review-
 import { escalateStuckLineHolders } from "./line-holder.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { ownerWaitWatch } from "./owner-todo.js";
-import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
+import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, sweepSignedOffStuck, type SignoffCover } from "./signoff.js";
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
@@ -1728,6 +1728,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A card for older code is moved or replaced first, so the owner never holds one that is bound to fail (BOS-734).
       if (opts.branchHead && opts.signoffCovers) await refreshSignoffCards(db, { headOf: opts.branchHead, covers: opts.signoffCovers, withdraw: opts.signoffWithdraw ?? (async () => undefined) }).catch(() => 0);
       const signoffCards = await sweepMissingSignoffs(db, tellCeo);
+      // BOS-1879: a ticket stuck In progress or Blocked on a head the owner signed off goes back to review, where the gate merges.
+      if (!held && opts.branchHead) await sweepSignedOffStuck(db, { headOf: opts.branchHead, now: t, graceMs: 30 * 60_000 }).catch(() => 0);
       // An owner-wait note with no card (BOS-1576): hourly backup for notes written before the rule or left by a withdrawn card. It wakes the CEO, so not during a hold.
       if (!held) await ownerWait.run().catch(() => undefined);
       // The merge line jam alert (BOS-766): after the sign-off sweep, so a ticket that just got its card is
