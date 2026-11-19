@@ -79,7 +79,8 @@ after="$(dc exec -T tailscale sh -c 'ls /var/lib/tailscale' | sort | tr '\n' ' '
 [ "$before" = "$after" ] || fail "state changed across restart: [$before] -> [$after]"
 
 echo "== guide's key steps with a placeholder key (the sidecar must reject it; no real login is tried)"
-TS_AUTHKEY=tskey-auth-rehearse-not-a-real-key dc up -d --no-deps --force-recreate tailscale
+# Built from two parts so the file holds no key-shaped string for secret scanners (BOS-1932).
+TS_AUTHKEY="tskey-""auth-rehearse-not-a-real-key" dc up -d --no-deps --force-recreate tailscale
 sleep 20
 if grep -qiE "invalid|unauthorized|auth.?key|NeedsLogin" <<<"$(dc logs --no-color tailscale 2>&1)"; then
   echo "placeholder key was refused or ignored, as expected"

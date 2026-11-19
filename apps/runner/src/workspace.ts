@@ -27,7 +27,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MergeCarried, type MainLogResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MergeCarried, type MainLogResult, type SecretScanResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -2321,6 +2321,37 @@ export class Workspaces {
       }
       return { commits };
     });
+  }
+
+  /**
+   * The whole-tree secrets pass (BOS-1932): fetches, reads the target's commit, then runs the runner's OWN installed scanner
+   * (BOSSMAN_SCAN_SCRIPT, root-owned, from the image, as for the merge-line scan) with `--tree <sha> --json` in the shared
+   * repo. It reads git objects only: nothing is checked out and no branch code runs. The repo lock is held for the fetch
+   * only, so merges don't wait the scan's ~20 s; the commit's objects can't change under it. The answer never holds a
+   * matched value (the scanner prints none).
+   */
+  async secretScan(projectId: string, target: string, secrets: Record<string, string | undefined> = {}): Promise<SecretScanResult> {
+    const none = (reason: string): SecretScanResult => ({ scanned: null, reason, files: 0, skipped: [], findings: [] });
+    const script = this.baseEnv.BOSSMAN_SCAN_SCRIPT;
+    if (!script || !path.isAbsolute(script) || !existsSync(script)) return none("This runner has no secrets scanner installed (an older runner image).");
+    const auth = gitAuthEnv(secrets);
+    const repo = this.repoDir(projectId);
+    const sha = await this.withRepoLock(projectId, async () => {
+      if (!existsSync(path.join(repo, "HEAD"))) return null;
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      return (await this.gitCode(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${target}^{commit}`], { cwd: repo })).stdout.trim() || null;
+    });
+    if (!sha) return none(existsSync(path.join(repo, "HEAD")) ? `The repo has no branch "${target}".` : "This runner has no copy of that project's repo yet.");
+    const env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME };
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile(process.execPath, [script, "--tree", sha, "--json"], { cwd: repo, env, timeout: 10 * 60_000, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`the secrets scanner failed: ${String(stderr || (err as Error).message).trim().slice(0, 500)}`));
+        else resolve(stdout);
+      });
+    });
+    const r = JSON.parse(out.trim().split("\n").pop() ?? "{}") as { commit?: string; files?: number; skipped?: SecretScanResult["skipped"]; findings?: SecretScanResult["findings"] };
+    if (r.commit !== sha || !Array.isArray(r.findings)) throw new Error("the secrets scanner gave an answer this runner can't read");
+    return { scanned: sha, files: Number(r.files) || 0, skipped: r.skipped ?? [], findings: r.findings };
   }
 
   /**
