@@ -134,6 +134,10 @@ if command -v git >/dev/null; then
   rm -f "$store"/*.json "$store"/*.log
   cached 0 1 "store: step times" 'echo x >>"$COUNT"; echo "check-all: step typecheck:server took 12s (exit 0, at 10:00:00 UTC)"; echo "check-all: step test:server took 345s (exit 0, at 10:06:00 UTC)"' env
   grep -q '"steps":{"typecheck:server":12,"test:server":345}' "$store"/*.json || fail "store: step times not recorded: $(cat "$store"/*.json)"
+  # BOS-1939: a skipped step is listed under "skipped" and never counted in "steps".
+  rm -f "$store"/*.json "$store"/*.log
+  cached 0 1 "store: skipped steps" 'echo x >>"$COUNT"; echo "check-all: step build took 5s (exit 0, at 10:00:00 UTC)"; echo "check-all: step shellcheck skipped"; echo "check-all: step shell-tests skipped"' env
+  grep -q '"steps":{"build":5},"skipped":\["shellcheck","shell-tests"\]' "$store"/*.json || fail "store: skipped steps not recorded: $(cat "$store"/*.json)"
   cached 0 0 "store: pass reused" 'echo x >>"$COUNT"' env
   grep -q "already passed" "$t/out" || fail "store: no reuse message: $(cat "$t/out")"
   cached 0 1 "store: merge gate does not trust it" 'echo x >>"$COUNT"' env BOSSMAN_MERGE_CHECK=1
