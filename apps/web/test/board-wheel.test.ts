@@ -225,7 +225,10 @@ const read = (page: Page): Promise<ScrollState> => page.evaluate(() => ({ y: win
 const sessions = new WeakMap<object, Promise<any>>();
 function cdpFor(page: Page): Promise<any> {
   let s = sessions.get(page);
-  if (!s) sessions.set(page, (s = page.context().newCDPSession(page)));
+  if (!s) {
+    s = page.context().newCDPSession(page) as Promise<any>;
+    sessions.set(page, s);
+  }
   return s;
 }
 
