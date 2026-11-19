@@ -14,7 +14,12 @@ import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY, checkQueue } from "../src/servic
 import { BUNDLE_FEATURE, WORKER_REPLACED_CLOSE } from "../src/services/check-workers.js";
 import { WORKER_NO_HELLO_CLOSE } from "../src/routes/check-worker-socket.js";
 
-const HEARTBEAT = 100;
+// BOS-1804: the server drops a socket silent for three heartbeats, judged by a timer that reads the wall clock. On a slow,
+// busy runner the server's own process stalls for more than 300 ms (PGlite queries run in-process), the timer then fires
+// before the pong already waiting in the socket is read, and the socket is dropped as "offline": the job never reaches the
+// worker, however long the test waits. 1.5 s (a 4.5 s drop) is out of reach of those stalls. What it still catches: a socket
+// that is silent for three heartbeats is closed (the no-hello test below); nothing else here depends on the interval.
+const HEARTBEAT = 1500;
 const COMMIT = "c".repeat(40);
 
 async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 5000): Promise<T> {
@@ -28,7 +33,7 @@ async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 
 }
 
 /**
- * The server closes a worker socket that is silent for three heartbeats (300 ms here). A real worker answers every ping; a
+ * The server closes a worker socket that is silent for three heartbeats (4.5 s here). A real worker answers every ping; a
  * raw test socket must too, or a slow runner (hello handled late) sees the server drop it as "offline" and the job never
  * reaches it. Only the no-hello test below leaves this out on purpose, and it answers pings itself.
  */
