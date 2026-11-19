@@ -1,11 +1,14 @@
 // BOS-1881: free run slots that outnumber the startable Ready tickets for 30 minutes raise one CEO alert, once,
 // and the alert's closer reports when the condition has ended.
+import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, decisions, projects, settings, tickets } from "../src/db/schema.js";
-import { clearWhenOf } from "../src/services/alert-clearing.js";
-import { idleSlotsGoneReason, idleSlotsSweep } from "../src/services/idle-slots-alert.js";
+import { alertClearing, clearWhenOf } from "../src/services/alert-clearing.js";
+import { kindCeiling } from "../src/services/alert-kinds.js";
+import { idleSlotsGoneReason, idleSlotsKey, idleSlotsSweep } from "../src/services/idle-slots-alert.js";
 
 let db: Awaited<ReturnType<typeof openPglite>>["db"];
 let close: () => Promise<void>;
@@ -64,5 +67,37 @@ describe("idle slots alert", () => {
     expect(await idleSlotsGoneReason(db, companyId, async () => 1)).toContain("no longer outnumber");
     // Two free slots, one startable ticket: still holds.
     expect(await idleSlotsGoneReason(db, companyId, async () => 2)).toBeNull();
+  });
+});
+
+// Review round 1: the real alert ladder and the real closer, not stand-ins.
+describe("idle slots alert through the real ladder and closer", () => {
+  it("raises a CEO-tier card that stays out of the owner's queue, and the closer closes it once startable work fills the slots", async () => {
+    const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws" });
+    try {
+      const sweepReal = idleSlotsSweep(db, { freeSlots: async () => 3, alert: (i) => built.alerts.raise(i as unknown as Parameters<typeof built.alerts.raise>[0]), now: () => at(0) });
+      await sweepReal.run();
+      const later = idleSlotsSweep(db, { freeSlots: async () => 3, alert: (i) => built.alerts.raise(i as unknown as Parameters<typeof built.alerts.raise>[0]), now: () => at(30) });
+      expect((await later.run()).raised).toBe(1);
+      const cards = await db.select().from(decisions).where(eq(decisions.dedupeKey, idleSlotsKey(companyId)));
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ tier: "ceo", status: "open" });
+      expect((cards[0]!.context as { ladder: { topRung: string } }).ladder.topRung).toBe("ceo");
+      expect(kindCeiling("idle_slots", "ceo")).toBe("ceo");
+      expect(kindCeiling("idle_slots", undefined)).toBe("ceo");
+      // Nothing for the owner: no open card of this kind sits on the owner's tier.
+      expect(await db.select().from(decisions).where(and(eq(decisions.tier, "owner"), eq(decisions.status, "open")))).toHaveLength(0);
+      // Still holding: the closer leaves it open. Two free slots filled by startable work: it closes by itself.
+      let free = 3;
+      const closer = alertClearing(db, { isConnected: () => false, hasRoom: async () => true, freeSlots: async () => free });
+      expect(await closer.check()).toBe(0);
+      const [ivy] = await db.select().from(agents).where(eq(agents.name, "Ivy"));
+      for (const title of ["A", "B", "C"]) await db.insert(tickets).values({ companyId, projectId, title, systemState: "ready", assigneeAgentId: ivy!.id });
+      free = 1; // Ivy can start one at a time; free slots no longer outnumber startable tickets
+      expect(await closer.check()).toBe(1);
+      expect((await db.select().from(decisions).where(eq(decisions.id, cards[0]!.id)))[0]!.status).not.toBe("open");
+    } finally {
+      await built.app.close();
+    }
   });
 });

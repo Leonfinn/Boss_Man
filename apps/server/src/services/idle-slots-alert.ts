@@ -19,6 +19,7 @@ export type IdleSlotFacts = { free: number; startable: number; idle: string[] };
 /** The three facts the alert and its closer both judge: free run slots, Ready tickets that could start now, and idle agents. */
 export async function idleSlotFacts(db: Db, companyId: string, freeSlots: (companyId: string) => Promise<number>): Promise<IdleSlotFacts> {
   const free = await freeSlots(companyId);
+  // A Ready ticket whose assignee is paused or retired cannot start, so the join leaves it out of `startable`.
   const ready = await db
     .select({ ticket: tickets })
     .from(tickets)
