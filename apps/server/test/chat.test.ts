@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, ceoChapters, checkWorkers, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp-trace.js";
 
@@ -56,6 +56,32 @@ describe("owner chat", () => {
     await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Are you there?" });
     await c.scheduler.tick();
     expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: agent paused");
+  });
+
+  it("DR-069 D1: the CEO's chat prompt carries the Owner's setup section with each worker and the owner's last word on it; a worker's chat does not", async () => {
+    const c = await setup();
+    await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
+    await c.db.insert(decisions).values({
+      companyId: c.company.id,
+      kind: "question",
+      question: "Please turn the check worker Truenas off for now so the merge line stops using it",
+      options: ["Done"],
+      recommendedOption: "Done",
+      raisedByAgentId: c.ceo.id,
+      status: "answered",
+      answer: "Done: worker is off",
+      answeredAt: new Date(Date.now() - 86_400_000),
+      context: { type: "question", steps: ["Switch Truenas off."], ownerMustDo: true },
+    });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Let Truenas take merges?" });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Status?", agentId: c.worker.id });
+    await c.scheduler.tick();
+    const starts = c.sent.filter((x): x is Start => x.type === "run.start");
+    const ceoStart = starts.find((x) => x.agentId === c.ceo.id)!;
+    expect(ceoStart.prompt).toContain("## Owner's setup");
+    expect(ceoStart.prompt).toMatch(/- Worker Truenas: .*switched off.*owner's last word: card .*Done: worker is off/);
+    const workerStart = starts.find((x) => x.agentId === c.worker.id);
+    if (workerStart) expect(workerStart.prompt).not.toContain("## Owner's setup");
   });
 
   it("stays open while an update waits and an agent is still working (BOS-349)", async () => {
