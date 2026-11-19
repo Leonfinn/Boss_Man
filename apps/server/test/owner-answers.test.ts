@@ -462,6 +462,50 @@ describe("owner-answer memory (BOS-1593)", () => {
     });
   });
 
+  describe("ranking (BOS-1856, DR-069 D4)", () => {
+    it("ranks a rare name above common words, and a short ask never reads 100% on a long card", async () => {
+      const c = (ctx = await setup());
+      const t = await c.ticket("Check machines");
+      const truenas = await c.answered({ question: "Turn Truenas off?", answer: "Done: the worker is off.", ticketId: t.id, at: new Date("2026-11-16T10:00:00Z") });
+      // "merge" and "checks" are common across the owner's cards, so they say little about the ask
+      for (let i = 0; i < 9; i++) await c.answered({ question: `Should merge checks run on branch ${"abcdefghi"[i]} before the reviewers start looking at it?`, answer: "Yes", ticketId: t.id, at: new Date(`2026-11-0${i + 1}T10:00:00Z`) });
+      const long = await c.answered({ question: "Should merge checks run on every branch before review starts for the whole team?", answer: "Yes", ticketId: t.id, at: new Date("2026-11-18T10:00:00Z") });
+
+      const hits = await searchOwnerAnswers(c.db, { companyId: c.company.id, q: "Truenas merge checks", limit: 50 });
+      expect(hits[0]!.sourceId).toBe(truenas.id);
+      const longHit = hits.find((h) => h.sourceId === long.id)!;
+      expect(isRepeat(longHit)).toBe(false);
+      expect(describeOwnerAnswer(longHit)).not.toContain("100%");
+    });
+
+    it("stops at an until date", async () => {
+      const c = (ctx = await setup());
+      const t = await c.ticket("Check machines");
+      await c.answered({ question: "Turn Truenas off?", answer: "Done: the worker is off.", ticketId: t.id, at: new Date("2026-11-16T10:00:00Z") });
+      await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.ceo.id, role: "owner", text: "You offered Truenas again, I turned Truenas off already.", createdAt: new Date("2026-11-18T10:00:00Z") });
+      const all = await searchOwnerAnswers(c.db, { companyId: c.company.id, q: "Truenas off" });
+      expect(all.map((h) => h.kind).sort()).toEqual(["card", "chat"]);
+      const before = await searchOwnerAnswers(c.db, { companyId: c.company.id, q: "Truenas off", until: new Date("2026-11-17T00:00:00Z") });
+      expect(before.map((h) => h.kind)).toEqual(["card"]);
+    });
+
+    it("reads a message that opens with a quote from the owner's own words", async () => {
+      const c = (ctx = await setup());
+      await c.db.insert(ownerChatMessages).values({
+        companyId: c.company.id,
+        agentId: c.ceo.id,
+        role: "owner",
+        text: "> Shall we let Truenas take the merge checks?\n> It would free the runner.\nPlease just finish the login page first.",
+        createdAt: new Date("2026-11-17T10:00:00Z"),
+      });
+      const [hit] = await searchOwnerAnswers(c.db, { companyId: c.company.id, q: "Truenas merge checks" });
+      // the quoted CEO words don't count as the owner's: not a repeat, and the quote isn't what is shown
+      expect(hit).toBeDefined();
+      expect(isRepeat(hit!)).toBe(false);
+      expect(describeOwnerAnswer(hit!)).toContain('Owner: "Please just finish the login page first."');
+    });
+  });
+
   it("never reads another company's answers", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Launch");

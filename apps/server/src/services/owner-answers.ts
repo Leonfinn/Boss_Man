@@ -68,6 +68,11 @@ type Row = {
   a_shared: number;
   q_shared: number | null;
   q_size: number | null;
+  q_shared_w: number | null;
+  /** Rarity-weighted shares (see scoredRows): of the ask's stems the source holds, the owner's own words hold, and all of the ask's. */
+  shared_w: number;
+  a_shared_w: number;
+  total_w: number;
   rank: number;
 };
 
@@ -131,10 +136,21 @@ function ownerAnswerSources(c: string, since: Date, kinds: ReadonlySet<OwnerAnsw
   return parts.length ? sql`src (kind, source_id, question, answer, owner_note, ticket_id, at, v, qv) as (${sql.join(parts, sql` union all `)})` : null;
 }
 
+/**
+ * The owner's own words: a message that opens by quoting the agent ("> ..." lines) is read from after the
+ * quote, so the quoted agent text neither scores for the owner nor crowds out what they said (BOS-1856).
+ */
+const OWN_WORDS_RE = /^(\s*>[^\n]*(\n|$))+/;
+export const ownWords = (text: string) => {
+  const rest = text.replace(OWN_WORDS_RE, "").trim();
+  return rest || text;
+};
+const OWN_WORDS_SQL = sql.raw(String.raw`regexp_replace(s.answer, '^(\s*>[^\n]*(\n|$))+', '')`);
+
 const lexArrayOf = (lex: string[]) => sql`${`{${lex.map((l) => `"${l.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`}::text[]`;
 
 /** Rows of `src` scored against the ask's stems; `where` picks the rows (a word match, or named ids). */
-async function scoredRows(db: Db, src: ReturnType<typeof sql>, lex: string[], where: "words" | string[]): Promise<Row[]> {
+async function scoredRows(db: Db, src: ReturnType<typeof sql>, lex: string[], where: "words" | string[], until?: Date): Promise<Row[]> {
   const lexArray = lexArrayOf(lex);
   const filter = where === "words" ? sql`s.v @@ q.tq` : sql`s.source_id = any(${`{${where.join(",")}}`}::text[])`;
   return rowsOf<Row>(
@@ -143,26 +159,43 @@ async function scoredRows(db: Db, src: ReturnType<typeof sql>, lex: string[], wh
       select ${lexArray} as lex,
         to_tsquery('simple', (select string_agg(quote_literal(l), ' | ') from unnest(${lexArray}) l)) as tq
     ),
-    ${src}
+    ${src},
+    -- a stem's weight falls with how many sources hold it: a name like "truenas" outweighs "check" or "card".
+    -- A stem no source holds weighs as one held once, so words nothing can match don't swamp the rest of the ask.
+    w as (
+      select l as stem, 1 + ln(1 + (select count(*) from src)::float8 / (1 + greatest(1, (select count(*) from src s2 where l = any(tsvector_to_array(s2.v)))))) as wt
+      from q, unnest(q.lex) l
+    )
     select s.kind, s.source_id, s.question, s.answer, s.owner_note, s.ticket_id, s.at,
       cardinality(array(select unnest(tsvector_to_array(s.v)) intersect select unnest(q.lex))) as shared,
       cardinality(tsvector_to_array(s.v)) as size,
-      cardinality(array(select unnest(tsvector_to_array(to_tsvector('english', s.answer))) intersect select unnest(q.lex))) as a_shared,
+      cardinality(array(select unnest(tsvector_to_array(to_tsvector('english', ${OWN_WORDS_SQL}))) intersect select unnest(q.lex))) as a_shared,
+      coalesce((select sum(wt) from w where stem = any(tsvector_to_array(s.v))), 0)::float8 as shared_w,
+      coalesce((select sum(wt) from w where stem = any(tsvector_to_array(to_tsvector('english', ${OWN_WORDS_SQL})))), 0)::float8 as a_shared_w,
+      coalesce((select sum(wt) from w), 0)::float8 as total_w,
       case when s.qv is null then null else cardinality(array(select unnest(tsvector_to_array(s.qv)) intersect select unnest(q.lex))) end as q_shared,
+      case when s.qv is null then null else coalesce((select sum(wt) from w where stem = any(tsvector_to_array(s.qv))), 0)::float8 end as q_shared_w,
       case when s.qv is null then null else cardinality(tsvector_to_array(s.qv)) end as q_size
     from src s, q
-    where ${filter}
-    order by shared desc, ts_rank_cd(s.v, q.tq) desc nulls last, s.at desc
+    where ${filter}${until ? sql` and s.at <= ${until}` : sql``}
+    order by shared_w desc, ts_rank_cd(s.v, q.tq) desc nulls last, s.at desc
     limit 200`),
   );
 }
 
 function hitOf(r: Row, n: number): OwnerAnswerHit {
   // A card or a note has its own question: compare like with like, by the smaller (similarQuestion's rule).
-  const sameQuestion = n && r.q_size ? Number(r.q_shared ?? 0) / Math.min(n, Number(r.q_size)) : 0;
-  const cover = n ? Number(r.shared) / n : 0;
-  // A chat hit's text includes the agent's line before it; only the owner's own words count towards a refusal.
-  const ownerWords = n ? Number(r.kind === "chat" ? r.a_shared : r.shared) / n : 0;
+  // A short ask is never "the same question" as a much longer one just because its few words sit inside it:
+  // the share is scaled down once the longer side is more than twice the shorter (3 words in a 20-word question: x0.3).
+  const lengthFactor = n && r.q_size ? Math.min(1, (2 * Math.min(n, Number(r.q_size))) / Math.max(n, Number(r.q_size))) : 1;
+  // Each stem counts by its rarity across the sources, so a name outweighs "check" and "card". The share is of the ask's
+  // weight; when the question is the shorter side it is lifted by n / its length (the smaller-count rule), then scaled.
+  const total = Number(r.total_w);
+  const sameQuestion = n && r.q_size && total ? Math.min(1, (Number(r.q_shared_w ?? 0) / total) * (n / Math.min(n, Number(r.q_size))) * lengthFactor) : 0;
+  // A card's or note's share is scaled like its question's, so a long card holding the ask's few words never reads 100%.
+  const cover = total ? (Number(r.shared_w) / total) * lengthFactor : 0;
+  // A chat hit's text includes the agent's line before it; only the owner's own words (after any quote) count towards a refusal.
+  const ownerWords = total ? (Number(r.kind === "chat" || r.kind === "ticket_reply" ? r.a_shared_w : r.shared_w) / total) * lengthFactor : 0;
   return {
     kind: r.kind,
     sourceId: r.source_id,
@@ -183,7 +216,8 @@ function hitOf(r: Row, n: number): OwnerAnswerHit {
 const best = (a: OwnerAnswerHit, b: OwnerAnswerHit) =>
   Number(isRepeat(b)) - Number(isRepeat(a)) || b.sameQuestion - a.sameQuestion || (b.meaning ?? 0) - (a.meaning ?? 0) || b.score - a.score || b.at.getTime() - a.at.getTime();
 
-type SearchInput = { companyId: string; q: string; since?: Date; kinds?: readonly OwnerAnswerKind[]; limit?: number; minScore?: number };
+/** `until` ends the search at a date (inclusive): what the owner had said before an event, without later talk about it. */
+type SearchInput = { companyId: string; q: string; since?: Date; until?: Date; kinds?: readonly OwnerAnswerKind[]; limit?: number; minScore?: number };
 
 /** Everything the owner has answered or said that shares words with `q`, best first (word search only). */
 export async function searchOwnerAnswers(db: Db, input: SearchInput): Promise<OwnerAnswerHit[]> {
@@ -191,7 +225,7 @@ export async function searchOwnerAnswers(db: Db, input: SearchInput): Promise<Ow
   if (!lex.length) return [];
   const src = ownerAnswerSources(input.companyId, input.since ?? new Date(0), new Set(input.kinds?.length ? input.kinds : OWNER_ANSWER_KINDS));
   if (!src) return [];
-  const hits = (await scoredRows(db, src, lex, "words")).map((r) => hitOf(r, lex.length)).sort(best);
+  const hits = (await scoredRows(db, src, lex, "words", input.until)).map((r) => hitOf(r, lex.length)).sort(best);
   const min = input.minScore ?? 0;
   return withTicketRefs(db, hits.filter((h) => Math.max(h.score, h.sameQuestion) >= min).slice(0, Math.min(Math.max(input.limit ?? 10, 1), 50)));
 }
@@ -245,7 +279,7 @@ export async function ownerAnswerSearch(db: Db, input: SearchInput, deps: { embe
   if (extra.length) {
     const src = ownerAnswerSources(input.companyId, input.since ?? new Date(0), new Set(input.kinds?.length ? input.kinds : OWNER_ANSWER_KINDS));
     const lex = await stems(db, input.q);
-    const rows = src ? await scoredRows(db, src, lex, extra) : [];
+    const rows = src ? await scoredRows(db, src, lex, extra, input.until) : [];
     const more = rows.map((r) => ({ ...hitOf(r, lex.length), meaning: sim.get(r.source_id) ?? null, method: "meaning" as const }));
     words.push(...(await withTicketRefs(db, more)));
   }
@@ -357,7 +391,7 @@ export function describeOwnerAnswer(h: OwnerAnswerHit): string {
   const note = h.ownerNote && h.kind === "card" ? ` Owner's note: "${clip(h.ownerNote, 200)}".` : h.ownerNote && h.kind === "note" ? ` Note: "${clip(h.ownerNote, 200)}".` : "";
   const words = `${Math.round(Math.max(h.score, h.sameQuestion) * 100)}% of the words`;
   const match = h.meaning === null ? words : `meaning ${Math.round(h.meaning * 100)}%${h.method === "both" ? `, ${words}` : ""}`;
-  return `- [${where}; ${match}]${asked} Owner: "${clip(h.answer, 300)}".${note}`;
+  return `- [${where}; ${match}]${asked} Owner: "${clip(ownWords(h.answer), 300)}".${note}`;
 }
 
 export type OwnerAskCheck = {
@@ -419,7 +453,7 @@ export async function checkOwnerAsk(
   if (!repeat) return { refusal: null, related, doneSteps, meaning };
   const what = repeat.question ? `"${clip(repeat.question, 160)}"` : "this";
   const where = `${KIND_LABEL[repeat.kind]} ${repeat.sourceId}${repeat.ticketRef ? ` on ${repeat.ticketRef}` : ""}`;
-  const said = repeat.kind === "note" && repeat.ownerNote ? `${clip(repeat.ownerNote, 300)} (${clip(repeat.answer, 200)})` : clip(repeat.answer, 300);
+  const said = repeat.kind === "note" && repeat.ownerNote ? `${clip(repeat.ownerNote, 300)} (${clip(repeat.answer, 200)})` : clip(ownWords(repeat.answer), 300);
   const note = repeat.kind === "card" && repeat.ownerNote ? `; their note: "${clip(repeat.ownerNote, 200)}"` : "";
   return { refusal: `The owner already answered ${what} (${where}) on ${day(repeat.at)} UTC: "${said}"${note}`, related, doneSteps, meaning };
 }
