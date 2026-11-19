@@ -26,7 +26,8 @@ function checkRobots(dist, problems, siteUrl) {
   if (siteUrl && !text.includes(`Sitemap: ${siteUrl}/sitemap.xml`)) problems.push(`robots.txt: expected "Sitemap: ${siteUrl}/sitemap.xml"`);
 }
 
-export function checkSite(dist, { siteUrl = "" } = {}) {
+/** `umami` ({ scriptUrl, origin, websiteId }, from checkUmami in build.mjs) makes every page need the Umami script and the policy allow it. */
+export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
   const problems = [];
   const pages = readdirSync(dist, { recursive: true }).map(String).filter((f) => f.endsWith(".html")).sort();
   if (pages.length === 0) problems.push("no pages found in " + dist);
@@ -77,6 +78,9 @@ export function checkSite(dist, { siteUrl = "" } = {}) {
     // The Content-Security-Policy allows only the site's own files, so an inline style or script would silently not apply.
     if (/<style[\s>]/i.test(html) || /\sstyle=["']/i.test(html)) problems.push(`${page}: inline style (the Content-Security-Policy blocks it)`);
     if (/<script(?![^>]*(\ssrc=|type="application\/ld\+json"))[^>]*>/i.test(html)) problems.push(`${page}: inline script (the Content-Security-Policy blocks it)`);
+    if (umami && !tags("script").some((t) => attr(t, "src") === umami.scriptUrl && attr(t, "data-website-id") === umami.websiteId)) {
+      problems.push(`${page}: missing the Umami tracking script (visits to this page would not be counted)`);
+    }
     // Heading order: the first heading is the h1 and no level is skipped on the way down.
     let level = 0;
     for (const m of html.matchAll(/<h([1-6])[\s>]/gi)) {
@@ -107,7 +111,15 @@ export function checkSite(dist, { siteUrl = "" } = {}) {
     internal(page, "twitter:image", metaContent("name", "twitter:image"));
   }
 
-  const cssFile = path.join(dist, "styles.css");
+  if (umami) {
+    const headers = existsSync(path.join(dist, "_headers")) ? readFileSync(path.join(dist, "_headers"), "utf8") : "";
+    const csp = /Content-Security-Policy:(.*)/i.exec(headers)?.[1] ?? "";
+    if (csp && !(csp.includes(`script-src 'self' ${umami.origin}`) && csp.includes(`connect-src ${umami.origin}`))) {
+      problems.push(`_headers: the Content-Security-Policy does not allow ${umami.origin} (the browser would block the tracking script)`);
+    }
+  }
+
+  const cssFile =path.join(dist, "styles.css");
   if (existsSync(cssFile)) {
     for (const m of readFileSync(cssFile, "utf8").matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) internal("styles.css", "url()", m[1]);
   }
@@ -116,7 +128,8 @@ export function checkSite(dist, { siteUrl = "" } = {}) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const dist = process.argv[2] ?? path.join(root, "dist");
-  const problems = checkSite(dist, { siteUrl: (process.env.SITE_URL ?? "").replace(/\/+$/, "") });
+  const { checkUmami } = await import("./build.mjs");
+  const problems = checkSite(dist, { siteUrl: (process.env.SITE_URL ?? "").replace(/\/+$/, ""), umami: checkUmami(process.env.UMAMI_SCRIPT_URL, process.env.UMAMI_WEBSITE_ID) });
   if (problems.length) {
     console.error(problems.map((p) => "- " + p).join("\n"));
     console.error(`\n${problems.length} problem(s) found`);

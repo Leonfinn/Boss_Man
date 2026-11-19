@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync, rmSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { build, checkPortalUrl, fill, parsePage, portalBlocks, readChangelog, requireSiteUrlOnPages } from "../scripts/build.mjs";
+import { build, checkPortalUrl, checkUmami, fill, parsePage, portalBlocks, readChangelog, requireSiteUrlOnPages } from "../scripts/build.mjs";
 import { checkSite } from "../scripts/check.mjs";
 
 let tmp: string;
@@ -369,5 +369,67 @@ describe("check", () => {
     const problems: string[] = checkSite(dist);
     undo();
     expect(problems).toContain('styles.css: url() "/img/gone.webp" does not exist');
+  });
+});
+
+describe("Umami page statistics", () => {
+  const scriptUrl = "https://stats.example.com/script.js";
+  const websiteId = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+  let tracked: string;
+  beforeAll(() => {
+    tracked = path.join(tmp, "dist-umami");
+    build({ outDir: tracked, siteUrl: "https://example.test", portalUrl: "https://roadmap.example.com/p/abc", umamiScriptUrl: scriptUrl, umamiWebsiteId: websiteId });
+  });
+  const umami = { scriptUrl, origin: "https://stats.example.com", websiteId };
+
+  it("puts the script on every page, with no cookie banner and nothing that stores a cookie", () => {
+    const files = (readdirSync(tracked, { recursive: true }) as string[]).map(String).filter((f) => f.endsWith(".html"));
+    expect(files.length).toBeGreaterThan(5);
+    for (const f of files) {
+      const html = readFileSync(path.join(tracked, f), "utf8");
+      expect(html, f).toContain(`<script defer src="${scriptUrl}" data-website-id="${websiteId}" data-do-not-track="true" data-exclude-search="true"></script>`);
+    }
+    expect(checkSite(tracked, { siteUrl: "https://example.test", umami })).toEqual([]);
+  });
+
+  it("names the Install, GitHub and Roadmap clicks", () => {
+    const home = readFileSync(path.join(tracked, "index.html"), "utf8");
+    expect(home).toMatch(/<a class="btn small" href="\/guides\/install-boss-man" data-umami-event="install-click">Install<\/a>/);
+    expect(home).toMatch(/<a href="https:\/\/github\.com\/[^"]+" data-umami-event="github-click">GitHub<\/a>/);
+    expect(home).toMatch(/href="https:\/\/roadmap\.example\.com\/p\/abc"[^>]*data-umami-event="roadmap-click"/);
+    expect(home).not.toMatch(/data-umami-event="[^"]*"[^>]*data-umami-event=/);
+  });
+
+  it("lets the browser load the script and send numbers, and nothing else", () => {
+    const headers = readFileSync(path.join(tracked, "_headers"), "utf8");
+    expect(headers).toContain("script-src 'self' https://stats.example.com;");
+    expect(headers).toContain("connect-src https://stats.example.com;");
+    expect(readFileSync(path.join(dist, "_headers"), "utf8")).not.toContain("stats.example.com");
+  });
+
+  it("is off when not configured, and refuses half or odd settings", () => {
+    expect(read("index.html")).not.toContain("data-website-id");
+    expect(checkUmami("", "")).toBeNull();
+    for (const [u, i] of [[scriptUrl, ""], ["", websiteId], ["http://stats.example.com/script.js", websiteId], ["https://user:pw@stats.example.com/s.js", websiteId], ["https://stats/s.js", websiteId], [scriptUrl, "not-an-id"]]) {
+      expect(() => checkUmami(u, i), `${u} ${i}`).toThrow(/UMAMI_/);
+    }
+  });
+
+  it("fails the pre-publish check when a page lacks the script or the policy blocks it", () => {
+    const f = path.join(tracked, "about.html");
+    const original = readFileSync(f, "utf8");
+    writeFileSync(f, original.replace(/<script defer src="https:\/\/stats[^>]*><\/script>/, ""));
+    const missing: string[] = checkSite(tracked, { siteUrl: "https://example.test", umami });
+    writeFileSync(f, original.replace(`data-website-id="${websiteId}"`, 'data-website-id="00000000-0000-4000-8000-000000000000"'));
+    const wrongId: string[] = checkSite(tracked, { siteUrl: "https://example.test", umami });
+    writeFileSync(f, original);
+    expect(missing).toEqual(["about.html: missing the Umami tracking script (visits to this page would not be counted)"]);
+    expect(wrongId).toHaveLength(1);
+    const h = path.join(tracked, "_headers");
+    const headers = readFileSync(h, "utf8");
+    writeFileSync(h, headers.replace(" https://stats.example.com", ""));
+    const blocked: string[] = checkSite(tracked, { siteUrl: "https://example.test", umami });
+    writeFileSync(h, headers);
+    expect(blocked.join("\n")).toContain("_headers: the Content-Security-Policy does not allow https://stats.example.com");
   });
 });
