@@ -112,7 +112,8 @@ describe("owner chat", () => {
     const { namedThingsSection, namedThingLines, NAMED_MAX_LINES } = await import("../src/services/named-things.js");
     const [d] = await c.db
       .insert(decisions)
-      .values({ companyId: c.company.id, kind: "question", question: "Keep the Penpot add-on?", options: ["Yes"], recommendedOption: "Yes", raisedByAgentId: c.ceo.id, status: "answered", answer: "Yes keep Penpot", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } })
+      // fixed id: the detector only reads an 8-hex token with both a letter and a digit as a card short id, so a random uuid failed ~2.4% of runs
+      .values({ id: "3f9a1c27-5b4e-4d8a-9c3e-7a1b2c3d4e5f", companyId: c.company.id, kind: "question", question: "Keep the Penpot add-on?", options: ["Yes"], recommendedOption: "Yes", raisedByAgentId: c.ceo.id, status: "answered", answer: "Yes keep Penpot", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } })
       .returning({ id: decisions.id });
     const short = d!.id.slice(0, 8);
     const addons = async () => ({ tailscale: { state: "unknown", since: null, source: "x" }, ntfy: { state: "unknown", since: null, source: "x" }, penpot: { state: "running", since: "2026-11-10T09:00:00Z", source: "x" } }) as never;
@@ -122,6 +123,9 @@ describe("owner chat", () => {
     expect(text).toMatch(new RegExp(`- Card ${short}: record: answered .*Yes keep Penpot`));
     expect(text).toMatch(/- Add-on Penpot: record: running since 2026-11-10 · owner .*card .*Yes keep Penpot/);
     expect(text).toContain("- Git token: record: can read GitHub Actions runs");
+    // by design an all-digit or all-letter 8-hex token is not a card (it would match plain numbers and words)
+    const [n] = await c.db.insert(decisions).values({ id: "12345678-5b4e-4d8a-9c3e-7a1b2c3d4e5f", companyId: c.company.id, kind: "question", question: "Digits only?", options: ["Yes"], recommendedOption: "Yes", raisedByAgentId: c.ceo.id, status: "answered", answer: "Yes", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } }).returning({ id: decisions.id });
+    expect(await namedThingsSection(c.db, c.company.id, [`What happened on card ${n!.id.slice(0, 8)}?`])).toEqual([]);
     // a worker that isn't this company's, and a ticket number that doesn't exist, say nothing
     expect(await namedThingsSection(c.db, c.company.id, ["What about APP-99999 and Mystery-box?"])).toEqual([]);
     // the cap
