@@ -21,6 +21,7 @@ docker logs --tail 50 boss-man-runner-<slug>
 `<slug>` is shown in **Settings > Server and runner** under **Runner**. Fixes:
 - If the runner image was never built, or the canary failed in step 5 of the install, run `scripts/update-runner.sh` again, then choose **Start runner**.
 - If **Settings** shows an error under the runner (the launcher couldn't start it), check `BOSSMAN_DOCKER_GID` in `.env` matches `stat -c %g /var/run/docker.sock`, then `docker compose up -d`.
+- The launcher checks its own set-up when it starts and every 30 seconds. If it can't open Docker's socket or write the data folder, `docker compose ps` shows it as **unhealthy**, and **Start the runner** shows the same message: it names the fix (the `BOSSMAN_DOCKER_GID` number to use, or the `chown 1000:1000` for the data folder). Run `docker inspect --format '{{json .State.Health}}' <launcher container>` to read it. If `BOSSMAN_DATA` is missing from `.env`, Docker creates the default folder as root: set it to your own folder and run `docker compose up -d`.
 - Choose **Reconnect runner** to give it a fresh token and container.
 - A log line `getaddrinfo ENOTFOUND server` means the server wasn't reachable. The runner keeps retrying by itself, waiting longer each time, up to 30 seconds between tries.
 - A runner that stops with "Set BOSSMAN_RUNNER_TOKEN_FILE..." was started without the launcher. Turn the launcher on as in [docs/00, step 4](00-first-time-install.md#4-write-the-settings-file) (`COMPOSE_PROFILES=launcher` and `BOSSMAN_LAUNCHER=1`): it gives each runner its token.

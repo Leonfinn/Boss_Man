@@ -22,6 +22,7 @@ import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, sibli
 import { dockerClient } from "./docker.js";
 import { watchGuardEvents } from "./guard-events.js";
 import { CHECKS_FILE, launcher, launcherServer } from "./launcher.js";
+import { checkSetup, explainError } from "./selfcheck.js";
 import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
@@ -84,7 +85,8 @@ const cfg: LauncherConfig = {
   guardMode: parseGuardMode(env.BOSSMAN_NETGUARD),
   guardAllow: parseAllow(env.BOSSMAN_NETGUARD_ALLOW),
 };
-const docker = dockerClient(env.DOCKER_SOCKET ?? "/var/run/docker.sock");
+const socketPath = env.DOCKER_SOCKET ?? "/var/run/docker.sock";
+const docker = dockerClient(socketPath);
 const api = launcher(cfg, docker);
 
 if (process.argv[2] === "recreate-all") {
@@ -101,7 +103,10 @@ if (key.length < 32) {
   process.exit(1);
 }
 
-const server = launcherServer(api, key);
+// BOS-1892: check the set-up at start and name each fix in the log; the compose healthcheck (dist/check.js) shows it in `docker compose ps`.
+const setup = { dataRoot, socketPath };
+for (const p of checkSetup(setup)) console.error(JSON.stringify({ at: new Date().toISOString(), msg: "launcher set-up problem", problem: p.what, fix: p.message }));
+const server = launcherServer(api, key, undefined, (err) => explainError(err, setup));
 server.listen(Number(env.PORT ?? 3105), "0.0.0.0", () => console.log(JSON.stringify({ at: new Date().toISOString(), msg: "launcher listening", network: cfg.network })));
 // The network guard (BOS-324) must be in the runner's namespace. BOS-335: the 5 s timer is the backstop, and Docker's
 // own events make the common case (a runner restarted by itself) re-guard at once. Checks never overlap: one is
