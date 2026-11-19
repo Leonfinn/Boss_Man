@@ -19,7 +19,7 @@ const s = http.createServer((req, res) => {
   let data = ""; req.on("data", (d) => (data += d)); req.on("end", () => {
     if (req.url === "/api/health") return send(200, { ok: true, commit });
     if (req.url === "/") return send(200, "<html><body>board</body></html>", "text/html");
-    if (req.url === "/api/login") return JSON.parse(data).password === "right" ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
+    if (req.url === "/api/login") return ["right", "pa\\ss\"w"].includes(JSON.parse(data).password) ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
     if (req.url === "/api/companies") return send(200, [{ id: C, projects: [{ id: P, companyId: C, name: "p" }] }]);
     if (req.url === `/api/projects/${P}/tickets`) return send(201, { id: T });
     if (req.url === `/api/tickets/${T}/state`) return send(200, { ok: true });
@@ -52,6 +52,11 @@ out="$(SMOKE_CREDENTIALS="$t/creds" "$here/smoke-staging.sh" "$t/stg" "$sha")" |
 for c in address version board signin ticket runner production; do [[ $(res $c) == pass ]] || fail "$c should pass: $out"; done
 [[ $(res agent_run) == skipped ]] || fail "agent_run should be skipped: $out"
 [[ $out != *right* ]] || fail "the password was printed"
+
+# A password with a backslash and a quote reaches the server intact, and a CRLF credentials file does not add a CR (BOS-1796).
+printf 'smoke_username=smoke\r\nsmoke_password=pa\\ss"w\r\n' >"$t/creds-odd"
+out="$(SMOKE_CREDENTIALS="$t/creds-odd" "$here/smoke-staging.sh" "$t/stg" "$sha")" || fail "odd password run failed: $out"
+[[ $(res signin) == pass ]] || fail "backslash/quote/CR password should sign in: $out"
 
 # No smoke account: sign-in checks are skipped, never failed.
 out="$("$here/smoke-staging.sh" "$t/stg" "$sha")" || fail "no-credentials run failed: $out"
