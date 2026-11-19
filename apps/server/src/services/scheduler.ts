@@ -12,6 +12,7 @@ import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
+import { checkJobsByCompany } from "./runner-busy.js";
 import { pickAccount } from "./claude-accounts.js";
 import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
@@ -1778,8 +1779,11 @@ export function schedulerService(
         await db.update(wakes).set({ statusReason: HOLD_RELEASED_REASON }).where(and(eq(wakes.status, "queued"), eq(wakes.statusReason, HOLD_REASON)));
       } else if (hold) {
         const work = await liveWorkRuns(db);
-        // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
-        const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
+        // BOS-1877: running checks the swap waits on keep it from landing just as work runs do, so chat goes through
+        // for them too (the swap then waits for that chat run). Not for a wrap-up hold, or once checks are not waited on.
+        const checksWaited = hold.kind !== "wrapup" && !hold.force && !hold.ignoreChecks ? [...(await checkJobsByCompany(db, true)).values()].reduce((a, n) => a + n, 0) : 0;
+        // While work runs or checks are still going, only chat and reply wakes go on to launch; every other wake is held.
+        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
         const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);

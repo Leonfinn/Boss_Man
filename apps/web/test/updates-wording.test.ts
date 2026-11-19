@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { atTime, checkSentence, deployerLine, inAbout, runsSentence, waitLine, type DeployWaitView, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
+import { atTime, checkSentence, drainTiming, deployerLine, inAbout, runsSentence, waitLine, type DeployWaitView, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // BOS-1846: the sentences the owner reads in Settings → Updates, pinned with a fixed clock. Clock times are built
@@ -8,6 +8,16 @@ import { when } from "../src/pages/Runs";
 const NOW = Date.parse("2026-11-19T12:00:00.000Z");
 const iso = (min: number) => new Date(NOW + min * 60_000).toISOString();
 const hhmm = (s: string) => new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+describe("drainTiming (BOS-1877)", () => {
+  it("says when it started and when it should end; overdue says so plainly; swapping and an old server differ", () => {
+    expect(drainTiming({ runs: 0, since: iso(-30), phase: "waiting", expectedFinishAt: iso(20) })).toBe(`Started ${hhmm(iso(-30))}. Expected to finish about ${hhmm(iso(20))}.`);
+    expect(drainTiming({ runs: 0, since: iso(-30), phase: "waiting", expectedFinishAt: null, overdue: true })).toBe(`Started ${hhmm(iso(-30))}. This is taking longer than expected.`);
+    expect(drainTiming({ runs: 2, since: iso(-5), phase: "waiting", expectedFinishAt: null })).toMatch(/No time estimate/);
+    expect(drainTiming({ runs: 0, phase: "swapping" })).toBe("The runners are being swapped now.");
+    expect(drainTiming({ runs: 0 })).toBe("");
+  });
+});
 
 describe("atTime", () => {
   it("is the reader's clock time", () => {
