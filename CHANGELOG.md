@@ -20,6 +20,22 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 19 November 2026
+
+- The runs history (for the CEO and Data & Analytics) now shows cached read and write tokens and a cost for each run, so a ticket's spend can be checked by token type.
+- A finished change that waits behind another change's landing turn now learns early whether it still fits: if main has moved under it, it is rebuilt and checked again during the wait rather than up to an hour later, and if it clashes it goes back to its author at once. Fewer changes sit waiting only to be sent back.
+- Owner cards with steps now have a "Why:", an "If you skip it:" and a Boss Man-written "Where" line.
+- A go-live card must now state an undo and where it came from, and is refused until the change's preview checks pass with page proof.
+- A card you have to apply by hand now shows its steps on the card before you click Approve.
+- A card that only you can answer is no longer withdrawn as stale when its ticket closes unanswered.
+- Boss Man won't ask you something its own record already answers, and your earlier answers about a setting now sit next to that setting.
+- An override on a card check now names the steps and rules it covers, and a step you have already done is checked against what is really live.
+- The Merge queue page is clearer: the badge and tab counts always agree, the "Merges" tab holds only merges, and "Quick checks" replaces "Queued checks".
+- The merge line and its banner now name who holds the landing turn and when it ends, show a "paused" state with its reason, and warn when the line has grown for an hour.
+- Fewer false alarms: the watchdog no longer flags work that is really waiting on a check, GitHub run or merge.
+- After a ticket merges, its assignee can still update the state note, and a queued wake moves a parked Backlog task to In progress.
+- Setup and in-app hints now match the current Settings paths and setup wizard.
+
 ## 17 November 2026
 
 - Settings → Server and runner → Updates now says a runner update is "needed" or "not needed", never "may be needed".
