@@ -16,7 +16,7 @@ import { z } from "zod";
 import { goLiveWaitWords, type GoLiveWait, FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, portalVerdict, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, costEvents, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
@@ -785,7 +785,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "runs",
     {
       description:
-        "For CEOs: see your company's running agents and steer them. action: list; message (runId, message; add interrupt to stop the current turn first; an ended run is woken again with the message); stop (runId). action history (CEO and Data & Analytics agent, read-only): finished runs of your company, newest first, with agent, ticket, model, start, end, seconds, outcome, stop reason and tokens; give from and to (ISO dates, at most 14 days apart; to defaults to now, from to 7 days before to) and limit (default 100, at most 500).",
+        "For CEOs: see your company's running agents and steer them. action: list; message (runId, message; add interrupt to stop the current turn first; an ended run is woken again with the message); stop (runId). action history (CEO and Data & Analytics agent, read-only): finished runs of your company, newest first, with agent, ticket, model, start, end, seconds, outcome, stop reason, tokens (input, output, cached read, cached write) and costMicros (millionths of a dollar, summed from the run's cost records; 0 when none); give from and to (ISO dates, at most 14 days apart; to defaults to now, from to 7 days before to) and limit (default 100, at most 500).",
       inputSchema: {
         action: z.enum(["list", "message", "stop", "history"]),
         from: z.string().max(40).optional(),
@@ -806,7 +806,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (from >= to) return fail("from must be before to.");
         if (to.getTime() - from.getTime() > 14 * 86_400_000) return fail("Ask for at most 14 days at a time.");
         const rows = await db
-          .select({ id: runsTable.id, agent: agents.name, number: tickets.number, origin: runsTable.origin, model: runsTable.model, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, stopReason: runsTable.stopReason, inputTokens: runsTable.inputTokens, outputTokens: runsTable.outputTokens })
+          .select({ id: runsTable.id, agent: agents.name, number: tickets.number, origin: runsTable.origin, model: runsTable.model, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, stopReason: runsTable.stopReason, inputTokens: runsTable.inputTokens, outputTokens: runsTable.outputTokens, cachedReadTokens: runsTable.cachedReadTokens, cachedWriteTokens: runsTable.cachedWriteTokens })
           .from(runsTable)
           .leftJoin(agents, eq(agents.id, runsTable.agentId))
           .leftJoin(tickets, eq(tickets.id, runsTable.ticketId))
@@ -814,9 +814,13 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           .orderBy(desc(runsTable.startedAt))
           .limit(input.limit ?? 100);
         const ref = await refsOf(db, scope.companyId);
+        const costs = rows.length
+          ? await db.select({ runId: costEvents.runId, micros: sql<string>`sum(${costEvents.costMicros})` }).from(costEvents).where(inArray(costEvents.runId, rows.map((r) => r.id))).groupBy(costEvents.runId)
+          : [];
+        const costOf = new Map(costs.map((c) => [c.runId, Number(c.micros)]));
         return text(JSON.stringify(rows.map(({ number, origin, ...r }) => {
           const t = ref({ number });
-          return { ...r, ticket: number == null ? null : t.ref, origin: number == null ? origin : null, seconds: r.endedAt ? Math.round((r.endedAt.getTime() - r.startedAt.getTime()) / 1000) : null };
+          return { ...r, costMicros: costOf.get(r.id) ?? 0, ticket: number == null ? null : t.ref, origin: number == null ? origin : null, seconds: r.endedAt ? Math.round((r.endedAt.getTime() - r.startedAt.getTime()) / 1000) : null };
         })));
       }
       if (me?.role !== "ceo") return fail("Only your company's CEO can steer runs.");
