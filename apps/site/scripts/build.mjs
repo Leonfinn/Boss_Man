@@ -1,6 +1,7 @@
 // Builds the static site: src/pages/*.html, src/guides/*.md and the repo's CHANGELOG.md (the "What's new" page) + shared
 // header/footer -> dist/, plus public/ copied as
 // is, _headers, _redirects, robots.txt and (when SITE_URL is set) sitemap.xml.
+import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +59,36 @@ export function checkPortalUrl(raw) {
 /** Drops <!--portal-->…<!--/portal--> blocks when there is no portal address; keeps the content when there is. */
 export function portalBlocks(text, hasPortal) {
   return text.replace(/<!--portal-->([\s\S]*?)<!--\/portal-->/g, (_, inner) => (hasPortal ? inner : ""));
+}
+
+/**
+ * The date (YYYY-MM-DD) a page's source files last changed in git, or "" when that can't be known truthfully: no git, a
+ * shallow clone (every file would then show the clone's date) or files git has no history for. An empty answer leaves
+ * <lastmod> out of the sitemap; a made-up date would teach search engines to ignore every date we send.
+ */
+export function gitLastModified(files, cwd = root) {
+  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  try {
+    if (git("rev-parse", "--is-shallow-repository") !== "false") return "";
+    const date = git("log", "-1", "--format=%cs", "--", ...files);
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "";
+  } catch {
+    return "";
+  }
+}
+
+/** The sitemap: one <url> per page; <lastmod> only where `lastmods` has a date for that path. */
+export function sitemapXml(siteUrl, paths, lastmods = {}) {
+  const urls = paths.map((p) => `  <url><loc>${siteUrl}${p}</loc>${lastmods[p] ? `<lastmod>${lastmods[p]}</lastmod>` : ""}</url>`).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`;
+}
+
+/** An IndexNow key is 8 to 128 letters, digits or dashes. */
+export function checkIndexNowKey(raw) {
+  const key = (raw ?? "").trim();
+  if (!key) return "";
+  if (!/^[A-Za-z0-9-]{8,128}$/.test(key)) throw new Error("INDEXNOW_KEY must be 8 to 128 letters, digits or dashes");
+  return key;
 }
 
 const GROUPS = ["Start here", "Everyday use", "Set it up your way", "Questions"];
@@ -279,7 +310,7 @@ ${html}
   return { content, wrapMain: false };
 }
 
-export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl, changelogFile = path.join(root, "..", "..", "CHANGELOG.md") } = {}) {
+export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl, changelogFile = path.join(root, "..", "..", "CHANGELOG.md"), lastModified = gitLastModified, indexNowKey = process.env.INDEXNOW_KEY } = {}) {
   siteUrl = siteUrl.replace(/\/+$/, "");
   if (siteUrl && !/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(siteUrl)) {
     throw new Error(`SITE_URL must be an https origin such as https://example.com (no path, query or spaces), got "${siteUrl}"`);
@@ -301,7 +332,9 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
   cpSync(path.join(srcDir, "menu.js"), path.join(outDir, "menu.js"));
 
   const paths = [];
-  const write = (meta, parts, fileName) => {
+  const sources = {}; // page path -> source files it is built from, for its sitemap date
+  const write = (meta, parts, fileName, from = []) => {
+    sources[meta.path] = from;
     const html = portalBlocks(document({ config, vars, siteUrl, meta, ...parts }), Boolean(portal));
     const target = path.join(outDir, fileName);
     mkdirSync(path.dirname(target), { recursive: true });
@@ -312,7 +345,7 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
   const pagesDir = path.join(srcDir, "pages");
   for (const file of readdirSync(pagesDir).filter((f) => f.endsWith(".html")).sort()) {
     const { meta, body } = parsePage(readFileSync(path.join(pagesDir, file), "utf8"), file);
-    write(meta, { content: fill(portalBlocks(body, Boolean(portal)), vars, file) }, file);
+    write(meta, { content: fill(portalBlocks(body, Boolean(portal)), vars, file) }, file, [path.join(pagesDir, file)]);
   }
 
   const guides = readGuides(path.join(srcDir, "guides"));
@@ -322,22 +355,25 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
   }
   if (guides.length) {
     const indexMeta = { title: "Guides: Boss Man", description: "Guides for installing and running Boss Man: install it, set up your first company, and use the board, Decisions, reviews, notifications and add-ons.", path: "/guides/", nav: "guides", body: "guide-page" };
-    write(indexMeta, guidesIndex(guides, { vars }), "guides/index.html");
+    write(indexMeta, guidesIndex(guides, { vars }), "guides/index.html", guides.map((g) => path.join(srcDir, "guides", g.file)));
     for (const g of guides) {
       const meta = { title: `${g.meta.title}: Boss Man guides`, description: g.meta.description ?? g.meta.lead, path: g.meta.path, nav: g.meta.path === "/faq" ? "faq" : g.meta.path === "/guides/install-boss-man" ? "install" : "guides", body: "guide-page" };
-      write(meta, guidePage(g, guides, { vars }), `${g.meta.path.slice(1)}.html`);
+      write(meta, guidePage(g, guides, { vars }), `${g.meta.path.slice(1)}.html`, [path.join(srcDir, "guides", g.file)]);
     }
   }
 
   const changelog = readChangelog(changelogFile);
   const newsMeta = { title: "What's new: Boss Man", description: `The changes you will notice in Boss Man, newest first, in plain words. Latest entry: ${changelog.dates[0]}.`, path: "/whats-new", nav: "whats-new", body: "guide-page" };
-  write(newsMeta, whatsNewPage(changelog, { vars }), "whats-new.html");
+  write(newsMeta, whatsNewPage(changelog, { vars }), "whats-new.html", [changelogFile]);
 
   writeFileSync(path.join(outDir, "robots.txt"), `User-agent: *\nAllow: /\n${siteUrl ? `\nSitemap: ${siteUrl}/sitemap.xml\n` : ""}`);
   if (siteUrl) {
-    const urls = paths.map((p) => `  <url><loc>${siteUrl}${p}</loc></url>`).join("\n");
-    writeFileSync(path.join(outDir, "sitemap.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`);
+    const lastmods = Object.fromEntries(paths.map((p) => [p, lastModified(sources[p])]));
+    writeFileSync(path.join(outDir, "sitemap.xml"), sitemapXml(siteUrl, paths, lastmods));
   }
+  // IndexNow wants the key served at /<key>.txt with the key as its only content. The key comes from the environment (Boss Man's Secrets), never the repo.
+  const key = checkIndexNowKey(indexNowKey);
+  if (key) writeFileSync(path.join(outDir, `${key}.txt`), key);
   for (const f of ["_headers", "_redirects"]) {
     if (existsSync(path.join(srcDir, f))) cpSync(path.join(srcDir, f), path.join(outDir, f));
   }
