@@ -178,6 +178,11 @@ if ((ROLLBACK)); then
   exit 0
 fi
 
+# BOS-1913: how long each step took, one "Timing:" line each, so a slow update shows which step it was (build, canary or
+# launcher) in the deployer log instead of one unexplained gap.
+LAP_START=$SECONDS
+lap() { echo "Timing: $1 took $((SECONDS - LAP_START))s"; LAP_START=$SECONDS; }
+
 stamp="$(date -u +%Y%m%d%H%M)"
 # The commit the image is built from (BOS-764): Boss Man skips a "Build and update runners" ask when the image already has the change.
 # Empty outside a git checkout, and then the runner reports none and the ask is made as before.
@@ -190,6 +195,7 @@ NETGUARD_PREV="$(docker image inspect --format '{{.Id}}' boss-man-netguard:curre
 # store drops untagged images the bare id is gone by the time the canary has passed (BOS-1417: "No such image", exit 1).
 if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:pending-previous || NETGUARD_PREV=; fi
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
+lap "network guard build"
 
 echo "Building $IMAGE:candidate (no Anthropic code; Claude Code comes from the pack on first start)${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
@@ -197,6 +203,7 @@ docker build --pull -f apps/runner/Dockerfile \
   --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
+lap "runner image build"
 
 echo "Running the canary (no network): Codex, OpenCode and each add-on. Claude is proven by its pack installer, not here (DR-050)..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
@@ -205,6 +212,7 @@ if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privile
   echo "The failed build is still tagged $IMAGE:candidate if you want to look at it." >&2
   exit 1
 fi
+lap "canary"
 
 if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then docker tag "$IMAGE:current" "$IMAGE:previous"; fi
 # The guard's :previous is tagged here too (not before the build), so a failed canary and a re-run can't leave --rollback
@@ -227,5 +235,6 @@ if [[ -n ${BOSSMAN_DEPLOYER:-} && -d $BOSSMAN_DEPLOYER/outbox ]]; then
 fi
 # Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.
 rebuild_launcher
+lap "launcher rebuild"
 move_runners
 echo "The new runner image ($stamp) is current. To undo: scripts/update-runner.sh --rollback"
