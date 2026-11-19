@@ -45,7 +45,7 @@ An in-progress limit stops agents starting more work than they can finish. Open 
 
 Leave a box empty for no limit.
 
-You can also hold new starts while the merge line or the quick-check queue is long. Both are off by default.
+You can also hold new starts while the merge line or the quick-check queue is long: **Hold new starts while this many merges are waiting** and **Hold new starts while this many quick checks are queued**. Both are off by default. If the merge line grows for an hour with no merge limit set, the merge banner says "Start brake off" and suggests a number ([Guide 7](/guides/reviews-and-merge-queue#the-merge-banner)).
 
 When an agent is at its limit, a new ticket for it waits in Ready. Its note says, for example, "Waiting: Soo is at the limit of 2 in-progress tickets; starts when one finishes." It starts by itself when one of that agent's tickets moves to Review, Done or Blocked.
 
