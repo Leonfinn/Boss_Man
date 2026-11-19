@@ -11,7 +11,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { appendLine, CHECK_REPORTED_REASON, checkTicketVerdict } from "../src/services/after-merge-check-tickets.js";
+import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict } from "../src/services/after-merge-check-tickets.js";
 import { wakeClass } from "../src/services/wake-classes.js";
 
 const BEFORE = "Health check returns 200";
@@ -38,6 +38,21 @@ describe("check ticket results: the rules", () => {
     expect(checkTicketVerdict({ outcome: "completed", acceptanceCriteria: crit, stateNote: "1 pass" })).toBeNull();
     expect(checkTicketVerdict({ outcome: "cancelled", acceptanceCriteria: crit, stateNote: "1 pass; 2 pass" })).toBeNull();
     expect(checkTicketVerdict({ outcome: "completed", acceptanceCriteria: [], stateNote: "all pass" })).toBeNull();
+  });
+
+  it("BOS-1867: a done close needs a numbered verdict for each of the check's own criteria, and the refusal shows the form", () => {
+    const crit = ["Banner waits", "Wording matches"];
+    // What QA wrote on BOS-1862: no numbered verdict, so nothing would reach the parent.
+    const bare = checkTicketDoneRefusal(crit, "Pass: 79 GitHub runs, none failed", 2);
+    expect(bare).toContain('"1 pass: <what you saw>; 2 pass: <what you saw>"');
+    expect(bare).toContain('Not reported: "Banner waits", "Wording matches"');
+    expect(bare).toContain("criterion 2 of another ticket");
+    expect(bare).toContain("outcome cancelled");
+    expect(checkTicketDoneRefusal(crit, "1 pass: 79 runs", 2)).toContain('Not reported: "Wording matches"');
+    expect(checkTicketDoneRefusal(crit, "1 pass: 79 runs; 2 fail: old text", 2)).toBeNull();
+    expect(checkTicketDoneRefusal(["Banner waits"], "1 pass: 79 GitHub runs", 1)).toBeNull();
+    // No criteria: checkTicketVerdict can never pass, so the close is refused too.
+    expect(checkTicketDoneRefusal([], "1 pass", 1)).toContain("no criteria of its own");
   });
 
   it("a long note gives way from the front, so the recorded line is never cut", () => {
@@ -95,9 +110,13 @@ async function setup() {
     const r = (await (await agent(as)).callTool({ name: "create_ticket", arguments: { title: "Check: banner waits for a merge", size: 1, noCode: true, project: "Customer app", ...args } })) as { content: Array<{ text: string }>; isError?: boolean };
     return { text: r.content[0]!.text, isError: !!r.isError, id: /Created ticket ([0-9a-f-]{36})/.exec(r.content[0]!.text)?.[1] ?? null };
   };
+  const setState = async (as: string, args: Record<string, unknown>) => {
+    const r = (await (await agent(as)).callTool({ name: "set_ticket_state", arguments: args })) as { content: Array<{ text: string }>; isError?: boolean };
+    return { text: r.content[0]!.text, isError: !!r.isError };
+  };
   const row = async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
   const reportWakes = async () => db.select().from(wakes).where(and(eq(wakes.agentId, dev.id), eq(wakes.reason, CHECK_REPORTED_REASON)));
-  return { db, work: built.work, scheduler: built.scheduler, co, dev, other, parent: parent!, create, row, reportWakes };
+  return { db, work: built.work, scheduler: built.scheduler, co, dev, other, parent: parent!, create, setState, row, reportWakes };
 }
 
 describe("check tickets: split out, then report back", () => {
@@ -202,5 +221,35 @@ describe("check tickets: split out, then report back", () => {
     expect(await c.reportWakes()).toEqual([]);
     const acts = await c.db.select().from(activity).where(and(eq(activity.ticketId, c.parent.id), eq(activity.kind, "after_merge_check")));
     expect(acts).toEqual([]);
+  });
+
+  it("BOS-1867: set_ticket_state refuses a bare \"Pass: …\" close of a linked check, then a numbered one closes and reports", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    await c.db.update(tickets).set({ assigneeAgentId: c.dev.id, systemState: "in_progress" }).where(eq(tickets.id, made.id!));
+    const bare = await c.setState(c.dev.id, { ticketId: made.id!, state: "done", outcome: "completed", summary: "Pass: 79 GitHub runs, none failed" });
+    expect(bare.isError, bare.text).toBe(true);
+    expect(bare.text).toContain('"1 pass: <what you saw>"');
+    expect(bare.text).toContain(`Not reported: "${LIVE.text}"`);
+    expect((await c.row(made.id!)).systemState).toBe("in_progress");
+    expect((await c.row(c.parent.id)).stateNote).toBe(c.parent.stateNote);
+    const numbered = await c.setState(c.dev.id, { ticketId: made.id!, state: "done", outcome: "completed", summary: "1 pass: 79 GitHub runs, none failed" });
+    expect(numbered.isError, numbered.text).toBe(false);
+    expect((await c.row(made.id!)).systemState).toBe("done");
+    expect((await c.row(c.parent.id)).stateNote).toMatch(/reported: 2 pass/);
+  });
+
+  it("BOS-1867: a linked check can still be cancelled with no verdict, and an unlinked ticket isn't held to the numbered form", async () => {
+    const c = await setup();
+    const linked = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    const plain = await c.create(c.dev.id, {});
+    await c.db.update(tickets).set({ assigneeAgentId: c.dev.id, systemState: "in_progress" }).where(eq(tickets.id, linked.id!));
+    await c.db.update(tickets).set({ assigneeAgentId: c.dev.id, systemState: "in_progress" }).where(eq(tickets.id, plain.id!));
+    // Cancelling is the CEO's step.
+    const cancelled = await c.setState(c.co.ceo.id, { ticketId: linked.id!, state: "done", outcome: "cancelled", summary: "Not needed: the parent was rescoped" });
+    expect(cancelled.isError, cancelled.text).toBe(false);
+    expect((await c.row(linked.id!)).systemState).toBe("done");
+    const unlinked = await c.setState(c.dev.id, { ticketId: plain.id!, state: "done", outcome: "completed", summary: "Pass: 79 GitHub runs, none failed" });
+    expect(unlinked.text).not.toContain("is the check for criterion");
   });
 });

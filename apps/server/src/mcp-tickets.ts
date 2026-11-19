@@ -22,6 +22,7 @@ import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
+import { checkTicketDoneRefusal } from "./services/after-merge-check-tickets.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent } from "./services/blocked-who-acts.js";
@@ -583,7 +584,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // With criteria on the ticket, moving to review is only allowed once the state note reports
       // pass or fail for each of them; the refusal names the ones it can't find.
       const [withCriteria] = await db
-        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState, ceoPlan: tickets.ceoPlan, ceoPlanDeadline: tickets.ceoPlanDeadline, urgent: tickets.urgent, title: tickets.title, assigneeId: tickets.assigneeAgentId, featureId: tickets.featureId, ownerSetup: tickets.ownerSetup, noCode: tickets.noCode })
+        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState, ceoPlan: tickets.ceoPlan, ceoPlanDeadline: tickets.ceoPlanDeadline, urgent: tickets.urgent, title: tickets.title, assigneeId: tickets.assigneeAgentId, featureId: tickets.featureId, ownerSetup: tickets.ownerSetup, noCode: tickets.noCode, checksTicketId: tickets.checksTicketId, checksCriterion: tickets.checksCriterion })
         .from(tickets)
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!withCriteria) return fail("No ticket with that ID in your company.");
@@ -648,6 +649,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           if (withCriteria.criteria.some((c) => isAfterMerge(c) && pageClauses(criterionText(c)).length)) {
             const shots = await db.select({ id: ticketImages.id, createdAt: ticketImages.createdAt }).from(ticketImages).where(eq(ticketImages.ticketId, ticketId));
             const refusal = pageShotRefusal(withCriteria.criteria, shots, live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? null, reported ?? "");
+            if (refusal) return fail(refusal);
+          }
+          // BOS-1867: a check ticket's result reaches its parent only through numbered verdicts on its own criteria.
+          if (withCriteria.checksTicketId && withCriteria.checksCriterion) {
+            const refusal = checkTicketDoneRefusal(withCriteria.criteria, reported, withCriteria.checksCriterion);
             if (refusal) return fail(refusal);
           }
           const uncited = uncitedCardPasses(withCriteria.criteria, `${withCriteria.current ?? ""}\n${note ?? ""}`, await openCardIds(db, ticketId));
