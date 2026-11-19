@@ -8,6 +8,8 @@ import { useDraft } from "../drafts";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
+import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { ThinkingTrace } from "../components/ThinkingTrace";
@@ -190,6 +192,8 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
       ) : (
         <section className="card messenger" data-picked={agentId ? "yes" : "no"} aria-label="Chat">
           <nav className="messenger-list" aria-label="Team">
+            {!threads.data && threads.error && <LoadError what="the team" message={threads.error.message} onRetry={threads.reload} />}
+            {!threads.data && !threads.error && <Loader label="Loading the team" size={16} />}
             <ul>
               {team.map((t) => (
                 <li key={t.id}>
@@ -223,6 +227,8 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                 {starred && <StarButton agent={starred} onToggle={() => void api(`/api/agents/${current.id}`, { method: "PATCH", body: { starred: !starred.starred } }).then(onChanged, (err: Error) => setError(err.message))} />}
               </header>
               <div className="chat-log" role="log" aria-live="polite">
+                {!chat.data && chat.error && <LoadError what="this conversation" message={chat.error.message} onRetry={chat.reload} />}
+                {!chat.data && !chat.error && <Loader label="Loading the conversation" size={16} />}
                 {items.length === 0 && chat.data && (
                   <p className="muted">
                     {current.role === "ceo" || current.duty === "assistant" ? 'Try: "Add rate limiting to the login API before the beta, after the auth refactor."' : `Ask ${current.name} about their work, or for something to go on the board.`}
