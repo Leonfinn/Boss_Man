@@ -27,7 +27,8 @@
 //   carried_across BOS-1762: its passed merge landed on a main that moved since it was tested, because main's new
 //                  commits touched none of its files (from, to, commits, files: how many files main changed)
 //   rebuilt        BOS-1762: main moved after its check and GitHub passed, so it is built and tested again
-//                  (rebuilds: how many times this merge; why/files: why it couldn't be carried, when it was asked)
+//                  (rebuilds: how many times this merge; why/files: why it couldn't be carried, when it was asked).
+//                  BOS-1821: also written while it waits for another ticket's landing turn, as soon as the carry is refused
 //   refreshed      BOS-1820: with GitHub CI gating, main moved while its check waited for a slot in a way a pass couldn't
 //                  be carried across, so the queued job took the new merge (and a new GitHub run) before it started
 //                  (why/files: why no carry; refreshes: how many times this attempt)

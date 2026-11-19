@@ -11,6 +11,8 @@ import { and, eq } from "drizzle-orm";
 vi.hoisted(() => {
   process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20";
   process.env.BOSSMAN_MERGE_RETARGET_MS = "20";
+  // BOS-1821: a merge waiting for a landing turn asks again only when the gate pushes main, never on the clock, in these tests.
+  process.env.BOSSMAN_TURN_WAIT_RECHECK_MS = "600000";
 });
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
@@ -128,7 +130,7 @@ function fakeGitHub() {
   return { fetch, calls, state, reads };
 }
 
-async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRed?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; changed?: string[] } = {}) {
+async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRed?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; prepare?: (c: Extract<RunnerCommand, { type: "workspace.merge" }>) => unknown; changed?: string[] } = {}) {
   const gh = fakeGitHub();
   const { db, close } = await openPglite();
   // In charge until a test hands over (BOS-1752): `lead.on = false` plays the blue/green switch on this copy.
@@ -162,7 +164,8 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRe
         else queueMicrotask(answer);
       }
       if (c.type === "workspace.merge") {
-        if (c.phase === "prepare") reply(c, opts.prepares?.length ? opts.prepares.shift() : { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN });
+        if (c.phase === "prepare" && opts.prepare) reply(c, opts.prepare(c));
+        else if (c.phase === "prepare") reply(c, opts.prepares?.length ? opts.prepares.shift() : { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN });
         else if (c.phase === "publish") reply(c, { status: "published", branch: `bossman-ci/${c.ticketId}`, commit: c.commit, hasWorkflows: opts.workflows !== false });
         else if (c.phase === "unpublish") reply(c, { status: "unpublished", branch: `bossman-ci/${c.ticketId}` });
         else if (c.phase === "finish" && opts.finishes?.length) reply(c, opts.finishes.shift());
@@ -927,6 +930,155 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         done = true;
         await finishJob(c, { state: "passed", exitCode: 0 });
         expect((await res).json()).toMatchObject({ outcome: "merged" });
+      });
+    });
+
+    // BOS-1821: on 18 Nov merges that passed while another ticket held the landing turn learned only when the turn ended
+    // (up to 65 minutes later) that main had moved under them in a way the carry refuses, or that they conflicted. The merge
+    // now asks the runner's carry question (BOS-1820) when its wait starts and whenever the gate pushes main.
+    // GitHub CI gating is off here, so the only prepares that carry `carryFrom` are the turn-wait asks.
+    describe("a merge waiting for another ticket's landing turn asks whether it can still be carried (BOS-1821)", () => {
+      const REFRESH = ["carried-check", "ci-publish", "merge-carry", "merge-refresh"];
+      const MERGE2 = "d".repeat(40);
+      const TREE2 = "9".repeat(40);
+      const NEW_MAIN = "8".repeat(40);
+      const refused = { ok: false, why: "main changed dependencies, build, CI or migration files", files: ["scripts/check-x.mjs"] };
+      type MergeCmd = Extract<RunnerCommand, { type: "workspace.merge" }>;
+      const mergeCmds = (c: Awaited<ReturnType<typeof setup>>) => c.sent.filter((m): m is MergeCmd => m.type === "workspace.merge");
+      const asks = (c: Awaited<ReturnType<typeof setup>>) => mergeCmds(c).filter((m) => m.phase === "prepare" && m.carryFrom);
+      const finishes = (c: Awaited<ReturnType<typeof setup>>) => mergeCmds(c).filter((m) => m.phase === "finish");
+      const lineEvents = async (c: Awaited<ReturnType<typeof setup>>) =>
+        (await c.db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, MERGE_LINE_KIND)))).map((r) => r.detail as { event: string; [k: string]: unknown });
+      const jobs = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      const landing = async (c: Awaited<ReturnType<typeof setup>>) => (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing as { state?: string; outcome?: string } | undefined;
+      const finished = async (c: Awaited<ReturnType<typeof setup>>) => {
+        await vi.waitFor(async () => expect((await landing(c))?.state).toBe("finished"), { timeout: 20_000 });
+        return (await landing(c))!;
+      };
+      /**
+       * The runner: a turn-wait ask (carryFrom) gets `wait`; a plain prepare builds the old merge until an ask was refused,
+       * then the new one (the rebuild). The BOS-1344 queue-time refresh is a plain prepare, so it finds the same tree.
+       */
+      const runner = (wait: () => Record<string, unknown>) => {
+        let moved = false;
+        return (m: MergeCmd) => {
+          if (m.carryFrom) {
+            const a = wait();
+            if ((a.carry as { ok?: boolean } | undefined)?.ok === false) moved = true;
+            return a;
+          }
+          return moved ? { status: "prepared", commit: MERGE2, tree: TREE2, targetSha: NEW_MAIN } : { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN };
+        };
+      };
+      /** Another ticket in review holds the project's landing turn. */
+      const holdTurn = async (c: Awaited<ReturnType<typeof setup>>) => {
+        const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Hot-file change", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+        landingTurns.rebuilt(c.project.id, other.id, 60 * 60_000);
+        expect(landingTurns.rebuilt(c.project.id, other.id, 60 * 60_000).turn).toBe("taken");
+        return other;
+      };
+      /** Approves, passes the merge's check, and waits until the push is held behind the other ticket's turn. */
+      const passAndHold = async (c: Awaited<ReturnType<typeof setup>>) => {
+        await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        await vi.waitFor(async () => expect((await lineEvents(c)).some((e) => e.event === "hold_started" && e.hold === "turn")).toBe(true), { timeout: 20_000 });
+      };
+      /** The wait loop goes round `n` more times (it reads the turn on every round): a deadline poll, not a fixed sleep. */
+      const rounds = async (spy: { mock: { calls: unknown[] } }, n: number) => {
+        const from = spy.mock.calls.length;
+        await vi.waitFor(() => expect(spy.mock.calls.length).toBeGreaterThanOrEqual(from + n), { timeout: 20_000 });
+      };
+
+      it("main changed a file the carry refuses while it waited: rebuilt and queued again before the other ticket's turn ends", async () => {
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner(() => ({ status: "prepared", commit: MERGE2, tree: TREE2, targetSha: NEW_MAIN, carry: refused })) }));
+        await serverMode(c);
+        const other = await holdTurn(c);
+        try {
+          await passAndHold(c);
+          // The proof: the rebuild and its new check happen while the other ticket still holds the turn.
+          await vi.waitFor(async () => expect(await jobs(c)).toHaveLength(2), { timeout: 20_000 });
+          expect(landingTurns.check(c.project.id).holder?.ticketId).toBe(other.id);
+          const ev = await lineEvents(c);
+          expect(ev.find((e) => e.event === "rebuilt")).toMatchObject({ rebuilds: 1, why: refused.why, files: refused.files });
+          expect(ev.filter((e) => e.event === "check_queued")).toHaveLength(2);
+          expect(ev.some((e) => e.event === "hold_ended" && e.hold === "turn")).toBe(true);
+          // The old merge was never pushed or finished; the ask named it.
+          expect(finishes(c)).toEqual([]);
+          expect(asks(c)[0]).toMatchObject({ carryFrom: { commit: MERGE, tree: TREE } });
+          const note = (await c.db.select({ summary: activity.summary }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, "merge_check_lock_wait")))).map((a) => a.summary);
+          expect(note.join("\n")).toMatch(/scripts\/check-x\.mjs while this merge waited for another ticket's landing turn/);
+          // The turn ends; the rebuilt merge's check passes and it lands.
+          landingTurns.done(c.project.id, other.id);
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          expect(await finished(c)).toMatchObject({ outcome: "merged" });
+          expect(finishes(c).map((f) => f.commit)).toEqual([MERGE2]);
+        } finally {
+          landingTurns.done(c.project.id, other.id);
+        }
+      });
+
+      it("a pass that can still be carried: asked once, again only when the gate pushes main, and finish carries it when the turn ends", async () => {
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner(() => ({ status: "prepared", commit: MERGE2, tree: TREE2, targetSha: NEW_MAIN, carry: { ok: true } })) }));
+        await serverMode(c);
+        const other = await holdTurn(c);
+        const spy = vi.spyOn(landingTurns, "check");
+        try {
+          await passAndHold(c);
+          await vi.waitFor(() => expect(asks(c)).toHaveLength(1), { timeout: 20_000 });
+          await rounds(spy, 10);
+          expect(asks(c)).toHaveLength(1);
+          // Another ticket's merge pushed main.
+          landingTurns.landed(c.project.id);
+          await vi.waitFor(() => expect(asks(c)).toHaveLength(2), { timeout: 20_000 });
+          await rounds(spy, 10);
+          expect(asks(c)).toHaveLength(2);
+          landingTurns.done(c.project.id, other.id);
+          expect(await finished(c)).toMatchObject({ outcome: "merged" });
+          expect(finishes(c)).toHaveLength(1);
+          expect(finishes(c)[0]).toMatchObject({ commit: MERGE, tree: TREE, carry: true });
+          expect(await jobs(c)).toHaveLength(1);
+          expect((await lineEvents(c)).filter((e) => e.event === "rebuilt")).toEqual([]);
+        } finally {
+          spy.mockRestore();
+          landingTurns.done(c.project.id, other.id);
+        }
+      });
+
+      it("a conflict found while it waited goes back to the author at once, before the turn ends, and nothing is pushed", async () => {
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner(() => ({ status: "conflicts", files: ["src/a.ts"] })) }));
+        await serverMode(c);
+        const other = await holdTurn(c);
+        try {
+          await passAndHold(c);
+          expect(await finished(c)).toMatchObject({ outcome: "conflicts" });
+          expect(landingTurns.check(c.project.id).holder?.ticketId).toBe(other.id);
+          expect(finishes(c)).toEqual([]);
+          expect((await c.state()).systemState).toBe("in_progress");
+        } finally {
+          landingTurns.done(c.project.id, other.id);
+        }
+      });
+
+      it.each([
+        ["a runner without merge-refresh", ["carried-check", "ci-publish", "merge-carry"], false],
+        ["the owner's merge_retarget switch off", REFRESH, true],
+      ] as const)("%s: nothing is asked while it waits, and finish decides when the turn ends (today's sequence)", async (_what, features, off) => {
+        const c = (ctx = await setup({ features: [...features], switchOn: false, prepare: runner(() => ({ status: "prepared", commit: MERGE2, tree: TREE2, targetSha: NEW_MAIN, carry: refused })) }));
+        await serverMode(c);
+        if (off) await c.db.insert(settings).values({ key: "merge_retarget", value: false });
+        const other = await holdTurn(c);
+        const spy = vi.spyOn(landingTurns, "check");
+        try {
+          await passAndHold(c);
+          await rounds(spy, 10);
+          expect(asks(c)).toEqual([]);
+          landingTurns.done(c.project.id, other.id);
+          expect(await finished(c)).toMatchObject({ outcome: "merged" });
+          expect(finishes(c).map((f) => f.commit)).toEqual([MERGE]);
+        } finally {
+          spy.mockRestore();
+          landingTurns.done(c.project.id, other.id);
+        }
       });
     });
 

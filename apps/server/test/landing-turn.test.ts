@@ -88,4 +88,18 @@ describe("landing turns (BOS-1762)", () => {
     expect(t.rebuilt(P, "a", 0)).toEqual({ count: 2, turn: null });
     expect(t.blocks(P, "b")).toBe(false);
   });
+
+  it("counts the gate's pushes to each project's main, so a waiting merge knows when to ask again (BOS-1821)", () => {
+    const { t } = turns();
+    expect(t.mainEpoch(P)).toBe(0);
+    t.landed(P);
+    t.landed(P);
+    expect(t.mainEpoch(P)).toBe(2);
+    expect(t.mainEpoch("project-2")).toBe(0);
+    // A turn ending is not a push: the count moves only on landed.
+    t.rebuilt(P, "a", HOUR);
+    t.rebuilt(P, "a", HOUR);
+    t.done(P, "a");
+    expect(t.mainEpoch(P)).toBe(2);
+  });
 });
