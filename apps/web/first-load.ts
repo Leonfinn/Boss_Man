@@ -59,6 +59,9 @@ export function firstLoadLimit(): Plugin {
     name: "boss-man:first-load-limit",
     apply: "build",
     closeBundle() {
+      // A build under vitest (NODE_ENV=test) bundles React's development build, which is far bigger; only the
+      // production build is what the owner downloads, so only it is held to the limit.
+      if (process.env.NODE_ENV !== "production") return;
       const m = measureFirstLoad(path.resolve("dist"));
       this.info(`first load: ${m.files.length} files, ${(m.raw / 1000).toFixed(1)} kB (${(m.gzip / 1000).toFixed(1)} kB gzipped)`);
       const problems = firstLoadProblems(m);
