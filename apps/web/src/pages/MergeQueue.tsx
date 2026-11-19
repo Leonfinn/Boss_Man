@@ -10,7 +10,7 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
-import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
+import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, pausedWaitText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
 import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
@@ -73,7 +73,6 @@ export function actingText(actor: NonNullable<WaitingRow["actor"]>): string {
 }
 
 const upFirst = (s: string) => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
-const slotsText = (n: number) => `${n} ${n === 1 ? "slot" : "slots"}`;
 
 /** The one short state word on a waiting row (BOS-1207): the colour on its left edge only repeats it. */
 export function rowState(r: WaitingRow): { word: string; tone: "amber" | "red" | "grey" | "blue" } {
@@ -155,7 +154,7 @@ function SectionHead({ title, fact }: { title: string; fact: string }) {
 function Running({ rows, slots, paused }: { rows: RunningNow[]; slots: number; paused?: PausedSummary | null }) {
   return (
     <section>
-      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} of ${slotsText(slots)} busy · flagged after an hour`} />
+      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} of ${slots} merge ${slots === 1 ? "slot" : "slots"} busy · flagged after an hour`} />
       {!rows.length ? (
         <p className="muted">Nothing is checking or merging right now.</p>
       ) : (
@@ -353,14 +352,14 @@ function MainRedBanner({ held, rows, heldBehind }: { held: number; rows: CheckRo
   if (held === 0 && heldBehind) {
     return (
       <div className="mq-red" data-main-red="true">
-        <strong>Main is red.</strong> {heldBehind.held} approved {heldBehind.held === 1 ? "ticket is" : "tickets are"} held until the fix{" "}
+        <strong>Merges are held.</strong> {heldBehind.held} approved {heldBehind.held === 1 ? "ticket is" : "tickets are"} held until the fix{" "}
         {heldBehind.fixes.map((f, i) => (
           <span key={f.ticketId}>
             {i > 0 ? " and " : ""}
             (<a href={`#/tickets/${f.ticketId}`} title={f.title}>{f.ref ?? f.title}</a>, {f.stateText})
           </span>
         ))}{" "}
-        is merged and live. Checks that fix main still run.
+        is merged and live. No new merge starts until then; checks that fix main, and merges already running, carry on.
       </div>
     );
   }
@@ -380,29 +379,36 @@ function MainRedBanner({ held, rows, heldBehind }: { held: number; rows: CheckRo
   );
 }
 
-/** The "Queued checks" tab (BOS-1174): every check running or waiting in the server's check queue. Read-only. */
-export function QueuedChecks({ data, heldBehind }: { data: CheckQueueData; heldBehind?: HeldSummary | null }) {
+/** BOS-1800: the checks the Quick checks tab lists and counts: everything in the check queue except merge checks (the Merges tab's). */
+export const quickChecksOf = (rows: CheckRow[]): CheckRow[] => rows.filter((r) => r.kind !== "merge");
+
+/** The "Quick checks" tab (BOS-1174, BOS-1800): every non-merge check running or waiting in the server's check queue. Read-only. */
+export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueData; heldBehind?: HeldSummary | null; paused?: PausedSummary | null }) {
   const held = data.rows.filter((r) => r.heldByMain).length;
   const free = Math.max(0, data.slots - data.running);
+  const rows = quickChecksOf(data.rows);
   return (
     <section>
-      <SectionHead title="Queued checks" fact={`${data.running} of ${slotsText(data.slots)} busy · running first, then in start order`} />
+      <SectionHead title="Quick checks" fact={`${data.running} of ${data.slots} check ${data.slots === 1 ? "slot" : "slots"} busy, shared with merge checks · running first, then in start order`} />
       {data.mode === "legacy" && <p className="muted" style={{ fontSize: 14 }}>The server-owned check queue is switched off, so only checks it already knows about are listed.</p>}
       {(held > 0 || heldBehind) && <MainRedBanner held={held} rows={data.rows} heldBehind={heldBehind} />}
+      {paused && (
+        <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(paused)}</strong> {pausedWaitText(paused)}</p>
+      )}
       {(data.idleSlots ?? []).map((s) => (
         <p key={s.line} className="muted" style={{ fontSize: 14 }} data-idle-slot={s.expected ? "expected" : "alarm"}>
           {s.expected ? "" : <strong>Idle check capacity. </strong>}
           {upFirst(s.line)}
         </p>
       ))}
-      {!data.rows.length ? (
+      {!rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
-          <strong>No checks queued.</strong> When an agent or the merge gate asks for a check, it shows here until it finishes.{" "}
+          <strong>No quick checks queued.</strong> When an agent asks for a quick check, it shows here until it finishes. Merge checks are on the Merges tab.{" "}
           {freeSlotsText(free, data.slots)}
         </div>
       ) : (
         <div className="mq-list" data-checks-list="true">
-          {data.rows.map((r) => (
+          {rows.map((r) => (
             <article key={r.id} className="card mq-item" data-check-state={r.state}>
               <div className="mq-head">
                 <span className="mq-title">
@@ -476,7 +482,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
     needsYou.length > 0 && { key: "needs", tone: "amber", text: figureText("mergeQueue.forYou", needsYou.length), href: tab === "merges" ? undefined : base, onClick: jump("mq-needs", "merges") },
     heldChecks > 0 && { key: "red", tone: "red", text: `Main is red: ${figureText("checkQueue.onHold", heldChecks)}`, href: `${base}/checks`, onClick: undefined },
     // R28: the other "main is red": approved tickets held behind a marked fix, before any check was queued. One pill per red.
-    heldBehind && heldChecks === 0 && { key: "red-fix", tone: "amber", text: `Main is red: ${figureText("mergeQueue.heldBehindFix", heldBehind.held)} ${heldBehind.fixes.map((f) => f.ref ?? f.title).join(" and ")}`, href: tab === "merges" ? undefined : base, onClick: jump("mq-held-fix", "merges") },
+    heldBehind && heldChecks === 0 && { key: "red-fix", tone: "amber", text: `Merges are held: ${figureText("mergeQueue.heldBehindFix", heldBehind.held)} ${heldBehind.fixes.map((f) => f.ref ?? f.title).join(" and ")}`, href: tab === "merges" ? undefined : base, onClick: jump("mq-held-fix", "merges") },
     failed > 0 && { key: "failed", tone: "red", text: figureText("mergeQueue.checkFailed", failed), href: tab === "merges" ? undefined : base, onClick: jump("mq-first-failed", "merges") },
     stuck > 0 && { key: "stuck", tone: "red", text: figureText("mergeQueue.overAnHour", stuck), href: tab === "merges" ? undefined : base, onClick: jump("mq-first-stuck", "merges") },
   ].filter(Boolean) as { key: string; tone: string; text: string; href: string | undefined; onClick: ((e: MouseEvent<HTMLAnchorElement>) => void) | undefined }[];
@@ -512,11 +518,11 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
         ))}
       <div className="tabs" role="tablist" aria-label="Merge queue views">
         {tabButton("merges", "Merges", data ? inLineOf(data) : null, "mergeQueue.inLine", needsYou.length > 0)}
-        {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, "checkQueue.queued", heldChecks > 0)}
+        {tabButton("checks", "Quick checks", cq ? quickChecksOf(cq.rows).length : null, "checkQueue.queued", heldChecks > 0)}
       </div>
       {tab === "checks" ? (
         <div role="tabpanel" id="mq-panel-checks" aria-labelledby="mq-tab-checks">
-          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} heldBehind={heldBehind} /> : <Loader label="Loading the queued checks" />}
+          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the quick checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} heldBehind={heldBehind} paused={pausedLine} /> : <Loader label="Loading the quick checks" />}
         </div>
       ) : (
         <div role="tabpanel" id="mq-panel-merges" aria-labelledby="mq-tab-merges">
@@ -532,7 +538,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
               )}
               <NeedsYou rows={needsYou} />
               {pausedLine && (
-                <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong></p>
+                <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong> {pausedWaitText(pausedLine)}</p>
               )}
               <Running rows={data.running} slots={data.slots} paused={pausedLine} />
               <Waiting rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />

@@ -67,7 +67,7 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   } else if (heldSummary(merges)) {
     // R28: calm amber, never the red "stuck" line: merges wait on the main fix on purpose.
     const h = heldSummary(merges)!;
-    mergesLine = { key: "merges", tone: "warn", symbol: "‖", state: "Merges held behind the main fix", pill: "Main is red", text: heldText(h), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+    mergesLine = { key: "merges", tone: "warn", symbol: "‖", state: "Merges held behind the main fix", pill: "Merges held", text: heldText(h), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
   } else mergesLine = { key: "merges", tone: "ok", symbol: "✓", state: "Merges moving", pill: "Merges moving", text: inLineOf(merges) > 0 ? `${figureText("mergeQueue.inLine", inLineOf(merges))}, none stuck.` : "Nothing in the merge line.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
 
   let usage: HealthLine;

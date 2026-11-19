@@ -32,6 +32,12 @@ export function pausedText(p: PausedSummary): string {
   return `Paused for ${p.reason} since ${clock(p.since)}; new checks start once it is done, by ${clock(p.until)} at the latest.`;
 }
 
+/** BOS-1800: what the pause waits for, so the owner need not ask whether to stop the running checks. */
+export function pausedWaitText(p: PausedSummary): string {
+  if (p.inUse === 0) return `Nothing is running, so ${p.reason} can start now. No new merge starts until it is done.`;
+  return `${p.reason.charAt(0).toUpperCase()}${p.reason.slice(1)} is waiting for ${p.inUse === 1 ? "the 1 running check" : `these ${p.inUse} running checks`} to finish; no new merges start until it's done. Nothing needs stopping.`;
+}
+
 /** "2 of 5 in use: new checks paused": the slot line while the pause lasts. */
 export function pausedSlotsText(p: PausedSummary): string {
   return `${p.inUse} of ${p.slots} ${p.slots === 1 ? "slot" : "slots"} in use: new checks paused`;
@@ -51,14 +57,14 @@ export function heldSummary(view: Pick<MergeHealthView, "line"> | null | undefin
 export function heldText(h: HeldSummary): string {
   const fixes = h.fixes.map((f) => `${f.ref ?? `"${f.title}"`} (${f.stateText})`).join(" and ");
   const end = h.fixes.some((f) => f.ownerUpdate) ? "They go on once the server update runs." : "They merge by themselves once it is merged and live.";
-  return `Main is red: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}. ${end}`;
+  return `Merges are held: ${figureText("mergeQueue.heldBehindFix", h.held)} the fix ${fixes}${h.since ? `, since ${clock(h.since)}` : ""}. ${end}`;
 }
 
 /** The calm amber line (never the red "stuck" banner); links the fix tickets. */
 export function HeldBehindFixLine({ held }: { held: HeldSummary }) {
   return (
     <div className="mq-held-fix" role="status" data-held-behind-fix="true">
-      <strong>Main is red: {figureText("mergeQueue.heldBehindFix", held.held)} the fix</strong>{" "}
+      <strong>Merges are held: {figureText("mergeQueue.heldBehindFix", held.held)} the fix</strong>{" "}
       {held.fixes.map((f, i) => (
         <span key={f.ticketId}>
           {i > 0 ? " and " : ""}

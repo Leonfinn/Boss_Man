@@ -64,7 +64,7 @@ describe("Right now", () => {
     const merges = view({ waitingCount: 6, line });
     const lines = healthLines({ health: ok, merges, stuck: null, running: 2, companyId: "c1" });
     expect(lines[1]).toMatchObject({ tone: "warn", state: "Merges held behind the main fix" });
-    expect(lines[1]!.text).toBe("Main is red: 6 approved tickets are held behind the fix BOS-1641 (in review). They merge by themselves once it is merged and live.");
+    expect(lines[1]!.text).toBe("Merges are held: 6 approved tickets are held behind the fix BOS-1641 (in review). They merge by themselves once it is merged and live.");
   });
 
   it("says 'not known' in words, never green, for every line that couldn't be read", () => {

@@ -93,10 +93,10 @@ export const OWNER_FIGURES = {
   },
   "checkQueue.queued": {
     area: "merges",
-    source: "GET /api/companies/:id/check-queue → rows.length",
-    word: "queued",
-    label: (n) => `${n} queued ${s(n, "check", "checks")}`,
-    places: ["Merge queue page, Queued checks tab count"],
+    source: "GET /api/companies/:id/check-queue → rows that are not merge checks (running and waiting)",
+    word: "quick",
+    label: (n) => `${n} quick ${s(n, "check", "checks")}`,
+    places: ["Merge queue page, Quick checks tab count"],
   },
   "decisions.needYou": {
     area: "decisions",

@@ -77,27 +77,27 @@ describe("heldText", () => {
 
   it("says one ticket in the singular, by ref", () => {
     expect(heldText({ held: 1, fixes: [fix()], since: null })).toBe(
-      `Main is red: 1 approved ticket is held behind the fix BOS-100 (being fixed). ${endByItself}`,
+      `Merges are held: 1 approved ticket is held behind the fix BOS-100 (being fixed). ${endByItself}`,
     );
   });
 
   it("says several tickets in the plural, joined with and", () => {
     const fixes = [fix(), fix({ ticketId: "00000000-0000-4000-8000-000000000002", ref: "BOS-101", stateText: "approved" })];
     expect(heldText({ held: 3, fixes, since: null })).toBe(
-      `Main is red: 3 approved tickets are held behind the fix BOS-100 (being fixed) and BOS-101 (approved). ${endByItself}`,
+      `Merges are held: 3 approved tickets are held behind the fix BOS-100 (being fixed) and BOS-101 (approved). ${endByItself}`,
     );
   });
 
   it("quotes the title when the fix has no ref, and uses the update wording for an owner update", () => {
     expect(heldText({ held: 1, fixes: [fix({ ref: null, title: "Repair the gate", ownerUpdate: true })], since: null })).toBe(
-      `Main is red: 1 approved ticket is held behind the fix "Repair the gate" (being fixed). ${endOnUpdate}`,
+      `Merges are held: 1 approved ticket is held behind the fix "Repair the gate" (being fixed). ${endOnUpdate}`,
     );
   });
 
   it("adds the start time when there is one", () => {
     const since = "2026-11-17T10:00:00.000Z";
     expect(heldText({ held: 1, fixes: [fix()], since })).toBe(
-      `Main is red: 1 approved ticket is held behind the fix BOS-100 (being fixed), since ${clock(since)}. ${endByItself}`,
+      `Merges are held: 1 approved ticket is held behind the fix BOS-100 (being fixed), since ${clock(since)}. ${endByItself}`,
     );
   });
 });
