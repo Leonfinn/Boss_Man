@@ -1720,6 +1720,12 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 /* Wide mouse screens keep the row, but its time and link never wrap. A narrow or touch screen (a phone, in either orientation) stacks it. */
 .strip.stack-narrow .strip-when, .strip.stack-narrow > a { white-space: nowrap; flex: none; }
 .strip.stack-narrow .strip-title { min-width: 0; }
+/* Wide mouse screens: the same four columns in every row, so time, reason and link line up down the list. */
+.strip.strip-cols { display: grid; grid-template-columns: minmax(0, 2fr) 5em minmax(0, 2fr) 11em; align-items: start; column-gap: 16px; }
+.strip.strip-cols .strip-title { grid-column: 1; }
+.strip.strip-cols .strip-when { grid-column: 2; }
+.strip.strip-cols > div { grid-column: 3; }
+.strip.strip-cols > a { grid-column: 4; }
 @media (max-width: 900px), (pointer: coarse) {
   .strip.stack-narrow { display: block; }
   .strip.stack-narrow .strip-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-weight: 600; }
