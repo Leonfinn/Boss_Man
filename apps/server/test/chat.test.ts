@@ -84,6 +84,55 @@ describe("owner chat", () => {
     if (workerStart) expect(workerStart.prompt).not.toContain("## Owner's setup");
   });
 
+  it("DR-069 D2: the chat prompt names what the record and the owner say about each thing the owner's message names, newest first; a message naming nothing adds no section", async () => {
+    const c = await setup();
+    await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
+    const card = (question: string, answer: string, daysAgo: number) =>
+      c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question, options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer, answeredAt: new Date(Date.now() - daysAgo * 86_400_000), context: { type: "question", steps: ["Do it."], ownerMustDo: true } }).returning({ id: decisions.id });
+    await card("Please turn the check worker Truenas off for now", "Done: worker is off", 5);
+    await card("Should Truenas take merge checks again?", "Done: Truenas stays off", 1);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Let Truenas take merges?" });
+    await c.scheduler.tick();
+    const section = c.sent.filter((x): x is Start => x.type === "run.start").find((x) => x.agentId === c.ceo.id)!.prompt;
+    expect(section).toContain("## What the record and the owner already say about the things named here");
+    const line = section.slice(section.indexOf("## What the record and the owner already say")).split("\n").find((l) => l.startsWith("- Worker Truenas:"))!;
+    expect(line).toMatch(/record: .*switched off/);
+    // newest answer first, at most 2 per thing, and a line is at most 300 characters
+    expect(line, line).toContain("worker is off");
+    expect(line.indexOf("Truenas stays off")).toBeGreaterThan(-1);
+    expect(line.indexOf("Truenas stays off")).toBeLessThan(line.indexOf("worker is off"));
+    expect(line.length).toBeLessThanOrEqual(300);
+    // a message that names nothing known gets no section
+    const { namedThingsSection } = await import("../src/services/named-things.js");
+    expect(await namedThingsSection(c.db, c.company.id, ["How is the board looking today?"])).toEqual([]);
+  });
+
+  it("DR-069 D2: each kind is recognised from the record; unknown things and other companies' names say nothing; the section holds at most 8 lines", async () => {
+    const c = await setup();
+    const { namedThingsSection, namedThingLines, NAMED_MAX_LINES } = await import("../src/services/named-things.js");
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Keep the Penpot add-on?", options: ["Yes"], recommendedOption: "Yes", raisedByAgentId: c.ceo.id, status: "answered", answer: "Yes keep Penpot", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } })
+      .returning({ id: decisions.id });
+    const short = d!.id.slice(0, 8);
+    const addons = async () => ({ tailscale: { state: "unknown", since: null, source: "x" }, ntfy: { state: "unknown", since: null, source: "x" }, penpot: { state: "running", since: "2026-11-10T09:00:00Z", source: "x" } }) as never;
+    // a card by its 8-hex short id, an add-on by name (with the owner's newest answer naming it), a git token by phrase
+    const lines = await namedThingsSection(c.db, c.company.id, [`What happened on card ${short}? And is Penpot ok? The git token too.`], { addons, gitTokenProbe: async () => "yes" });
+    const text = lines.join("\n");
+    expect(text).toMatch(new RegExp(`- Card ${short}: record: answered .*Yes keep Penpot`));
+    expect(text).toMatch(/- Add-on Penpot: record: running since 2026-11-10 · owner .*card .*Yes keep Penpot/);
+    expect(text).toContain("- Git token: record: can read GitHub Actions runs");
+    // a worker that isn't this company's, and a ticket number that doesn't exist, say nothing
+    expect(await namedThingsSection(c.db, c.company.id, ["What about APP-99999 and Mystery-box?"])).toEqual([]);
+    // the cap
+    const names = Array.from({ length: 11 }, (_, i) => `Box${i}`);
+    for (const name of names) await c.db.insert(checkWorkers).values({ name, tokenHash: randomUUID(), companyIds: [c.company.id] });
+    const capped = (await namedThingsSection(c.db, c.company.id, [names.join(" and ")])).filter((l) => l.startsWith("- "));
+    expect(capped).toHaveLength(NAMED_MAX_LINES);
+    expect(NAMED_MAX_LINES).toBe(8);
+    expect(await namedThingLines(c.db, c.company.id, [{ kind: "Worker", name: "Unknown", needles: ["Unknown"], record: null }])).toEqual([]);
+  });
+
   it("stays open while an update waits and an agent is still working (BOS-349)", async () => {
     const c = await setup();
     // The CEO is busy with its own work, then a runner update starts to drain.
