@@ -19,7 +19,7 @@ A zip, `<company-slug>.bossman.zip`, with a `manifest.json` (`format: "bossman-c
 
 | Part | Files | Always? |
 |---|---|---|
-| Company | `company.json`: name, review policy, notification and quiet-hours settings, rules | yes |
+| Company | `company.json`: name, mission, review policy, goal-check interval, whether the owner approves engagements, ticket prefix, standing rules, and whether the watchdog is on | yes |
 | Agents | `agents/<slug>/agent.json` (name, role, title, template, duty, reports-to, agent kind, model) and `agents/<slug>/INSTRUCTIONS.md`, plus `avatar.*` if uploaded | yes |
 | Skills | `skills/<name>/…`, the full folder as stored, plus `skills.json` (source, pin, pack, and which agents have each skill) | yes |
 | Projects | `projects/<slug>/project.json`: repo URL, default branch, checks, landing, caps, columns, review-policy override | yes |
@@ -63,9 +63,10 @@ The spec at agentcompanies.io is **not yet read**. This mapping comes from a rea
 |---|---|
 | `COMPANY.md` name | company name |
 | `AGENTS.md` frontmatter: name, title, `reportsTo`, `skills:` list; body | agent and instructions; skills given by leaf name |
-| `.paperclip.yaml` `adapter.type`: `claude_local`, `opencode_local` | agent kind: `claude`, `opencode` |
+| `.paperclip.yaml` `adapter.type`: `claude_local`, `opencode_local`, `codex_local` | agent kind: `claude`, `opencode`, `codex` (any other type becomes `claude`, noted in the preview) |
 | `adapter.config.model` | model (checked against the runner) |
-| `role`: CEO, engineer, qa, pm, researcher | role, plus the closest template |
+| `role`: ceo, engineer, qa, pm, researcher, designer, writer | role, plus the closest template |
+| `role`: knowledge-maintainer | a worker with the wiki duty |
 | `inputs.env` with `kind: secret` | secret placeholder, granted to that agent |
 | `projects.*.workspaces.repo.repoUrl` and `defaultRef` | project repo and branch |
 | `heartbeat`, `permissions`, `appearance` | dropped: Boss Man wakes on events, and only the CEO hires |
