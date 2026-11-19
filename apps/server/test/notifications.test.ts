@@ -356,6 +356,8 @@ describe("notification ladder (R44)", () => {
     expect((await tap(token)).statusCode).toBe(200);
     st = (await c.req("GET", "/api/notification-settings")).json();
     expect(st.phoneTest.confirmedAt).not.toBeNull();
+    // BOS-1797: the record keeps the address the tap went to, so a later address change can't reuse this proof.
+    expect(st.phoneTest.url).toBe("https://bossman.example.ts.net");
     // One use only.
     expect((await tap(token)).statusCode).toBe(404);
     // A new test starts unconfirmed again, and the old link is dead.

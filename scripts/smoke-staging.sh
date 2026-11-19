@@ -90,7 +90,10 @@ if [[ -z $health ]]; then
 elif [[ -z $user || -z $pass ]]; then
   report signin skipped "not set up: no smoke account file"; report ticket skipped "not set up: no smoke account file"; report runner skipped "not set up: no smoke account file"
 else
-  body="$(printf '{"username":"%s","password":"%s"}' "${user//\"/}" "${pass//\"/}")"
+  # JSON-escape backslash and quote (a bare one made invalid JSON or a wrong password); drop a CR left by a Windows-edited file.
+  user="${user%$'\r'}"; pass="${pass%$'\r'}"
+  user="${user//\\/\\\\}"; user="${user//\"/\\\"}"; pass="${pass//\\/\\\\}"; pass="${pass//\"/\\\"}"
+  body="$(printf '{"username":"%s","password":"%s"}' "$user" "$pass")"
   code="$(printf '%s' "$body" | api -o /dev/null -w '%{http_code}' --data-binary @- "$BASE/api/login" 2>/dev/null)"
   if [[ $code == 200 ]]; then
     report signin pass "the smoke account signs in"

@@ -217,4 +217,4 @@ Boss Man's fuller release notes (what went live on its own server and when) are 
 
 `scripts/deploy.sh` says "Nothing new to deploy". The checkout is already at the newest commit. Add `--force` only if you want to rebuild anyway.
 
-The update card is only an alert ("Got it") and does not deploy. The update changes a file the deployer refuses. Apply it by hand, as in step 2.
+The update card says "Main has moved to …" and does not deploy. The update changes a file the deployer refuses. Once you approve it, it leaves a to-do with the hand-apply steps. Apply it by hand, as in step 2, then answer the to-do **Done, it's applied**.

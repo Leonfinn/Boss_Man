@@ -29,6 +29,11 @@ export type CiOutcome =
    * `gateOutput`: the end of the gate's own re-run of the named tests, when that failed too.
    */
   | { kind: "failed"; status: CiStatus; retried?: boolean; why?: string; gateOutput?: string }
+  /**
+   * R40 (BOS-1685): it failed only in main's known GitHub-only red, which this branch doesn't touch. Not in ciStops on
+   * purpose: the gate's own check must still finish and pass before the merge goes on. Set by the merge gate, never here.
+   */
+  | { kind: "known_red"; jobs: string[]; refs: string[] }
   | { kind: "refused"; message: string }
   | { kind: "error"; message: string }
   | { kind: "timeout"; waiting: string[] }

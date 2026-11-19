@@ -209,7 +209,7 @@ A server deploy updates the server only. When an update changes the runners' cod
 - **"Rejected: this change touches deployment files"**: run `scripts/deploy.sh` yourself in `$B/src`. The deployer refuses changes to files such as `scripts/`, `deploy/`, compose files and Dockerfiles.
 - **"Rejected: only one server deploy every 10 minutes"**: wait, then press **Try again** on Updates.
 - **`main` moved after you approved:** nothing to do. The approval deploys the newest checked commit on `main`. Only if `main` was rewritten so the approved commit is gone do you see "is not on main any more"; a new question for `main` follows within a few minutes.
-- **An alert about deployment files you have already applied by hand**: the note was written before you did. Press **Got it**; it refreshes within about 6 minutes.
+- **A to-do about deployment files you have already applied by hand**: it was written before you did. Answer **Done, it's applied**. It also closes by itself once the host reports the new commit running.
 - **Updates stuck behind an infra change.** The deployer offers only the tip of `main`. While an unapplied infra change is in that range, every later update waits behind it until you apply it by hand. Merge infra changes on their own, after the app changes before them are deployed.
 - **The update waits for free memory.** The deployer holds a request while the host is short of memory and tries again each minute. [docs/09-self-deploy.md](09-self-deploy.md#the-hosts-memory-floor-scriptshost-deployersh) explains the numbers.
 

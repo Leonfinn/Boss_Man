@@ -341,7 +341,8 @@ function Recent({ rows }: { rows: RecentRow[] }) {
 }
 
 type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null; seatPlace?: number | null; lane?: string | null };
-type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
+type IdleSlotRow = { machine: string; line: string; expected: boolean };
+type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[]; idleSlots?: IdleSlotRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
 /** The one "main is red" banner (BOS-1207): said once, naming the ticket that fixes main when one is queued. */
@@ -394,6 +395,12 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
       {paused && (
         <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(paused)}</strong> {pausedWaitText(paused)}</p>
       )}
+      {(data.idleSlots ?? []).map((s) => (
+        <p key={s.line} className="muted" style={{ fontSize: 14 }} data-idle-slot={s.expected ? "expected" : "alarm"}>
+          {s.expected ? "" : <strong>Idle check capacity. </strong>}
+          {upFirst(s.line)}
+        </p>
+      ))}
       {!rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
           <strong>No quick checks queued.</strong> When an agent asks for a quick check, it shows here until it finishes. Merge checks are on the Merges tab.{" "}

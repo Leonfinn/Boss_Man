@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
 import { CHECK_QUEUE_MODE_KEY, checkQueue } from "../src/services/check-queue.js";
@@ -74,6 +75,21 @@ describe("check dispatcher", () => {
     // A runner that reports nothing (older image) is not capped.
     await s.d.onHello(s.runner.id, s.sent.map((x) => x.command.jobId));
     expect(s.d.runnerSlots(s.runner.id)).toBeUndefined();
+  });
+
+  it("R46: a free runner slot held by the update pause is listed as idle with its reason, keeps its start time, and clears once the job starts", async () => {
+    const s = await setup();
+    const job = await s.req("idle1");
+    await s.db.insert(settings).values({ key: "deploy_wait", value: { phase: "waiting", approvedAt: new Date().toISOString() } });
+    await s.d.pump();
+    const [first] = s.d.idleSlots(s.runner.companyId);
+    expect(first).toMatchObject({ jobId: job.id, code: "update_hold", expected: true, machine: "the company runner" });
+    await s.d.pump();
+    expect(s.d.idleSlots(s.runner.companyId)[0]!.since.getTime()).toBe(first!.since.getTime());
+    await s.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    await s.d.pump();
+    expect(s.sent).toHaveLength(1);
+    expect(s.d.idleSlots(s.runner.companyId)).toEqual([]);
   });
 
   it("does nothing in legacy mode", async () => {

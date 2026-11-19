@@ -16,6 +16,22 @@ pnpm --filter @boss-man/site test
 
 `SITE_OUT` builds somewhere other than `apps/site/dist`.
 
+`INDEXNOW_KEY` (8 to 128 letters, digits or dashes; kept in Boss Man's Secrets, never in the repo) makes the build write `/<key>.txt` holding just the key, as IndexNow requires. Sitemap dates (`<lastmod>`) come from each source file's git history; with no history (a shallow clone) the date is left out rather than guessed.
+
+After a successful deploy, the publish step runs `node apps/site/scripts/indexnow.mjs --previous <old sitemap>` (before the deploy, `--fetch-previous <file>` saves the live sitemap). It sends only changed pages to IndexNow, retries once, runs the shell command in `INDEXNOW_ON_FAILURE` (which raises a CEO ticket) after a second failure, and always exits 0 so a publish never fails because of it. Google reads changes from the sitemap.
+
+## Publishing
+
+`scripts/publish-site.sh` is the one publish step (every release ends with it, see the comment at the top of `CHANGELOG.md`). It builds the site from the commit checked out, saves the live sitemap, deploys to Cloudflare Pages, then sends the IndexNow notice — in that order. The notice is best-effort: it never fails the publish. Settings come from the environment, so it works on any host and any Cloudflare account:
+
+- `SITE_URL` (required): the site's https origin.
+- `CF_PAGES_PROJECT`: the Cloudflare Pages project. Empty: the script builds and checks only, and deploys nothing (a safe dry run).
+- `INDEXNOW_KEY`: the key from Boss Man's Secrets. Empty: no key file is served and no notice is sent.
+- `INDEXNOW_ON_FAILURE`: a shell command to raise a CEO ticket after the notice fails twice (gets a summary in `INDEXNOW_FAILURE`).
+- `WRANGLER` (default `npx --yes wrangler@4`), `CF_PAGES_BRANCH` (default `main`), `DIST_TMP` (a fresh temp dir by default).
+
+Publish from a full clone, not a shallow one: with no git history the sitemap has no dates, every page counts as changed, and all of them are sent each time (IndexNow tolerates it, but it isn't "only changed pages"). Rollback: re-run the script from the older commit.
+
 ## Cloudflare Pages settings
 
 Root directory `/`, build command `pnpm --filter @boss-man/site build`, output directory `apps/site/dist`, Node 22, environment variables `SITE_URL` and `PORTAL_URL`. Pages serves `guides/install-boss-man.html` at `/guides/install-boss-man` and `404.html` for unknown paths. `src/_headers` sets security and cache headers; its Content-Security-Policy allows only the site's own files, so no inline styles or scripts (the check fails on either). `src/_redirects` sends the old `/features`, `/how-it-works` and `/get-started` addresses to the home page and the new guides.

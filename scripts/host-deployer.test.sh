@@ -37,7 +37,12 @@ git clone -q "$T/origin.git" "$T/src" 2>/dev/null
 push() { # file: change a file and push main; prints the new sha
   mkdir -p "$(dirname "$T/w/$1")"; echo "$RANDOM" >"$T/w/$1"
   git -C "$T/w" add -A; git -C "$T/w" commit -qm "change $1"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
-  git -C "$T/w" rev-parse HEAD
+  # Exactly one 40-char sha, or end the whole test naming the helper (BOS-1817): a stray line or an empty
+  # value would otherwise only show up later as the deployer rejecting the request's shape. push runs in a
+  # $(...) subshell, where exit would end only the subshell, so signal the main script ($$ is the parent).
+  local sha; sha="$(git -C "$T/w" rev-parse HEAD)"
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: push($1) did not give one 40-char sha, got: [$sha]" >&2; kill -TERM "$$"; exit 1; }
+  echo "$sha"
 }
 c1="$(push apps/server/a)"
 
@@ -70,7 +75,12 @@ conf() { printf 'REPO=%s\nWEBHOOK_URL=http://127.0.0.1:%s/hook\nWEBHOOK_ON_SUCCE
 conf 0
 host() { "$here/host-deployer.sh" "$@" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero"; }; }
 req() { # target commit [id]: write a request the way the server does
-  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${3:-$(node -e 'console.log(crypto.randomUUID())')}" "$1" "$2" >"$D/inbox/request.json"
+  # Build the id first and check it, so a failed node start under load stops here with a clear message.
+  local rid="${3:-}"
+  [[ -n $rid ]] || rid="$(node -e 'console.log(crypto.randomUUID())')"
+  [[ $rid =~ ^[0-9A-Za-z-]{1,64}$ ]] || { echo "FAIL: req($1) request id is not a plain id, got: [$rid]" >&2; exit 1; }
+  [[ $2 =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: req($1) commit is not one 40-char sha, got: [$2]" >&2; exit 1; }
+  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$rid" "$1" "$2" >"$D/inbox/request.json"
 }
 status() { jget "$D/outbox/status.json" "$1"; }
 calls() { wc -l <"$STUB_LOG" | tr -d ' '; }
@@ -1247,6 +1257,14 @@ sreq "$s1"; host
 has "$D/outbox/staging-status.json" "not configured"
 [[ ! -e $D/inbox/staging-request.json ]] || fail "lane off left the request in the inbox"
 hasnt "$STUB_LOG" "deploy-staging.sh"
+# A symlinked request is never read (BOS-1775): the id behind it must not reach the world-readable status file.
+printf '{"id":"secret"}\n' >"$T/secret-target.json"; ln -s "$T/secret-target.json" "$D/inbox/staging-request.json"; host
+[[ $(sstatus result) == rejected ]] || fail "lane off, symlink: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-status.json" "secret"
+hasnt "$D/outbox/staging-history.jsonl" "secret"
+# A plain file whose id is not a UUID is not echoed either.
+printf '{"id":"secret"}\n' >"$D/inbox/staging-request.json"; host
+hasnt "$D/outbox/staging-status.json" "secret"
 
 # Lane on: a main commit deploys, then the smoke checks run, with production's folder passed for the isolation checks.
 conf 0; printf 'STAGING_DIR=%s\nSTAGING_RATE_LIMIT_SECONDS=3600\n' "$T/stg" >>"$D/host.conf"
