@@ -102,7 +102,7 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
         <div className="field">
           <label htmlFor="skill-url">GitHub link to a repository, a folder or a SKILL.md</label>
           <input id="skill-url" type="url" placeholder="https://github.com/owner/repo/tree/main/skills" value={url} onChange={(e) => setUrl(e.target.value)} />
-          <small className="muted">Every skill under the link is added, pinned to the commit it points at now; several from one link become a pack you can give in one go. Public repositories only for now; a link straight to a SKILL.md file anywhere also works.</small>
+          <small className="muted">Every skill under the link is added, pinned to the commit it points at now; several from one link become a pack you can give in one go. Private repositories work when the company has a git token that can read them (Settings → Secrets); a link straight to a SKILL.md file anywhere also works.</small>
         </div>
       )}
       {tab === "written" && (
