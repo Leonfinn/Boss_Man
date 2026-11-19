@@ -19,7 +19,7 @@ import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, nam
 import { CI_BRANCH_PREFIX, GitHostError, type CiStatus, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { CEO_FIRST_MERGE_WHY, ceoFirstLadder, ceoFirstMergeNote, CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
 import { checkGate, ticketCheckPriority } from "./check-gate.js";
 import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
@@ -188,7 +188,7 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       if (d.exitCode === undefined && !d.timedOut && !d.output && Array.isArray(d.why)) return `Approved, but not merged: a migration number is already taken (${d.why.join("; ")}). ${back} to fix; the details are in the conversation below.`;
       return `Approved, but not merged: the check ${d.timedOut ? `timed out after ${Math.max(1, Math.round((d.ms ?? 0) / 60_000))} minutes` : checkFailureSentence(d)}. ${back} to fix; the check's output is in the conversation below.${d.keptLog ? ` ${fullLogPointer(d.keptLog.jobId, d.keptLog.ticketId, d.keptLog.chars)}` : ""}`;
     case "check_stuck":
-      return "Approved, but not merged: the check couldn't finish. This isn't a problem with the agent's work; it's in your Decisions.";
+      return "Approved, but not merged: the check couldn't finish. This isn't a problem with the agent's work; a merge card is open in Decisions, with the CEO first unless only you can fix it.";
     case "conflicts":
       return `Approved, but not merged: the work conflicts with ${ctx.branch} in ${(d.files ?? []).join(", ")}. ${back} to sort out.`;
     case "migration_journal":
@@ -289,19 +289,26 @@ const when = (iso: string) => {
   return `${d.getUTCDate()} ${formatDate("en-GB", d, { month: "short", timeZone: "UTC" })} ${iso.slice(11, 16)} UTC`;
 };
 
-/** The owner decides what to do with a check that couldn't finish; the ticket stays in review and the loop detector never hears of it. */
-async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title: string }, command: string, reason: string, output: string, own?: { question: string; tier: "owner" | "ceo"; dedupeKey: string }) {
+/**
+ * A card for a check that couldn't finish: the CEO first (alert ladder, BOS-1873), the owner after the handover or at once when
+ * only they can fix it. The ticket stays in review and the loop detector never hears of it. Call it through the review
+ * service's checkStuck, which also wakes the CEO.
+ */
+async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title: string }, command: string, reason: string, output: string, own?: { question?: string; /** "owner" only for what the owner alone can fix: a token, the GitHub bill, a GitHub-side action (BOS-1873). */ tier?: "owner" | "ceo"; dedupeKey?: string }) {
   // A ticket closed while its check was running needs no merge card (BOS-149): read the state
   // again, because the ticket may have been merged or cancelled since this landing began.
   const [latest] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, t.id));
   if (!latest || latest.systemState === "done") return;
   // BOS-1070: one card for a whole project's problem (the git token can't read CI). While one is open, others don't add theirs.
-  if (own) {
+  if (own?.dedupeKey) {
     const [open] = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.status, "open"), eq(decisions.dedupeKey, own.dedupeKey))).limit(1);
     if (open) return null;
   }
   // One open merge card per ticket: this one replaces any older card (BOS-149).
   await clearMergeCards(db, t.id, { by: "system", note: `Replaced by a newer merge card: the check \`${command}\` ${reason}.`, at: new Date().toISOString() });
+  const tier = own?.tier ?? "ceo";
+  // BOS-1873: a CEO card carries the CEO rung of the alert ladder, or the owner's queue shows it at once.
+  const ladder = tier === "ceo" ? ceoFirstLadder(t.id, CEO_FIRST_MERGE_WHY) : null;
   const [row] = await db
     .insert(decisions)
     .values({
@@ -312,14 +319,14 @@ async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title
       recommendedOption: CHECK_AGAIN,
       // The CEO first (BOS-446): Boss Man has already retried by itself, and the CEO can retry or send it back.
       // A CI access or billing card (BOS-1070) goes to the owner: only they can change the token or the plan.
-      tier: own?.tier ?? "ceo",
+      tier,
       dedupeKey: own?.dedupeKey ?? `merge-stuck:${t.id}`,
-      context: { type: "check_stuck", ticketId: t.id, command, output: output.slice(-1500) },
+      context: { type: "check_stuck", ticketId: t.id, command, output: output.slice(-1500), ...(ladder ? { ladder } : {}) },
     })
     .onConflictDoNothing()
-    .returning({ question: decisions.question });
+    .returning({ id: decisions.id, question: decisions.question });
   await lineEvent(db, t, { event: "hold_started", hold: "card", note: `the check ${reason}`.slice(0, 200) });
-  return row?.question ?? null;
+  return row ? { ...row, ceoFirst: !!ladder } : null;
 }
 
 /** A check's result for the merge-line timeline (BOS-769): null when it never finished, so it says nothing of the work. */
@@ -763,6 +770,21 @@ export function reviewService(
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
     if (ceo) await wake?.(ceo.id, { ticketId: t.id, reason, note });
     return ceo?.id ?? null;
+  }
+
+  /**
+   * BOS-1873: raises a merge or check card and, when it went to the CEO first, wakes the CEO about it. The ladder's
+   * handover clock only starts with a CEO run that can see the card, so an unwoken CEO would leave it waiting for the outer cap.
+   */
+  async function mergeStuck(t: { id: string; title: string; companyId: string }, why: string) {
+    const [card] = await raiseMergeStuck(db, t, why);
+    if (card?.ceoFirst) await tellCeo(t, "decision", ceoFirstMergeNote(t.title, card.id, `its merge didn't finish (${why.slice(0, 300)})`)).catch(() => undefined);
+    return card ?? null;
+  }
+  async function checkStuck(t: { companyId: string; id: string; title: string }, command: string, reason: string, output: string, own?: Parameters<typeof raiseCheckStuck>[5]) {
+    const card = await raiseCheckStuck(db, t, command, reason, output, own);
+    if (card?.ceoFirst) await tellCeo(t, "decision", ceoFirstMergeNote(t.title, card.id, `the merge check \`${command}\` couldn't finish (it ${reason.slice(0, 300)})`)).catch(() => undefined);
+    return card;
   }
 
   /**
@@ -1748,7 +1770,7 @@ export function reviewService(
         const [row] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
         if (row) {
           await record(db, { companyId: row.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't start: ${message}` });
-          await raiseMergeStuck(db, row, message);
+          await mergeStuck(row, message);
         }
         throw err;
       }
@@ -1911,8 +1933,8 @@ export function reviewService(
             }
             goneTries++;
             if (goneTries > INFRA_RETRY_ATTEMPTS) {
-              await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The runner kept going away under the merge (${message}); it's in your Decisions.` });
-              await raiseCheckStuck(db, t, "the merge", "was cut off because the runner restarted or went away", message);
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The runner kept going away under the merge (${message}); the merge card is with the CEO first.` });
+              await checkStuck(t, "the merge", "was cut off because the runner restarted or went away", message);
               return { outcome: "check_stuck", delivered: null, detail: r.detail };
             }
             const pause = INFRA_RETRY_BASE_MS * 2 ** (goneTries - 1);
@@ -1954,8 +1976,8 @@ export function reviewService(
           const d = r.detail as { command?: string; output?: string; status?: string } | undefined;
           if (attempt >= LOCK_RETRY_ATTEMPTS) {
             const moved = d?.status === "main_moved";
-            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: moved ? `The merge gave up after ${attempt} tries: main kept moving before it could land; it's in your Decisions.` : `Merge check gave up waiting for the lock after ${attempt} tries; it's in your Decisions.` });
-            await raiseCheckStuck(db, t, d?.command ?? "the merge", moved ? "kept finding that main had moved before it could land" : "kept waiting for the shared lock, which other checks held", d?.output ?? "");
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: moved ? `The merge gave up after ${attempt} tries: main kept moving before it could land; it's in your Decisions.` : `Merge check gave up waiting for the lock after ${attempt} tries; the merge card is with the CEO first.` });
+            await checkStuck(t, d?.command ?? "the merge", moved ? "kept finding that main had moved before it could land" : "kept waiting for the shared lock, which other checks held", d?.output ?? "");
             return { outcome: "check_stuck", delivered: null, detail: r.detail };
           }
           const pause = LOCK_RETRY_BASE_MS * 2 ** (attempt - 1);
@@ -2002,7 +2024,7 @@ export function reviewService(
         }
         await failed("gate_fault", undefined, err.message);
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't run: ${err.message}` });
-        await raiseMergeStuck(db, t, err.message);
+        await mergeStuck(t, err.message);
         // Whoever approved still hears why, as before.
         throw err;
       } finally {
@@ -2387,7 +2409,7 @@ export function reviewService(
             // Retries used up: one "Run the check again" card, and the ticket stays in review so running it
             // again does not reset the reviews (BOS-460 stalled overnight on a reset request).
             await wait(t, `Not merged: the runner didn't answer the check for other tickets' unmerged work (${err.message}). Nothing was merged.`, "card");
-            await raiseCheckStuck(db, t, "carried-work check", "the runner didn't answer the check for other tickets' unmerged work", err.message);
+            await checkStuck(t, "carried-work check", "the runner didn't answer the check for other tickets' unmerged work", err.message);
             return { outcome: "check_stuck", delivered: null, detail: { unchecked: err.message } };
           }
           const pause = INFRA_RETRY_BASE_MS * 2 ** (retry - 1);
@@ -2443,14 +2465,14 @@ export function reviewService(
         if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
         if (checkQueueStuck(v)) {
           const mins = /no progress for (\d+) min/.exec(v.output)?.[1] ?? "60";
-          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The check queue made no progress for ${mins} minutes (the same check held the slot); the merge check gave up and it's in your Decisions.` });
-          await raiseCheckStuck(db, t, command, `was stopped: the check queue made no progress for ${mins} minutes, because the check holding the slot never finished`, v.output);
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The check queue made no progress for ${mins} minutes (the same check held the slot); the merge check gave up and the merge card is with the CEO first.` });
+          await checkStuck(t, command, `was stopped: the check queue made no progress for ${mins} minutes, because the check holding the slot never finished`, v.output);
           return { outcome: "check_stuck", delivered: null, detail: v };
         }
         const never: InfraCause | null = (v as { noAnswer?: boolean }).noAnswer ? "no_answer" : checkNeverFinished(v);
         if (never) {
           const reason = INFRA_CAUSE_TEXT[never](v.ms);
-          await raiseCheckStuck(db, t, command, reason, v.output);
+          await checkStuck(t, command, reason, v.output);
           return { outcome: "check_stuck", delivered: null, detail: v };
         }
         const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
@@ -2551,13 +2573,14 @@ export function reviewService(
             : why === "billing"
               ? `GitHub CI didn't run for "${t.title}": GitHub wouldn't start its jobs because of the account's spending limit or a failed payment. This isn't a problem with the agent's work. To fix it on GitHub: Settings → Billing and licensing → check the payment method and the Actions budget. Then choose "${CHECK_AGAIN}". ${switchOff}`
               : `GitHub CI: Boss Man couldn't read the CI result for "${t.title}" from GitHub after several tries (${message}), so nothing was merged. If GitHub is having trouble (githubstatus.com), wait for it to recover, then choose "${CHECK_AGAIN}". ${switchOff}`;
-        const raised = await raiseCheckStuck(db, t, "GitHub CI", why === "access" ? "couldn't read GitHub Actions runs" : why === "billing" ? "wasn't started by GitHub (billing)" : "couldn't be read from GitHub", message, { question, tier: "owner", dedupeKey: `ci-${why}:${t.projectId}` });
+        // BOS-1873: the token and the bill are the owner's; a read that kept failing (a GitHub outage) the CEO retries first.
+        const raised = await checkStuck(t, "GitHub CI", why === "access" ? "couldn't read GitHub Actions runs" : why === "billing" ? "wasn't started by GitHub (billing)" : "couldn't be read from GitHub", message, { question, tier: why === "error" ? "ceo" : "owner", dedupeKey: `ci-${why}:${t.projectId}` });
         if (raised === null) {
           const held = ciCardWaiting.get(t.projectId) ?? new Set<string>();
           held.add(ticketId);
           ciCardWaiting.set(t.projectId, held);
         }
-        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub Actions runs" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : "It's in the owner's Decisions."}` });
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub Actions runs" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : why === "error" ? "The card is with the CEO first." : "It's in the owner's Decisions."}` });
         return { outcome: "check_stuck", delivered: null, detail: { ci: why, message } };
       };
       // BOS-1733 (CI fix 2): GitHub failed in named tests this branch doesn't change. The decision table (ci-flake.ts) says
@@ -2721,8 +2744,8 @@ export function reviewService(
             return null;
           case "timeout": {
             const mins = Math.round(ciTiming.ceilingMs / 60_000);
-            await raiseCheckStuck(db, t, "GitHub CI", `was still running after ${mins} minutes${o.waiting.length ? ` (${o.waiting.join(", ")})` : ""}`, "");
-            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub CI was still running after ${mins} minutes; it's in your Decisions.` });
+            await checkStuck(t, "GitHub CI", `was still running after ${mins} minutes${o.waiting.length ? ` (${o.waiting.join(", ")})` : ""}`, "");
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub CI was still running after ${mins} minutes; the merge card is with the CEO first.` });
             return { outcome: "check_stuck", delivered: null, detail: { ci: "timeout", waiting: o.waiting } };
           }
           case "superseded":
@@ -2731,7 +2754,8 @@ export function reviewService(
             return { outcome: "lock_wait", delivered: null, detail: { status: "ci_superseded", newerSha: o.newerSha } };
           case "cancelled": {
             const what = o.runs.join(", ") || "the CI run";
-            await raiseCheckStuck(db, t, "GitHub CI", `was cancelled on GitHub (${what})${o.rerunTried ? ", and cancelled again after one re-run" : "; Boss Man's token couldn't re-run it (it needs Actions: Read and write)"}. No test failed. Open the run on GitHub and re-run it, then choose "${CHECK_AGAIN}"`, "");
+            // BOS-1873: owner-first: re-running the run is done on GitHub, which only the owner can reach.
+            await checkStuck(t, "GitHub CI", `was cancelled on GitHub (${what})${o.rerunTried ? ", and cancelled again after one re-run" : "; Boss Man's token couldn't re-run it (it needs Actions: Read and write)"}. No test failed. Open the run on GitHub and re-run it, then choose "${CHECK_AGAIN}"`, "", { tier: "owner" });
             await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub cancelled the run (${what}); no test failed. It's in your Decisions.` });
             return { outcome: "check_stuck", delivered: null, detail: { ci: "cancelled", runs: o.runs } };
           }
@@ -3508,7 +3532,7 @@ export function reviewService(
       }
       if (m0.status === "job_stuck") {
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The queued merge check stopped before it finished: ${m0.reason}` });
-        await raiseCheckStuck(db, t, named(m0.command), `stopped: ${m0.reason}`, m0.output);
+        await checkStuck(t, named(m0.command), `stopped: ${m0.reason}`, m0.output);
         return { outcome: "check_stuck", delivered: null, detail: m0 };
       }
       const m: MergeResult | PushResult = m0;
