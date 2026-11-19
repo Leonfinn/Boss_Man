@@ -7,6 +7,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne,
 import { REAL_USE_LABEL, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
+import { dueChatReport } from "./chat-report-back.js";
 import { agentHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
@@ -2245,6 +2246,9 @@ export function schedulerService(
       // so the parent's "unblocked" note already reads the recorded verdict.
       const reported = await reportCheckTicket(db, ticketId, now());
       if (reported) await this.notify(reported.agentId, { ticketId: reported.ticketId, reason: CHECK_REPORTED_REASON, note: reported.note, causedByRunId });
+      // R52 (BOS-1911): a ticket asked for in chat is reported back in that chat: one chat wake, whose run (or Boss Man's own line) tells the owner.
+      const owed = await dueChatReport(db, ticketId, now(), causedByRunId);
+      if (owed) await this.notify(owed.agentId, { reason: CHAT_REASON, priority: 4, causedByRunId });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
       for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
       // The wiki maintainer files what finished work produced (R73). One waiting run covers

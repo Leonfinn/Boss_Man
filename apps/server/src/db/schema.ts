@@ -383,6 +383,14 @@ export const tickets = pgTable(
     pullRequestHead: text("pull_request_head"),
     /** The head commit and check result the agent was last told about ("sha:failed"), so each is told once (R86). */
     pullRequestCi: text("pull_request_ci"),
+    /**
+     * R52 (BOS-1911): a ticket asked for in an owner chat is reported back in that chat. The agent whose chat run created or
+     * changed it, and when; null for a ticket that did not come from chat (existing rows stay off).
+     */
+    reportInChatAgentId: uuid("report_in_chat_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
+    reportInChatAt: timestamp("report_in_chat_at", { withTimezone: true }),
+    /** Set when it closed (or handed out follow-ups) and the chat has not been told yet; cleared once a chat reply names it or Boss Man's own line is posted. */
+    chatReportDueAt: timestamp("chat_report_due_at", { withTimezone: true }),
     /** A watcher (R80): an agent that reports this ticket's progress to the owner every so often. Off when null. */
     watcherAgentId: uuid("watcher_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
     watchEveryMinutes: integer("watch_every_minutes"),
