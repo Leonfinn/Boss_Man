@@ -6,7 +6,7 @@ import { eq, sql } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, notifications, settings } from "../src/db/schema.js";
-import { MergeTrain } from "../src/services/merge-train.js";
+import { MergeTrain, TRAIN_THRASH_QUICK } from "../src/services/merge-train.js";
 import { EMPTY_SEAT_MS, MERGE_STALL_REASON, mergeStallService, mergeTrainStatus, NO_LANDING_MS, stalls } from "../src/services/merge-stall.js";
 import { OWNER_AFTER_MS } from "../src/services/priority-watch.js";
 import { WAKE_CLASS } from "../src/services/wake-classes.js";
@@ -141,7 +141,7 @@ async function setup() {
   }
   const told: Array<{ ticketId: string; note: string; at: number }> = [];
   const sent: Array<{ id: string; title: string; body: string; at: number }> = [];
-  const service = (clock: { t: number }, trains: () => Array<{ projectId: string; facts: ReturnType<MergeTrain["facts"]> }>) =>
+  const service = (clock: { t: number }, trains: () => Array<{ projectId: string; facts: ReturnType<MergeTrain["facts"]> }>, paused?: () => boolean) =>
     mergeStallService(db, {
       tellCeo: async ({ ticketId, note }) => void told.push({ ticketId, note, at: clock.t }),
       notify: async (input) => {
@@ -151,6 +151,7 @@ async function setup() {
       },
       now: () => new Date(clock.t),
       trains,
+      ...(paused ? { paused: async () => paused() } : {}),
     });
   return { ...built, db, close, company, project, ids, refs, told, sent, service };
 }
@@ -304,6 +305,99 @@ async function replay(trial: boolean) {
   }
   return { seatedAt, empties, told: [...ctx.told], sent: [...ctx.sent] };
 }
+
+describe("merge stall alarm during a deliberate pause (BOS-1841)", () => {
+  // h holds the line (two passed it), so b waits while a seat is empty: an empty_seat stall after EMPTY_SEAT_MS.
+  const build = (clock: { t: number }) => {
+    const tr = new MergeTrain({ seats: () => 2, now: () => clock.t });
+    const id = (w: string) => ctx.ids.get(w)!;
+    tr.join(id("a"), { priority: 1, place: 1 });
+    tr.seated(id("a"));
+    tr.join(id("h"), { priority: 1, place: 2, headOnly: true, clash: { with: [id("a")], files: ["src/a.ts"], at: clock.t } });
+    for (const w of ["E", "F"]) {
+      tr.join(id(w), { priority: 1, place: 3 });
+      tr.seated(id(w));
+      tr.landed(id(w));
+    }
+    tr.join(id("b"), { priority: 1, place: 9 });
+    tr.seated(id("b"));
+    return tr;
+  };
+
+  it("raises no empty-seat stall while paused, and counts from when the pause ended", async () => {
+    const clock = { t: at("12:00:00") };
+    const tr = build(clock);
+    let paused = true;
+    const svc = ctx.service(clock, () => [{ projectId: ctx.project.id, facts: tr.facts() }], () => paused);
+    const before = ctx.told.length;
+    for (let i = 0; i < 10; i++) {
+      clock.t += 10 * MIN;
+      expect(await svc.run()).toMatchObject({ told: 0 });
+    }
+    expect(ctx.told).toHaveLength(before);
+    paused = false;
+    clock.t += MIN;
+    expect(await svc.run()).toMatchObject({ told: 0 });
+    clock.t += EMPTY_SEAT_MS;
+    expect(await svc.run()).toMatchObject({ told: 1 });
+    expect(ctx.told).toHaveLength(before + 1);
+    expect(ctx.sent).toHaveLength(0);
+  });
+
+  it("raises no no-landing stall while paused, and counts from when the pause ended", async () => {
+    const clock = { t: at("14:00:00") };
+    const tr = new MergeTrain({ seats: () => 1, now: () => clock.t });
+    tr.join(ctx.ids.get("S")!, { priority: 1, place: 1 });
+    tr.seated(ctx.ids.get("S")!);
+    tr.join(ctx.ids.get("B")!, { priority: 1, place: 2 });
+    let paused = true;
+    const svc = ctx.service(clock, () => [{ projectId: ctx.project.id, facts: tr.facts() }], () => paused);
+    clock.t += NO_LANDING_MS + 10 * MIN;
+    expect(await svc.run()).toMatchObject({ told: 0, ownerTold: 0 });
+    clock.t += NO_LANDING_MS;
+    expect(await svc.run()).toMatchObject({ told: 0, ownerTold: 0 });
+    expect(ctx.told).toHaveLength(0);
+    expect(ctx.sent).toHaveLength(0);
+    paused = false;
+    clock.t += NO_LANDING_MS - SEC;
+    expect(await svc.run()).toMatchObject({ told: 0 });
+    clock.t += SEC;
+    expect(await svc.run()).toMatchObject({ told: 1 });
+    expect(ctx.told[0]!.note).toContain("nothing has landed");
+  });
+
+  it("still tells a restack loop (thrash) at once while paused", async () => {
+    const clock = { t: at("15:00:00") };
+    const tr = new MergeTrain({ seats: () => 2, now: () => clock.t });
+    const a = ctx.ids.get("a")!;
+    tr.join(a, { priority: 1, place: 1 });
+    tr.seated(a);
+    for (let i = 0; i < TRAIN_THRASH_QUICK; i++) {
+      tr.prepared(a, { base: "m", commit: `c${i}`, tree: `t${i}`, onMain: true });
+      clock.t += SEC;
+      tr.restack(a);
+    }
+    expect(tr.facts().thrashSince).not.toBeNull();
+    const svc = ctx.service(clock, () => [{ projectId: ctx.project.id, facts: tr.facts() }], () => true);
+    expect(await svc.run()).toMatchObject({ told: 1 });
+    expect(ctx.told[0]!.note).toContain("restacking in a loop");
+  });
+
+  it("keeps an episode raised before the pause, and does not tell it again after", async () => {
+    const clock = { t: at("13:00:00") };
+    const tr = build(clock);
+    let paused = false;
+    const svc = ctx.service(clock, () => [{ projectId: ctx.project.id, facts: tr.facts() }], () => paused);
+    clock.t += EMPTY_SEAT_MS;
+    expect(await svc.run()).toMatchObject({ told: 1 });
+    paused = true;
+    clock.t += 5 * MIN;
+    expect(await svc.run()).toMatchObject({ told: 0, cleared: 0 });
+    paused = false;
+    clock.t += MIN;
+    expect(await svc.run()).toMatchObject({ told: 0, cleared: 0 });
+  });
+});
 
 describe("14 Nov replay (BOS-1511)", () => {
   it("without the trial on main: B, C and D pass P1, the seats freed at 20:30:45 and 20:38:00 stay empty, and the CEO hears by 20:33:45", async () => {

@@ -90,6 +90,7 @@ import { mainCiService } from "./services/main-ci.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
+import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
@@ -1187,6 +1188,8 @@ export async function buildApp(opts: AppOptions) {
     },
     notify: (input) => notes.notify(input),
     now: opts.now,
+    // BOS-1841: no empty-seat or no-landing alarm while new checks are paused on purpose for a server update.
+    paused: async () => (await softHold(db, opts.now?.())).on,
   });
   // Idle check capacity (R46, BOS-1814): the CEO after 5 minutes, the owner after 30, once per machine and job.
   const checkIdle = checkIdleService({
