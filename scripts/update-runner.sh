@@ -201,8 +201,24 @@ docker build --pull -f apps/runner/Dockerfile \
 echo "Running the canary (no network): Codex, OpenCode and each add-on. Claude is proven by its pack installer, not here (DR-050)..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
   "$IMAGE:candidate" node_modules/.bin/tsx src/canary-main.ts; then
-  echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2
+  if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then
+    echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2
+    echo "The failed build is still tagged $IMAGE:candidate if you want to look at it." >&2
+    exit 1
+  fi
+  # BOS-1893: a first install has no :current image and no runner. Boss Man itself does not need one to start, so bring up the
+  # database, the server and the launcher, so the owner has a web page, and say what is left to do.
+  echo "The runner image did not pass its safety check (the canary), so there is no runner image yet." >&2
+  echo "This is a first install: Boss Man itself can start without it, so it is starting the database, the server and the launcher now." >&2
   echo "The failed build is still tagged $IMAGE:candidate if you want to look at it." >&2
+  lp="${profiles:-runners}"
+  case ",$lp," in *,launcher,*) ;; *) lp="$lp,launcher" ;; esac
+  if COMPOSE_PROFILES="$lp" docker compose up -d --no-build db server launcher; then
+    echo "Boss Man is starting. Open its web page; agents cannot run until the runner image is built." >&2
+  else
+    echo "Could not start Boss Man either. Start it by hand with: docker compose up -d --no-build db server launcher" >&2
+  fi
+  echo "Next step: scroll up to see why the canary failed (a network blip or a full disk are the usual causes), fix that, then run scripts/update-runner.sh again." >&2
   exit 1
 fi
 
