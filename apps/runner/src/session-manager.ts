@@ -390,6 +390,13 @@ export function killGroup(child: ChildProcess, graceMs = 5000) {
 
 export class SessionManager {
   private readonly runs = new Map<string, RunState>();
+  /** The last cumulative cost the agent reported per session id (BOS-1865): a resumed run counts from here. Capped, oldest dropped. */
+  private readonly sessionCosts = new Map<string, number>();
+  private rememberSessionCost(sessionId: string, costMicros: number) {
+    this.sessionCosts.delete(sessionId);
+    this.sessionCosts.set(sessionId, costMicros);
+    if (this.sessionCosts.size > 500) this.sessionCosts.delete(this.sessionCosts.keys().next().value as string);
+  }
   /** Short names of the temp folders live fenced runs use (BOS-1087), so two runs never share one and the sweep spares them. */
   private readonly liveTmpNames = new Set<string>();
   /** The model list last reported per agent kind, so it's sent only when it changes. */
@@ -1002,6 +1009,7 @@ export class SessionManager {
   private async start(cmd: StartCommand) {
     const { emit } = this.opts;
     let lastCostMicros = 0;
+    let costBaselineNeeded = false;
     let lastContextUsed = -Infinity;
     let lastQuota = "";
     let messageText = "";
@@ -1286,8 +1294,14 @@ export class SessionManager {
           const cost = parseAcpUsageCost(u);
           if (cost) {
             // Treated as cumulative per session; a drop means the counter reset (R34).
-            const delta = cost.costMicros >= lastCostMicros ? cost.costMicros - lastCostMicros : cost.costMicros;
+            // A reopened session carries its earlier total (BOS-1865): the first figure of a resumed run starts
+            // from where the session's last run ended. If this runner has no figure for the session (it restarted
+            // since), that first figure is only a baseline: counting it whole would charge the session's whole
+            // history again, so one turn's cost is lost rather than the history counted twice.
+            const delta = costBaselineNeeded ? 0 : cost.costMicros >= lastCostMicros ? cost.costMicros - lastCostMicros : cost.costMicros;
+            costBaselineNeeded = false;
             lastCostMicros = cost.costMicros;
+            if (state.sessionId) this.rememberSessionCost(state.sessionId, cost.costMicros);
             if (delta > 0) emit({ type: "run.cost", runId: cmd.runId, fundingSourceId: cmd.fundingSourceId, costMicrosDelta: delta, model: cost.model });
           }
           const meta = u._meta as Record<string, unknown> | undefined;
@@ -1474,6 +1488,11 @@ export class SessionManager {
       // Claude Code has read the file by now. Production runs are unfenced and share one user, so don't leave the token readable for the whole run (BOS-553 review).
       if (cmd.agentKind === "claude") dropMcp();
       state.sessionId = session.sessionId;
+      if (session.resumed) {
+        const earlier = this.sessionCosts.get(session.sessionId);
+        if (earlier === undefined) costBaselineNeeded = true;
+        else lastCostMicros = earlier;
+      }
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
       // Steering (BOS-1016): claude-agent-acp and codex-acp advertise it; OpenCode doesn't, so its messages wait for the turn to end.
       // promptRequired makes the adapter hand an idle session's message back to us instead of starting a detached turn,
