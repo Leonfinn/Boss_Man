@@ -237,4 +237,6 @@ fi
 rebuild_launcher
 lap "launcher rebuild"
 move_runners
+lap "runner switch (drain request sent; the drain itself runs in the deployer and server)"
+echo "Timing: total $SECONDS s. A routine update should build in about 5 minutes; read these lines in the deployer log (Settings > Server and runner > Updates)."
 echo "The new runner image ($stamp) is current. To undo: scripts/update-runner.sh --rollback"

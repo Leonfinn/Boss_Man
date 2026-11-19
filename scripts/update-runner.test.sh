@@ -144,4 +144,9 @@ logged "docker tag boss-man-runner:candidate" && fail "a failed canary was promo
 logged "boss-man-netguard:previous" && fail "a failed canary moved the network guard's :previous tag"
 [[ ! -e $T/deployer/inbox/drain.json ]] || fail "a failed canary asked for a drain"
 if ./update-runner.sh --bogus >/dev/null 2>&1; then fail "unknown flag accepted"; fi
+# BOS-1913: each step prints its own Timing line, including the switch, and a total.
+run
+for step in "network guard build" "runner image build" "canary" "launcher rebuild" "runner switch" "total"; do
+  grep -q "^Timing: $step" "$T/out" || fail "no Timing line for $step: $(cat "$T/out")"
+done
 echo "update-runner.test.sh: ok"
