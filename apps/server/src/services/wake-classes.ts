@@ -70,6 +70,10 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "github feedback": "scheduled",
   // A GitHub post that looks like a security report goes to the CEO at once (BOS-1393).
   "github security": "scheduled",
+  // The GitHub watcher opened a ticket for a Dependabot or secret-scanning alert, or can't read them (BOS-1929): once per alert, never dropped.
+  "github security alert": "scheduled",
+  "github secret alert": "scheduled",
+  "github alerts unreadable": "scheduled",
   // The runner-update answer is "can't tell" (BOS-1648): a fault the CEO must hear, once per cause, never dropped.
   "runner update: can't tell": "scheduled",
   // The live commit still can't be placed after the missed-merge sweep (BOS-1645): once per commit, never dropped.
