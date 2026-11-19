@@ -1577,7 +1577,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           <h3 style={{ fontSize: 15, margin: "0 0 6px" }}>Left your list recently</h3>
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
             {recentNotices.map((n) => (
-              <li key={n.id} className="strip stack-narrow" style={{ fontSize: 14 }}>
+              <li key={n.id} className="strip stack-narrow strip-cols" style={{ fontSize: 14 }}>
                 <strong className="strip-title">{n.question.split("\n")[0]}</strong> <span className="muted strip-when">· {atTime(n.notice.at)}</span>
                 <div>{n.notice.text}</div>
                 {n.notice.newer && <a href={`#/decisions/${n.notice.newer.decisionId}`}>Open the newer card ›</a>}
