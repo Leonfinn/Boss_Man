@@ -11,8 +11,8 @@ afterEach(() => {
 it("BOS-1921: a summary that only repeats the title is shown once; a different one is kept", async () => {
   window.location.hash = "#tok";
   const features = [
-    { id: "a", title: "Dark mode", description: "Dark mode.", stage: "under_consideration", myVote: null },
-    { id: "b", title: "Export", description: "Download everything as CSV", stage: "under_consideration", myVote: null },
+    { id: "a", title: "Dark mode", description: "Dark mode.", stage: "considering", myVote: null },
+    { id: "b", title: "Export", description: "Download everything as CSV", stage: "considering", myVote: null },
   ];
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ title: "Next", intro: null, hasLogo: false, features }), { status: 200 })));
   render(<PortalApp />);
