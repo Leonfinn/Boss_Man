@@ -11,7 +11,7 @@ import { systemMoveTicket } from "./ticket-transition.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
-import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
+import { CANCEL_RUN, ceoFirstMergeNote, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
@@ -843,7 +843,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A stored refusal (BOS-684, the carried-work gate) is the reason; otherwise the merge simply never finished.
       // Either way the CEO can answer "Run the check again" on the card.
       const why = ticket.refusal ? `the merge was refused and the sweep's one retry is used up: ${ticket.refusal.replace(/\.$/, "")}` : "it was approved, then nothing merged it; the server may have restarted part-way";
-      raised += (await raiseMergeStuck(db, ticket, why)).length;
+      const [card] = await raiseMergeStuck(db, ticket, why);
+      if (!card) continue;
+      raised++;
+      // BOS-1873: the card is on the CEO's rung; wake the CEO so the handover clock starts.
+      if (card.ceoFirst) await tellCeo(ticket.companyId, ceoFirstMergeNote(ticket.title, card.id, `nothing merged it (${why.slice(0, 300)})`)).catch(() => undefined);
     }
     return raised;
   }

@@ -425,6 +425,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect((await c.state()).systemState).toBe("review");
     const cards = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
     expect(cards).toEqual([expect.objectContaining({ tier: "owner", dedupeKey: `ci-access:${c.project.id}` })]);
+    // BOS-1873: only the owner can change the token, so it carries no CEO ladder.
+    expect((cards[0]!.context as { ladder?: unknown }).ladder).toBeUndefined();
     expect(cards[0]!.question).toMatch(/can't read GitHub Actions runs.*Repository permissions → Actions: Read-only/);
     // No GitHub Checks permission named ("Settings → Server and runner → Checks" is Boss Man's own page).
     expect(cards[0]!.question).not.toMatch(/Checks:/);
@@ -436,7 +438,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toHaveLength(1);
   });
 
-  it("an Actions API that keeps failing is retried, then never merges and raises a card", async () => {
+  it("an Actions API that keeps failing is retried, then never merges and raises a card, with the CEO first (BOS-1873)", async () => {
     const c = (ctx = await setup());
     c.gh.state.status = 502;
     const res = (await approveAndWait(c.req, c.ticket.id)).json();
@@ -444,7 +446,10 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     // The first read and three retries, all on main's head: nothing was pushed.
     expect(c.gh.calls.filter((u) => u.includes(`/actions/runs?head_sha=${MAIN}`))).toHaveLength(4);
     expect(c.merges()).toEqual(["prepare"]);
-    expect(await c.db.select({ dedupeKey: decisions.dedupeKey, tier: decisions.tier }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `ci-error:${c.project.id}`, tier: "owner" }]);
+    const open = await c.db.select({ dedupeKey: decisions.dedupeKey, tier: decisions.tier, context: decisions.context }).from(decisions).where(eq(decisions.status, "open"));
+    expect(open).toEqual([expect.objectContaining({ dedupeKey: `ci-error:${c.project.id}`, tier: "ceo" })]);
+    // A GitHub outage needs no token or money: the CEO retries it first, and it reaches the owner only after the handover.
+    expect((open[0]!.context as { ladder?: unknown }).ladder).toMatchObject({ rung: "ceo", minutes: 60 });
   });
 
   // GitHub's jobs data for a job it refused to start: failed, no steps, no runner.
