@@ -809,6 +809,7 @@ export async function buildApp(opts: AppOptions) {
     addons: addonFacts,
     release: (ticketId) => decisionsSvc.release(ticketId),
     serverCalm: (rule) => health?.calmReason(rule) ?? null,
+    freeSlots: (companyId) => scheduler.freeSlots(companyId),
     liveCommit: () => process.env.BOSSMAN_COMMIT || null,
     now: opts.now,
   });

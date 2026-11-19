@@ -323,14 +323,8 @@ export async function signedOffHeadOutsideReview(db: Db, t: Ticket, headOf: (tic
  * run (the gate's own bounce hands the author the work first), and a paused company's.
  */
 export async function sweepSignedOffStuck(db: Db, deps: { headOf: (ticketId: string) => Promise<string | null>; now: Date; graceMs: number }): Promise<number> {
-  const rows = await db
-    .select({ t: tickets })
-    .from(tickets)
-    .innerJoin(companies, eq(companies.id, tickets.companyId))
-    .where(and(inArray(tickets.systemState, ["in_progress", "blocked"]), eq(companies.paused, false), sql`${tickets.mergeCommit} is null`, sql`${tickets.stateChangedAt} < ${new Date(deps.now.getTime() - deps.graceMs)}`, sql`not exists (select 1 from runs r where r.ticket_id = ${tickets.id} and r.ended_at is null)`, sql`exists (select 1 from decisions d where d.status = 'answered' and d.context->>'type' = 'risk_review' and d.context->>'ticketId' = ${tickets.id}::text and d.context->'signedOff' is not null)`));
   let moved = 0;
-  for (const { t } of rows) {
-    if (!(await signedOffHeadOutsideReview(db, t, deps.headOf))) continue;
+  for (const t of await findSignedOffStuck(db, deps)) {
     const note = "Boss Man: the owner signed off this head and it hasn't changed, but the ticket was not in review, where the gate merges from. Moved to review.";
     const done = await systemMoveTicket(db, { ticketId: t.id, from: ["in_progress", "blocked"], to: "review", reason: note, now: deps.now, stateNote: note });
     if (!done) continue;
@@ -338,4 +332,16 @@ export async function sweepSignedOffStuck(db: Db, deps: { headOf: (ticketId: str
     moved++;
   }
   return moved;
+}
+
+/** The tickets `sweepSignedOffStuck` would move now (BOS-1881 names them in the idle-slots alert, so the two never disagree). */
+export async function findSignedOffStuck(db: Db, deps: { headOf: (ticketId: string) => Promise<string | null>; now: Date; graceMs: number }): Promise<Ticket[]> {
+  const rows = await db
+    .select({ t: tickets })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .where(and(inArray(tickets.systemState, ["in_progress", "blocked"]), eq(companies.paused, false), sql`${tickets.mergeCommit} is null`, sql`${tickets.stateChangedAt} < ${new Date(deps.now.getTime() - deps.graceMs)}`, sql`not exists (select 1 from runs r where r.ticket_id = ${tickets.id} and r.ended_at is null)`, sql`exists (select 1 from decisions d where d.status = 'answered' and d.context->>'type' = 'risk_review' and d.context->>'ticketId' = ${tickets.id}::text and d.context->'signedOff' is not null)`));
+  const out: Ticket[] = [];
+  for (const { t } of rows) if (await signedOffHeadOutsideReview(db, t, deps.headOf)) out.push(t);
+  return out;
 }
