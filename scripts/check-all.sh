@@ -270,7 +270,28 @@ if [ -n "$mem_peak" ]; then
 fi
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
-step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
+# Time budgets (BOS-1926), in seconds: what a step should take on the merge runner. A step over its budget is reported in the log
+# ("check-all: budget ... over by Ns") but never fails the check; the line is there so a slow stage is seen while it is still small.
+# The server tests grew from about 7 minutes (199 files) to 16 to 17.5 (411 files); the budget is the level they are trimmed to, and
+# a new file that pushes past it should be sped up or cut, not hidden by raising this number without a ticket.
+# BOSSMAN_BUDGET_TEST_SERVER_SECONDS overrides it (0 = no budget line).
+step_budget() {
+  case "$1" in
+    test:server) echo "${BOSSMAN_BUDGET_TEST_SERVER_SECONDS:-840}" ;;
+    *) echo 0 ;;
+  esac
+}
+step() {
+  local name=$1 began=$SECONDS rc=0 took budget; shift; "$@" || rc=$?
+  took=$((SECONDS - began))
+  echo "check-all: step $name took ${took}s (exit $rc, at $(date -u +%H:%M:%S) UTC)"
+  budget=$(step_budget "$name")
+  if [ "$budget" -gt 0 ] 2>/dev/null; then
+    if [ "$took" -gt "$budget" ]; then echo "check-all: budget $name ${budget}s: over by $((took - budget))s (a note, not a failure)"
+    else echo "check-all: budget $name ${budget}s: within, $((budget - took))s to spare"; fi
+  fi
+  return "$rc"
+}
 step in-memory-state node scripts/check-in-memory-state.mjs
 step test-lines node scripts/check-test-lines.mjs
 # The list guards (BOS-1727) run before the long typecheck and build, so a missing line in a hand-kept list fails in the

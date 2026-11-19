@@ -5,10 +5,9 @@ import { and, gt, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
-import { migrate } from "drizzle-orm/pglite/migrator";
 import * as schema from "../src/db/schema.js";
 import { companies, failureSignatures } from "../src/db/schema.js";
-import { migrationsFolder } from "../src/db/client.js";
+import { openPglite } from "../src/db/client.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -18,10 +17,11 @@ afterEach(async () => {
 
 describe("the no-progress trigger B query plans on the new index (BOS-611)", () => {
   it("failure_signatures_company_recent is chosen for (company_id in ..., created_at > ...) grouped by signature", async () => {
-    const client = new PGlite({ extensions: { vector: (await import("@electric-sql/pglite-pgvector")).vector } });
-    const db = drizzle(client, { schema });
-    await migrate(db, { migrationsFolder });
-    ctx = { close: async () => client.close() };
+    // BOS-1926: a copy of the run's migrated template, not a fresh migration.
+    const opened = await openPglite();
+    const db = opened.db as unknown as ReturnType<typeof drizzle<typeof schema>>;
+    const client = (db as unknown as { $client: PGlite }).$client;
+    ctx = { close: opened.close };
     const [co] = await db.insert(companies).values({ name: "App Co", slug: "app-co" } as never).returning();
     const since = new Date(Date.now() - 3_600_000);
     const rows = Array.from({ length: 500 }, (_, i) => ({
