@@ -2086,7 +2086,7 @@ export async function buildApp(opts: AppOptions) {
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {
       const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(req.query);
-      return workflow.scorecard(IdParam.parse(req.params).id, q.days);
+      return workflow.scorecardWithPrevious(IdParam.parse(req.params).id, q.days);
     });
 
     // Workflow retros (docs/19 parts 2 and 3): who runs them, the latest findings and changes, and a run on demand.
