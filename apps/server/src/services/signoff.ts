@@ -310,9 +310,11 @@ export const SIGNED_OFF_HEAD_REFUSAL = "This head is signed off; the gate only m
  */
 export async function signedOffHeadOutsideReview(db: Db, t: Ticket, headOf: (ticketId: string) => Promise<string | null>): Promise<boolean> {
   if (t.systemState === "review" || t.systemState === "done" || t.mergeCommit) return false;
+  // Ask the database first: only a ticket with a standing sign-off is worth a runner call for its head.
+  const { current } = await priorSignoff(db, { id: t.id, risk: t.risk }, null);
+  if (!current) return false;
   const head = await headOf(t.id).catch(() => null);
-  if (!head) return false;
-  return !!(await priorSignoff(db, { id: t.id, risk: t.risk }, head)).reuse;
+  return !!head && current.head === head;
 }
 
 /**
