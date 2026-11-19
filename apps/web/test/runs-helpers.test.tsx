@@ -1,30 +1,64 @@
 // @vitest-environment jsdom
 // Pins the pure helpers exported from pages/Runs.tsx (BOS-1766): whyRun, tokens, usage, outcomeTag, when.
-import { render } from "@testing-library/react";
+// BOS-1851 fills in every reason whyRun maps and checks outcomeTag without rendering.
 import { describe, expect, it } from "vitest";
 import type { RunRow } from "../src/api";
 import { outcomeTag, tokens, usage, when, whyRun } from "../src/pages/Runs";
 
 const run = (over: Partial<RunRow> = {}) => ({ id: "r1", ticketId: "t1", ...over }) as unknown as RunRow;
 
+// Every reason the page's own table maps, so changing or dropping a word shows up here.
+const REASONS: Array<[reason: string, words: string]> = [
+  ["assigned", "Was given the task"],
+  ["woken by owner", "You woke it"],
+  ["message", "Your message"],
+  ["owner_chat", "Chat with you"],
+  ["chat", "Chat with you"],
+  ["decision", "Answering a decision"],
+  ["decision answered", "Your answer to its question"],
+  ["feedback", "New feedback to triage"],
+  ["chased", "Chased: something is waiting on it"],
+  ["unblocked", "Its task was unblocked"],
+  ["resume", "Picking up after a restart"],
+  ["engagement", "Another company's request"],
+  ["deploy rejected", "You rejected its deploy"],
+  ["review", "Review feedback"],
+  ["reviewer", "Asked to review"],
+  ["changes requested", "Changes requested"],
+  ["verify failed", "Its merge check failed"],
+  ["deploy approved", "You approved its deploy"],
+];
+
 describe("whyRun", () => {
-  it("maps a known reason to its words", () => {
-    expect(whyRun(run({ reason: "assigned" }))).toBe("Was given the task");
-    expect(whyRun(run({ reason: "woken by owner" }))).toBe("You woke it");
+  it("maps every reason the page knows to its words", () => {
+    for (const [reason, words] of REASONS) {
+      expect(whyRun(run({ reason })), reason).toBe(words);
+    }
   });
-  it("capitalises an unknown reason", () => {
+  it("capitalises a reason it has no words for, and touches nothing else", () => {
     expect(whyRun(run({ reason: "something new" }))).toBe("Something new");
+    expect(whyRun(run({ reason: "some_reason" }))).toBe("Some_reason");
   });
   it("is empty with a ticket and no reason", () => {
     expect(whyRun(run({ reason: null }))).toBe("");
+    expect(whyRun(run({ reason: undefined }))).toBe("");
     expect(whyRun(run({ reason: "" }))).toBe("");
   });
   it("says chat runs by whether they ended", () => {
-    expect(whyRun(run({ purpose: "chat" as never, endedAt: null }))).toBe("Answering the owner in chat");
-    expect(whyRun(run({ purpose: "chat" as never, endedAt: "2026-01-01T00:00:00Z" }))).toBe("Answered the owner in chat");
+    expect(whyRun(run({ purpose: "chat", endedAt: null }))).toBe("Answering the owner in chat");
+    expect(whyRun(run({ purpose: "chat", endedAt: "2026-01-01T00:00:00Z" }))).toBe("Answered the owner in chat");
+    // A chat run answers even when a reason was also recorded.
+    expect(whyRun(run({ purpose: "chat", reason: "assigned", endedAt: null }))).toBe("Answering the owner in chat");
+  });
+  it("reads a recorded reason when the purpose is not chat", () => {
+    expect(whyRun(run({ purpose: null, reason: "feedback" }))).toBe("New feedback to triage");
+    expect(whyRun(run({ purpose: "ticket", reason: "verify failed" }))).toBe("Its merge check failed");
   });
   it("uses the shared label for a run without a ticket", () => {
     expect(whyRun(run({ ticketId: null, reason: null }))).toBe("Run without a ticket (reason not recorded)");
+    expect(whyRun(run({ ticketId: null, purpose: "chat", endedAt: null }))).toBe("Answering the owner in chat");
+    expect(whyRun(run({ ticketId: null, origin: "nudge", originFrom: "CEO", originNote: "take this on" }))).toBe("Nudged by CEO: take this on");
+    expect(whyRun(run({ ticketId: null, reason: "some_reason" }))).toBe("Some reason");
   });
 });
 
@@ -59,21 +93,24 @@ describe("usage", () => {
 });
 
 describe("outcomeTag", () => {
+  // The element is inspected as returned: no React render is needed to pin the tag and its words.
   const tag = (o: string | null | undefined) => {
-    const { container } = render(outcomeTag(o));
-    const el = container.firstElementChild!;
-    return `${el.className}|${el.textContent}`;
+    const el = outcomeTag(o) as unknown as { props: { className?: string; children?: string } };
+    return `${el.props.className}|${el.props.children}`;
   };
-  it("covers every outcome", () => {
+  it("covers every outcome, including null and unknown values", () => {
     expect(tag(null)).toBe("tag blue|Running");
     expect(tag(undefined)).toBe("tag blue|Running");
     expect(tag("")).toBe("tag blue|Running");
     expect(tag("error: boom")).toBe("tag red|Failed");
+    expect(tag("error")).toBe("tag red|Failed");
     expect(tag("interrupted")).toBe("tag amber|Interrupted");
     expect(tag("cancelled")).toBe("tag|Stopped");
     expect(tag("stopped by owner")).toBe("tag|Stopped");
     expect(tag("lost on restart")).toBe("tag amber|Lost");
     expect(tag("completed")).toBe("tag green|Finished");
+    expect(tag("end_turn")).toBe("tag green|Finished");
+    expect(tag("something new")).toBe("tag green|Finished");
   });
 });
 
