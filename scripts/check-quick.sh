@@ -88,6 +88,10 @@ step() { # step <label> <command...>
 }
 has() { grep -Eq "$1" <<<"$changed"; }
 
+# BOS-1628: install_packages (retry on a machine fault, exit 75 plus the marker) is shared with check-all.sh.
+# shellcheck source=scripts/install-packages.sh
+. "$(dirname "${BASH_SOURCE[0]}")/install-packages.sh"
+env_fault=0
 # The list guards first (BOS-1727): four lists kept by hand (in-memory state notes, the owner's controls, wake classes, the screen
 # inventory) failed 25 quick checks in 3 days, each only after 9 to 13 minutes. They run in the first minute, each only when a
 # file it reads changed, and a failure names the file to edit and the line to add (scripts/check-guards.sh). Each still fails
@@ -103,9 +107,15 @@ if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
   }
   if [ $((g_wake + g_owner + g_screen)) -gt 0 ] && [ ! -d node_modules ]; then
     # A fresh tree (the queued check job) has no packages yet; install them here, as the later install step would.
-    before=$failed failed=0
-    step "install packages (fresh tree, no node_modules)" pnpm install --frozen-lockfile --prefer-offline
+    before=$failed failed=0 irc=0
+    iout="$(install_packages 2>&1)" || irc=$?
+    if [ "$irc" -eq 0 ]; then echo "PASS  install packages (fresh tree, no node_modules)"
+    else
+      echo "FAIL  install packages (fresh tree, no node_modules) (exit $irc)"; printf '%s\n' "$iout" | tail -n 40 | sed 's/^/      /'; failed=1
+      [ "$irc" -ne 75 ] || [ "$before" -ne 0 ] || env_fault=1
+    fi
     install_failed=$failed failed=$((before | failed))
+    install_tried=1 install_tried_failed=$install_failed
     [ "$install_failed" -eq 0 ] || { g_wake=0 g_owner=0 g_screen=0; echo "SKIP  list guards: the install failed"; }
   fi
   [ "$g_wake" -eq 0 ] || step "guard: wake classes (every wake reason has a class)" scripts/check-guards.sh wake-classes
@@ -350,9 +360,20 @@ done
 # the install never holds a check slot. The queue job sets the shared pnpm store (BOS-655), so this is quick when warm.
 # A tree that already has node_modules (an agent's checkout) is left as it is.
 web_build=0; ! has '^apps/web/|^packages/shared/' || web_build=1
-if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
-  before=$failed failed=0
-  step "install packages (fresh tree, no node_modules)" pnpm install --frozen-lockfile --prefer-offline
+if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ -n "${install_tried:-}" ] && [ ! -d node_modules ]; then
+  # The list guards above already tried the install on this tree: do not try (and retry) it a second time.
+  if [ "$install_tried_failed" -ne 0 ]; then
+    echo "SKIP  typecheck, related tests, web build: the install failed"; need_slot=0 web_build=0
+  fi
+elif { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
+  before=$failed failed=0 irc=0
+  iout="$(install_packages 2>&1)" || irc=$?
+  if [ "$irc" -eq 0 ]; then echo "PASS  install packages (fresh tree, no node_modules)"
+  else
+    echo "FAIL  install packages (fresh tree, no node_modules) (exit $irc)"; printf '%s\n' "$iout" | tail -n 40 | sed 's/^/      /'; failed=1
+    # A machine fault with nothing else wrong so far: say so, so the check is retried, not blamed on the branch.
+    [ "$irc" -ne 75 ] || [ "$before" -ne 0 ] || env_fault=1
+  fi
   install_failed=$failed failed=$((before | failed))
   # Without packages every later pnpm step fails too: don't take a check slot just to say so again.
   if [ "$install_failed" -ne 0 ]; then
@@ -378,6 +399,7 @@ if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web 
 fi
 if [ "$web_build" -eq 1 ] && [ "$web_built_early" -eq 0 ]; then step "build web" pnpm --filter @boss-man/web build; fi
 
+if [ "$failed" -ne 0 ] && [ "$env_fault" -eq 1 ]; then echo "$ENV_FAULT_MARKER: nothing of the branch was checked (exit 75)"; return 75; fi
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
 echo "check-quick: all steps passed (the merge gate also runs the whole-repo tests of the packages you touched; high and critical tickets get the full check too)"
