@@ -1141,15 +1141,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </dl>
                     )}
                     {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
-                    {d.context?.type === "self_deploy" && d.context.handSteps && d.context.handSteps.length > 0 && (
-                      <details className="plan">
-                        <summary>What you'll need to do</summary>
-                        <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
-                          {d.context.handSteps.map((s, i) => (
-                            <li key={i}><StepText text={s} refs={d.refs} /></li>
-                          ))}
-                        </ol>
-                      </details>
+                    {d.context?.type === "self_deploy" && (d.context.infra || (d.context.handSteps && d.context.handSteps.length > 0)) && (
+                      <div data-hand-steps>
+                        <p data-hand-why style={{ fontSize: 14 }}>
+                          This update changes how Boss Man deploys itself{d.context.update?.handFiles?.length ? <> (<span className="mono" style={{ overflowWrap: "anywhere" }}>{d.context.update.handFiles.join(", ")}</span>)</> : ""}, so it is applied on the machine that runs Boss Man, not by the button.
+                        </p>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>What you'll need to do</p>
+                        {d.context.handSteps && d.context.handSteps.length > 0 ? (
+                          <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                            {d.context.handSteps.map((s, i) => (
+                              <li key={i}><StepText text={s} refs={d.refs} /></li>
+                            ))}
+                          </ol>
+                        ) : (
+                          <p data-hand-nosteps className="banner" style={{ fontSize: 14 }}>
+                            Boss Man has no steps to show for this update, because the machine hasn't reported where Boss Man is installed. Don't press Approve yet: open Settings → Server and runner → Server and ask us on this ticket for the exact commands.
+                          </p>
+                        )}
+                      </div>
                     )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>

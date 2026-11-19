@@ -147,6 +147,23 @@ describe("decision queue", () => {
     expect(screen.getByText("Runner update afterwards: not needed.")).toBeTruthy();
   });
 
+  it("shows the hand-apply steps open on the card, with the why line, and says so when the host reported no steps (BOS-1834)", () => {
+    setSecure(true);
+    const base = { kind: "approval" as const, question: "Main has moved.", options: ["Approve", "Not now"], recommendedOption: "Approve", blocks: [] };
+    const update = { from: "a".repeat(40), to: "b".repeat(40), total: 1, files: 1, changes: [], more: 0, otherCommits: [], handBecause: "x", handFiles: ["scripts/host-deployer.sh", "deploy/staging.yml"], handEffect: "both" as const, needsDeployerCopy: true, needsRunnerUpdate: false, risks: [] };
+    const { unmount } = render(<Decisions decisions={[decision({ ...base, context: { type: "self_deploy", infra: true, update, handSteps: ["Step one."], check: "Check it.", rollback: "Roll back." } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const why = document.querySelector("[data-hand-why]")!;
+    expect(why.textContent).toBe("This update changes how Boss Man deploys itself (scripts/host-deployer.sh, deploy/staging.yml), so it is applied on the machine that runs Boss Man, not by the button.");
+    expect(document.querySelector("[data-hand-steps] details")).toBeNull();
+    expect(screen.getByText("Step one.")).toBeTruthy();
+    expect(screen.getByText("Check it.")).toBeTruthy();
+    expect(screen.getByText("Roll back.")).toBeTruthy();
+    unmount();
+    render(<Decisions decisions={[decision({ ...base, context: { type: "self_deploy", infra: true, update, handSteps: [] } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(document.querySelector("[data-hand-nosteps]")?.textContent).toContain("hasn't reported where Boss Man is installed");
+    expect(document.querySelector("[data-hand-steps] ol")).toBeNull();
+  });
+
   it("shows each hand-apply command in its own block with a Copy button that copies only the command (BOS-269)", async () => {
     setSecure(true);
     const writeText = vi.fn(() => Promise.resolve());
