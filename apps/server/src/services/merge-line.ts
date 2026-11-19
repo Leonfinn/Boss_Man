@@ -28,6 +28,8 @@
 //   carried_across BOS-1762: its passed merge landed on a main that moved since it was tested, because main's new
 //                  commits touched none of its files (from, to, commits, files: how many files main changed)
 //   rebuilt        BOS-1762: main moved after its check and GitHub passed, so it is built and tested again
+//   ci_wait_started BOS-1871: the landing began waiting for GitHub CI on its merge copy (commit)
+//   ci_wait_ended  BOS-1871: that wait ended (commit, outcome: passed | failed | timeout | stopped | error | …, waitedMs)
 //                  (rebuilds: how many times this merge; why/files: why it couldn't be carried, when it was asked).
 //                  BOS-1821: also written while it waits for another ticket's landing turn, as soon as the carry is refused
 //   refreshed      BOS-1820: with GitHub CI gating, main moved while its check waited for a slot in a way a pass couldn't
@@ -86,7 +88,11 @@ export type MergeLineEvent =
   | { event: "rebuilt"; rebuilds: number; why?: string; files?: string[] }
   /** BOS-1820: main moved while its check still waited for a slot, in a way a pass couldn't be carried across, so the queued job took the new merge first (place kept). */
   | { event: "refreshed"; why: string; files?: string[]; refreshes: number }
-  | { event: "landing_turn"; action: "taken" | "queued" | "ended" | "expired"; rebuilds?: number; capMin?: number };
+  | { event: "landing_turn"; action: "taken" | "queued" | "ended" | "expired"; rebuilds?: number; capMin?: number }
+  /** BOS-1871: the landing began waiting for GitHub CI on its merge copy (`commit`). */
+  | { event: "ci_wait_started"; commit: string }
+  /** BOS-1871: that wait ended: `outcome` is how (passed, failed, timeout, stopped, error, …), `waitedMs` how long it took. */
+  | { event: "ci_wait_ended"; commit: string; outcome: string; waitedMs: number };
 
 /**
  * Why a server took charge of the merge line (BOS-1399). A restart and a crash look the same from inside, so
@@ -195,6 +201,8 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
       : e.action === "expired"
       ? `Merge line: the landing turn ran out after ${e.capMin} min; other merges push again`
       : "Merge line: the landing turn ended",
+  ci_wait_started: (e) => `Merge line: waiting for GitHub CI on the merge copy ${e.commit.slice(0, 12)}`,
+  ci_wait_ended: (e) => `Merge line: GitHub CI wait ended (${e.outcome}) after ${Math.round(e.waitedMs / 60_000)} min`,
 };
 
 const summaryOf = (e: MergeLineEvent) => (SUMMARY[e.event] as (x: MergeLineEvent) => string)(e);

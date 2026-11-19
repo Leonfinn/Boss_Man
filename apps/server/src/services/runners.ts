@@ -6,6 +6,7 @@ import { AddonReport, isInfiniteModel, type JournalEntry, type RUNNER_FEATURES, 
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { checkEndedRun } from "./cost-check.js";
 import { recordRestart, type HelloRestart, type LastRestart } from "./runner-restarts.js";
 import { redact } from "./error-buffer.js";
 import { costEvents, decisions, engagements, notifications, runnerEventAttempts, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
@@ -40,6 +41,7 @@ export const RUNNER_SETTLE_MS = 10 * 60_000;
 
 export function runnersService(db: Db, funding: ReturnType<typeof fundingService>) {
   let onPermission: PermissionHook | null = null;
+  let onCostAlert: ((alert: { companyId: string; question: string }) => Promise<unknown>) | null = null;
   const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
   // Runs before listeners and is awaited, for cheap bookkeeping a reader must see straight after the event (BOS-217).
   const syncHooks: Array<(runner: Runner, event: RunnerEvent) => Promise<unknown>> = [];
@@ -246,7 +248,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         return [];
       case "run.ended":
         await markEnded(tx, event.runId, at, event.interrupted ? "interrupted" : event.error ? `error: ${event.error}` : event.stopReason, event.usage);
-        return [];
+        // The cost sanity check (BOS-1866): stored with the run's end; the CEO alert goes out after the commit.
+        const costAlert = await checkEndedRun(tx, event.runId);
+        return costAlert && onCostAlert ? [async () => onCostAlert?.(costAlert)] : [];
       case "run.cost": {
         if (event.costMicrosDelta === 0) return [];
         const [run] = await tx.select().from(runs).where(eq(runs.id, event.runId));
@@ -629,6 +633,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       else p.reject(new Error(reply.error ?? "The runner couldn't do that."));
     },
 
+    /** Where the cost sanity check's CEO alert goes (BOS-1866); app.ts gives it the alert ladder. */
+    setCostAlertHook(hook: (alert: { companyId: string; question: string }) => Promise<unknown>) {
+      onCostAlert = hook;
+    },
     setPermissionHook(hook: PermissionHook) {
       onPermission = hook;
     },

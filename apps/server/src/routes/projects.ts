@@ -12,6 +12,7 @@ import type { gitHostService } from "../services/git-hosts.js";
 import { DEFAULT_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, WATCH_TOKEN_ENV, type githubWatchService } from "../services/github-watch.js";
 import type { launcherService } from "../services/launcher.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
+import { summarizeCostChecks } from "../services/cost-check.js";
 import { monthStartUtc, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
 import type { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { runnersService } from "../services/runners.js";
@@ -212,7 +213,9 @@ export function projectRoutes(
         .where(since ? and(eq(tickets.projectId, id), gte(runsTable.startedAt, since)) : eq(tickets.projectId, id))
         .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0), cacheRead: Number(r?.cacheRead ?? 0), cacheWrite: Number(r?.cacheWrite ?? 0) }));
     const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
-    return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
+    // The cost sanity check (BOS-1866): runs on this project's tasks whose recorded cost disagrees with their tokens at list price, and runs not checked.
+    const costCheck = await summarizeCostChecks(db, sql`${runsTable.ticketId} in (select ${tickets.id} from ${tickets} where ${tickets.projectId} = ${id})` as ReturnType<typeof and>);
+    return { costCheck, tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
   });
 
   // The setup wizard (R56): where the owner is in it, and what's still to do for a company.

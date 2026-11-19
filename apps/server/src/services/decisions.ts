@@ -475,11 +475,10 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
     ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
     : "";
   await lineEvent(db, t, { event: "hold_started", hold: "card", note: `the merge didn't finish: ${why}`.slice(0, 200) });
-  // tier "ceo" alone doesn't keep a card off the owner's queue (queue() filters on the ladder rung only), so a CEO-first
-  // card carries the ladder: the alert-ladder sweep hands it to the owner after CEO_QUESTION_HANDOVER_MINUTES (BOS-1860).
-  const at = new Date().toISOString();
-  const ladder = opts?.ceoFirst ? { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: t.id, about: [] as string[], hops: [{ to: "ceo", at, why: opts.ceoFirst.why }] } : null;
-  return db
+  // BOS-1873: every merge card goes to the CEO first (the CEO retries gate faults), except the workflow-scope one: only the
+  // owner can change the git token.
+  const ladder = fix ? null : ceoFirstLadder(t.id, opts?.ceoFirst?.why ?? CEO_FIRST_MERGE_WHY);
+  const rows = await db
     .insert(decisions)
     .values({
       companyId: t.companyId,
@@ -495,6 +494,24 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
+  return rows.map((r) => ({ ...r, ceoFirst: !!ladder }));
+}
+
+/** Why a merge or check card starts with the CEO (BOS-1873), said on the card's first hop. */
+export const CEO_FIRST_MERGE_WHY = "the CEO retries merge and check faults first; the owner gets it only if the CEO hasn't settled it in time";
+
+/**
+ * The alert ladder for a CEO-first system card (BOS-1860, BOS-1873). tier "ceo" alone doesn't keep a card off the owner's
+ * queue (queue() filters on the ladder rung only), so the card carries the ladder: the alert-ladder sweep hands it to the
+ * owner after CEO_QUESTION_HANDOVER_MINUTES of a CEO run that could see it.
+ */
+export function ceoFirstLadder(ticketId: string, why: string, at = new Date().toISOString()) {
+  return { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId, about: [] as string[], hops: [{ to: "ceo", at, why }] };
+}
+
+/** The CEO's wake for a CEO-first merge or check card (BOS-1873): which card, and the two answers the CEO may give. */
+export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
+  return `"${title}" was approved, but ${what}. This isn't the agent's work. The merge card is yours first: answer "${CHECK_AGAIN}" on card ${cardId} once the cause is gone, or "${CHECK_SEND_BACK}" if the work needs changing. "${CHECK_SKIP}" is the owner's; the card reaches them after ${CEO_QUESTION_HANDOVER_MINUTES} minutes if it is still open.`;
 }
 /**
  * An approved decision whose next step is the owner's own (BOS-122) leaves this to-do open on their
@@ -735,6 +752,8 @@ export class AnswerError extends Error {}
 
 /** The option for dropping a line: numbered, so a long lesson can be chosen by its number. */
 const replaceOption = (i: number, lesson: string) => `Replace #${i + 1}: ${lesson}`;
+/** An option as an answer can name it: a "Replace #N: <whole lesson>" option can pass the tools' 200-character cap, so it is named "Replace #N" (BOS-1874). */
+const shortLabel = (o: string) => (/^Replace #\d+: /.test(o) ? o.slice(0, o.indexOf(":")) : o);
 /** The lesson a drop answer names, in the numbered or the older "Replace: " form. */
 const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec(answer)?.[1];
 
@@ -3079,7 +3098,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (extra.custom && !ownWords) throw new AnswerError("This decision needs one of its options; only an agent's question takes your own answer.");
       const handOff = (d.context as DecisionContext).type === "stale_blocker" && answer === LET_CEO_DECIDE; // also on cards raised before the option existed
       if (handOff && extra.settledBy) throw new AnswerError("Only the owner can hand this to the CEO; answer Chase, Reassign or Drop dependency.");
-      if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
+      if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.map(shortLabel).join(", ")}`);
       await validate(d, answer, extra);
       if (handOff) return handToCeo(d);
       const ctx = d.context as DecisionContext;

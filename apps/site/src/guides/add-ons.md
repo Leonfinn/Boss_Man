@@ -43,7 +43,7 @@ Runner add-ons are tools built into the runner image, such as a browser agents c
 2. Press **Build and update runners** (Settings > Server and runner > Updates).
 3. Check the same panel again. Each add-on says Working, Not working or Not installed.
 
-An install that listed add-ons in `.env` before this panel existed needs nothing: those add-ons start ticked, and the first save keeps them. Without self-deploy, the panel can't save, and `RUNNER_ADDONS` in `.env` still works with `scripts/update-runner.sh`.
+An install that listed add-ons in `.env` before this panel existed needs nothing: those add-ons start ticked, and the first save keeps them. If the runner is offline and nothing has been built or saved yet, the boxes are locked and say **Can't tell which add-ons are on yet**: wait for the runner to connect, and they unlock. Without self-deploy, the panel can't save, and `RUNNER_ADDONS` in `.env` still works with `scripts/update-runner.sh`.
 
 Skills that need an add-on are left out of agents' runs until it works. Details: [`docs/12-runner-add-ons.md`](@repo/blob/main/docs/12-runner-add-ons.md).
 

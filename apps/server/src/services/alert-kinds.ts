@@ -28,7 +28,9 @@ export type ClearWhen =
   /** A roadmap feature that had no open ticket now has one (BOS-595, closer in alert-clearing.ts). */
   | { kind: "featureHasTicket"; featureId: string }
   /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
-  | { kind: "serverCalm"; rule: "memory" | "freezes" };
+  | { kind: "serverCalm"; rule: "memory" | "freezes" }
+  /** The cost sanity check's card (BOS-1866): the company's latest checked runs are all in band. */
+  | { kind: "costBackInBand"; companyId: string };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -227,6 +229,11 @@ export const ALERT_KINDS = {
   // merge-failures.ts (BOS-1461): three failed merge attempts with the same reason in 30 minutes. Stops at the CEO;
   // closes by itself (mergeFailuresCalm) after 30 minutes without another of that reason.
   merge_failures: {
+    topRung: "ceo",
+  },
+  // cost-check.ts (BOS-1866): a run's recorded cost is far from its tokens at list price. Stops at the CEO, never the
+  // owner; one card per company, closes by itself (costBackInBand) once the latest checked runs are in band.
+  cost_out_of_band: {
     topRung: "ceo",
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).

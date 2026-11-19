@@ -52,6 +52,10 @@ async function heldBehindFixOf(
       // The time with no result: the wait for GitHub CI when there is one, else the check's own run.
       const noResult = Math.max(run.minutes, run.ci?.minutes ?? 0);
       if (noResult >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been ${run.ci ? "waiting for GitHub CI" : "landing"} for ${noResult} minutes with no result` };
+    } else if (wait?.state === "waiting_for_ci") {
+      // BOS-1871: its check is over and the landing waits only for GitHub CI; `minutes` is that wait's own clock, not the approval's.
+      stateText = `waiting for GitHub CI, ${wait.minutes} min`;
+      if (wait.minutes >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been waiting for GitHub CI for ${wait.minutes} minutes with no result` };
     } else if (wait) {
       stateText = `approved, waiting to land, ${wait.minutes} min`;
       // Whoever owns the wait (Boss Man, the CEO, an agent), an approved fix that has not landed in an hour is stalled.
@@ -123,7 +127,8 @@ export type RunningNow = {
  */
 export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
 
-export type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
+/** waiting_for_ci (BOS-1871): its landing is under way, its check holds no slot any more, and it waits only for GitHub CI on its merge copy. */
+export type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held" | "waiting_for_ci";
 
 /** Approved work held by the carried-work guard (BOS-130): the ticket(s) it waits for, by ref and title. */
 export type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
@@ -293,6 +298,14 @@ export function carriedTitles(note: string | null | undefined): string[] {
 /** What the owner reads for a hold on `titles`: the sentence only, never the hidden title list. */
 export function carriedNoteText(note: string | null | undefined): string {
   return carriedHold(note).note ?? (note ?? "");
+}
+
+/**
+ * BOS-1871: the words for a landing that waits only for GitHub CI on its merge copy, e.g. "waiting for GitHub CI (check), 12 min
+ * so far". Written where that wait is decided (the landing's own CI marker), so the screen can't fall through to "next in line".
+ */
+export function ciWaitLabel(ci: { minutes: number; waiting: string[] }): string {
+  return `waiting for GitHub CI on its merge copy${ci.waiting.length ? ` (${ci.waiting.join(", ")})` : ""}, ${waitedText(Math.max(0, ci.minutes))} so far`;
 }
 
 /** One plain duration for the owner, e.g. "1 h 10 min". */
@@ -519,11 +532,15 @@ export function mergeQueueService(
     // BOS-1517: when each running check itself began. The landing's start (runningMerges) can be hours older: it covers the
     // wait for a seat and earlier attempts.
     const checkStart = new Map<string, Date>();
+    // BOS-1871: landings whose check holds no slot (it has ended) but whose wait for GitHub CI is still open. They are
+    // not running a check, so they stay out of Running now, but they are not waiting for one either.
+    const ciWait = new Map<string, { since: string; waiting: string[] }>();
     const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
     if (deps.runningChecks && queueMode?.mode === "server") {
       const held = await deps.runningChecks(companyId);
       held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
       for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
+      for (const l of live) if (!slotOf.has(l.ticketId) && l.ci) ciWait.set(l.ticketId, l.ci);
       live = live.filter((l) => slotOf.has(l.ticketId));
       // BOS-1757: a running merge job is what holds a slot, so it is listed even when no landing marker owns it (the ticket
       // was sent back, or the server restarted). The Checks panel counts the same rows, so the two screens can't disagree.
@@ -534,7 +551,7 @@ export function mergeQueueService(
         live.push({ ticketId: j.ticketId, startedAt: (j.startedAt ?? new Date(0)).toISOString(), startedBy: "the merge gate (no landing is waiting on it)" });
       }
     }
-    return { live, slotOf, restarted, checkStart };
+    return { live, slotOf, restarted, checkStart, ciWait };
   }
 
   return {
@@ -553,7 +570,7 @@ export function mergeQueueService(
       const [company] = await db.select({ prefix: companies.ticketPrefix, brakeLimit: companies.holdStartsMergesWaiting }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
-      const { live, slotOf, restarted, checkStart } = await liveMerges(companyId);
+      const { live, slotOf, restarted, checkStart, ciWait } = await liveMerges(companyId);
       const limit = await deps.limit();
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
@@ -612,6 +629,30 @@ export function mergeQueueService(
       const heldWaits = new Map<string, { ids: string[]; since: string }>();
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
+        // BOS-1871: its landing is under way and waits only for GitHub CI on the merge copy (the check is over, so it holds no
+        // slot). Said here, from the landing's own CI marker, before any reason a merge that hasn't started would have.
+        const ci = ciWait.get(r.id);
+        if (ci) {
+          const since = new Date(ci.since);
+          const words = ciWaitLabel({ minutes: mins(t.getTime() - since.getTime()), waiting: ci.waiting });
+          sinceOf.set(r.id, since.toISOString());
+          waiting.push({
+            ticketId: r.id,
+            ref: ticketRef(prefix, r.number),
+            title: r.title,
+            minutes: mins(t.getTime() - since.getTime()),
+            risk: riskOf(r.risk),
+            urgent: r.urgent,
+            failedCheck: false,
+            state: "waiting_for_ci",
+            label: words,
+            stuck: false,
+            next: "It merges by itself once GitHub CI passes.",
+            actor: "system",
+            decisionId: null,
+          });
+          continue;
+        }
         const card = cards.get(r.id);
         const check = checks.get(r.id);
         const failedCheck = check ? !check.passed : false;

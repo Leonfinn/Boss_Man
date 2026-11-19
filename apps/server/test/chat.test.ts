@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, ceoChapters, checkWorkers, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, ceoChapters, checkJobs, checkWorkers, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp-trace.js";
 
@@ -157,6 +157,19 @@ describe("owner chat", () => {
     expect((await youSaidLines(c.db, c.company.id, "Try Aa1, Bb2 and Cc3.", ["hi"])).length).toBe(2);
   });
 
+  it("BOS-1870: a Settings path through Limits shows the saved and in-force values; other paths and a failing source say nothing", async () => {
+    const c = await setup();
+    const { namedThingsSection } = await import("../src/services/named-things.js");
+    const held = { saved: 6, inForce: 3, because: "a server update is waiting for a quiet machine", since: "2026-11-19T10:00:00.000Z", until: "2026-11-19T13:00:00.000Z" };
+    const free = { saved: 2, inForce: 2, because: null, since: null, until: null };
+    const text = "Why is Settings → Server and runner → Limits and checks lower than I set?";
+    const out = (await namedThingsSection(c.db, c.company.id, [text], { limits: async () => ({ allCompanies: held, background: free }) })).join("\n");
+    expect(out).toContain("record: agents at once, all companies: saved 6, in force 3 (a server update is waiting for a quiet machine, until 2026-11-19 at the latest); background: 2 (saved and in force)");
+    // a path that is not about limits, and a source that fails, add no record
+    expect(await namedThingsSection(c.db, c.company.id, ["See Settings → Add-ons."], { limits: async () => ({ allCompanies: held, background: free }) })).toEqual([]);
+    expect(await namedThingsSection(c.db, c.company.id, [text], { limits: async () => { throw new Error("down"); } })).toEqual([]);
+  });
+
   it("stays open while an update waits and an agent is still working (BOS-349)", async () => {
     const c = await setup();
     // The CEO is busy with its own work, then a runner update starts to drain.
@@ -183,6 +196,17 @@ describe("owner chat", () => {
       expect(c.sent.some((x) => x.type === "run.start")).toBe(false);
       expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: update pending");
     })();
+  });
+
+  it("stays open while an update waits only on a running check, not only on agents (BOS-1877)", async () => {
+    const c = await setup();
+    const [t] = await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.maintenance.start({ minutes: 30 });
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What's the update waiting on?" })).statusCode).toBe(201);
+    await c.scheduler.tick();
+    expect(c.sent.find((x): x is Start => x.type === "run.start")).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("answering");
   });
 
   it("answers with a board-only run beside the CEO's own work, and the reply lands in the chat", async () => {
