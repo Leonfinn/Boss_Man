@@ -180,19 +180,3 @@ export function windowLabel(key: string): { name: string; note?: string } {
   const words = key.replace(/_/g, " ").trim();
   return { name: words ? `${words[0]!.toUpperCase()}${words.slice(1)} limit` : "Other limit" };
 }
-
-/**
- * The limits every Claude subscription has, shown on its funding card and hold list even before a reading
- * for them is stored (BOS-1916). The Fable key is the one Claude Code reports; a reading under another
- * Fable-like key still matches by windowLabel.
- */
-export const CLAUDE_SUBSCRIPTION_WINDOWS = ["five_hour", "seven_day", "seven_day_overage_included"] as const;
-
-/** The windows to list for a source: the expected ones for a Claude subscription, then any other seen. */
-export function windowsToShow(isClaudeSubscription: boolean, seen: string[]): string[] {
-  if (!isClaudeSubscription) return seen;
-  const isFable = (k: string) => /fable|overage_included/.test(k);
-  const fable = seen.find(isFable);
-  const base = CLAUDE_SUBSCRIPTION_WINDOWS.map((w) => (w === "seven_day_overage_included" && fable ? fable : w));
-  return [...base, ...seen.filter((k) => !base.includes(k))];
-}

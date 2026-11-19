@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, usd, type BudgetRow, type Company, type FundingSource, type FundingStatus } from "../api";
 import { usePoll } from "../hooks";
-import { windowHasReset, windowLabel, windowsToShow } from "@boss-man/shared";
+import { windowHasReset, windowLabel } from "@boss-man/shared";
 import { ageLabel } from "../age";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
@@ -128,7 +128,7 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   const tokens = usePoll((signal) => (claude ? api<Array<{ id: string; name: string; kind: string }>>("/api/secrets", { signal }) : Promise.resolve([])), 60_000, "secrets-for-funding");
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const windows = windowsToShow(claude && s.source.kind === "subscription", s.windowsSeen ?? s.quota.map((q) => q.window));
+  const windows = s.windowsSeen ?? s.quota.map((q) => q.window);
   const save = async () => {
     setError(null);
     try {
@@ -305,24 +305,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
         </>
       ) : s.providerQuota ? (
         <ProviderQuotaBlock q={s.providerQuota} />
-      ) : s.quota.length || (s.source.kind === "subscription" && s.source.provider === "anthropic") ? (
-        windowsToShow(s.source.kind === "subscription" && s.source.provider === "anthropic", s.quota.map((q) => q.window)).map((w) => {
-          const q = s.quota.find((r) => r.window === w);
-          if (!q) {
-            // No reading stored for this limit yet: show the line anyway, never hide it (BOS-1916).
-            const missing = windowLabel(w);
-            return (
-              <div key={w} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                  <span>{missing.name}</span>
-                  <span className="mono">–</span>
-                </div>
-                <div className="bar" aria-hidden="true"><span style={{ width: 0 }} /></div>
-                {missing.note && <span className="muted" style={{ fontSize: 12 }}>{missing.note}</span>}
-                <span className="muted" style={{ fontSize: 12 }}>No reading yet; updates on the next run</span>
-              </div>
-            );
-          }
+      ) : s.quota.length ? (
+        s.quota.map((q) => {
           const label = windowLabel(q.window);
           // A reading whose window has already reset says nothing about the window now (BOS-1409):
           // every limit reads as empty, the same rule the hold uses, so Fable and This week never show last week's figure.
