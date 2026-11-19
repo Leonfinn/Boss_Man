@@ -200,10 +200,11 @@ describe("placing features on the roadmap", () => {
     const c = await setup();
     const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Public feature" })).json();
     const row = async () => (await c.db.select().from(features).where(eq(features.id, f.id)))[0]!;
-    const roadmap = async () => ((await c.req("GET", `/api/roadmap/features`)).json() as Array<{ features: Array<{ id: string; publicSummary: string | null; showPublicly: boolean }> }>).flatMap((x) => x.features);
+    const roadmap = async () => ((await c.req("GET", `/api/roadmap/features`)).json() as Array<{ features: Array<{ id: string; publicSummary: string | null }> }>).flatMap((x) => x.features);
 
     const ceo = await c.mcp(c.ceo.id);
-    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, showPublicly: true, reason: "Show it on the public roadmap." } }))).toMatch(/Write a public summary before showing the feature publicly/);
+    // showPublicly is retired: it is only another name for portalVisible, and never saves the old column.
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, showPublicly: true, portalVisible: false, reason: "Conflict." } }))).toMatch(/retired and means portalVisible/);
     expect((await row()).showPublicly).toBe(false);
     expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: `  ${"x".repeat(2001)}  `, reason: "Too long." } }))).toMatch(/2000|Too big|too big|String must contain at most/i);
     expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: 42, reason: "Not a string." } })).isError).toBe(true);
@@ -216,16 +217,16 @@ describe("placing features on the roadmap", () => {
           arguments: { action: "update_feature", featureId: f.id, publicSummary: "  A simple way to see what the team plans next.  ", showPublicly: true, reason: "Soo's public copy (BOS-207)." },
         }),
       ),
-    ).toBe('Updated "Public feature": wrote its public summary, shows it publicly.');
-    expect(await row()).toMatchObject({ publicSummary: "A simple way to see what the team plans next.", showPublicly: true });
-    expect((await roadmap()).find((x) => x.id === f.id)).toMatchObject({ publicSummary: "A simple way to see what the team plans next.", showPublicly: true });
+    ).toBe('Updated "Public feature": wrote its public summary, put it on the feedback portal.');
+    expect(await row()).toMatchObject({ publicSummary: "A simple way to see what the team plans next.", portalVisible: true, showPublicly: false });
+    expect((await roadmap()).find((x) => x.id === f.id)).toMatchObject({ publicSummary: "A simple way to see what the team plans next." });
     await ceo.close();
 
     // Null clears the summary, and showing publicly then falls back to false.
     const ceo2 = await c.mcp(c.ceo.id);
-    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: null, showPublicly: false, reason: "Take it off the public roadmap." } }))).toContain("cleared its public summary, hides it from the public roadmap");
+    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: null, showPublicly: false, reason: "Take it off the public roadmap." } }))).toContain("cleared its public summary, took it off the feedback portal");
     await ceo2.close();
-    expect(await row()).toMatchObject({ publicSummary: null, showPublicly: false });
+    expect(await row()).toMatchObject({ publicSummary: null, portalVisible: false });
   });
 
   it("refuses to put a feature the rule calls security work on the portal, though the owner still can (BOS-991, BOS-1419)", async () => {
@@ -416,7 +417,7 @@ describe("a product manager runs features, roadmap and portal (BOS-1359)", () =>
     expect(await call("update_ticket", { ticketId: t.id, assignee: "Engineer", reason: "x" })).toMatch(/Only your company's CEO or a manager/);
 
     // The portal: a normal feature can be published; a security one only once its public summary is clean (BOS-1419).
-    expect(await call("feedback", { action: "update_feature", featureId, publicSummary: "Export your data as CSV.", showPublicly: true, portalVisible: true, reason: "Ready to show." })).toContain("put it on the feedback portal");
+    expect(await call("feedback", { action: "update_feature", featureId, publicSummary: "Export your data as CSV.", portalVisible: true, reason: "Ready to show." })).toContain("put it on the feedback portal");
     const sec = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Fix security vulnerability in login" })).json();
     expect(await call("feedback", { action: "update_feature", featureId: sec.id, publicSummary: "Store the API key in the vault.", portalVisible: true, reason: "x" })).toMatch(/reads as security work/);
     expect(await call("feedback", { action: "update_feature", featureId: sec.id, publicSummary: "Safer sign-in, in plain words.", portalVisible: true, reason: "x" })).toContain("put it on the feedback portal");
