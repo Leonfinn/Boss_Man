@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, projects, ticketMessages, tickets } from "../src/db/schema.js";
-import { errorLines, mainCiService, namedFiles, NEVER_WEAKEN } from "../src/services/main-ci.js";
+import { areaOf, errorLines, knownRedOnly, mainCiFailures, mainCiService, namedFiles, NEVER_WEAKEN, redScope, type OpenFailure } from "../src/services/main-ci.js";
 import { GitHostError, type CompareDetail, type WorkflowJob, type WorkflowRun } from "../src/services/git-hosts.js";
 
 const sha = (c: string) => c.repeat(40);
@@ -55,7 +55,7 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
   const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, company.id), eq(agents.role, "ceo")));
 
   // A fake GitHub: the runs, jobs and logs the test sets.
-  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", logError: null as Error | null, runsError: null as Error | null, calls: 0, compare: {} as Record<string, CompareDetail> };
+  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", logError: null as Error | null, runsError: null as Error | null, calls: 0, compare: {} as Record<string, CompareDetail>, tree: null as string[] | null };
   const gitHosts = {
     // Keyed "from...to"; an unset pair answers like a token without Contents read.
     compareDetail: async (_c: unknown, _t: unknown, from: string, to: string) => {
@@ -74,6 +74,11 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
       return gh.log;
     },
     commitAnnotations: async () => [],
+    // R40: main's file list; null answers like a failed read.
+    treePaths: async () => {
+      if (!gh.tree) throw new GitHostError(404, "Not Found");
+      return gh.tree;
+    },
   };
   const woken: Array<{ agentId: string; ticketId: string }> = [];
   const service = mainCiService(db, {
@@ -115,6 +120,47 @@ describe("namedFiles (BOS-1688)", () => {
       "✗ b.spec.tsx",
     ];
     expect(namedFiles(lines).sort()).toEqual(["apps/server/src/services/x.ts", "b.spec.tsx", "test/a.test.ts"]);
+  });
+});
+
+describe("redScope (R40, BOS-1685)", () => {
+  const tree = ["package.json", "apps/server/test/a.test.ts", "apps/web/test/a.test.ts", "packages/shared/src/x.ts", "scripts/check-quick.sh", ".github/workflows/ci.yml"];
+  it("reduces each named file to its area and adds the workflow file", () => {
+    expect(areaOf("apps/web/src/page.tsx")).toBe("apps/web/");
+    expect(areaOf("scripts/a.sh")).toBe("scripts/");
+    expect(areaOf("package.json")).toBe("package.json");
+    expect(redScope(["packages/shared/src/x.ts", "scripts/check-quick.sh"], ".github/workflows/ci.yml", tree)).toEqual([".github/workflows/ci.yml", "packages/shared/", "scripts/"]);
+  });
+  it("covers every area a package-relative name could be", () => {
+    expect(redScope(["test/a.test.ts"], null, tree)).toEqual(["apps/server/", "apps/web/"]);
+  });
+  it("is unknown (null) with no named file, an unreadable tree, or a name that matches nothing", () => {
+    expect(redScope([], ".github/workflows/ci.yml", tree)).toBeNull();
+    expect(redScope(["test/a.test.ts"], null, null)).toBeNull();
+    expect(redScope(["test/gone.test.ts"], null, tree)).toBeNull();
+  });
+});
+
+describe("knownRedOnly (R40, BOS-1685): the gate takes a branch's GitHub failure as main's only on an exact match", () => {
+  const red: OpenFailure = { ticketId: "t1", workflow: "CI", runs: [], job: "check", step: "Run pnpm test", named: ["test/a.test.ts"], scope: ["apps/server/"] };
+  it("matches the same job, step and failing test", () => {
+    expect(knownRedOnly([{ job: "check", step: "Run pnpm test", files: ["apps/server/test/a.test.ts"] }], [red])).toEqual([red]);
+  });
+  it("refuses another job", () => {
+    expect(knownRedOnly([{ job: "e2e", step: "Run pnpm test", files: ["apps/server/test/a.test.ts"] }], [red])).toBeNull();
+  });
+  it("refuses another failing step", () => {
+    expect(knownRedOnly([{ job: "check", step: "Typecheck", files: ["apps/server/test/a.test.ts"] }], [red])).toBeNull();
+  });
+  it("refuses a failure that names a test file main's red doesn't", () => {
+    expect(knownRedOnly([{ job: "check", step: "Run pnpm test", files: ["apps/server/test/a.test.ts", "apps/server/test/b.test.ts"] }], [red])).toBeNull();
+  });
+  it("refuses a failure that names no file (nothing to compare)", () => {
+    expect(knownRedOnly([{ job: "check", step: "Run pnpm test", files: [] }], [red])).toBeNull();
+  });
+  it("refuses when one of several failed jobs doesn't match, and when the red's scope is unknown", () => {
+    expect(knownRedOnly([{ job: "check", files: ["test/a.test.ts"] }, { job: "lint", files: ["x.test.ts"] }], [red])).toBeNull();
+    expect(knownRedOnly([{ job: "check", step: "Run pnpm test", files: ["apps/server/test/a.test.ts"] }], [{ ...red, scope: null }])).toBeNull();
   });
 });
 
@@ -176,6 +222,30 @@ describe("the main-CI watcher", () => {
     expect(made!.body).not.toContain(sha("e").slice(0, 8));
     expect(made!.body).not.toContain("No suspect");
     expect(made!.assigneeAgentId).toBe(c.dev.id);
+  });
+
+  it("R40: records the red's job, step, named files and scope, resolving a package-relative name through main's tree", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(61, "failure", sha("d"), { path: ".github/workflows/ci.yml" })];
+    c.gh.jobs[61] = [job("test", [["Run tests", "failure"]])];
+    c.gh.log = "FAIL test/a.test.ts > adds\nError: expected 1 to be 2";
+    c.gh.tree = ["package.json", "apps/server/test/a.test.ts", "apps/web/src/page.tsx", ".github/workflows/ci.yml"];
+    await c.service.run();
+    const [red] = await mainCiFailures(c.db, c.project.id);
+    expect(red).toMatchObject({ job: "test", step: "Run tests", named: ["test/a.test.ts"], scope: [".github/workflows/ci.yml", "apps/server/"] });
+  });
+
+  it("R40: leaves the scope unknown when main's tree can't be read", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(62, "failure", sha("d"))];
+    c.gh.jobs[62] = [job("test", [["Run tests", "failure"]])];
+    c.gh.log = "FAIL test/a.test.ts > adds";
+    await c.service.run();
+    const [red] = await mainCiFailures(c.db, c.project.id);
+    expect(red!.named).toEqual(["test/a.test.ts"]);
+    expect(red!.scope).toBeNull();
   });
 
   it("says no commit broke it when main didn't move since the last green run, and says so when the token can't read commits", async () => {

@@ -95,9 +95,13 @@ export function wantsEveryPush(s: NotifySettings): boolean {
 }
 
 const KEY = "notifications";
-const PHONE_TEST_KEY = "notifications.phone-test";
+export const PHONE_TEST_KEY = "notifications.phone-test";
 const PHONE_TEST_TTL_MS = 15 * 60_000;
-type PhoneTestRecord = { sentAt: string; tokenHash: string | null; expiresAt: string | null; confirmedAt: string | null };
+/**
+ * The last test push. `url` is the public address its Got it button posted to (BOS-1797): a tap proves the phone
+ * reached Boss Man at that address, not at whatever the box holds later. Absent on a record from before it was kept.
+ */
+export type PhoneTestRecord = { sentAt: string; tokenHash: string | null; expiresAt: string | null; confirmedAt: string | null; url?: string | null };
 const hashTestToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 /** Cuts text to fit in `max` bytes of UTF-8, without splitting a character. */
@@ -504,21 +508,22 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       const s = await getSettings();
       const t = now();
       const actions: PushAction[] = [];
-      let rec: PhoneTestRecord = { sentAt: t.toISOString(), tokenHash: null, expiresAt: null, confirmedAt: null };
+      let rec: PhoneTestRecord = { sentAt: t.toISOString(), tokenHash: null, expiresAt: null, confirmedAt: null, url: null };
       if (s.publicUrl && new URL(s.publicUrl).protocol === "https:") {
         const token = randomBytes(32).toString("base64url");
-        rec = { ...rec, tokenHash: hashTestToken(token), expiresAt: new Date(t.getTime() + PHONE_TEST_TTL_MS).toISOString() };
-        actions.push({ action: "http", label: "Got it", url: `${s.publicUrl.replace(/\/$/, "")}/api/phone/got-it`, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }), clear: true });
+        const base = s.publicUrl.replace(/\/$/, "");
+        rec = { ...rec, tokenHash: hashTestToken(token), expiresAt: new Date(t.getTime() + PHONE_TEST_TTL_MS).toISOString(), url: base };
+        actions.push({ action: "http", label: "Got it", url: `${base}/api/phone/got-it`, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }), clear: true });
       }
       await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device." + (actions.length ? " Tap Got it to confirm." : ""), link: "#/notifications", level: "page", urgent: true, actions });
       await db.insert(settings).values({ key: PHONE_TEST_KEY, value: rec }).onConflictDoUpdate({ target: settings.key, set: { value: rec } });
     },
 
-    /** The last test push: when it was sent and whether the phone tapped Got it (null: none sent yet). */
-    async testStatus(): Promise<{ sentAt: string; confirmedAt: string | null } | null> {
+    /** The last test push: when it was sent, whether the phone tapped Got it (null: none sent yet), and the address the tap went to (null: not kept). */
+    async testStatus(): Promise<{ sentAt: string; confirmedAt: string | null; url?: string | null } | null> {
       const [row] = await db.select().from(settings).where(eq(settings.key, PHONE_TEST_KEY));
       const r = row?.value as PhoneTestRecord | undefined;
-      return r ? { sentAt: r.sentAt, confirmedAt: r.confirmedAt } : null;
+      return r ? { sentAt: r.sentAt, confirmedAt: r.confirmedAt, url: r.url ?? null } : null;
     },
 
     /** A tap on Got it. True only for the live, unused link of the last test; the link then stops working. */

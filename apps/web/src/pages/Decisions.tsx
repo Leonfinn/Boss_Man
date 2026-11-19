@@ -1160,15 +1160,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </dl>
                     )}
                     {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
-                    {d.context?.type === "self_deploy" && d.context.handSteps && d.context.handSteps.length > 0 && (
-                      <details className="plan">
-                        <summary>What you'll need to do</summary>
-                        <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
-                          {d.context.handSteps.map((s, i) => (
-                            <li key={i}><StepText text={s} refs={d.refs} /></li>
-                          ))}
-                        </ol>
-                      </details>
+                    {d.context?.type === "self_deploy" && (d.context.infra || (d.context.handSteps && d.context.handSteps.length > 0)) && (
+                      <div data-hand-steps>
+                        <p data-hand-why style={{ fontSize: 14 }}>
+                          This update changes how Boss Man deploys itself{d.context.update?.handFiles?.length ? <> (<span className="mono" style={{ overflowWrap: "anywhere" }}>{d.context.update.handFiles.join(", ")}</span>)</> : ""}, so it is applied on the machine that runs Boss Man, not by the button.
+                        </p>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>What you'll need to do</p>
+                        {d.context.handSteps && d.context.handSteps.length > 0 ? (
+                          <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                            {d.context.handSteps.map((s, i) => (
+                              <li key={i}><StepText text={s} refs={d.refs} /></li>
+                            ))}
+                          </ol>
+                        ) : (
+                          <p data-hand-nosteps className="banner" style={{ fontSize: 14 }}>
+                            Boss Man has no steps to show for this update, because the machine hasn't reported where Boss Man is installed. Don't press Approve yet: open Settings → Server and runner → Server and ask us on this ticket for the exact commands.
+                          </p>
+                        )}
+                      </div>
                     )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>
@@ -1528,9 +1537,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             // (BOS-1691) In place of each card being re-checked: who has it, after what, and when it is back at the latest.
             <ul data-testid="recheck-lines" style={{ listStyle: "none", padding: 0, margin: "12px 0" }}>
               {recheckCards.map((d) => (
-                <li key={d.id} id={`decision-${d.id}`} role="status" className={`strip amber${d.id === linkedId ? " linked" : ""}`} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 6 }}>
+                <li key={d.id} id={`decision-${d.id}`} role="status" className={`strip amber stack-narrow${d.id === linkedId ? " linked" : ""}`} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 6 }}>
                   <TicketRefs about={d.about} />
-                  <strong>{d.question.split("\n")[0]}</strong>
+                  <strong className="strip-title">{d.question.split("\n")[0]}</strong>
                   <div style={{ fontSize: 13 }}>
                     Being re-checked by {d.rechecking!.by}
                     {d.staleReason ? (/^the owner\b/i.test(d.staleReason) ? ` after ${fromYou(d.staleReason)}` : ` because ${d.staleReason}`) : ""}.{" "}
@@ -1568,8 +1577,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           <h3 style={{ fontSize: 15, margin: "0 0 6px" }}>Left your list recently</h3>
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
             {recentNotices.map((n) => (
-              <li key={n.id} className="strip" style={{ fontSize: 14 }}>
-                <strong>{n.question.split("\n")[0]}</strong> <span className="muted">· {atTime(n.notice.at)}</span>
+              <li key={n.id} className="strip stack-narrow" style={{ fontSize: 14 }}>
+                <strong className="strip-title">{n.question.split("\n")[0]}</strong> <span className="muted strip-when">· {atTime(n.notice.at)}</span>
                 <div>{n.notice.text}</div>
                 {n.notice.newer && <a href={`#/decisions/${n.notice.newer.decisionId}`}>Open the newer card ›</a>}
               </li>

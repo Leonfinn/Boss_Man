@@ -1557,14 +1557,18 @@ staging_tick() {
   [[ -e $sreq || -L $sreq ]] || return 0
   if [[ -z $STAGING_DIR ]]; then
     # Lane off: answer once so the requester isn't left waiting, and drop the file.
-    S_ID="$(jfield id <"$sreq" 2>/dev/null || true)" S_COMMIT="" S_STARTED="$(now)"
+    S_ID="" S_COMMIT="" S_STARTED="$(now)"
+    # Read the id only from a plain file (a symlink could point at a file the server can't read) and only if it looks like a UUID.
+    if [[ -f $sreq && ! -L $sreq ]]; then S_ID="$(jfield id <"$sreq" 2>/dev/null || true)"; fi
+    [[ $S_ID =~ ^[0-9a-fA-F-]{36}$ ]] || S_ID=""
     ((DRY)) || rm -f "$sreq"
     staging_done rejected "Rejected: staging is not configured on this host (STAGING_DIR in host.conf is empty)."; return 0
   fi
   [[ $STAGING_RATE_LIMIT_SECONDS =~ ^[0-9]{1,6}$ && $STAGING_TIMEOUT_SECONDS =~ ^[0-9]{1,6}$ ]] || { log "STAGING_RATE_LIMIT_SECONDS and STAGING_TIMEOUT_SECONDS must be whole numbers; the staging lane is skipped."; return 0; }
   # Staging must not starve production: held while an update would not have the memory it needs (BOS-420's numbers).
   if [[ -n ${MEM_AVAIL:-} && -n ${NEED_MB:-} ]] && ((MEM_AVAIL < NEED_MB)); then
-    S_ID="$(jfield id <"$sreq" 2>/dev/null || true)" S_COMMIT="" S_STARTED="$(now)"; S_KV=()
+    S_ID="" S_COMMIT="" S_STARTED="$(now)"; S_KV=()
+    if [[ -f $sreq && ! -L $sreq ]]; then S_ID="$(jfield id <"$sreq" 2>/dev/null || true)"; fi
     [[ -z $S_ID || ! $S_ID =~ ^[0-9a-fA-F-]{36}$ ]] && S_ID=""
     write_staging_status held "Held: only $MEM_AVAIL MB of memory is free and an update needs $NEED_MB MB. The staging deploy runs when memory frees up."
     return 0

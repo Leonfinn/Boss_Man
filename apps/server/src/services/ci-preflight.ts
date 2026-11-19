@@ -56,6 +56,9 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         return { passed: true, text: "GitHub did not start CI for the pushed branch (the workflow may not run on bossman-ci/** branches), so there is nothing to wait for." };
       case "stopped":
         return { passed: false, text: "The run was stopped." };
+      // Only the merge gate sets known_red (R40); the pre-flight never sees it, and a failure is never a pass here.
+      case "known_red":
+        return { passed: false, text: `GitHub's CI jobs failed on your branch merged with main (${merge}) in ${o.jobs.join(", ")}, which also fails on main.` };
       case "timeout":
         return { passed: false, text: `GitHub CI was still running after ${Math.round(timing.ceilingMs / 60_000)} minutes${o.waiting.length ? ` (${o.waiting.join(", ")})` : ""}. Ask again with request_check later, or tell the CEO.` };
       case "refused":

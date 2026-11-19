@@ -342,7 +342,8 @@ function Recent({ rows }: { rows: RecentRow[] }) {
 }
 
 type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null; seatPlace?: number | null; lane?: string | null };
-type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
+type IdleSlotRow = { machine: string; line: string; expected: boolean };
+type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[]; idleSlots?: IdleSlotRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
 /** The one "main is red" banner (BOS-1207): said once, naming the ticket that fixes main when one is queued. */
@@ -388,6 +389,12 @@ export function QueuedChecks({ data, heldBehind }: { data: CheckQueueData; heldB
       <SectionHead title="Queued checks" fact={`${data.running} of ${slotsText(data.slots)} busy · running first, then in start order`} />
       {data.mode === "legacy" && <p className="muted" style={{ fontSize: 14 }}>The server-owned check queue is switched off, so only checks it already knows about are listed.</p>}
       {(held > 0 || heldBehind) && <MainRedBanner held={held} rows={data.rows} heldBehind={heldBehind} />}
+      {(data.idleSlots ?? []).map((s) => (
+        <p key={s.line} className="muted" style={{ fontSize: 14 }} data-idle-slot={s.expected ? "expected" : "alarm"}>
+          {s.expected ? "" : <strong>Idle check capacity. </strong>}
+          {upFirst(s.line)}
+        </p>
+      ))}
       {!data.rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
           <strong>No checks queued.</strong> When an agent or the merge gate asks for a check, it shows here until it finishes.{" "}

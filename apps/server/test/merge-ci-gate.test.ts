@@ -128,7 +128,7 @@ function fakeGitHub() {
   return { fetch, calls, state, reads };
 }
 
-async function setup(opts: { features?: string[]; holdVerify?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; changed?: string[] } = {}) {
+async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRed?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; changed?: string[] } = {}) {
   const gh = fakeGitHub();
   const { db, close } = await openPglite();
   // In charge until a test hands over (BOS-1752): `lead.on = false` plays the blue/green switch on this copy.
@@ -157,7 +157,7 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; workflow
       if (c.type === "workspace.carried") reply(c, { carried: [] });
       if (c.type === "workspace.migrations") reply(c, { needed: false, reason: "No other branch uses this ticket's migration numbers." });
       if (c.type === "workspace.verify") {
-        const answer = () => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 5 } });
+        const answer = () => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: opts.verifyRed ? { ok: false, exitCode: 1, timedOut: false, output: "1 test failed in the gate's own check", ms: 5 } : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 5 } });
         if (opts.holdVerify) held.push(answer);
         else queueMicrotask(answer);
       }
@@ -322,6 +322,60 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
 
   it("a red CI after a waits-on link was added mid-CI holds the ticket instead of sending it back (BOS-1643)", async () => {
     await markedMidCi((c, fix) => c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerTicketId: fix }));
+  });
+
+  // R40 (BOS-1685): once a GitHub-only red holds only what touches it, a released ticket's GitHub run still fails in
+  // main's red job. That failure is main's, and the ticket merges on the gate's own check, only when every condition
+  // holds: the failure matches main's open red exactly, the branch doesn't touch it, and the gate's own check passed.
+  describe("a failure that is only main's known GitHub-only red (R40)", () => {
+    const FENCE = { annotation_level: "failure", path: "apps/server/test/fence.test.ts", start_line: 42, title: "fence > blocks a write", message: "AssertionError: expected 0 to be 1" };
+    const knownRed = async (o: Parameters<typeof setup>[0] = {}, annotations: unknown[] = [FENCE], failing = job("check", "failure", 7, "Run tests")) => {
+      const c = (ctx = await setup({ changed: ["apps/web/src/page.tsx"], ...o }));
+      const fix = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Main's CI is failing: CI / check / Run tests", state: "in_progress" })).json() as { id: string };
+      await c.db.insert(settings).values({ key: `main_ci:${c.project.id}`, value: { status: { state: "failing", detail: "", at: "" }, seen: {}, open: { "ci / check / run tests": { ticketId: fix.id, workflow: "CI", runs: [], job: "check", step: "Run tests", named: ["test/fence.test.ts"], scope: [".github/workflows/ci.yml", "apps/server/"] } } } });
+      c.gh.state.checks = true;
+      c.gh.state.annotations.set(failing.id, annotations);
+      c.gh.state.ci = (sha) => (sha === MERGE ? red([failing]) : green());
+      return c;
+    };
+    const ciRows = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")));
+
+    it("an exact match, on a branch that doesn't touch it, merges on the gate's own check: recorded, and no CI pass row", async () => {
+      const c = await knownRed();
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+      expect(await c.state()).toMatchObject({ systemState: "done", mergeCommit: FINAL });
+      expect((await c.events()).some((e) => /GitHub CI failed only in check, which also fails on main/.test(e))).toBe(true);
+      expect(await ciRows(c)).toEqual([]);
+      expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    });
+
+    it("a failing test main's red doesn't name: sent back", async () => {
+      const c = await knownRed({}, [FENCE, { ...FENCE, path: "apps/server/test/new.test.ts" }]);
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+    });
+
+    it("another failing job: sent back", async () => {
+      const c = await knownRed({}, [FENCE], job("images (arm64)", "failure", 8, "Run tests"));
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+    });
+
+    it("a branch that touches the red's files: sent back", async () => {
+      const c = await knownRed({ changed: ["apps/server/src/fence.ts"] });
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+    });
+
+    it("the gate's own check fails: not merged, and not taken as main's", async () => {
+      const c = await knownRed({ verifyRed: true });
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).not.toMatchObject({ outcome: "merged" });
+      expect((await c.state()).mergeCommit).toBeNull();
+      expect((await c.events()).some((e) => /also fails on main/.test(e))).toBe(false);
+    });
+
+    it("main's red closed (its ticket done): sent back as before", async () => {
+      const c = await knownRed();
+      await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.title, "Main's CI is failing: CI / check / Run tests"));
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+    });
   });
 
   it("waits while CI runs, says so on the merge queue, and runs its own check at the same time", async () => {

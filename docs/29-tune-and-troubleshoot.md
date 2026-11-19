@@ -106,7 +106,7 @@ The runner hit its limit of processes and threads. Raise `BOSSMAN_RUNNER_PIDS` (
 Every script that makes a backup writes it straight into your backup folder, which is `<install-dir>` (`$B`), next to `src`. The file names tell you which script made them:
 - `bossman-YYYY-MM-DD-HHMM.sql.gz`: made before each update (`scripts/deploy.sh`) and by the host deployer.
 - `rebuild-YYYY-MM-DD-HHMM.sql.gz`: made by `scripts/rebuild-live.sh`.
-- `restore-test-*.sql.gz`: made by `scripts/restore-test.sh --fresh-backup`.
+- `restore-test-*.sql.gz`: made by `scripts/restore-test.sh --fresh-backup`. The script deletes it again when the check passes, unless you add `--keep`; a failed check leaves it in place.
 - `penpot-YYYY-MM-DD-HHMM.tar`: made by `scripts/backup-penpot.sh`, if you use Penpot.
 
 If you set `BOSSMAN_BACKUP_DIR`, they go there instead. Backups made by current scripts are readable by their owner only (mode 600). How to check that a backup restores: [docs/23-updating.md](23-updating.md#check-that-a-backup-restores).
@@ -181,12 +181,29 @@ Synthetic (synthetic.new) is an OpenCode provider.
 1. Add its key under **Settings > Secrets > Add** as **Synthetic API key**. It reaches agents as `SYNTHETIC_API_KEY`, and OpenCode lists the models as `synthetic/<model>` (for example `synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`).
 2. Under **Settings > Funding**, add a source with kind **Subscription (setup-token)** and provider **Synthetic** for a standard plan.
 
-The Funding page then shows requests used of the plan's limit, the percentage, when it renews, and how use has moved within the current period.
+The Funding page then shows **Weekly credits**: the percentage of this week's credits used and left, and how use has moved within the current period. Credits come back 2% at a time. If Synthetic reports no weekly credits for the account, the page shows its request window instead (requests used of the limit, and when it renews), labelled as such, because the weekly plan often doesn't spend it. Synthetic doesn't report the top-up credit balance, so the page can't show it; see it at synthetic.new.
 
-- Boss Man checks the plan at most every 5 minutes, and again right after a run on an agent paid from Synthetic ends. The page shows the stored reading. If Synthetic can't be reached, the card keeps the last good reading and says how old it is; it never stops a run. Readings are kept for 30 days.
-- You get one notification when use passes 80% of the limit, and another at 100%, each once per period. Each names when the plan renews and which agents are paid from Synthetic.
-- Boss Man does not pause or slow any runs when the plan runs out: move less urgent work or wait for the renewal.
-- The CEO can read the same numbers from its server status. It sees only its own company's agents named.
+- Boss Man checks the plan at most every 5 minutes, and again right after a run on an agent paid from Synthetic ends. The page shows the stored reading. If Synthetic can't be reached, the card keeps the last good reading and says how old it is. Readings are kept for 30 days.
+- You get one notification each time use passes 60%, 80% and 92% of the weekly credits, once per week. On an account that reports only the request window, the points are 80% and 100% instead. Each names when credits come back (or the plan renews), which agents are paid from Synthetic, and what Boss Man will do about the hold.
+
+### Funding hold: when the plan is nearly used up
+
+Boss Man pauses routine work on a Synthetic subscription when it reaches the hold point, 95% by default. You set what happens on the Funding page, on the Synthetic source's card, under **When the subscription is nearly used up**:
+
+- **Hold routine work at**: the hold point, from 80% to 100%.
+- **I have top-up credit**: what runs once the hold starts.
+  - **Hold everything at the limit (urgent tickets run until then)**, the default. Routine work stops at the hold point. Tickets you marked Urgent keep running until the credits are used up (100%), then wait too. Nothing spends top-up credit. Use this if the account has no top-up credit.
+  - **Keep urgent work running on top-up credit**. Routine work stops at the hold point. Urgent tickets carry on past the weekly allowance, paid from your Synthetic top-up credit.
+  - **Keep all work running on top-up credit**. Nothing is held. Once the weekly allowance is used, Synthetic pays for all work from top-up credit, and you get one note a week when that starts. Boss Man can't see the balance, so it can't stop before the credit runs out.
+- **Which limits can trigger the hold**: untick a limit to stop it holding work.
+
+In every setting, chats, reviews and deploy approvals keep running. Agents on an Infinite-mode model are never held.
+
+When routine work pauses you get one notification, **Routine work paused**, saying until when and what still runs. You get another, **Routine work is running again**, when use drops back under the hold point. To carry on sooner, change **I have top-up credit** if the account has top-up credit, or wait for credits to come back.
+
+An unknown reading never starts a hold. If Synthetic stops answering, a hold based on the last good reading lifts on its own when the next credits are due back, or 15 minutes after that reading if that is later.
+
+The CEO can read the same numbers from its server status. It sees only its own company's agents named.
 
 ## Compression
 

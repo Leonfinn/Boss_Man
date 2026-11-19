@@ -1,6 +1,6 @@
 # HTTPS through Tailscale Serve (any Docker host)
 
-Gives Boss Man an `https://boss-man.<your-tailnet>.ts.net` address with a valid certificate, reachable only from devices signed in to your tailnet. It uses Tailscale **Serve**, not Funnel, so nothing is on the public internet. It fronts the owner's web/login port (3100) only, never the feedback portal. The plain LAN address keeps working. The installable web app and phone notifications need this address.
+Gives Boss Man an `https://boss-man.<your-tailnet>.ts.net` address with a valid certificate, reachable only from devices signed in to your tailnet. It uses Tailscale **Serve**, not Funnel, so nothing is on the public internet. It fronts the owner's web/login port (3100) on port 443, and the optional ntfy add-on for phone notifications on port 8443 ([docs/31](31-phone-notifications.md)); never the feedback portal. The plain LAN address keeps working. The installable web app and phone notifications need this address.
 
 Works on a plain Linux Docker host, a Proxmox VM running Docker, and a Proxmox LXC container running Docker. Host-specific notes are at the end.
 
@@ -71,8 +71,8 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    docker compose exec tailscale tailscale serve status
    ```
 
-   It must show `https://boss-man.<tailnet>.ts.net` proxying to `http://server:3100` and say "(tailnet only)", not "Funnel on". Use the address this prints, not one guessed from the example.
-7. Prove the trusted address is not shared with LAN traffic. This lists everything on `edge`; it must be only the `tailscale` and `server` containers:
+   It must show `https://boss-man.<tailnet>.ts.net` proxying to `http://server:3100` and say "(tailnet only)", not "Funnel on". Use the address this prints, not one guessed from the example. It also shows a second entry, `https://boss-man.<tailnet>.ts.net:8443` proxying to `http://ntfy:80`, even if you have not set up ntfy: that is the phone notifications add-on ([docs/31](31-phone-notifications.md)), and it answers with an error until ntfy runs.
+7. Prove the trusted address is not shared with LAN traffic. This lists everything on `edge`; it must be only the `tailscale` and `server` containers, plus `ntfy` if you run the phone notifications add-on:
 
    ```sh
    docker network inspect $(docker network ls -q --filter name=edge) --format '{{.Name}}: {{range .Containers}}{{.Name}} {{.IPv4Address}}; {{end}}'
@@ -113,7 +113,7 @@ For blue/green (the Caddy front door in `deploy/truenas-bluegreen.yml`) add a se
    ```
 
    Then do steps 5a and 6 above, and remove the key from `.env` as step 5 says (restart with `docker compose up -d --no-deps tailscale`).
-4. Check: `docker compose exec tailscale tailscale serve status` shows `http://server:3100` and no `3101`. `docker network inspect` for `front` lists only the proxy and the two colours. Log in over `https://<your machine>.<tailnet>.ts.net` and confirm the session cookie is Secure; over the LAN address it stays plain.
+4. Check: `docker compose exec tailscale tailscale serve status` shows `http://server:3100` and no `3101` (the second entry, port 8443 to `http://ntfy:80`, is the ntfy add-on and is expected). `docker network inspect` for `front` lists only the proxy and the two colours. Log in over `https://<your machine>.<tailnet>.ts.net` and confirm the session cookie is Secure; over the LAN address it stays plain.
 5. Undo: `docker compose stop tailscale`, remove the two Tailscale files from `COMPOSE_FILE`, then `docker compose up -d --no-deps proxy`.
 
 Behaviour change: the colours now see real client addresses, so the login limit counts each device separately, where before all devices looked like Caddy.

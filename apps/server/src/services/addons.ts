@@ -19,7 +19,7 @@ export type AddonFact = {
   source: string;
   detail?: string;
   /** ntfy only (BOS-1482): the last test push and when the phone tapped Got it (null: never confirmed). "running" says only that ntfy accepted a push. */
-  phone?: { testSentAt: string | null; confirmedAt: string | null };
+  phone?: { testSentAt: string | null; confirmedAt: string | null; /** BOS-1797: the public address the test's Got it went to; a tap proves only that address. Absent on an older test. */ testedUrl?: string };
   /** ntfy only (BOS-1484): the owner's phone type, or "unknown" until they set it on the Notifications page. */
   phoneType?: "android" | "iphone" | "both" | "unknown";
   /** ntfy only, with phoneType "unknown": what an agent should do instead of guessing. */
@@ -101,7 +101,7 @@ export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySe
             ? { state: "running", since: last.pushedAt.toISOString(), source: "ntfy accepted the last push, which doesn't show the phone got it" }
             : { state: "stopped", since: last.createdAt.toISOString(), source: "the last phone push failed", detail: last.pushError ?? undefined };
         const test = deps.phoneTest ? await deps.phoneTest().catch(() => null) : null;
-        ntfy.phone = { testSentAt: test?.sentAt ?? null, confirmedAt: test?.confirmedAt ?? null };
+        ntfy.phone = { testSentAt: test?.sentAt ?? null, confirmedAt: test?.confirmedAt ?? null, ...(test?.url ? { testedUrl: test.url } : {}) };
         ntfy.phoneType = s.phoneType ?? "unknown";
         if (!s.phoneType) ntfy.phoneTypeNote = "phone type unknown: ask the owner";
       }

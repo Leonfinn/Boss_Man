@@ -133,6 +133,11 @@ export function readPolicy(v: unknown): SlotPolicy {
   return { takes, mergeKept: takes === "both" && Number.isInteger(kept) && kept > 0 ? Math.min(kept, MAX_CHECK_SLOTS) : 0 };
 }
 
+/** R46 (BOS-1814): why a machine with a free slot did not take a queued job it could take. `expected`: the owner already sees this reason elsewhere (a server-update pause, their own machine setting), so no alarm. */
+export type CheckDecline = { jobId: string; ticketId: string; kind: CheckJob["kind"]; scope: CheckJob["scope"]; code: "update_hold" | "machine_policy" | "reserve" | "slot_rules" | "no_code"; text: string; expected: boolean };
+export type ClaimResult = { jobs: CheckJob[]; declined: CheckDecline | null };
+const declineOf = (j: CheckJob, code: CheckDecline["code"], text: string, expected: boolean): CheckDecline => ({ jobId: j.id, ticketId: j.ticketId, kind: j.kind, scope: j.scope, code, text, expected });
+
 /** One machine as the queue view sees it, for "why it waits" (BOS-1602). */
 export type MachineView = { workerId: string | null; limit: number; policy: SlotPolicy };
 
@@ -449,8 +454,13 @@ export function checkQueue(db: Db) {
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
   async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean } = {}): Promise<CheckJob[]> {
+    return (await claimNextWhy(runnerId, now, companyId, runnerSlots, opts)).jobs;
+  }
+
+  /** `claimNext` with the reason a free runner slot took nothing (R46). */
+  async function claimNextWhy(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean } = {}): Promise<ClaimResult> {
     // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
-    return claimOn(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId, undefined, { policy: await runnerPolicy(), dedicatedOnly: opts.dedicatedOnly });
+    return claimOnWhy(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId, undefined, { policy: await runnerPolicy(), dedicatedOnly: opts.dedicatedOnly });
   }
 
   /** Running jobs on one machine by kind (see `admits`). */
@@ -479,6 +489,22 @@ export function checkQueue(db: Db) {
     skip?: (jobId: string) => boolean,
     opts: { policy?: SlotPolicy; dedicatedOnly?: boolean } = {},
   ): Promise<CheckJob[]> {
+    return (await claimOnWhy(machine, limit, now, companyId, skip, opts)).jobs;
+  }
+
+  /**
+   * R46 (BOS-1814): `claimOn` with the reason. When it starts nothing although a queued job exists that this machine could
+   * take, `declined` says which job and why, in words from the deciding rule (never a bare empty list). `expected` marks a
+   * reason the owner already sees elsewhere (the server-update pause), so the alarm leaves it alone.
+   */
+  async function claimOnWhy(
+    machine: Machine,
+    limit: number,
+    now = new Date(),
+    companyId?: string,
+    skip?: (jobId: string) => boolean,
+    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean } = {},
+  ): Promise<ClaimResult> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
     // BOS-1748: the hold parks the company runner and every merge check, but a separate check worker still takes quick
     // pre-review checks. The update waits only on merge checks and agent runs (deploy-wait counts nothing on a worker), a
@@ -486,13 +512,18 @@ export function checkQueue(db: Db) {
     // when its socket drops) and costs 2 to 5 minutes. Holding them back gained nothing and left the worker idle for up to 3 hours.
     const held = (await softHold(db, now)).on;
     const worker = isWorker(machine) ? machine.workerId : null;
-    if (held && !worker) return [];
     const policy = opts.policy ?? DEFAULT_SLOT_POLICY;
+    const no = (declined: CheckDecline | null): ClaimResult => ({ jobs: [], declined: opts.dedicatedOnly ? null : declined });
+    const ofCompany = (await servable(now, limit >= 2)).filter((j) => !companyId || j.companyId === companyId);
+    if (held && !worker) return no(ofCompany[0] ? declineOf(ofCompany[0], "update_hold", "new checks are paused for a server update", true) : null);
     // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
-    const candidates = (await servable(now, limit >= 2))
-      .filter((j) => (!companyId || j.companyId === companyId) && !skip?.(j.id))
-      .filter((j) => !held || !isLong(j));
-    if (candidates.length === 0) return [];
+    const candidates = ofCompany.filter((j) => !skip?.(j.id)).filter((j) => !held || !isLong(j));
+    if (candidates.length === 0) {
+      const heldLong = held ? ofCompany.find((j) => isLong(j) && !skip?.(j.id)) : undefined;
+      if (heldLong) return no(declineOf(heldLong, "update_hold", "merge and full checks are paused for a server update", true));
+      const skipped = ofCompany.find((j) => skip?.(j.id));
+      return no(skipped ? declineOf(skipped, "no_code", "this machine could not get the code for it, so it goes to another machine", false) : null);
+    }
     const onMachine = machineCond(worker, companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {
@@ -503,7 +534,7 @@ export function checkQueue(db: Db) {
     // BOS-1435: the reserve is per machine, with that machine's own limit. BOS-1602: `admits` holds both rules, and the
     // owner's per-machine split (what it takes, slots kept for merges); with nothing set it is the rule above, unchanged.
     const use = await useOn(tx as unknown as Db, onMachine);
-    if (use.merge + use.check >= limit) return [];
+    if (use.merge + use.check >= limit) return { jobs: [], declined: null };
     const quickWaits = candidates.some((j) => !isLong(j));
     const claimed: CheckJob[] = [];
     for (const j of candidates) {
@@ -523,7 +554,19 @@ export function checkQueue(db: Db) {
         if (row.scope === "full") use.longCheck++;
       }
     }
-    return claimed;
+    if (claimed.length || opts.dedicatedOnly) return { jobs: claimed, declined: null };
+    // A free slot, a job it may take, and nothing started: say which job and which rule.
+    const j0 = candidates[0]!;
+    const mergesOnly = policy.takes === "merge" && j0.kind !== "merge";
+    const checksOnly = policy.takes === "checks" && j0.kind === "merge";
+    const declined = mergesOnly
+      ? declineOf(j0, "machine_policy", "this machine is set to take merge checks only", true)
+      : checksOnly
+        ? declineOf(j0, "machine_policy", "this machine is set to take pre-review checks only", true)
+        : isLong(j0) && quickWaits
+          ? declineOf(j0, "reserve", "the last free slot is kept for a quick check that is waiting", false)
+          : declineOf(j0, "slot_rules", "this machine's slot rules (slots kept for merges) do not allow it yet", false);
+    return { jobs: [], declined };
     });
   }
 
@@ -791,5 +834,5 @@ export function checkQueue(db: Db) {
 
   const place = (ticketId: string) => mergePlace(db, ticketId);
 
-  return { list, mode, slots, setMode, setSlots, runnerPolicy, setRunnerPolicy, train, setTrain, laneAge, setLaneAge, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, failedJobs, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, runnerPolicy, setRunnerPolicy, train, setTrain, laneAge, setLaneAge, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimNextWhy, claimOn, claimOnWhy, progress, complete, readLog, failedJobs, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
 }
