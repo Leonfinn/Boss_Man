@@ -809,7 +809,7 @@ export function checkQueue(db: Db) {
       const k = merge ? seen.merge : seen.check;
       const what = merge ? "merge" : "check";
       if (!k.slots) return merge ? "no machine that takes merge checks is ready" : "no machine that takes pre-review checks is ready";
-      return k.busy >= k.slots ? `waiting for a ${what} slot: ${k.busy} of ${k.slots} busy` : null;
+      return k.busy >= k.slots ? `waiting for a ${what} slot: ${k.busy} of the ${k.slots} slots that take ${merge ? "merge" : "pre-review"} checks busy` : null;
     };
   }
 

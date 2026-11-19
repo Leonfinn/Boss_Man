@@ -116,6 +116,8 @@ export type RunningNow = {
   overLimit: boolean;
   /** BOS-1070: waiting for GitHub CI on the merge commit (beside the check): minutes so far, and the jobs still running. */
   ci?: { minutes: number; waiting: string[] };
+  /** BOS-1942: where the merge check runs, from its check job: the check worker's name, or "company runner" for this server; absent when no job is known. */
+  ranOn?: string | null;
   /** BOS-1517: the same facts as one line. */
   statusLine: StatusLine;
 };
@@ -166,6 +168,8 @@ export type WaitingRow = {
   signedOffAt?: string | null;
   /** BOS-1517: the one status line (step, since, next, what is in the way). */
   statusLine?: StatusLine;
+  /** BOS-1942: for waiting_for_ci, where the finished merge check ran (same values as RunningNow.ranOn). */
+  ranOn?: string | null;
   /** BOS-1515: held by the merge train to land on main alone: who it clashed with (refs), the files, since when. */
   heldAlone?: { clashWith: string[]; files: string[]; since: string | null; holdsLine: boolean } | null;
 };
@@ -207,6 +211,8 @@ export type MergeQueueView = {
   companyId: string;
   mode: "legacy" | "server";
   slots: number;
+  /** BOS-1942: the name Boss Man records for this server's host, for "Running on this server (name)"; null when none is recorded. */
+  serverHost?: string | null;
   running: RunningNow[];
   waiting: WaitingRow[];
   recent: RecentRow[];
@@ -373,7 +379,11 @@ export function mergeQueueService(
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
     /** This company's running check jobs, oldest start first: what really holds a slot (server mode). */
-    runningChecks?: (companyId: string) => Promise<Array<{ ticketId: string; kind: string; startedAt?: Date | null }>>;
+    runningChecks?: (companyId: string) => Promise<Array<{ ticketId: string; kind: string; startedAt?: Date | null; ranOn?: string | null }>>;
+    /** BOS-1942: where each ticket's latest finished merge check ran (worker name or "company runner"), for a landing that waits only for GitHub CI. */
+    endedMergePlaces?: (companyId: string, ticketIds: string[]) => Promise<Map<string, string>>;
+    /** BOS-1942: the name Boss Man records for this server's host. */
+    serverHost?: () => Promise<string | null>;
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
     /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
     places?: (companyId: string) => Promise<Map<string, { place: number | null; why: string | null; seatPlace?: number | null; lane?: string | null }>>;
@@ -535,10 +545,12 @@ export function mergeQueueService(
     // BOS-1871: landings whose check holds no slot (it has ended) but whose wait for GitHub CI is still open. They are
     // not running a check, so they stay out of Running now, but they are not waiting for one either.
     const ciWait = new Map<string, { since: string; waiting: string[] }>();
+    // BOS-1942: where each running merge check runs, from its check job.
+    const ranOnOf = new Map<string, string>();
     const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
     if (deps.runningChecks && queueMode?.mode === "server") {
       const held = await deps.runningChecks(companyId);
-      held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
+      held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); if (j.ranOn) ranOnOf.set(j.ticketId, j.ranOn); } });
       for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
       for (const l of live) if (!slotOf.has(l.ticketId) && l.ci) ciWait.set(l.ticketId, l.ci);
       live = live.filter((l) => slotOf.has(l.ticketId));
@@ -551,7 +563,7 @@ export function mergeQueueService(
         live.push({ ticketId: j.ticketId, startedAt: (j.startedAt ?? new Date(0)).toISOString(), startedBy: "the merge gate (no landing is waiting on it)" });
       }
     }
-    return { live, slotOf, restarted, checkStart, ciWait };
+    return { live, slotOf, restarted, checkStart, ciWait, ranOnOf };
   }
 
   return {
@@ -570,7 +582,7 @@ export function mergeQueueService(
       const [company] = await db.select({ prefix: companies.ticketPrefix, brakeLimit: companies.holdStartsMergesWaiting }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
-      const { live, slotOf, restarted, checkStart, ciWait } = await liveMerges(companyId);
+      const { live, slotOf, restarted, checkStart, ciWait, ranOnOf } = await liveMerges(companyId);
       const limit = await deps.limit();
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
@@ -600,6 +612,7 @@ export function mergeQueueService(
           what: "merge_check",
           slot,
           overLimit: over,
+          ...(ranOnOf.has(l.ticketId) ? { ranOn: ranOnOf.get(l.ticketId) } : {}),
           ...(l.ci ? { ci: { minutes: mins(t.getTime() - new Date(l.ci.since).getTime()), waiting: l.ci.waiting } } : {}),
         };
       });
@@ -627,6 +640,8 @@ export function mergeQueueService(
       const blockerOf = new Map<string, string>();
       const stepOf = new Map<string, string>();
       const heldWaits = new Map<string, { ids: string[]; since: string }>();
+      // BOS-1942: where the finished check of each ticket that waits only for GitHub CI ran.
+      const endedPlaces = deps.endedMergePlaces && ciWait.size ? await deps.endedMergePlaces(companyId, [...ciWait.keys()]).catch(() => new Map<string, string>()) : new Map<string, string>();
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
         // BOS-1871: its landing is under way and waits only for GitHub CI on the merge copy (the check is over, so it holds no
@@ -645,6 +660,7 @@ export function mergeQueueService(
             urgent: r.urgent,
             failedCheck: false,
             state: "waiting_for_ci",
+            ...(endedPlaces.has(r.id) ? { ranOn: endedPlaces.get(r.id) } : {}),
             label: words,
             stuck: false,
             next: "It merges by itself once GitHub CI passes.",
@@ -846,6 +862,7 @@ export function mergeQueueService(
         mode: queue?.mode ?? "legacy",
         startBrakeOff: brakeOff,
         slots,
+        serverHost: deps.serverHost ? await deps.serverHost().catch(() => null) : null,
         running,
         waiting,
         recent: recentRows,
