@@ -213,6 +213,14 @@ wr apps/web/test/inventory.test.ts 'import { SRC } from "./scan"; it("x", () => 
 wr apps/web/test/shell-layout.test.ts 'import { launch } from "./real-page"; await launch();'
 wr apps/web/test/pure.test.ts 'it("adds", () => 1 + 1);'
 wr apps/runner/test/fence.test.ts '// mentions chromium only in a comment'
+# BOS-1789: a server test that reads the web pages by path; a test that reaches a reading helper through an alias, two folders
+# down and through a second helper; a runner test whose helper reads another package.
+wr apps/server/test/reads-web.test.ts 'import { readFileSync } from "node:fs"; const WEB = new URL("../../web/src/", import.meta.url); readFileSync(WEB);'
+wr apps/server/test/lib/deep/scan.ts 'import { readdirSync } from "node:fs"; export const ROOT = new URL("..", import.meta.url); readdirSync(ROOT);'
+wr apps/server/test/lib/mid.ts 'import { ROOT } from "./deep/scan.js"; export const R = ROOT;'
+wr apps/server/test/aliased.test.ts 'import { R } from "@/lib/mid"; it("x", () => R);'
+wr apps/runner/test/helpers/read-root.ts 'import { readFileSync } from "node:fs"; export const D = readFileSync(process.cwd() + "/apps/web/Dockerfile");'
+wr apps/runner/test/via-helper.test.ts 'const { D } = await import("~/helpers/read-root"); it("x", () => D);'
 g add -A; g commit -q -m "test files"; g update-ref refs/remotes/origin/main HEAD
 wrt() { grep -qF "$1" "$t/out" || fail "$2: expected '$1' in: $(cat "$t/out")"; }
 # Not at the gate and not asked for: skipped.
@@ -222,21 +230,34 @@ notlogged "ratchet.test.ts" "hand run whole-repo"
 # At the gate: the server's reading tests run, as one named-file run from the package; a test that reads only its own fixture
 # and a test that only finds its folder do not.
 run 0 "the gate runs the whole-repo tests of a touched package" env BOSSMAN_MERGE_CHECK=1
-logged "pnpm --filter @boss-man/server exec vitest run test/ratchet.test.ts" "gate server"
+logged "pnpm --filter @boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "gate server"
 notlogged "plain.test.ts" "gate server plain"
 notlogged "locate-only.test.ts" "gate server locate-only"
 notlogged "@boss-man/web exec vitest run" "gate untouched web package"
-notlogged "@boss-man/runner exec vitest run" "gate untouched runner package"
-wrt "PASS  whole-repo tests (apps/server, 1 files)" "gate PASS line"
+# BOS-1789 criterion 2: the test that imports a reading helper through an alias, two folders down and through a second helper is picked up.
+logged "test/aliased.test.ts" "aliased nested helper"
+# Criterion 1 (the other side): a server change does not run the runner test whose helper reads apps/web.
+notlogged "via-helper.test.ts" "gate server change, runner test reads web"
+wrt "PASS  whole-repo tests (apps/server, 3 files)" "gate PASS line"
 # CHECK_QUICK_WHOLE_REPO=1 asks for them in a hand run.
 run 0 "a hand run can ask for them" env CHECK_QUICK_WHOLE_REPO=1
-logged "pnpm --filter @boss-man/server exec vitest run test/ratchet.test.ts" "asked for"
+logged "pnpm --filter @boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "asked for"
 # A web change runs the browser tests and the tests that read through a helper; a pure test stays out.
 g checkout -q -B wr2 origin/main; commit apps/web/src/lib/format.ts
 run 0 "a web change at the gate" env BOSSMAN_MERGE_CHECK=1
 logged "pnpm --filter @boss-man/web exec vitest run test/inventory.test.ts test/shell-layout.test.ts" "gate web"
 notlogged "pure.test.ts" "gate web pure"
-notlogged "@boss-man/server exec vitest run" "gate web only"
+# BOS-1789 criterion 1: a web-page-only change runs the server test that reads apps/web by path, and the runner test whose helper
+# reads apps/web, but not the server tests that read only the server's own files.
+logged "pnpm --filter @boss-man/server exec vitest run test/reads-web.test.ts" "web change runs the server test that reads the web pages"
+notlogged "ratchet.test.ts" "web change, server test that reads only server files"
+notlogged "aliased.test.ts" "web change, server test that reads only server files (helper)"
+logged "exec vitest run test/via-helper.test.ts" "web change runs the runner test whose helper reads the web app"
+wrt "PASS  whole-repo tests (apps/server, 1 files)" "web change server PASS line"
+# A hand run of the same change leaves them out.
+run 0 "a hand run of a web change skips cross-package tests" env
+notlogged "reads-web.test.ts" "hand run web change"
+run 0 "a web change at the gate (again, for the build)" env BOSSMAN_MERGE_CHECK=1
 # The browser tests open apps/web/dist and skip without it: the build runs first, once, before the whole-repo run.
 [ "$(grep -cF "pnpm --filter @boss-man/web build" "$LOG")" -eq 1 ] || fail "web built not exactly once: $(cat "$LOG")"
 [ "$(grep -nF "pnpm --filter @boss-man/web build" "$LOG" | head -n 1 | cut -d: -f1)" -lt "$(grep -nF "pnpm --filter @boss-man/web exec vitest run test/inventory" "$LOG" | head -n 1 | cut -d: -f1)" ] || fail "web build after the browser tests: $(cat "$LOG")"
@@ -249,7 +270,7 @@ grep -q "^FAIL  whole-repo tests (apps/web" "$t/out" || fail "no FAIL line: $(ca
 # A shared change touches every package.
 g checkout -q -B wr3 origin/main; commit packages/shared/src/other.ts
 run 0 "a shared change at the gate" env BOSSMAN_MERGE_CHECK=1
-logged "@boss-man/server exec vitest run test/ratchet.test.ts" "gate shared server"
+logged "@boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "gate shared server"
 logged "@boss-man/web exec vitest run" "gate shared web"
 g checkout -q -B feature origin/main
 

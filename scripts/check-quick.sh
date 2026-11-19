@@ -129,23 +129,76 @@ whole_repo_read='readFileSync|readdirSync|readFile\(|readdir\(|statSync|existsSy
 whole_repo_locate='import\.meta\.(url|dirname)|__dirname|process\.cwd\(\)'
 whole_repo_browser='real-page|playwright|chromium'
 whole_repo_on() { [ -n "${BOSSMAN_MERGE_CHECK:-}" ] || [ -n "${CHECK_QUICK_WHOLE_REPO:-}" ]; }
-whole_repo_tests() { # whole_repo_tests <package dir>: its whole-repo test files, relative to the package, sorted
-  local d=$1 all helpers h
+# BOS-1789: a whole-repo test also reads files of another package (the server's owner-control-list.test.ts reads apps/web, the
+# runner tests read apps/runner/Dockerfile). Which packages a test reads is taken from the package paths its text names (and its
+# helpers' text): "apps/web", "packages/shared", or the relative form "../../web/src". The gate then runs such a test when the
+# branch changes that other package, not only its own. Known limit: a path built from pieces that never name the package is missed.
+whole_repo_pkg_re='(apps|packages)/(launcher|runner|server|web|site|shared)([^A-Za-z0-9_-]|$)|\.\./(launcher|runner|server|web|site|shared)/'
+whole_repo_pkgs_in() { # whole_repo_pkgs_in <file>...: the package dirs those files name by path, one per line
+  { grep -ohE "$whole_repo_pkg_re" "$@" 2>/dev/null || true; } | sed -E 's#^(apps|packages)/([a-z]+).*#\1/\2#; s#^\.\./shared/#packages/shared#; s#^\.\./([a-z]+)/#apps/\1#' | sort -u
+}
+whole_repo_imports() { # whole_repo_imports <file> <helper>: the file imports the helper (relative, aliased, .js suffix, import() or require())
+  local b
+  b="$(basename "$2")"; b="${b%.*}"
+  grep -qE "(from|import|require)[[:space:](]*[\"']([^\"']*[/#])?$b(\.(js|jsx|ts|tsx|mjs|mts))?[\"']" "$1" 2>/dev/null
+}
+whole_repo_closure() { # whole_repo_closure <file> <helper>...: the file and every helper it imports, directly or through other helpers
+  local seen=" $1 " queue=$1 next f h
+  shift
+  while [ -n "$queue" ]; do
+    next=""
+    for f in $queue; do
+      for h in "$@"; do
+        case "$seen" in *" $h "*) continue ;; esac
+        if whole_repo_imports "$f" "$h"; then seen="$seen$h "; next="$next $h"; fi
+      done
+    done
+    queue=$next
+  done
+  echo "$seen"
+}
+whole_repo_tests() { # whole_repo_tests <package dir> [<touched dir>...]: its whole-repo test files to run, relative to the package, sorted
+  # With no touched list the package itself counts as touched. A test runs when its package is touched, or when a package it reads is.
+  local d=$1 all cands helpers new f t h reads p want out=""
+  shift
+  local touched=("$@")
+  [ "${#touched[@]}" -gt 0 ] || touched=("$d")
   all="$(find "$d" -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) -print 2>/dev/null)" || all=""
   [ -n "$all" ] || return 0
-  # A test may read through a helper in its test folder (screen-inventory.test.ts imports screen-scan.ts): the helper counts too.
-  helpers="$(find "$d/test" -maxdepth 2 -type f -name '*.ts' ! -name '*.test.ts' 2>/dev/null | { xargs -r grep -lE "$whole_repo_read" 2>/dev/null || true; } | { xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true; })" || helpers=""
-  {
-    # shellcheck disable=SC2086  # one argument per file; paths have no spaces
-    { grep -lE "$whole_repo_read" $all 2>/dev/null || true; } | xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true
-    for h in $helpers; do
-      h="$(basename "$h" .ts)"
-      # shellcheck disable=SC2086
-      grep -lE "from [\"'](\./|\.\./)([^\"']*/)?$h(\.js)?[\"']" $all 2>/dev/null || true
+  # A test may read through a helper in its test folder, at any depth (screen-inventory.test.ts imports screen-scan.ts): the helper
+  # counts too, and so does a helper that only imports a reading helper, until no new one turns up.
+  cands="$(find "$d/test" -name node_modules -prune -o -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.js' -o -name '*.mjs' \) ! -name '*.test.*' -print 2>/dev/null)" || cands=""
+  # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+  helpers=" $({ grep -lE "$whole_repo_read" $cands 2>/dev/null || true; } | { xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true; } | tr '\n' ' ')"
+  while :; do
+    new=""
+    for f in $cands; do
+      case "$helpers" in *" $f "*) continue ;; esac
+      for h in $helpers; do
+        if whole_repo_imports "$f" "$h"; then new="$new $f"; break; fi
+      done
     done
-    # shellcheck disable=SC2086
+    [ -n "$new" ] || break
+    helpers="$helpers$new "
+  done
+  # shellcheck disable=SC2086
+  want="$({
+    { grep -lE "$whole_repo_read" $all 2>/dev/null || true; } | xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true
+    for t in $all; do
+      for h in $helpers; do
+        if whole_repo_imports "$t" "$h"; then echo "$t"; break; fi
+      done
+    done
     [ "$d" != apps/web ] || grep -lE "$whole_repo_browser" $all 2>/dev/null || true
-  } | sort -u | sed "s#^$d/##"
+  } | sort -u)"
+  for t in $want; do
+    # shellcheck disable=SC2046,SC2086  # one argument per file; paths have no spaces
+    reads="$d $(whole_repo_pkgs_in $(whole_repo_closure "$t" $helpers))"
+    for p in $reads; do
+      case " ${touched[*]} " in *" $p "*) out="$out$t"$'\n'; break ;; esac
+    done
+  done
+  printf '%s' "$out" | sed "s#^$d/##"
   return 0
 }
 
@@ -256,13 +309,15 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
   # Whole-repo tests (BOS-1732) the related list can't reach: one vitest run per package, from its package folder (same slot,
   # its setup files apply). Named files, so vitest-guard accepts it inside the slot.
   if whole_repo_on; then
-    for d in "${pkgs[@]}"; do
-      files="$(whole_repo_tests "$d")"
+    # BOS-1789: every package is looked at, not only the touched ones: a test that reads a touched package runs too.
+    for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
+      [ "${#pkgs[@]}" -gt 0 ] || break
+      files="$(whole_repo_tests "$d" "${pkgs[@]}")"
       [ -n "$files" ] || continue
       name="$(node -p "require('./$d/package.json').name")"
       # The browser tests of apps/web open the built app (apps/web/dist) and skip when it is missing: build it first, here in
       # the slot, so they really run. The build step after the slot wait is then left out (web_built_early).
-      if [ "$d" = apps/web ]; then step "build web (before the browser tests)" pnpm --filter @boss-man/web build; fi
+      if [ "$d" = apps/web ] && [[ " ${pkgs[*]} " == *" apps/web "* ]]; then step "build web (before the browser tests)" pnpm --filter @boss-man/web build; fi
       # shellcheck disable=SC2086  # one argument per file; paths have no spaces
       step "whole-repo tests ($d, $(grep -c . <<<"$files") files)" pnpm --filter "$name" exec vitest run $files
     done
@@ -316,7 +371,7 @@ fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
 # At the gate the heavy phase already built the web app when apps/web has whole-repo tests (web_built_early).
 web_built_early=0
-if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web)" ]; then
+if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web "${pkgs[@]}")" ]; then
   for d in "${pkgs[@]}"; do [ "$d" != apps/web ] || web_built_early=1; done
 fi
 if [ "$web_build" -eq 1 ] && [ "$web_built_early" -eq 0 ]; then step "build web" pnpm --filter @boss-man/web build; fi
