@@ -38,7 +38,7 @@ async function setup() {
   const { db } = shared;
   const built = await (app ??= buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" }));
   const cookie = await signedInOwner(db);
-  const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Customer app" })).json() as { id: string };
@@ -105,7 +105,8 @@ describe("a waiting merge takes the new main (BOS-1344)", () => {
 
   it("leaves the job alone when the setting is off", async () => {
     const c = await setup();
-    await c.db.insert(settings).values({ key: "merge_retarget", value: false });
+    // BOS-1900: turned off the way the owner does it, with the Settings → Checks switch's route.
+    expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: false })).json()).toMatchObject({ refresh: false });
     const res = approveAndWait(c.req, c.ticket.id);
     const job = await c.jobOf();
     c.state.mainMoved = true;

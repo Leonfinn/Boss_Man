@@ -132,7 +132,7 @@ describe("raiseOwnerSetup (BOS-1650)", () => {
     const row = await raiseOwnerSetup(ctx.db, { companyId: ctx.companyId, tickets: [{ ticketId: t.id, title: t.title, why: "Lets Penpot open from your laptop.", ifSkipped: "Nothing breaks; Penpot stays reachable only from the server." }], steps: ["Open Settings → Server and runner and press Save."], commit: "a".repeat(40) });
     expect(row).not.toBeNull();
     const [card] = await cards(ctx);
-    expect(card!.question).toBe(`"Penpot over the network" is live.\n\nWhy: Lets Penpot open from your laptop.\nIf you skip it: Nothing breaks; Penpot stays reachable only from the server.\n\nSteps:\n\n1. Open Settings → Server and runner and press Save.`);
+    expect(card!.question).toBe(`"Penpot over the network" is live.\n\nWhy: Lets Penpot open from your laptop.\nIf you skip it: Nothing breaks; Penpot stays reachable only from the server.\nWhere: Step 1: Boss Man, in Settings\n\nSteps:\n\n1. Open Settings → Server and runner and press Save.`);
     expect(card!.question).not.toContain("To start using it");
   });
 

@@ -475,11 +475,10 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
     ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
     : "";
   await lineEvent(db, t, { event: "hold_started", hold: "card", note: `the merge didn't finish: ${why}`.slice(0, 200) });
-  // tier "ceo" alone doesn't keep a card off the owner's queue (queue() filters on the ladder rung only), so a CEO-first
-  // card carries the ladder: the alert-ladder sweep hands it to the owner after CEO_QUESTION_HANDOVER_MINUTES (BOS-1860).
-  const at = new Date().toISOString();
-  const ladder = opts?.ceoFirst ? { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: t.id, about: [] as string[], hops: [{ to: "ceo", at, why: opts.ceoFirst.why }] } : null;
-  return db
+  // BOS-1873: every merge card goes to the CEO first (the CEO retries gate faults), except the workflow-scope one: only the
+  // owner can change the git token.
+  const ladder = fix ? null : ceoFirstLadder(t.id, opts?.ceoFirst?.why ?? CEO_FIRST_MERGE_WHY);
+  const rows = await db
     .insert(decisions)
     .values({
       companyId: t.companyId,
@@ -495,6 +494,24 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
+  return rows.map((r) => ({ ...r, ceoFirst: !!ladder }));
+}
+
+/** Why a merge or check card starts with the CEO (BOS-1873), said on the card's first hop. */
+export const CEO_FIRST_MERGE_WHY = "the CEO retries merge and check faults first; the owner gets it only if the CEO hasn't settled it in time";
+
+/**
+ * The alert ladder for a CEO-first system card (BOS-1860, BOS-1873). tier "ceo" alone doesn't keep a card off the owner's
+ * queue (queue() filters on the ladder rung only), so the card carries the ladder: the alert-ladder sweep hands it to the
+ * owner after CEO_QUESTION_HANDOVER_MINUTES of a CEO run that could see it.
+ */
+export function ceoFirstLadder(ticketId: string, why: string, at = new Date().toISOString()) {
+  return { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId, about: [] as string[], hops: [{ to: "ceo", at, why }] };
+}
+
+/** The CEO's wake for a CEO-first merge or check card (BOS-1873): which card, and the two answers the CEO may give. */
+export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
+  return `"${title}" was approved, but ${what}. This isn't the agent's work. The merge card is yours first: answer "${CHECK_AGAIN}" on card ${cardId} once the cause is gone, or "${CHECK_SEND_BACK}" if the work needs changing. "${CHECK_SKIP}" is the owner's; the card reaches them after ${CEO_QUESTION_HANDOVER_MINUTES} minutes if it is still open.`;
 }
 /**
  * An approved decision whose next step is the owner's own (BOS-122) leaves this to-do open on their
@@ -613,7 +630,7 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
     .values({
       companyId: t.companyId,
       kind: "question",
-      question: `${heading}\n\n${whyLines}\n\n${others.length ? "Steps for them all:" : "Steps:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
+      question: `${heading}\n\n${whyLines}${check.where.length ? `\nWhere: ${check.where.join("; ")}` : ""}\n\n${others.length ? "Steps for them all:" : "Steps:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
       options: [TODO_DONE],
       recommendedOption: TODO_DONE,
       tier: "owner",

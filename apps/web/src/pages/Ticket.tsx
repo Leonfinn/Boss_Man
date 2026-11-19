@@ -217,23 +217,46 @@ function CriteriaEdit({ draftKey, initial, save, busy }: { draftKey: string; ini
 /** The owner's setup steps (DR-011): what they do once this change is live, written by whoever built it. */
 function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const steps = (t.ownerSetup ?? "").trim();
+  const why = (t.ownerSetupWhy ?? "").trim();
+  const ifSkipped = (t.ownerSetupIfSkipped ?? "").trim();
   const n = steps.split("\n").filter(Boolean).length;
   return (
     <DetailRow title="After it goes live" count={n ? `${n} step${n === 1 ? "" : "s"} for you` : "nothing for you"} tone={n ? "amber" : undefined}>
-      <OwnerSetupEdit draftKey={`ticket-owner-setup/${t.id}`} key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v }).then((ok) => ok ?? false)} />
+      <OwnerSetupEdit
+        draftKey={`ticket-owner-setup/${t.id}`}
+        key={`${steps}\u0000${why}\u0000${ifSkipped}`}
+        initial={steps}
+        initialWhy={why}
+        initialIfSkipped={ifSkipped}
+        busy={busy}
+        save={(body) => patch(body).then((ok) => ok ?? false)}
+      />
     </DetailRow>
   );
 }
 
-/** One step per line; saving nothing clears them. The typing is kept in this browser (DR-045). */
-function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; initial: string; save: (v: string) => Promise<boolean>; busy: boolean }) {
+/** One step per line; saving nothing clears them. The "why" and "if skipped" lines sit above, one line each. The typing is kept in this browser (DR-045). */
+function OwnerSetupEdit({ draftKey, initial, initialWhy, initialIfSkipped, save, busy }: { draftKey: string; initial: string; initialWhy: string; initialIfSkipped: string; save: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const [text, setText] = useState(() => readDraft(draftKey) || initial);
+  const whyKey = `${draftKey}/why`;
+  const skipKey = `${draftKey}/if-skipped`;
+  const [why, setWhy] = useState(() => readDraft(whyKey) || initialWhy);
+  const [skip, setSkip] = useState(() => readDraft(skipKey) || initialIfSkipped);
   // What Save should send: the box's text, unless it still shows a kept draft from before this edit.
-  const shown = readDraft(draftKey);
-  const [open, setOpen] = useState(!initial && !shown);
+  const shown = readDraft(draftKey) || readDraft(whyKey) || readDraft(skipKey);
+  const [open, setOpen] = useState(!initial && !initialWhy && !initialIfSkipped && !shown);
+  const oneLine = { padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%", resize: "vertical" as const };
   return open ? (
     <div className="field">
-      <label htmlFor="t-owner-setup" style={{ fontWeight: 600 }}>
+      <label htmlFor="t-owner-setup-why" style={{ fontWeight: 600 }}>
+        Why it matters (opens the card)
+      </label>
+      <DraftTextarea draftKey={whyKey} id="t-owner-setup-why" rows={1} maxLength={240} placeholder="What this setup changes for you" value={why} onChange={setWhy} style={oneLine} />
+      <label htmlFor="t-owner-setup-skip" style={{ fontWeight: 600, marginTop: 6 }}>
+        If you skip it
+      </label>
+      <DraftTextarea draftKey={skipKey} id="t-owner-setup-skip" rows={1} maxLength={240} placeholder="What happens if you leave this undone" value={skip} onChange={setSkip} style={oneLine} />
+      <label htmlFor="t-owner-setup" style={{ fontWeight: 600, marginTop: 6 }}>
         What you have to do, one step per line
       </label>
       <DraftTextarea
@@ -251,15 +274,24 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
         <button
           type="button"
           className="btn primary"
-          disabled={busy || text === initial}
+          disabled={busy || (text === initial && why === initialWhy && skip === initialIfSkipped)}
           onClick={() => {
-            // Clear only once the server has taken the steps; a failed save keeps them.
-            void save(text.trim()).then((ok) => ok && clearDraft(draftKey));
+            // Send only what changed; empty clears it. Clear drafts only once the server has taken them; a failed save keeps them.
+            const body: Record<string, unknown> = {};
+            if (text !== initial) body.ownerSetup = text.trim();
+            if (why !== initialWhy) body.ownerSetupWhy = why.trim() || null;
+            if (skip !== initialIfSkipped) body.ownerSetupIfSkipped = skip.trim() || null;
+            void save(body).then((ok) => {
+              if (!ok) return;
+              clearDraft(draftKey);
+              clearDraft(whyKey);
+              clearDraft(skipKey);
+            });
           }}
         >
           Save steps
         </button>
-        {initial && (
+        {(initial || initialWhy || initialIfSkipped) && (
           <button type="button" className="btn" onClick={() => setOpen(false)}>
             Done
           </button>
@@ -267,9 +299,21 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
       </div>
     </div>
   ) : (
-    <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
-      Edit steps
-    </button>
+    <>
+      {initialWhy && (
+        <p style={{ margin: "0 0 4px" }}>
+          <strong>Why:</strong> {initialWhy}
+        </p>
+      )}
+      {initialIfSkipped && (
+        <p style={{ margin: "0 0 4px" }}>
+          <strong>If you skip it:</strong> {initialIfSkipped}
+        </p>
+      )}
+      <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
+        Edit steps and lines
+      </button>
+    </>
   );
 }
 

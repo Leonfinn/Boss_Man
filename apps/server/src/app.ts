@@ -36,6 +36,7 @@ import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
 import { failuresForStatus } from "./services/merge-failures.js";
+import { raiseCostAlert } from "./services/cost-check.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
@@ -482,7 +483,7 @@ export async function buildApp(opts: AppOptions) {
     trace,
     flag: (n) => notes.notify({ ...n, level: "flag" }),
     // DR-069 D2: read lazily, because the git host service and the host facts are made further down.
-    named: { addons: () => addonFacts(), serverHost: () => hostFacts.serverHost(), gitTokenProbe: (companyId) => gitTokenProbe(companyId), now: opts.now },
+    named: { addons: () => addonFacts(), serverHost: () => hostFacts.serverHost(), gitTokenProbe: (companyId) => gitTokenProbe(companyId), limits: async () => { const l = await scheduler.limitsInForce(); return { allCompanies: l.allCompanies, background: l.background }; }, now: opts.now },
   });
   const pa =paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
@@ -666,7 +667,8 @@ export async function buildApp(opts: AppOptions) {
   const images = ticketImagesService(db, { runners });
   const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status(), runLimit: async () => (await scheduler.limitsInForce()).allCompanies });
   const workflow = workflowService(db, { now: opts.now });
-  const skillsSvc = skillsService(db, { fetch: opts.fetch });
+  // Read fresh on each import (BOS-1891): a token added or rotated in Settings → Secrets counts at once. With a run, that agent's grant limits apply.
+  const skillsSvc = skillsService(db, { fetch: opts.fetch, gitToken: async (companyId, runId) => (await secretsSvc.resolveCompanyEnv(companyId, "skill_import", runId)).GIT_TOKEN });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
@@ -994,6 +996,8 @@ export async function buildApp(opts: AppOptions) {
     },
     now: opts.now,
   });
+  // Cost sanity check (BOS-1866): a run whose cost disagrees with its tokens at list price raises one CEO alert.
+  runners.setCostAlertHook((a) => raiseCostAlert((input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]), a));
   // The GitHub watcher (BOS-1393): main.ts runs runDue() on the leader's timer; the owner's routes save the setting and check now.
   const githubWatch = githubWatchService(db, {
     fetch: opts.fetch,

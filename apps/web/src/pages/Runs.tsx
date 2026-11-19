@@ -2,6 +2,7 @@ import { useState } from "react";
 import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
+import { Loader } from "../components/Loader";
 
 export const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 
@@ -103,6 +104,24 @@ export function outcomeTag(outcome: string | null | undefined) {
   return <span className="tag green">Finished</span>;
 }
 
+/**
+ * Why a run ended badly, in plain words, or null when it ended well (BOS-1887). The server stores a failure as
+ * `error: <reason>`; Interrupted and Lost get a short line of their own.
+ */
+export function failureReason(outcome: string | null | undefined): string | null {
+  if (!outcome) return null;
+  if (outcome.startsWith("error")) {
+    const reason = outcome.replace(/^error:?\s*/, "").trim();
+    return reason ? `Failed: ${reason}` : "Failed, and the run didn't say why.";
+  }
+  if (outcome === "interrupted") return "Interrupted: it was stopped part-way, for example by a restart, and can be started again.";
+  if (outcome.startsWith("lost")) {
+    const detail = outcome.replace(/^lost:?\s*/, "").trim();
+    return `Lost: Boss Man lost contact with the runner and doesn't know how it ended.${detail ? ` (${detail})` : ""}`;
+  }
+  return null;
+}
+
 function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Company[]; finished: boolean }) {
   return (
     <div className="table-wrap">
@@ -142,7 +161,14 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
                 )}
               </td>
               <td className="mono">{r.model ?? "default"}</td>
-              <td>{outcomeTag(finished ? r.outcome : null)}</td>
+              <td>
+                {outcomeTag(finished ? r.outcome : null)}
+                {finished && failureReason(r.outcome) && (
+                  <div className="muted" style={{ fontSize: 13, marginTop: 4, maxWidth: 360, overflowWrap: "anywhere" }}>
+                    {failureReason(r.outcome)}
+                  </div>
+                )}
+              </td>
               {finished && (
                 <td className="mono" style={{ textAlign: "right", whiteSpace: "nowrap" }} title={usage(r).title}>
                   {usage(r).text}
@@ -225,6 +251,20 @@ function Chips({ label, value, options, onPick }: { label: string; value: string
   );
 }
 
+/** A failed load says so and offers Retry, instead of passing for an empty list (BOS-1887). */
+function LoadFailed({ what, message, onRetry }: { what: string; message: string; onRetry: () => void }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <p role="alert" className="error" style={{ margin: 0 }}>
+        Couldn't load {what}: {message}
+      </p>
+      <button type="button" className="btn" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
 export function Runs({ companies }: { companies: Company[] }) {
   const [filter, setFilter] = useState<Filter>(savedFilter);
   // Older runs loaded by "Show more", for the filter they were loaded under.
@@ -286,8 +326,12 @@ export function Runs({ companies }: { companies: Company[] }) {
             <RunTable rows={active.data} companies={companies} finished={false} />
             <EndAllRuns count={active.data.length} onDone={() => (active.reload(), recent.reload())} />
           </>
-        ) : (
+        ) : active.data ? (
           <p className="muted">No agents are running.</p>
+        ) : active.error ? (
+          <LoadFailed what="the running runs" message={active.error.message} onRetry={active.reload} />
+        ) : (
+          <Loader label="Loading the running runs" />
         )}
       </section>
       <section aria-labelledby="recent-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -308,7 +352,15 @@ export function Runs({ companies }: { companies: Company[] }) {
             onPick={(id) => change({ result: id as Filter["result"] })}
           />
         </div>
-        {shown?.length ? <RunTable rows={shown} companies={companies} finished /> : <p className="muted">{filtered ? "No finished runs match these filters." : "No runs have finished yet."}</p>}
+        {shown?.length ? (
+          <RunTable rows={shown} companies={companies} finished />
+        ) : shown ? (
+          <p className="muted">{filtered ? "No finished runs match these filters." : "No runs have finished yet."}</p>
+        ) : recent.error ? (
+          <LoadFailed what="the finished runs" message={recent.error.message} onRetry={recent.reload} />
+        ) : (
+          <Loader label="Loading the finished runs" />
+        )}
         {canMore && (
           <div>
             <button type="button" className="btn" disabled={loadingMore} onClick={() => void showMore()}>

@@ -222,6 +222,7 @@ if [ -z "$pre_done" ]; then
     rm -rf "$skipdir"
     node scripts/lint-migrations.mjs
     node scripts/check-doc-numbers.mjs
+    node scripts/check-compose-secrets-docs.mjs
   fi
 fi
 

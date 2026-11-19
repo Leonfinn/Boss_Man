@@ -25,6 +25,7 @@ const BLIP = "Couldn't push the merge commit to bossman-ci/fc5ce221 for the git 
 const FETCH_BLIP = "Command failed: git fetch --quiet origin\nerror: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502\nfatal: expected flush after ref listing";
 const NON_FF = "Couldn't push the merge to main: To https://github.com/example/repo.git\n ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to 'https://github.com/example/repo.git'";
 const PROTECTED = "Couldn't push the merge to main: remote: error: GH006: Protected branch update failed for refs/heads/main.\nTo https://github.com/example/repo.git\n ! [remote rejected] main -> main (protected branch hook declined)";
+const WORKFLOW_SCOPE = "Couldn't push the merge to main: To https://github.com/example/repo.git\n ! [remote rejected] main -> main (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)";
 
 async function setup() {
   setInfraRetryBase(1);
@@ -46,8 +47,7 @@ async function setup() {
   /** The runner's next answers to workspace.merge, taken in order: an error text fails that request; an empty list merges. */
   const mergeAnswers: Array<string | null> = [];
   /** Runs when the runner receives a merge request, before it answers (a hook for the "handed over while waiting" test). */
-  const onMerge: { hook: (n: number) => void } = { hook: () => undefined };
-  built.runners.connect(reg.runnerId, (c) => {
+  const onMerge: { hook: (n: number) => void } = { hook: () => undefined };  built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const requestId = (c as { requestId: string }).requestId;
     const reply = (r: { ok: boolean; data?: unknown; error?: string }) => queueMicrotask(() => built.runners.resolveReply({ requestId, ...r }));
@@ -142,7 +142,7 @@ describe("a push or fetch that fails on the network retries once by itself (BOS-
     expect(c.merges()).toBe(2);
   });
 
-  it("a refused push (non-fast-forward, protected branch) is not retried: today's card at once, owner-visible as before", async () => {
+  it("a refused push (non-fast-forward, protected branch) is not retried: one card at once, on the CEO's rung (BOS-1873), the CEO woken", async () => {
     for (const refusal of [NON_FF, PROTECTED]) {
       const c = await setup();
       c.mergeAnswers.push(refusal);
@@ -151,12 +151,41 @@ describe("a push or fetch that fails on the network retries once by itself (BOS-
       await vi.waitFor(async () => expect(await c.cards(t.id)).toHaveLength(1));
       expect(c.merges()).toBe(1);
       const [card] = await c.cards(t.id);
-      expect((card!.context as { ladder?: unknown }).ladder).toBeUndefined();
+      expect((card!.context as { ladder?: { rung: string; minutes: number } }).ladder).toMatchObject({ rung: "ceo", minutes: 60 });
+      expect((await c.built.decisions.queue({ companyId: c.company.id })).map((d) => d.id)).not.toContain(card!.id);
+      const woken = await c.wakesFor(c.ceo.id);
+      expect(woken).toHaveLength(1);
+      expect(woken[0]!.note).toContain(card!.id);
       expect(await c.failReasons(t.id)).toEqual(["gate_fault"]);
       expect((await c.row(t.id)).stateNoteStaleReason).toBeNull();
       await ctx?.close();
       ctx = undefined;
     }
+  });
+
+  it("a merge card already open before this change (no ladder) keeps today's routing: still on the owner's queue (BOS-1873)", async () => {
+    const c = await setup();
+    const t = await c.approved();
+    const [old] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "The merge check timed out", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", tier: "ceo", dedupeKey: `merge-stuck:${t.id}`, context: { type: "check_stuck", ticketId: t.id, command: "pnpm test", output: "timed out" } })
+      .returning({ id: decisions.id });
+    await c.built.sweeps.run();
+    expect((await c.built.decisions.queue({ companyId: c.company.id })).map((d) => d.id)).toContain(old!.id);
+    expect((await c.cards(t.id))[0]!.context).not.toHaveProperty("ladder");
+  });
+
+  it("a push refused for the token's workflow scope stays owner-first: only the owner can change the token (BOS-1873)", async () => {
+    const c = await setup();
+    c.mergeAnswers.push(WORKFLOW_SCOPE);
+    const t = await c.approved();
+    await c.built.review.landVisible(t.id, "the owner").catch(() => undefined);
+    await vi.waitFor(async () => expect(await c.cards(t.id)).toHaveLength(1));
+    const [card] = await c.cards(t.id);
+    expect(card!.question).toMatch(/Repository permissions → Workflows/);
+    expect((card!.context as { ladder?: unknown }).ladder).toBeUndefined();
+    expect((await c.built.decisions.queue({ companyId: c.company.id })).map((d) => d.id)).toContain(card!.id);
+    expect(await c.wakesFor(c.ceo.id)).toHaveLength(0);
   });
 
   it("handed over during the wait: the old copy sends no second merge and raises no card (the new copy resumes it)", async () => {

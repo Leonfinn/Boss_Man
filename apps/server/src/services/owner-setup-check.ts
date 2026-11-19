@@ -9,7 +9,7 @@ import { type CompanyFacts, fillCompanyFacts } from "./company-facts.js";
 import { composeFactsFrom } from "./compose-steps.js";
 import { type WhenFacts, branchingFindings, settleWhen } from "./owner-setup-when.js";
 import { type LintOverrideInput, type OverrideEntry, cleanOverride, overrideTooShort, resolveOverride, serializeOverride } from "./lint-override.js";
-import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
+import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps, placeFindings } from "./steps.js";
 
 /**
  * The host facts a setup step may name, and the plain words the card uses when the host hasn't reported one
@@ -96,6 +96,8 @@ export type OwnerSetupCheck = {
   /** Refusals a CEO override can let through, with a reason. */
   soft: LintFinding[];
   warn: LintFinding[];
+  /** BOS-1880: the card's "Where" lines, one per place in the order first met. */
+  where: string[];
   /** BOS-1650: steps left out because their `[when <fact>]` is false (raise mode). */
   dropped: { step: number; fact: string }[];
 };
@@ -117,13 +119,16 @@ export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts
   const compose = composeFactsFrom(facts.values);
   const lint = lintOwnerSteps(shown, { ...(compose ? { compose } : {}), ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
   // R20 (BOS-1650) runs on the steps as the owner will read them, after every marker is settled.
-  const refuse = [...settled.findings, ...company.findings, ...lint.refuse, ...branchingFindings(shown)];
+  // BOS-1880: the same place check a card gets (BOS-1660), on the steps as the owner reads them, so a go-live card
+  // can't send the owner to "the card" for a place. Its Where lines go on the card.
+  const place = placeFindings(shown, facts.serverHost);
+  const refuse = [...settled.findings, ...company.findings, ...lint.refuse, ...branchingFindings(shown), ...place.findings];
   const warn = lint.warn;
   // When written, a company token may have no record yet (the other company adds its target before go-live); a
   // known host fact may be unreported. At go-live both stay, and the steps go to the CEO.
   const knownGap = (f: LintFinding) => f.rule === "R4" && (Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "") || /^has \{\{company\.[a-z0-9-]+\.deployTarget\.(?:name|kind|address|tagName)\}\}/.test(f.problem));
   const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)));
-  return { steps: shown, generic: filled.generic, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn, dropped: settled.dropped };
+  return { steps: shown, generic: filled.generic, where: place.where, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn, dropped: settled.dropped };
 }
 
 /**

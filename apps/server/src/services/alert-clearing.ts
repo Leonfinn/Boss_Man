@@ -14,6 +14,7 @@ import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
 import { runnerImageCommit } from "./runner-image.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
+import { backInBandReason } from "./cost-check.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -68,7 +69,9 @@ export type ClearWhen =
    */
   | { kind: "featurePortalSettled"; featureId: string }
   /** A repeated-merge-failure card (BOS-1461): no failed attempt of that reason for 30 minutes. */
-  | { kind: "mergeFailuresCalm"; companyId: string; reason: string };
+  | { kind: "mergeFailuresCalm"; companyId: string; reason: string }
+  /** The cost sanity check's card (BOS-1866): the company's latest checked runs are all in band. */
+  | { kind: "costBackInBand"; companyId: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -128,6 +131,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "featurePortalSettled":
         if (typeof c.featureId === "string") out.push({ kind: "featurePortalSettled", featureId: c.featureId });
+        break;
+      case "costBackInBand":
+        if (typeof c.companyId === "string") out.push({ kind: "costBackInBand", companyId: c.companyId });
         break;
       case "mergeFailuresCalm":
         if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
@@ -288,6 +294,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "serverCalm":
         return deps.serverCalm?.(c.rule) ?? null;
+      case "costBackInBand":
+        return backInBandReason(db, c.companyId, card.createdAt);
       case "mergeFailuresCalm": {
         // Calm for the whole window, and the card itself is at least that old.
         const since = new Date(now().getTime() - FAILURE_WINDOW_MS);

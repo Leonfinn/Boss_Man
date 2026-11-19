@@ -6,7 +6,7 @@ import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
 
 type Tokens = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-type Spend = { tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
+type Spend = { costCheck?: { outOfBand: number; checked: number; skipped: { model: string; reason: string; runs: number }[] }; tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
 const PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", synthetic: "Synthetic" };
 
 const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
@@ -90,6 +90,16 @@ export function ProjectBudget({ project }: { project: Project }) {
         </div>
       ) : (
         <p className="muted">No monthly cap. Set one on the Config tab.</p>
+      )}
+      {s.costCheck && s.costCheck.outOfBand > 0 && (
+        <p role="alert" style={{ fontSize: 14, margin: "8px 0" }}>
+          Check these figures: {s.costCheck.outOfBand} run{s.costCheck.outOfBand === 1 ? "" : "s"} on this project's tasks recorded a cost that does not match {s.costCheck.outOfBand === 1 ? "its" : "their"} tokens at list price, so the dollar figures here may be wrong. The CEO has been told; you do not need to do anything.
+        </p>
+      )}
+      {s.costCheck && s.costCheck.skipped.length > 0 && (
+        <p className="muted" style={{ fontSize: 13, margin: "4px 0" }}>
+          Not cross-checked against list prices: {s.costCheck.skipped.map((k) => `${k.runs} run${k.runs === 1 ? "" : "s"} on ${k.model} (${k.reason})`).join("; ")}.
+        </p>
       )}
       <p className="muted" style={{ fontSize: 13 }}>The dollar figures are list-price estimates for API and credit runs, not a bill and not total spend. Runs paid from a subscription (such as Claude Max) are left out, and the monthly cap does not stop them. The cap per task does count subscription runs, at list prices. Extra usage or top-up bought on a subscription is not seen here. The month is the calendar month (UTC). Set the caps on the Config tab.</p>
       {s.tokens && (

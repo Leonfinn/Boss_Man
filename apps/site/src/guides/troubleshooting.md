@@ -72,6 +72,8 @@ From: [Guide 3](/guides/first-company-and-ticket).
 
 Check **Settings > Server and runner > Runner > Add-ons**. For Not installed, tick the add-on there, press **Save add-ons**, then press **Build and update runners** in Settings > Server and runner > Updates. Skills that need an add-on are left out of agents' runs until it says Working.
 
+If the boxes are locked and say **Can't tell which add-ons are on yet**, the runner is offline and nothing has been built or saved yet. Wait for the runner to connect; the boxes then unlock. Saving before that could drop add-ons you set in `.env`.
+
 From: [Guide 9](/guides/add-ons).
 
 ### The runner stops with "Set BOSSMAN_RUNNER_TOKEN_FILE...".
@@ -103,6 +105,12 @@ From: [Guide 5](/guides/agents-and-models).
 ### I gave the CEO a ticket and nothing happens.
 
 Open **Agents** and check the agent is not paused. Then check that **Settings > Server and runner** says the runner is **Connected**. When it works, a run shows under **Runs** in the sidebar within a minute or two.
+
+From: [Guide 3](/guides/first-company-and-ticket).
+
+### An agent didn't answer my chat message.
+
+You do not need to resend it. If an agent's chat run ends without a reply, the chat says so and why it stopped, and the agent is asked again once, straight away. If that run also ends without a reply, the chat says your message is kept, and you get a notification. The agent's next chat run answers it; sending another message starts one.
 
 From: [Guide 3](/guides/first-company-and-ticket).
 
@@ -189,7 +197,7 @@ From: [Guide 10](/guides/updates-and-backups).
 
 ### The runner update seems to take a long time.
 
-Boss Man waits for the current runs to finish, then swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. If you ran `scripts/update-runner.sh` yourself, nothing moves until you choose **Update runners (finish runs first)** there. With the host deployer set up, that button is under **For a hand-built runner image**. To stop, choose **Cancel the update**. To undo a finished update, run `scripts/update-runner.sh --rollback`.
+Boss Man waits for the current runs and checks to finish, then swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. If work is still going after 30 minutes, you get a card that lists it. Choose **Swap as soon as these finish** to let the update finish by itself with nothing more to press. If you do not answer, new work starts again 90 minutes after the update began, and the swap waits for each company to go quiet. If you ran `scripts/update-runner.sh` yourself, nothing moves until you choose **Update runners (finish runs first)** there. With the host deployer set up, that button is under **For a hand-built runner image**. To stop, choose **Cancel the runner update**. To undo a finished update, run `scripts/update-runner.sh --rollback`.
 
 From: [Guide 10](/guides/updates-and-backups).
 
