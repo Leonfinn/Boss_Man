@@ -91,13 +91,13 @@ The buttons make your phone call Boss Man directly, over Boss Man's https addres
 - the ntfy server has a publish token;
 - the **ntfy server** address is `https://...` or exactly the bundled `http://ntfy:80` (any other `http://` address is refused, so the token never crosses an untrusted network in clear text);
 - Boss Man's public URL is https;
-- **Approve buttons** haven't been switched off in Notifications.
+- **Offer an Approve button on simple agent questions** is ticked in Notifications (it is, unless you untick it).
 
 If one fails, Notifications says which.
 
 ## Blue/green installs
 
-With blue/green the two Boss Man copies are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command, and in the rollback command. It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 5 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
+With blue/green the two Boss Man copies are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command, and in the rollback command. It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings from steps 4 and 5 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
 
 ## Per host
 

@@ -17,7 +17,7 @@ Checked on 16 Oct 2026 against Productboard's help centre and public portals:
 | **User impact score** | **Demand.** The sum of importance, but each customer counts once per feature, at the most important level they asked for. One loud customer can't outweigh many quiet ones. A feature's demand includes its subfeatures'. |
 | **Drivers** scored 0 to 5, with a **prioritisation formula** | **Criteria** per company, each with a weight (0 to 10), scored 0 to 5 per feature. **Value** is the weighted average of demand (scaled so the most wanted feature is 5) and the scored criteria. **Priority** is value × 3 ÷ effort (1 to 5; unsized counts as 3). |
 | **Hierarchy**: product, component, feature, subfeature | Area, feature, subfeature (one level). |
-| **Portal**: vote, suggest, see what's planned and launched | Opt-in, behind a secret link. Visitors vote with an importance, can add a comment, and can suggest ideas. Everything they send is treated as untrusted. |
+| **Portal**: vote, suggest, see what's planned and launched | Opt-in, behind a secret link, or at the bare public address if you choose (see "The link" below). Visitors vote with an importance, can add a comment, and can suggest ideas. Everything they send is treated as untrusted. |
 | **AI-suggested links** | A plain word-match suggestion of features a note may be about. It's not AI, and it's meant as a starting point. |
 
 ## Boss Man's own additions
@@ -53,9 +53,11 @@ Each row on the Features list has an "On portal" tick that saves at once and mat
 The portal is the only part of Boss Man meant for people other than you.
 
 - **The link.** The secret is after `#` (`/portal.html#<secret>`). Browsers don't send that part to servers, so it stays out of logs and Referer headers. The page sends it to the API in a header. **New link** on the Feedback page makes a new secret and ends the old one at once.
+- **The bare address (optional, off by default).** On the Feedback page, under **Short public address**, the tick box **Open this portal at the public address itself, with no secret link part** makes the portal's public address open this portal with no secret. Anyone who has the address then sees it, so use it only for a portal meant to be public, such as one your website links to. Only one company's portal can use it; ticking it for one company unticks it for any other. A wrong secret is still refused: it never falls back to the bare-address portal.
 - **Its own port.** The portal page is separate from your app and loads none of its code. With `BOSSMAN_PORTAL_PORT` (3101 inside the container; the NAS port is `BOSSMAN_PORTAL_HOST_PORT`, 3101 by default), a second listener serves only:
-  - the portal page;
-  - its assets;
+  - the portal page (`/` redirects to it);
+  - the page that confirms a post by email (`/confirm.html`);
+  - their assets;
   - `/api/portal`.
 
   Your login, API, MCP and runner endpoints don't exist on that port. Expose the portal's port if you need to, **never the owner's** (`BOSSMAN_HOST_PORT`, 3100 by default).
@@ -67,6 +69,10 @@ The portal is the only part of Boss Man meant for people other than you.
   - 10 ideas a day per visitor;
   - a hidden field that catches bots;
   - size caps on every field.
+- **Confirm posts by email (optional, off by default).** On the Feedback page, the tick box **Visitors must click a link we email them before a post, comment or vote counts** makes every visitor give an email address. What they send stays hidden, and counts for nothing, until they click the emailed link. It needs outgoing email (Settings → Server and runner → Email) and `BOSSMAN_PORTAL_URL`. You choose how long the link works (1 to 168 hours, 24 by default) and how long a confirmed browser is remembered (1 to 365 days, 90 by default). With it on, each email address also has its own limits:
+  - 3 confirmation emails an hour;
+  - 5 votes or comments an hour;
+  - 10 ideas a day.
 - **Untrusted.** Everything visitors send is marked as coming from outside. Agents only ever see it inside `<untrusted>` blocks (R51).
 
 To share the portal beyond your network, point a reverse proxy at the portal's port only, or use [Tailscale Funnel](https://tailscale.com/kb/1223/tailscale-funnel). Funnel accepts public traffic only on ports 443, 8443 and 10000, and needs MagicDNS and HTTPS turned on for your tailnet ([Funnel CLI reference](https://tailscale.com/kb/1311/tailscale-funnel)). I couldn't reach Tailscale's docs from where this was written to check the exact command for your version, so follow their page.

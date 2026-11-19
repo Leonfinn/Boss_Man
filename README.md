@@ -96,6 +96,8 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | [docs/24-privacy.md](docs/24-privacy.md) | What Boss Man sends, and where |
 | [docs/20-https-tailscale.md](docs/20-https-tailscale.md) | An HTTPS address through Tailscale Serve, which the installable web app and phone notifications need |
 | [docs/31-phone-notifications.md](docs/31-phone-notifications.md) | Pages and asks on your phone through your own ntfy server, with Approve buttons |
+| [docs/33-public-portal-cloudflare.md](docs/33-public-portal-cloudflare.md) | The feedback portal on a public address through a Cloudflare Tunnel, with no router port opened |
+| [docs/34-check-workers.md](docs/34-check-workers.md) | Check workers: more machines on any Docker host to take quick and merge checks when the check line is long |
 | [docs/12-runner-add-ons.md](docs/12-runner-add-ons.md) | Optional tools in the runner image, such as a browser |
 | [docs/15-penpot.md](docs/15-penpot.md) | The optional Penpot design tool |
 | [docs/16-penpot-agent-setup.md](docs/16-penpot-agent-setup.md) | Letting agents read and draw designs in Penpot |

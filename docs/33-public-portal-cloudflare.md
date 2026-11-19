@@ -6,7 +6,7 @@ Works on any Docker host (plain Linux, a Proxmox VM or LXC, TrueNAS). Nothing he
 
 - A `cloudflared` container (`deploy/cloudflared.yml`) dials out to Cloudflare. No router port is opened and no reverse proxy is needed.
 - In the Cloudflare dashboard the tunnel has one public hostname, for example `roadmap.example.com`, pointing at `http://server:3101`.
-- `server:3101` is the portal listener. It serves only the portal page, its assets and `/api/portal/...`; everything else is a 404 (`apps/server/src/portal.ts`). The owner's app (3100: login, API, MCP, runners) is never named in the tunnel.
+- `server:3101` is the portal listener. It serves only the portal page (`/` redirects to it), the email-confirmation page `/confirm.html`, their assets and `/api/portal/...`; everything else is a 404 (`apps/server/src/portal.ts`). The owner's app (3100: login, API, MCP, runners) is never named in the tunnel.
 - The name `server` resolves on the default network in a single-server install and in blue/green (Caddy's alias).
 
 ## Settings in the .env file
@@ -31,6 +31,7 @@ Create a tunnel (Networks, then Tunnels, then Create a tunnel, type Cloudflared)
 
 ## Check
 
-- `https://roadmap.example.com/` shows the public roadmap.
+- The portal's secret link from the Feedback page (`https://roadmap.example.com/portal.html#<secret>`) shows the public roadmap.
+- `https://roadmap.example.com/` shows it too only if you ticked **Open this portal at the public address itself** under **Short public address** on the Feedback page (off by default). Without the tick it opens the portal page with "This link is incomplete. Ask for the full portal link."
 - `https://roadmap.example.com/api/health` and any other owner-app route answer 404.
 - Roll back: remove `:deploy/cloudflared.yml` from `COMPOSE_FILE`, restart the stack, delete the tunnel in the dashboard.

@@ -4,7 +4,7 @@
 # Needs Docker Compose 2.23.1 or newer (`docker compose version`).
 #
 # It dials OUT only; no port is published. It holds no GitHub, AI or deploy credentials, only its worker token.
-# Boss Man's Settings > Server and runner > Checks > Add a check worker shows this file already filled in: copy that one.
+# Boss Man's Settings > Server and runner > Limits and checks > Checks > Add a check worker shows this file already filled in: copy that one.
 
 name: boss-man-check-worker
 
