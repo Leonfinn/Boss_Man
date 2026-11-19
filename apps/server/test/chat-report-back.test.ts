@@ -28,11 +28,17 @@ async function setup() {
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json();
-  await req("POST", `/api/companies/${company.id}/projects`, { name: "App" });
+  const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "App" })).json();
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json();
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
-  built.runners.connect(reg.runnerId, (c) => (sent.push(c), true));
+  const link = () => built.runners.connect(reg.runnerId, (c) => (sent.push(c), true));
+  let disconnect = link();
+  /** A runner swap: the link drops, and a fresh one connects later. */
+  const swapOut = () => disconnect();
+  const swapIn = () => {
+    disconnect = link();
+  };
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runner!, { seq: ++seq, at: new Date().toISOString(), event });
   // The runner events are ingested on the server's own queue and nothing signals when one is applied, so each caller reads the database after this short pause (the same shape as chat.test.ts).
@@ -68,7 +74,7 @@ async function setup() {
     await built.scheduler.tick();
     return sent.find((x): x is Start => x.type === "run.start");
   };
-  return { ...built, db, req, company, ceo, sent, emit, settle, mcp, chat, askInChat, closeTicket };
+  return { ...built, db, req, company, project, ceo, sent, emit, settle, mcp, chat, askInChat, closeTicket, swapOut, swapIn };
 }
 
 describe("R52: a ticket asked for in chat is reported back in chat", () => {
@@ -115,6 +121,50 @@ describe("R52: a ticket asked for in chat is reported back in chat", () => {
     const run = await c.closeTicket(t.id);
     expect(run).toBeUndefined();
     expect((await c.chat()).filter((m) => m.text.startsWith("Boss Man: APP-1"))).toHaveLength(0);
+  });
+
+  it("a ticket made by a run that is not a chat run is left unmarked: closing it reports nothing", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    // The owner opens a ticket for the CEO in the board, and the CEO's ticket run (not a chat run) opens a second one.
+    const seed = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Plan the work", assigneeAgentId: c.ceo.id })).json();
+    c.sent.length = 0;
+    await c.scheduler.wake({ agentId: c.ceo.id, ticketId: seed.id, reason: "check due", note: "Woken: check due." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.ceo.id)!;
+    expect(start, "the ticket run starts").toBeDefined();
+    const client = await c.mcp(start.runId);
+    await client.callTool({ name: "create_ticket", arguments: { title: "A follow-up from the board", size: 2 } });
+    await client.close();
+    const rows = await c.db.select().from(tickets).where(eq(tickets.title, "A follow-up from the board"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reportInChatAt).toBeNull();
+    expect(rows[0]!.reportInChatAgentId).toBeNull();
+    const run = await c.closeTicket(rows[0]!.id);
+    expect(run, "no chat run starts for it").toBeUndefined();
+    expect((await c.chat()).filter((m) => m.role === "system" && m.text.startsWith("Boss Man:"))).toHaveLength(0);
+  });
+
+  it("a wake queued while the runner is swapped out still fires after the new runner connects", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    const t = await c.askInChat("Please get Florence to write the recommendation.");
+    c.swapOut();
+    await c.db.update(tickets).set({ systemState: "done", outcome: "completed", stateChangedAt: new Date() }).where(eq(tickets.id, t.id));
+    await c.scheduler.onTicketDone(t.id);
+    const [due] = await c.db.select({ due: tickets.chatReportDueAt }).from(tickets).where(eq(tickets.id, t.id));
+    expect(due!.due, "the report is owed, stored on the ticket row").not.toBeNull();
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    expect(c.sent.find((x) => x.type === "run.start"), "nothing starts while no runner is connected").toBeUndefined();
+    c.swapIn();
+    await c.scheduler.tick();
+    const run = c.sent.find((x): x is Start => x.type === "run.start");
+    expect(run, "the chat run starts once the runner is back").toBeDefined();
+    expect(run!.prompt).toContain("## Report back to the owner now");
+    await c.emit({ type: "run.ended", runId: run!.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    expect((await c.chat()).filter((m) => m.role === "system" && m.text.startsWith("Boss Man: APP-1"))).toHaveLength(1);
   });
 
   it("the CEO sets and clears the mark with update_ticket reportInChat", async () => {
