@@ -95,7 +95,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## Q
 
-- **Queued checks**: The tab on the **Merge queue** page that lists every check running or waiting, with its ticket, kind, place in line and wait. Checks are **Held** while main is red. ([Guide 7](/guides/reviews-and-merge-queue#queued-checks))
+- **Quick checks**: The tab on the **Merge queue** page that lists the quick and full checks agents ask for, running or waiting, with each one's ticket, kind, place in line and wait. Merge checks are on the **Merges** tab. Checks are **Held** while main is red. ([Guide 7](/guides/reviews-and-merge-queue#quick-checks))
 - **Quiet hours**: Hours you set under **Notifications > How you're told**, when pages and asks become flags and flags become notes. ([Guide 8](/guides/phone-notifications#quiet-hours-and-limits))
 
 ## R
