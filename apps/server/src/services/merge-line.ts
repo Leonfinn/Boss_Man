@@ -20,8 +20,9 @@
 //                  approval that is held again doesn't end it, so one jam reads as one hold, not many short ones.
 //   merged         it merged (commit; null when there was nothing to merge)
 //   attempt_failed a merge attempt did not land (reason: check_failed | landing_refused | main_moved | conflict |
-//                  lock_timeout | restart | gate_fault; jobId; note). BOS-1461: server_status counts the last hour
-//                  by reason, and three of one reason in 30 minutes raise one CEO alert (merge-failures.ts).
+//                  lock_timeout | restart | gate_fault | git_transport_retried | git_transport; jobId; note). BOS-1461:
+//                  server_status counts the last hour by reason, and three of one reason in 30 minutes raise one CEO
+//                  alert (merge-failures.ts), except git_transport_retried (BOS-1860: a blip the merge retried by itself).
 //   train_clash    merge train (BOS-1515): on ahead = held to land on main alone (with: the members it clashed with, files),
 //                  on main = a trial merge on main clashed after main moved, so it is sent back at once (files)
 //   carried_across BOS-1762: its passed merge landed on a main that moved since it was tested, because main's new
@@ -143,7 +144,9 @@ export function clashWords(withRefs: string[], files: string[], total = files.le
 }
 
 /** Why a merge attempt did not land (BOS-1461). */
-export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault"] as const;
+// BOS-1860: git_transport_retried = a push or fetch to the git host failed on the network and the merge retries once by itself
+// (never alerted); git_transport = it failed again on the retry, so a merge card went to the CEO.
+export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault", "git_transport_retried", "git_transport"] as const;
 export type FailReason = (typeof FAIL_REASONS)[number];
 export const FAIL_REASON_TEXT: Record<FailReason, string> = {
   check_failed: "the merge check failed",
@@ -153,6 +156,8 @@ export const FAIL_REASON_TEXT: Record<FailReason, string> = {
   lock_timeout: "the merge check gave up waiting for a check slot",
   restart: "the runner restarted or went away under the merge",
   gate_fault: "the merge gate itself failed (check stuck or an error)",
+  git_transport_retried: "a push or fetch to the git host failed on the network; retried once by itself",
+  git_transport: "a push or fetch to the git host failed on the network twice",
 };
 
 const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { event: K }>) => string } = {

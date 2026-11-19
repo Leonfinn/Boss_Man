@@ -94,7 +94,7 @@ export const WAITING_LIMIT_MS = 60 * 60_000;
 /** Who is acting on a stuck item, in the owner's words. */
 export type ActorKind = "agent" | "ceo" | "owner" | "system";
 
-export type MergePhase = "queued" | "checking" | "merging" | "waiting_to_retry";
+export type MergePhase = "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git";
 
 export type RunningNow = {
   ticketId: string;
@@ -246,6 +246,7 @@ export const PHASE_LABEL: Record<MergePhase, string> = {
   checking: "running the check",
   merging: "merging",
   waiting_to_retry: "trying again after the runner restarted",
+  retrying_git: "retrying after a push/fetch failure to the git host",
 };
 
 /** BOS-1517: a running merge's step in the status line. Unlike PHASE_LABEL, "queued" here already holds a slot. */
@@ -254,6 +255,7 @@ const PHASE_TEXT: Record<MergePhase, string> = {
   checking: "running the check",
   merging: "merging",
   waiting_to_retry: "trying again after the runner restarted",
+  retrying_git: "retrying after a push/fetch failure to the git host",
 };
 
 /** The prefix of the carried-work note `refuseCarried` writes on the held ticket (BOS-130). */

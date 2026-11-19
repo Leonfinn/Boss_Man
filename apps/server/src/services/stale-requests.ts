@@ -9,6 +9,7 @@ import { agents, companies, decisions, deploys, runs, ticketDependencies, ticket
 import { closeInvalidCards, hiddenWhileRechecked, RECHECK_AUTHOR_MS, RECHECK_CEO_MS } from "./card-validity.js";
 import { engagedRecently, reachedOwner, recheckBackBy, recheckLine } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
+import { GIT_RETRY_CARD_NOTE, GIT_RETRY_NOTE } from "./git-transport-fault.js";
 
 type DecisionRow = typeof decisions.$inferSelect;
 
@@ -183,7 +184,8 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   const noted = await db
     .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, state: tickets.systemState })
     .from(tickets)
-    .where(and(eq(tickets.companyId, input.companyId), inArray(tickets.id, scope), isNull(tickets.stateNoteStaleAt), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
+    // BOS-1860: the merge gate's own "retrying after a push/fetch failure" flag gives way to a real event like this one.
+    .where(and(eq(tickets.companyId, input.companyId), inArray(tickets.id, scope), or(isNull(tickets.stateNoteStaleAt), inArray(tickets.stateNoteStaleReason, [GIT_RETRY_NOTE, GIT_RETRY_CARD_NOTE])), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
   const flaggedTickets = noted.map((n) => n.id);
   if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now, stateNoteStaleReason: input.reason }).where(inArray(tickets.id, flaggedTickets));
 
