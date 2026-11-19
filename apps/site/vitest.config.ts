@@ -6,4 +6,4 @@ import { guardVitest } from "../../scripts/vitest-guard.mjs";
 guardVitest();
 
 // Worker cap: one CPU budget for every part of a check (see scripts/check-threads.mjs).
-export default defineConfig({ test: { maxWorkers: checkThreads() } });
+export default defineConfig({ test: { setupFiles: ["./test/setup-env.ts"], maxWorkers: checkThreads() } });
