@@ -16,7 +16,10 @@ const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "planned", label: "Planned", help: "On the way. Your vote still helps us decide what comes first." },
   { id: "released", label: "Released", help: "Done recently." },
 ];
-type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
+// BOS-1921: a summary that only repeats the title is shown once (nothing stored changes).
+const squash = (s: string) => s.toLowerCase().replace(/\s+/g, " ").replace(/[\s.!?…:;,]+$/, "").trim();
+const sameText = (title: string, body: string) => squash(title) === squash(body);
+type PortalFeature ={ id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
 type Portal = { title: string; intro: string | null; hasLogo: boolean; confirmByEmail?: boolean; rememberedEmail?: string | null; back: { url: string; text: string } | null; features: PortalFeature[] };
 /** BOS-1388: with "Confirm posts by email" on, the address is needed and the reason is said once, next to the box. */
 type Ask = { required: boolean; remembered: string | null };
@@ -84,7 +87,7 @@ function FeatureCard({ f, onChanged, ask }: { f: PortalFeature; onChanged: () =>
   return (
     <li className="card portal-card">
       <h3>{f.title}</h3>
-      {f.description && <p style={{ whiteSpace: "pre-wrap" }}>{f.description}</p>}
+      {f.description && !sameText(f.title, f.description) && <p style={{ whiteSpace: "pre-wrap" }}>{f.description}</p>}
       {canVote && (
         <>
           <p className="label">How much would this matter to you?</p>
