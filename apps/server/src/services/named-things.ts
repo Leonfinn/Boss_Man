@@ -185,12 +185,12 @@ export async function youSaidLines(db: Db, companyId: string, reply: string, own
   const now = sources.now?.() ?? new Date();
   const first = (await findNamedThings(db, companyId, [reply], sources)).filter((t) => !t.needles.some((n) => has(ownerLower, n)));
   const lines: string[] = [];
-  const seen = new Set<string>();
+  const seen: string[] = [];
   for (const t of first) {
     if (lines.length >= YOU_SAID_MAX) break;
-    const hit = (t.own ?? (await ownersLastWord(db, companyId, t, now, new Set(ownerTexts.map((x) => x.trim()))))).find((h) => !seen.has(`${h.kind}:${h.sourceId}`));
+    const hit = (t.own ?? (await ownersLastWord(db, companyId, t, now, new Set(ownerTexts.map((x) => x.trim()))))).find((h) => !seen.includes(`${h.kind}:${h.sourceId}`));
     if (!hit) continue;
-    seen.add(`${hit.kind}:${hit.sourceId}`);
+    seen.push(`${hit.kind}:${hit.sourceId}`);
     const where = hit.kind === "card" ? `on card ${hit.sourceId.slice(0, 8)}${hit.ticketRef ? ` (${hit.ticketRef})` : ""}` : hit.kind === "chat" ? "in chat" : hit.kind === "note" ? "in a note" : `on ${hit.ticketRef ?? "a ticket"}`;
     lines.push(clip(`You said "${clip(hit.answer, 100)}" ${where}, ${day(hit.at).slice(0, 10)}, about ${t.name}, which your messages here didn't name.`, NAMED_LINE_MAX));
   }
