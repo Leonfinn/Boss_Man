@@ -837,9 +837,16 @@ blockquote.selected { background: var(--amber-soft); border-left-color: var(--am
 }
 
 /* ---------- Feedback portal (public page) ---------- */
-.portal { max-width: 880px; margin: 0 auto; padding: 32px 16px 48px; display: flex; flex-direction: column; gap: 20px; }
-.portal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.portal-card { display: flex; flex-direction: column; gap: 10px; }
+.portal { max-width: 1280px; margin: 0 auto; padding: 32px 16px 48px; display: flex; flex-direction: column; gap: 20px; }
+/* Tiles (BOS-1921): one column on phones, two from 700px, three from 1100px. Grid rows stretch, so cards in a
+   row are equal height; the vote buttons sit at the bottom of each card. */
+.portal-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@media (min-width: 700px) { .portal-list { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1100px) { .portal-list { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+/* The idea form and notes stay at a readable width, aligned with the left edge of the grid. */
+.portal > form.card { max-width: 880px; }
+.portal-card { display: flex; flex-direction: column; gap: 10px; overflow-wrap: anywhere; }
+.portal-card > .label { margin-top: auto; }
 .portal-card h3 { font-size: 17px; font-weight: 600; }
 /* The way back to the owner's website (BOS-967): a bar above the portal, and the same link under it. */
 .portal-back-bar { background: var(--side-raised); border-bottom: 1px solid var(--line); }
