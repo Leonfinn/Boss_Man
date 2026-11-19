@@ -266,6 +266,7 @@ Check it worked: you see "Saved." and the step shows a tick.
 **The runner.** It's the container where the company's agents work. It connects out to Boss Man, so it needs no open ports. This step only shows its status.
 - If the tag says **Connected**, there is nothing to do.
 - If it says **Not connected** and the launcher is on, choose **Start the runner**. Without the launcher, the step points you to **Settings → Server and runner**: follow the steps there.
+- If something is wrong (the launcher can't be reached, the runner's container has stopped, or its network guard won't start), the step says which, with a link to the fix in [docs/29](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
 - Wait for the tag to say **Connected**. This can take up to a minute; the page updates by itself.
 
 Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
