@@ -32,6 +32,7 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Being checked
   - Costliest tasks
   - Filter tasks
   - Merged, waiting for a live check

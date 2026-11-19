@@ -709,6 +709,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // the merge line's "left" event, and the done, review and feature steps after a real change. This tool
       // only says whom to wake: the chain depth of this run goes with each wake.
       const at = new Date();
+      // BOS-1906: with no passing quick check on the head, Boss Man queues it and the ticket waits in review as "Being checked":
+      // no review round opens and no reviewer is woken until it passes.
+      const beingChecked = state === "review" && !sameState && checkRequests ? await checkRequests.holdForReview({ companyId: scope.companyId, agentId: scope.agentId, ticketId }) : { held: false as const };
       let moved: Awaited<ReturnType<typeof moveTicket>>;
       try {
         moved = await moveTicket(db, ticketId, state, {
@@ -719,10 +722,10 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           note: summary,
           blockedUntil: state === "blocked" ? until : undefined,
           blockedUntilReason: blocked_reason?.trim() || null,
-          fields: { ...(gateAdded ? { acceptanceCriteria: withCriteria.criteria } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(ownerSetupWhy !== undefined ? { ownerSetupWhy: ownerSetupWhy.trim() || null } : {}), ...(ownerSetupIfSkipped !== undefined ? { ownerSetupIfSkipped: ownerSetupIfSkipped.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
+          fields: { ...(beingChecked.held ? { checkHoldAt: at } : {}), ...(gateAdded ? { acceptanceCriteria: withCriteria.criteria } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(ownerSetupWhy !== undefined ? { ownerSetupWhy: ownerSetupWhy.trim() || null } : {}), ...(ownerSetupIfSkipped !== undefined ? { ownerSetupIfSkipped: ownerSetupIfSkipped.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
           hooks: {
             onDone: () => hooks.onTicketDone?.(ticketId, scope.runId),
-            onReview: () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),
+            onReview: beingChecked.held ? undefined : () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),
             onFeature: (fid) => feedback.syncFeature(fid),
           },
           now: at,
@@ -797,7 +800,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, !byCeo);
         if (state === "blocked" && withCriteria.prev === "in_progress" && waitsOnMergeOnly && (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId)).limit(1)).length) planNote += `\n\n${IN_PROGRESS_BLOCKED_WARNING}`;
       }
-      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
+      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
     },
   );
 }
