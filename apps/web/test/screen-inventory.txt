@@ -172,7 +172,6 @@ sections:
 reads: 
   - /api/runs
   - /api/runs/:id/transcript
-  - /api/runs/recent
 
 ## #/scrum-master
 sections: 

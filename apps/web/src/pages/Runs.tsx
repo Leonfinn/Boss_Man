@@ -224,6 +224,33 @@ function EndAllRuns({ count, onDone }: { count: number; onDone: () => void }) {
   );
 }
 
+const PAGE = 50;
+const FILTER_KEY = "bm.runs.filter";
+type Filter = { companyId: string; agentId: string; result: "" | "finished" | "failed" | "interrupted" };
+const NO_FILTER: Filter = { companyId: "", agentId: "", result: "" };
+
+/** The owner's last filter, so a reload (or coming back later) keeps it. */
+function savedFilter(): Filter {
+  try {
+    const f = JSON.parse(localStorage.getItem(FILTER_KEY) ?? "{}") as Partial<Filter>;
+    return { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "" };
+  } catch {
+    return NO_FILTER;
+  }
+}
+
+function Chips({ label, value, options, onPick }: { label: string; value: string; options: Array<{ id: string; name: string }>; onPick: (id: string) => void }) {
+  return (
+    <div className="segmented" role="group" aria-label={label} style={{ flexWrap: "wrap" }}>
+      {[{ id: "", name: "All" }, ...options].map((o) => (
+        <button key={o.id} type="button" className="chip" aria-pressed={value === o.id} onClick={() => onPick(o.id)}>
+          {o.name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** A failed load says so and offers Retry, instead of passing for an empty list (BOS-1887). */
 function LoadFailed({ what, message, onRetry }: { what: string; message: string; onRetry: () => void }) {
   return (
@@ -239,8 +266,49 @@ function LoadFailed({ what, message, onRetry }: { what: string; message: string;
 }
 
 export function Runs({ companies }: { companies: Company[] }) {
+  const [filter, setFilter] = useState<Filter>(savedFilter);
+  // Older runs loaded by "Show more", for the filter they were loaded under.
+  const [older, setOlder] = useState<{ key: string; rows: RunRow[]; done: boolean }>({ key: "", rows: [], done: false });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const company = companies.find((c) => c.id === filter.companyId);
+  const filterKey = JSON.stringify(filter);
+  const change = (patch: Partial<Filter>) => {
+    const next = { ...filter, ...patch };
+    // An agent belongs to one company, so changing company clears the agent.
+    if (patch.companyId !== undefined) next.agentId = "";
+    localStorage.setItem(FILTER_KEY, JSON.stringify(next));
+    setFilter(next);
+  };
+  const query = (extra = "") => {
+    const p = new URLSearchParams({ limit: String(PAGE) });
+    // A saved company that no longer exists is ignored, not sent (it would show an empty list with no way out).
+    if (company) p.set("companyId", filter.companyId);
+    if (company && filter.agentId) p.set("agentId", filter.agentId);
+    if (filter.result) p.set("result", filter.result);
+    return `/api/runs/recent?${p.toString()}${extra}`;
+  };
   const active = usePoll((signal) => api<RunRow[]>("/api/runs", { signal }), 5_000, "active");
-  const recent = usePoll((signal) => api<RunRow[]>("/api/runs/recent?limit=50", { signal }), 15_000, "recent");
+  const recent = usePoll((signal) => api<RunRow[]>(query(), { signal }), 15_000, `recent:${filterKey}`);
+  const olderRows = older.key === filterKey ? older.rows : [];
+  const seen = new Set((recent.data ?? []).map((r) => r.id));
+  const shown = recent.data ? [...recent.data, ...olderRows.filter((r) => !seen.has(r.id))] : null;
+  const canMore = !!shown && (recent.data?.length ?? 0) >= PAGE && !(older.key === filterKey && older.done);
+  const showMore = async () => {
+    const last = shown?.[shown.length - 1];
+    if (!last?.endedAt) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const rows = await api<RunRow[]>(query(`&before=${encodeURIComponent(last.endedAt)}`));
+      setOlder({ key: filterKey, rows: [...olderRows, ...rows], done: rows.length < PAGE });
+    } catch (err) {
+      setMoreError((err as Error).message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+  const filtered = !!(filter.companyId || filter.agentId || filter.result);
   return (
     <>
       <header className="page-head">
@@ -270,14 +338,40 @@ export function Runs({ companies }: { companies: Company[] }) {
         <h2 id="recent-h" style={{ fontSize: 18, fontWeight: 600 }}>
           Finished
         </h2>
-        {recent.data?.length ? (
-          <RunTable rows={recent.data} companies={companies} finished />
-        ) : recent.data ? (
-          <p className="muted">No runs have finished yet.</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {companies.length > 1 && <Chips label="Company" value={filter.companyId} options={companies} onPick={(id) => change({ companyId: id })} />}
+          {company && company.agents.length > 0 && <Chips label="Agent" value={filter.agentId} options={company.agents} onPick={(id) => change({ agentId: id })} />}
+          <Chips
+            label="Result"
+            value={filter.result}
+            options={[
+              { id: "finished", name: "Finished" },
+              { id: "failed", name: "Failed" },
+              { id: "interrupted", name: "Interrupted" },
+            ]}
+            onPick={(id) => change({ result: id as Filter["result"] })}
+          />
+        </div>
+        {shown?.length ? (
+          <RunTable rows={shown} companies={companies} finished />
+        ) : shown ? (
+          <p className="muted">{filtered ? "No finished runs match these filters." : "No runs have finished yet."}</p>
         ) : recent.error ? (
           <LoadFailed what="the finished runs" message={recent.error.message} onRetry={recent.reload} />
         ) : (
           <Loader label="Loading the finished runs" />
+        )}
+        {canMore && (
+          <div>
+            <button type="button" className="btn" disabled={loadingMore} onClick={() => void showMore()}>
+              {loadingMore ? "Loading…" : "Show more"}
+            </button>
+          </div>
+        )}
+        {moreError && (
+          <p role="alert" className="error">
+            {moreError}
+          </p>
         )}
       </section>
     </>

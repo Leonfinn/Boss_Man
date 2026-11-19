@@ -131,8 +131,17 @@ export function agentRunsRoutes(
     return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
   });
   owner.get("/api/runs/recent", async (req) => {
-    const q = z.object({ companyId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
-    return runsSvc.recent(q.limit, q.companyId);
+    const q = z
+      .object({
+        companyId: Uuid.optional(),
+        limit: z.coerce.number().int().min(1).max(200).optional(),
+        agentId: Uuid.optional(),
+        result: z.enum(["finished", "failed", "interrupted"]).optional(),
+        // "Show more": only runs that ended before this moment (the oldest one already shown).
+        before: z.coerce.date().optional(),
+      })
+      .parse(req.query);
+    return runsSvc.recent(q.limit, q.companyId, { agentId: q.agentId, result: q.result, before: q.before });
   });
   owner.get("/api/runs/:id/transcript", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
