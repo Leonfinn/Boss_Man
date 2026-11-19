@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
 import { CHECK_QUEUE_MODE_KEY, checkQueue } from "../src/services/check-queue.js";
-import { eq } from "drizzle-orm";
 import { checkDispatcher, MACHINE_FAULT_MARKER, MACHINE_FAULT_RETRIES } from "../src/services/check-dispatcher.js";
 
 const shared = openPglite();
