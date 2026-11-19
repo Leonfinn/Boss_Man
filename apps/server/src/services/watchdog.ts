@@ -3,11 +3,14 @@
 // wakes the Scrum Master once with the list of flags that are due. The Scrum Master's few
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
-import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { GO_LIVE_WAIT_MAX_MS, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
-import { activity, agents, checkJobs, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import { PREFLIGHT_KIND, PREFLIGHT_STARTED_KIND } from "./ci-preflight.js";
+/** A GitHub CI pre-flight "started" row with no result after this long is treated as lost, not as a wait. */
+const PREFLIGHT_MAX_WAIT_MS = 3 * 60 * 60_000;
+import { activity, agents, checkJobs, checkResults, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { type CardOpening, checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
@@ -418,6 +421,28 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         if (j.kind === "pre_review" && j.commit !== head.get(j.ticketId)) continue;
         const live = j.state === "queued" || j.state === "running";
         checks.set(j.ticketId, [...(checks.get(j.ticketId) ?? []), { from: j.queuedAt, to: live ? null : (j.endedAt ?? j.queuedAt) }]);
+      }
+      // BOS-1836: GitHub's CI before review (ci-preflight.ts). Its "started" row is a wait until a result row for the same head
+      // follows; a start with no result for PREFLIGHT_MAX_WAIT_MS counts as lost (a restart that recover() missed), so it can't hide a stall.
+      const pre = await db
+        .select({ ticketId: checkResults.ticketId, sha: checkResults.sha, kind: checkResults.kind, at: checkResults.at })
+        .from(checkResults)
+        .innerJoin(tickets, eq(tickets.id, checkResults.ticketId))
+        .where(and(inArray(checkResults.ticketId, inProgress), inArray(checkResults.kind, [PREFLIGHT_STARTED_KIND, PREFLIGHT_KIND]), gte(checkResults.at, tickets.stateChangedAt)))
+        .orderBy(asc(checkResults.at));
+      const started = new Map<string, { sha: string | null; at: Date }>();
+      for (const r of pre) {
+        if (r.kind === PREFLIGHT_STARTED_KIND) {
+          started.set(r.ticketId, { sha: r.sha, at: r.at });
+        } else {
+          const s = started.get(r.ticketId);
+          if (!s || s.sha !== r.sha) continue;
+          started.delete(r.ticketId);
+          checks.set(r.ticketId, [...(checks.get(r.ticketId) ?? []), { from: s.at, to: r.at }]);
+        }
+      }
+      for (const [ticketId, s] of started) {
+        if (Date.now() - s.at.getTime() < PREFLIGHT_MAX_WAIT_MS) checks.set(ticketId, [...(checks.get(ticketId) ?? []), { from: s.at, to: null }]);
       }
     }
     const snapTickets: SnapTicket[] = rows.map((r) => ({
