@@ -17,7 +17,8 @@ let n = 0;
 
 beforeEach(async () => {
   ({ db, close } = await openPglite());
-  [{ id: companyId }] = await db.insert(companies).values({ name: "Approve Co" }).returning({ id: companies.id });
+  const [co] = await db.insert(companies).values({ name: "Approve Co" }).returning({ id: companies.id });
+  companyId = co!.id;
 });
 afterEach(async () => {
   await close();
