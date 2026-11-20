@@ -7,7 +7,8 @@
 #
 # It builds the site from the commit checked out here, saves the live sitemap, deploys, then runs the
 # IndexNow notice against the previous sitemap. The notice is best-effort: a failed one never fails a
-# publish (it retries once, then runs INDEXNOW_ON_FAILURE so a CEO ticket is raised).
+# publish (it retries once, then runs INDEXNOW_ON_FAILURE, which prints a RAISE-CEO-TICKET line the publishing
+# agent turns into a CEO ticket).
 #
 # Settings come from the environment, never from this file (it works on any host, with any Cloudflare account).
 # Store them once in Boss Man's Settings → Secrets (every run gets them); a value set in the command overrides it:
@@ -18,8 +19,9 @@
 #   CF_PAGES_PROJECT    the Cloudflare Pages project name. When it is empty, only the build runs and nothing is deployed.
 #   INDEXNOW_KEY        the key from Boss Man's Secrets screen. Empty: no key file is served and no notice is sent.
 #   INDEXNOW_ON_FAILURE a shell command to run after the notice fails twice (it gets a plain summary in
-#                       INDEXNOW_FAILURE). The publish step supplies scripts/request-ceo-ticket.sh to raise a CEO
-#                       ticket; set it to override, or to empty to only print the failure.
+#                       INDEXNOW_FAILURE). The publish step supplies scripts/request-ceo-ticket.sh, which prints a
+#                       RAISE-CEO-TICKET line for the publishing agent to report with create_ticket; set it to
+#                       override, or to empty to only print the failure.
 #   DIST_TMP            where the build, the previous sitemap and the deploy log are kept; a fresh temp dir by default.
 #                       Must be writable and persist until the script ends (not a fixed /tmp path; mktemp is used).
 #   WRANGLER            the wrangler command, default "npx --yes wrangler@4".
@@ -70,8 +72,10 @@ $wrangler pages deploy "$dist" --project-name "$CF_PAGES_PROJECT" --branch "$bra
 # 4. Tell IndexNow about the changed pages. Never fails the publish: indexnow.mjs always exits 0, and the
 #    "|| true" is a second guard in case node itself cannot start.
 echo "publish-site: sending the IndexNow notice"
-# A notice that fails twice raises a CEO ticket (scripts/request-ceo-ticket.sh). An INDEXNOW_ON_FAILURE set in the
-# command replaces it; an empty one leaves the failure in the log only.
+# A notice that fails twice prints a RAISE-CEO-TICKET line (scripts/request-ceo-ticket.sh) for the publishing agent to
+# report with create_ticket. An INDEXNOW_ON_FAILURE set in the command replaces it; an empty one leaves the failure in
+# the log only. The hook exits non-zero on purpose, so it must not turn a notice failure into a publish failure: the
+# `|| true` below keeps that promise.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${INDEXNOW_ON_FAILURE+set}" ]; then on_failure="$INDEXNOW_ON_FAILURE"; else on_failure="sh $here/request-ceo-ticket.sh"; fi
 SITE_URL="$site_url" DIST="$dist" INDEXNOW_ON_FAILURE="$on_failure" node "$here/../apps/site/scripts/indexnow.mjs" --previous "$previous" || true
