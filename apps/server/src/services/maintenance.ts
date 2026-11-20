@@ -79,6 +79,10 @@ export type Hold = {
   ceoWokenAt?: string;
   /** BOS-2058 (rule b): when the drain reached its own end and went ahead by itself (stopped what was going, then swapped). */
   wentAheadAt?: string;
+  /** BOS-2058 (rule b): since when a scheduling pass has kept a swap waiting; past the runner-settle end the swap goes ahead without it. */
+  settleSince?: string;
+  /** BOS-2058 (rule b): since when the launcher has not answered; past the runner-launcher end the update gives up and the hold lifts. */
+  launcherDownSince?: string;
   /** slug -> when its runner was recreated; the hold waits for these to reconnect. */
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
@@ -771,8 +775,24 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         fleet = await deps.fleet();
       } catch (err) {
         deps.log?.(`drain: the launcher did not answer: ${(err as Error).message}`);
+        // BOS-2058 (rule b): a launcher that never answers again must not hold every company for ever. Past the
+        // runner-launcher end the update gives up: the hold lifts, the owner is told, and each company's CEO is woken.
+        const t = now();
+        const downSince = h.launcherDownSince ?? t.toISOString();
+        if (t.getTime() - Date.parse(downSince) >= WAIT_RULES["runner-launcher"].endMin * 60_000) {
+          const minutes = Math.round((t.getTime() - Date.parse(downSince)) / 60_000);
+          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Start the update again from Settings > Server and runner once the launcher is back.`);
+          if (deps.wakeCeo) {
+            for (const co of await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))) {
+              await deps.wakeCeo(co.id, `The runner update gave up: the runner launcher did not answer for ${minutes} minutes, so the hold lifted and new runs start again on the old runner image. Nothing was stopped. The owner was told; the update needs starting again once the launcher answers.`).catch((e) => deps.log?.(`drain: waking the CEO failed: ${(e as Error).message}`));
+            }
+          }
+          return;
+        }
+        if (!h.launcherDownSince) await save({ ...h, launcherDownSince: downSince });
         return;
       }
+      if (h.launcherDownSince) h = { ...h, launcherDownSince: undefined };
       if (fleet.some((r) => r.current === undefined)) {
         await end("Runner update stopped", "page", "The launcher is older than the server and cannot say which runners are on the new image. Update the launcher (scripts/deploy.sh --runner), then start the update again.");
         return;
@@ -871,8 +891,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const settledInTime = await Promise.race([deps.settled().then(() => true), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), deps.settleWaitMs ?? SETTLE_WAIT_MS); timer.unref?.(); })]);
         clearTimeout(timer);
         if (!settledInTime) {
-          deps.log?.(`drain: a scheduling pass has not ended after ${Math.round((deps.settleWaitMs ?? SETTLE_WAIT_MS) / 1000)} s; ${r.slug} is looked at again on the next pass`);
-          continue;
+          // BOS-2058 (rule b): the scheduling pass gets the runner-settle end, counted from the first pass it held up. Past
+          // it the swap goes ahead without it: the runs are counted again just below, so a launch that did land is waited for.
+          const settleSince: string = h.settleSince ?? t.toISOString();
+          if (now().getTime() - Date.parse(settleSince) < WAIT_RULES["runner-settle"].endMin * 60_000) {
+            h = { ...h, settleSince };
+            deps.log?.(`drain: a scheduling pass has not ended after ${Math.round((deps.settleWaitMs ?? SETTLE_WAIT_MS) / 1000)} s; ${r.slug} is looked at again on the next pass`);
+            continue;
+          }
+          deps.log?.(`drain: a scheduling pass has held the swap since ${settleSince}; ${r.slug} goes ahead without it`);
+        } else if (h.settleSince) {
+          h = { ...h, settleSince: undefined };
         }
         active = await withChat(waitedOn(await runnerBusy(db, true, now())));
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;

@@ -10,6 +10,7 @@ import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 import { DRAIN_GO_AHEAD_MINUTES, drainForecast, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
+import { activeWaits, WAIT_RULES } from "../src/services/update-waits.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -66,7 +67,10 @@ function fakeLauncher() {
   const failTimes = new Map<string, number>();
   const rolledBack: string[] = [];
   let noPrevious = false;
-  return { fetch, calls, runnersBySlug, broken, guardBroken, failTimes, rolledBack, setNoPrevious: (v: boolean) => (noPrevious = v), setOldLauncher: (v: boolean) => (old = v) };
+  // BOS-2058: a launcher that has stopped answering (connection refused).
+  let isDown = false;
+  const down = ((input: string | URL | Request, init?: RequestInit) => (isDown ? Promise.reject(new TypeError("fetch failed")) : fetch(input, init))) as typeof globalThis.fetch;
+  return { fetch: down, calls, runnersBySlug, broken, guardBroken, failTimes, rolledBack, setNoPrevious: (v: boolean) => (noPrevious = v), setOldLauncher: (v: boolean) => (old = v), setDown: (v: boolean) => (isDown = v) };
 }
 
 async function setup(opts: { launcher?: boolean; reconnectMs?: number; settleMs?: number } = {}) {
@@ -510,7 +514,73 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     c.advance(5 * MIN);
     await c.maintenance.step();
     expect(await ceoWakes()).toHaveLength(1);
+    // BOS-2058: 8 minutes on, past the scheduling pass's own 5-minute end, the swap went ahead without it.
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("a scheduling pass that never ends holds the swap for its own end only, and the screen says so meanwhile (BOS-2058)", async () => {
+    const c = (ctx = await setup({ settleMs: 20 }));
+    await c.company("App Co", "app-co");
+    await c.maintenance.start({ minutes: 30 });
+    vi.spyOn(c.scheduler, "settled").mockImplementation(() => new Promise(() => undefined));
+    await c.maintenance.step();
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    const settle = (await activeWaits(c.db)).find((w) => w.kind === "runner-settle");
+    expect(settle?.waitingOn).toContain("scheduling pass");
+    expect(Date.parse(settle!.endsAt) - Date.parse(settle!.since)).toBe(WAIT_RULES["runner-settle"].endMin * MIN);
+    c.advance(4 * MIN);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    c.advance(MIN + 1000);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("a launcher that stops answering: the update gives up at its own end, lifts the hold and wakes the CEO, not only the owner (BOS-2058)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.maintenance.start({ minutes: 30 });
+    c.fake.setDown(true);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull();
+    const row = (await activeWaits(c.db)).find((w) => w.kind === "runner-launcher");
+    expect(row?.waitingOn).toContain("launcher");
+    expect(row?.atEnd).toBe("give-up");
+    c.advance(14 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull();
+    c.advance(MIN + 1000);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("page: Runner update gave up: the launcher does not answer");
+    const notes = (await c.db.select().from(wakes).where(and(eq(wakes.agentId, a.ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).map((w) => w.note ?? "");
+    expect(notes.some((n) => n.includes("launcher did not answer"))).toBe(true);
+  });
+
+  it("a launcher that answers again before its end clears the wait; the next outage starts its own clock (BOS-2058)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    // A run still going keeps the hold on after the launcher answers again.
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    c.fake.setDown(true);
+    await c.maintenance.step();
+    expect((await getHold(c.db))?.launcherDownSince).toBeDefined();
+    c.advance(10 * MIN);
+    c.fake.setDown(false);
+    await c.maintenance.step();
+    const h = await getHold(c.db);
+    expect(h).not.toBeNull();
+    expect(h!.launcherDownSince).toBeUndefined();
+    expect((await activeWaits(c.db)).map((w) => w.kind)).not.toContain("runner-launcher");
+    // Down again 10 minutes later: a fresh 15 minutes, not the 10 already spent.
+    c.fake.setDown(true);
+    c.advance(MIN);
+    await c.maintenance.step();
+    c.advance(10 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull();
   });
 
   it("holdEndsAt: swap-when-done ends SWAP_WHEN_DONE_CAP_MINUTES after the answer, other answers are unchanged (BOS-1982)", () => {

@@ -160,7 +160,7 @@ export function describeWait(kind: WaitKind, since: string, detail?: string, end
 
 /** The shape of the two settings rows this reads; only the fields it needs. */
 type DeployWaitRow = { phase?: string; approvedAt?: string; sentAt?: string; windowUntil?: string; handoverSince?: string; quiet?: { why?: string[] } };
-type HoldRow = { kind?: string; since?: string; deadline?: string; swapWhenDoneAt?: string; force?: boolean; ignoreChecks?: boolean; swapWhenDone?: boolean; wrapSince?: string; forUpdate?: string };
+type HoldRow = { kind?: string; since?: string; deadline?: string; swapWhenDoneAt?: string; force?: boolean; ignoreChecks?: boolean; swapWhenDone?: boolean; wrapSince?: string; forUpdate?: string; settleSince?: string; launcherDownSince?: string };
 
 /**
  * Every wait that is on now, from the rows that exist today (`deploy_wait`, `maintenance`) plus the live landing ids
@@ -185,6 +185,8 @@ export async function activeWaits(db: Db, opts: { landingSince?: string | null; 
       const goAt = drainEndsAt({ ...hold, since: hold.since }).toISOString();
       if (hold.force) out.push(describeWait("owner-force", hold.since));
       else out.push(describeWait(hold.ignoreChecks ? "owner-force" : "runner-drain", hold.since, undefined, goAt));
+      if (hold.settleSince) out.push(describeWait("runner-settle", hold.settleSince));
+      if (hold.launcherDownSince) out.push(describeWait("runner-launcher", hold.launcherDownSince));
     }
   }
   if (opts.landingSince) out.push(describeWait("runner-landing", opts.landingSince, opts.landingNames?.length ? opts.landingNames.join(", ") : undefined));
