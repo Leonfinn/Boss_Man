@@ -449,7 +449,10 @@ describe("security alerts (BOS-1929)", () => {
     const cards = await t!.db.select().from(decisions).where(eq(decisions.companyId, c.company.id));
     expect(cards).toHaveLength(1);
     expect(cards[0]!.question).toContain("Dependabot alerts (read)");
-    expect(cards[0]!.question).not.toContain("Secret scanning");
+    // Only Dependabot is named as missing; the steps ask for read and write on both and say Boss Man can then change alert state.
+    expect(cards[0]!.question).not.toContain("Secret scanning alerts (read)");
+    expect(cards[0]!.question).toContain("Read and write");
+    expect(cards[0]!.question).toContain("change alert state on GitHub");
     expect((await c.svc.get(c.project.id))!.status).toBe("ok");
     expect(c.woken.filter((w) => w.reason === "github alerts unreadable")).toHaveLength(1);
     c.gh.dependabot = [];

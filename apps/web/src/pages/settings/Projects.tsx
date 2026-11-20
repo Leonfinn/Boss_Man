@@ -238,7 +238,7 @@ export function GithubWatch({ projectId }: { projectId: string }) {
     <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "start", paddingTop: 12, borderTop: "1px solid var(--line)" }}>
       <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>GitHub feedback watcher</p>
       <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
-        Files new issues, discussions and comments from a GitHub repo into the feedback inbox for Support to triage. Off until you switch it on. It only reads: it never replies, labels or closes anything on GitHub. The token is a read-only fine-grained token (Issues, Discussions and Metadata: read), saved in Secrets and granted to the company as <span className="mono">{w.tokenName}</span>. {w.hasToken ? "A token is granted." : "No token is granted yet."}
+        Files new issues, discussions and comments from a GitHub repo into the feedback inbox for Support to triage. Off until you switch it on. It never replies or labels anything on GitHub; the one thing it can change is a security alert, which the security reviewer closes after checking it. The token is a fine-grained token (Issues, Discussions and Metadata: read; Secret scanning alerts and Dependabot alerts: read and write), saved in Secrets and granted to the company as <span className="mono">{w.tokenName}</span>. {w.hasToken ? "A token is granted." : "No token is granted yet."}
       </p>
       <div className="field" style={{ gridColumn: "1 / -1" }}>
         <label>

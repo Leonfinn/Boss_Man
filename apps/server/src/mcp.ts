@@ -75,6 +75,8 @@ import { traceCalls } from "./mcp-trace.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
+import { registerSecurityAlert } from "./mcp-security-alert.js";
+import type { githubWatchService } from "./services/github-watch.js";
 import { registerPermissionReport } from "./mcp-permission-report.js";
 import { registerOwnerAnswers } from "./mcp-owner-answers.js";
 import type { Embedder } from "./services/wiki-semantic.js";
@@ -188,6 +190,8 @@ export type Services = {
   selfDeployCards?: () => Promise<SelfDeployFacts>;
   /** The company's embedder for owner-answer meaning search (BOS-1593); absent or null: word search alone. */
   ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
+  /** security_alert (BOS-1931): the GitHub watcher's service, which makes the GitHub call; absent: the tool isn't registered. */
+  githubWatch?: ReturnType<typeof githubWatchService>;
   /** Live read of whether the git token can read GitHub Actions (R34); absent where there is no git host. */
   gitTokenProbe?: GitTokenProbe;
 };
@@ -226,6 +230,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerRequestNote(server, db, scope, hooks);
   registerListMyWork(server, db, scope);
   registerMergeLineExport(server, db, scope);
+  registerSecurityAlert(server, db, services.githubWatch, scope);
   registerPermissionReport(server, db, scope);
   registerOwnerAnswers(server, db, scope, services.ownerAnswerEmbedder);
   return server;
