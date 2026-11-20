@@ -1156,7 +1156,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </header>
                 )}
-                {shown.length === 0 && tickets.length > 0 && filterCount > 0 ? (
+                {shown.length === 0 && tickets.length > 0 && words.length > 0 ? (
+                  <p className="lane-empty">
+                    No tasks match "{query.trim()}".{" "}
+                    <button type="button" className="linkish" onClick={() => setQuery("")}>
+                      Clear search
+                    </button>
+                  </p>
+                ) : shown.length === 0 && tickets.length > 0 && filterCount > 0 ? (
                   <p className="lane-empty">
                     No tasks match your filters.{" "}
                     <button type="button" className="linkish" onClick={clearFilters}>

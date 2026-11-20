@@ -166,6 +166,19 @@ describe("board filters", () => {
     expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
   });
 
+  it("says a search matched nothing, with a Clear search button, instead of the empty-column hint", async () => {
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search tasks" }), { target: { value: "zzzqq" } });
+    expect(shown()).toEqual([]);
+    expect(screen.getAllByText(/No tasks match "zzzqq"\./).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Nothing finished yet.")).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: "Clear search" })[0]!);
+    expect((screen.getByRole("searchbox", { name: "Search tasks" }) as HTMLInputElement).value).toBe("");
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+  });
+
   it("opens as a non-modal dialog, closes on Escape and returns focus to the Filter button", async () => {
     stub();
     open();
