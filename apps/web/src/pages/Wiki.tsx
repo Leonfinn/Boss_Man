@@ -216,7 +216,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   };
 
   if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} /> : away(page.error) ? null : <p className="error" role="alert">{page.error.message}</p>;
-  if (!p) return null;
+  if (!p) return <Loader label="Loading the page" />;
   if (editing) return <Editor draftKey={`wiki/${companyId}/${slug}`} initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -415,7 +415,7 @@ function SemanticSettings({ companyId }: { companyId: string }) {
 function BriefView({ companyId }: { companyId: string }) {
   const brief = usePoll((signal) => api<{ markdown: string }>(`/api/companies/${companyId}/brief`, { signal }), 30_000, companyId);
   if (brief.error && !away(brief.error)) return <p className="error" role="alert">{brief.error.message}</p>;
-  if (!brief.data) return null;
+  if (!brief.data) return <Loader label="Loading the company brief" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <h2 style={{ fontSize: 22, fontWeight: 600 }}>Company brief</h2>
@@ -600,6 +600,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
                 </li>
               </ul>
             )}
+            {list.error && !away(list.error) && <p className="error" role="alert">Couldn't load the page list: {list.error.message}</p>}
             {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "Only the company brief so far."}</p>}
             <SemanticSettings companyId={company.id} />
             <TreeList
