@@ -21,8 +21,8 @@ export const MERGE_LINE_EXPORT_MAX = 20_000;
 export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs", "check", "passed", "by", "commit", "with", "files", "note", "action", "rebuilds", "reason"] as const;
 // BOS-1823: note = a hold_started's note (for hold "turn", names the ticket that has the landing turn); action = a landing_turn's
 // (taken, queued, ended, expired) or a train_clash's; rebuilds = a rebuilt's or landing_turn's count; reason = why a merge was
-// rebuilt (rebuilt rows) or failed (attempt_failed rows), or how a GitHub CI wait ended (ci_wait_ended rows, BOS-1871). Other
-// events' notes and reasons stay private.
+// rebuilt (rebuilt rows) or failed (attempt_failed rows), or how a GitHub CI wait ended (ci_wait_ended rows, BOS-1871). An
+// attempt_failed row with reason "restart" also carries its note (BOS-2089). Other events' notes and reasons stay private.
 /** ran_on (BOS-1435): "company runner" or the check worker's name, for a job that started; null otherwise. */
 /**
  * BOS-1923: busy_at_start = slots busy on its machine when it started (itself not counted); ran = "quick" or "quick+full"
@@ -53,7 +53,8 @@ export function exportRow(r: { ticketId: string | null; at: Date; detail: Record
     commit: str(d.commit),
     with: Array.isArray(d.with) ? d.with.map((w) => str((w as { ticketId?: unknown } | null)?.ticketId)).filter((x): x is string => !!x).join(" ") || null : null,
     files: Array.isArray(d.files) ? d.files.filter((f): f is string => typeof f === "string").join(",") || null : null,
-    note: d.event === "hold_started" ? str(d.note) : null,
+    // BOS-2089: a "restart" failure's note is the runner's own reason (lock time-out, no answer), so a run of them can be told apart.
+    note: d.event === "hold_started" || (d.event === "attempt_failed" && d.reason === "restart") ? str(d.note) : null,
     action: str(d.action),
     rebuilds: typeof d.rebuilds === "number" ? d.rebuilds : null,
     reason: d.event === "rebuilt" ? str(d.why) : d.event === "attempt_failed" ? str(d.reason) : d.event === "ci_wait_ended" ? str(d.outcome) : null,

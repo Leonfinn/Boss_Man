@@ -1,10 +1,10 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, deploys, runners, secretAccessLog, wakes } from "../src/db/schema.js";
+import { activity, decisions, deploys, runners, secretAccessLog, wakes } from "../src/db/schema.js";
 import { endpointProblem, liveTagOf } from "../src/services/deploys.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -45,6 +45,33 @@ describe("deploy targets (R14)", () => {
     expect((await c.target({ name: "Git", kind: "git", endpoint: `https://bot:${"ghp_"}0123456789abcdefghijABCDEFGHIJ@github.com/x/y.git` /* joined: no key-shaped line for the secret scans (BOS-1932) */ })).statusCode).toBe(422);
     const ok = await c.target({ name: "Docker", kind: "docker", endpoint: "tcp://socket-proxy:2375", isProduction: true });
     expect(ok.statusCode).toBe(201);
+  });
+
+  it("leaves an activity line when a target is added, changed or removed, and none for a refused request (BOS-2100)", async () => {
+    const c = (ctx = await setup());
+    const lines = async () => (await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")))).map((a) => a.summary);
+    const ok = await c.target({ name: "Production", kind: "ssh", endpoint: "deploy@nas.lan", isProduction: true, requiresApproval: true });
+    expect(ok.statusCode).toBe(201);
+    const id = ok.json().id as string;
+    expect(await lines()).toEqual(["Owner added deploy target Production"]);
+
+    // Refused: validation and unknown id write nothing.
+    expect((await c.req("PATCH", `/api/deploy-targets/${id}`, { endpoint: "nas.lan" })).statusCode).toBe(422);
+    expect((await c.req("PATCH", `/api/deploy-targets/${randomUUID()}`, { isProduction: false })).statusCode).toBe(404);
+    expect((await c.req("DELETE", `/api/deploy-targets/${randomUUID()}`)).statusCode).toBe(404);
+    expect(await lines()).toHaveLength(1);
+
+    // A save that changes nothing writes nothing; each real change is named, without the values.
+    expect((await c.req("PATCH", `/api/deploy-targets/${id}`, { isProduction: true })).statusCode).toBe(200);
+    expect(await lines()).toHaveLength(1);
+    expect((await c.req("PATCH", `/api/deploy-targets/${id}`, { requiresApproval: false, endpoint: "ops@nas.lan" })).statusCode).toBe(200);
+    const all = await lines();
+    expect(all).toHaveLength(2);
+    expect(all.at(-1)).toBe("Owner changed deploy target Production: approval needed turned off, endpoint changed");
+    expect(all.join(" ")).not.toContain("nas.lan");
+
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}`)).statusCode).toBe(204);
+    expect((await lines()).at(-1)).toBe("Owner removed deploy target Production");
   });
 
   it("checks the endpoint shape for each kind", () => {

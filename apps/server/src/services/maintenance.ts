@@ -42,7 +42,16 @@ export const WRAP_UP_DURING_UPDATE = `${WRAP_UP_ASKED} A runner update is alread
  * whatever its image, so new launcher settings (memory, check slots, CPU) reach it without cutting runs off (BOS-594).
  * "wrapup": the owner asked every agent to stop cleanly (BOS-929); nothing is swapped, so there is no runner to wait
  * for: the hold only keeps new runs from starting until the owner cancels it or the update it was for finishes. */
-export type HoldKind = "update" | "settings" | "wrapup";
+export type HoldKind = "update" | "settings" | "wrapup" | "building";
+/**
+ * BOS-1955: update-runner.sh asks for a "building" hold before its first docker build (drain.json with reason "building"),
+ * so a run that starts while the image is built, checked and the launcher rebuilt is not waited on in full afterwards.
+ * It blocks new starts, swaps nothing and asks nobody to stop. The real drain takes it over and keeps its `since`. It ends
+ * by itself: drain-cancel.json (the script's EXIT trap when the build fails), the owner's Cancel, or this many minutes.
+ */
+export const BUILD_HOLD_MAX_MINUTES = 45;
+/** The reason drain.json carries for the early hold (scripts/update-runner.sh). */
+export const BUILDING_REASON = "building";
 /**
  * How long the "Ask agents to wrap up" panel lets a run go before flagging it "still going" (BOS-929). Never stopped
  * automatically. 30, not 10 (BOS-1016): a merge check takes 15 minutes or more and a full check 30 to 50, and an agent
@@ -183,6 +192,8 @@ const fmtTime = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
  */
 export const holdBlocksStarts = (hold: Hold | null, at: Date): boolean => {
   if (!hold) return false;
+  // A building hold (BOS-1955) holds until its own limit, whether or not the server pass that ends it has run yet.
+  if (hold.kind === "building") return at < new Date(hold.deadline);
   if (hold.kind === "wrapup" || hold.wrapSince || hold.force || hold.ignoreChecks) return true;
   return at < holdEndsAt(hold);
 };
@@ -233,6 +244,8 @@ export type MaintenanceDeps = {
   settled: () => Promise<unknown>;
   /** BOS-1954: how long to wait for `settled` (default SETTLE_WAIT_MS); a test makes it short. */
   settleWaitMs?: number;
+  /** BOS-1955: the scheduling pass running now (kind and how long), so the log names the pass that did not end. */
+  passInfo?: () => { kind: string; runningMs: number } | null;
   tick: () => Promise<unknown>;
   /** The per-run Stop (runs.ts cancel): BOS-1377's "Stop these and carry on" and BOS-1238's button stop runs through it. */
   cancelRun?: (runId: string) => Promise<unknown>;
@@ -274,6 +287,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     }
   }
   const trigger = deps.dir && path.join(deps.dir, "inbox", "drain.json");
+  /** BOS-1955: update-runner.sh drops this when its build fails; it ends a building hold and never a real drain. */
+  const cancelTrigger = deps.dir && path.join(deps.dir, "inbox", "drain-cancel.json");
 
   const save = (h: Hold) => db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
 
@@ -393,7 +408,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   /** What drain.json asks for: a setting change when it says so, else an image update. Unreadable or odd contents count as an update, as before. */
   function kindOf(text: string): HoldKind {
     try {
-      return (JSON.parse(text) as { reason?: unknown })?.reason === SETTINGS_REASON ? "settings" : "update";
+      const reason = (JSON.parse(text) as { reason?: unknown })?.reason;
+      return reason === SETTINGS_REASON ? "settings" : reason === BUILDING_REASON ? "building" : "update";
     } catch {
       return "update";
     }
@@ -501,6 +517,23 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const kind = opts.kind ?? "update";
       const have = await getHold(db);
       if (have) {
+        // BOS-1955: the image is built and the real drain asks: it takes over the early hold and KEEPS its start, so the
+        // hard cap and the "waited too long" clock count from when new work was first held. Its own wait starts now.
+        if ((kind === "update" || kind === "settings") && have.kind === "building") {
+          const minutes = opts.minutes ?? (deps.drainMinutes ?? 30);
+          const up: Hold = { ...have, kind, reason: kind === "settings" ? SETTINGS_REASON : "runner update", minutes, deadline: new Date(now().getTime() + minutes * 60_000).toISOString() };
+          await save(up);
+          await tellOnce(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP, up);
+          return (await getHold(db)) ?? up;
+        }
+        // A building hold asked for again, or while another hold is on: that one already holds.
+        // A re-run's request refreshes the old building hold's deadline (keeps `since`), so it can't lift mid-build.
+        if (kind === "building") {
+          if (have.kind !== "building") return have;
+          const up: Hold = { ...have, deadline: new Date(now().getTime() + have.minutes * 60_000).toISOString() };
+          await save(up);
+          return (await getHold(db)) ?? up;
+        }
         // The owner's wrap-up asked for while an update or setting change is waiting (BOS-988): the update is exactly
         // when they need it, so it joins the hold instead of being refused. The update keeps its own kind, start and
         // deadline, so it still goes ahead by itself when the runs end; the wrap-up adds only its ask, its timeout and
@@ -532,8 +565,15 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       }
       // A wrap-up has no deadline: nothing is waiting on a swap, so it never asks "stop them now?". The panel's
       // "still going" timeout is only a flag for the owner (WRAPUP_NOT_RESPONDING_MINUTES).
-      const minutes = opts.minutes ?? (kind === "wrapup" ? WRAPUP_NOT_RESPONDING_MINUTES : (deps.drainMinutes ?? 30));
+      const minutes = opts.minutes ?? (kind === "building" ? BUILD_HOLD_MAX_MINUTES : kind === "wrapup" ? WRAPUP_NOT_RESPONDING_MINUTES : (deps.drainMinutes ?? 30));
       const t = now();
+      if (kind === "building") {
+        // Nobody is told to stop: runs going carry on, only new starts wait. The deadline is the hold's own limit.
+        const b: Hold = { reason: "building the new runner image", kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
+        await save(b);
+        await deps.notify({ companyId: null, level: "note", title: "Runner update building: new work held", body: `The new runner image is being built and checked. New runs and checks wait from now, so the swap does not have to wait for work that starts during the build. Runs already going carry on. If the build fails the hold lifts by itself; it also lifts after ${minutes} minutes at the latest. You can cancel it in Settings > Server and runner.`, link: "#/settings" });
+        return b;
+      }
       // BOS-2058: a wrap-up pressed while a server update waits for a quiet machine belongs to that update (it used to be a
       // standalone hold that ended only when someone pressed Cancel: the 20 Nov 10:40 "wrapped up for no reason" entry).
       const forServer = kind === "wrapup" && (await deps.serverUpdateWaiting?.().catch(() => false));
@@ -577,11 +617,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
       // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
       // A "stop the checks and update now" answer (force) means nothing is waited for any more.
-      const checksList = h.kind === "wrapup" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
+      const checksList = h.kind === "wrapup" || h.kind === "building" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
       // BOS-1877: the chat stays open while anything the swap waits on is still going (runs, or checks), not only runs.
       // BOS-1951: merges being pushed to main hold the swap too (BOS-1645), so the banner names them and the chat stays open.
       // Not for a wrap-up hold: it swaps nothing. The same count the drain waits on, so text and swap never disagree.
-      const mergeIds = h.kind === "wrapup" || !deps.landingMergeIds ? [] : await deps.landingMergeIds().catch(() => [] as string[]);
+      const mergeIds = h.kind === "wrapup" || h.kind === "building" || !deps.landingMergeIds ? [] : await deps.landingMergeIds().catch(() => [] as string[]);
       const mergesList = mergeIds.length
         ? await db
             .select({ ticket: sql<string | null>`case when ${tickets.number} is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || ${tickets.number}::text end` })
@@ -591,9 +631,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         : [];
       const mergesN = Math.max(mergeIds.length, mergesList.length);
       // Nothing named is going and the swap still has not happened: late and unnamed (see unknownWait).
-      const unknown = runsTotal === 0 && checksList.length === 0 && mergesN === 0 && unknownWait(h, now(), reconnectMs);
-      const forecast = drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now(), merges: mergesN, unknownWait: unknown });
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0 || (h.kind !== "wrapup" && (checksList.length > 0 || mergesN > 0 || unknown)), blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, unknownWait: unknown, last };
+      const unknown = h.kind !== "building" && runsTotal === 0 && checksList.length === 0 && mergesN === 0 && unknownWait(h, now(), reconnectMs);
+      // BOS-1955: a building hold is never "swapping": nothing is built yet, so chat stays open for the whole build.
+      const forecast = h.kind === "building" ? { phase: "waiting" as const, expectedFinishAt: null, overdue: false } : drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now(), merges: mergesN, unknownWait: unknown });
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: h.kind === "building" || runsTotal > 0 || (h.kind !== "wrapup" && (checksList.length > 0 || mergesN > 0 || unknown)), blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, unknownWait: unknown, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows
@@ -617,7 +658,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
      */
     async updateNow(): Promise<{ ok: true } | { ok: false; reason: "no_update" | "agents_running" | "no_checks" }> {
       const h = await getHold(db);
-      if (!h || h.kind === "wrapup") return { ok: false, reason: "no_update" };
+      if (!h || h.kind === "wrapup" || h.kind === "building") return { ok: false, reason: "no_update" };
       const busy = await runnerBusy(db, true, now());
       if (busy.runsTotal > 0) return { ok: false, reason: "agents_running" };
       if (busy.checksTotal === 0) return { ok: false, reason: "no_checks" };
@@ -630,6 +671,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const h = await getHold(db);
       if (!h) return false;
       if (h.kind === "wrapup") await end("Wrap-up cancelled", "note", "New runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+      else if (h.kind === "building") await end("Runner update build hold cancelled", "note", "New runs start again. If the image build is still going, the swap will wait for work again once it is built.");
       else await end("Runner update cancelled", "note", "New runs start again. Runners not swapped yet still run the old image; start the update again when you like.");
       return true;
     },
@@ -702,7 +744,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const h = await getHold(db);
       if (!h) return;
       // A wrap-up never asks the deadline question, so its answers are for an old card: nothing to do.
-      if (h.kind === "wrapup") return;
+      if (h.kind === "wrapup" || h.kind === "building") return;
       const later = (minutes: number) => new Date(now().getTime() + minutes * 60_000).toISOString();
       if (answer === STOP_THESE_CARRY_ON) {
         await self.stopRuns(ctx.runIds ?? [], ctx.runIds ?? []);
@@ -734,16 +776,31 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         asked = kindOf(await readFile(trigger, "utf8").catch(() => ""));
         await rm(trigger, { force: true });
       }
+      // BOS-1955: update-runner.sh's build failed: lift its early hold. Only a building hold: a real drain, a settings
+      // change and a wrap-up are never ended by this file, so a stale one can't cut off a swap that is under way.
+      if (cancelTrigger && (await stat(cancelTrigger).then(() => true, () => false))) {
+        await rm(cancelTrigger, { force: true });
+        // Both files in one pass (a build that failed fast): the cancel wins, so no hold starts that nothing would end.
+        if (asked === "building") asked = null;
+        if ((await getHold(db))?.kind === "building" && asked !== "update" && asked !== "settings") await end("Runner update build stopped", "note", "The new runner image was not built, so nothing is swapped. New runs have started again.");
+      }
       let h = await getHold(db);
       // A real update or setting change takes over a wrap-up hold here too, not only from the button (BOS-929): its
       // trigger file must end the wrap-up and swap, or new work stays held until the owner cancels by hand.
-      const takesOver = !!h && h.kind === "wrapup" && (asked === "update" || asked === "settings");
-      if (asked && (!h || (asked === "settings" && h.kind !== "settings") || takesOver)) {
+      // BOS-1955: it takes over a building hold the same way, but keeps that hold's start.
+      const takesOver = !!h && (h.kind === "wrapup" || h.kind === "building") && (asked === "update" || asked === "settings");
+      const refreshes = asked === "building" && h?.kind === "building";
+      if (asked && (!h || (asked === "settings" && h.kind !== "settings") || takesOver || refreshes)) {
         await self.start({ kind: asked });
         // Re-read, so the hold carries who its start message already reached (BOS-988): the pass below tells the rest.
         h = await getHold(db);
       }
       if (!h) return;
+      // BOS-1955: the early hold ends by itself when the build never reached a drain (the script was killed, a host reboot).
+      if (h.kind === "building") {
+        if (now() >= new Date(h.deadline)) await end("Runner update build hold ended", "note", `The new image was not ready within ${h.minutes} minutes, so new runs have started again. Press Build and update runners again when you like.`);
+        return;
+      }
 
       // A wrap-up hold (BOS-929) swaps nothing and asks nothing: it only keeps new runs from starting until the
       // owner cancels it, or a real update takes it over in start() above. The scheduler's hold already does that.
@@ -891,12 +948,13 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const settledInTime = await Promise.race([deps.settled().then(() => true), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), deps.settleWaitMs ?? SETTLE_WAIT_MS); timer.unref?.(); })]);
         clearTimeout(timer);
         if (!settledInTime) {
+          const pass = deps.passInfo?.();
           // BOS-2058 (rule b): the scheduling pass gets the runner-settle end, counted from the first pass it held up. Past
           // it the swap goes ahead without it: the runs are counted again just below, so a launch that did land is waited for.
           const settleSince: string = h.settleSince ?? t.toISOString();
           if (now().getTime() - Date.parse(settleSince) < WAIT_RULES["runner-settle"].endMin * 60_000) {
             h = { ...h, settleSince };
-            deps.log?.(`drain: a scheduling pass has not ended after ${Math.round((deps.settleWaitMs ?? SETTLE_WAIT_MS) / 1000)} s; ${r.slug} is looked at again on the next pass`);
+            deps.log?.(`drain: a scheduling pass has not ended after ${Math.round((deps.settleWaitMs ?? SETTLE_WAIT_MS) / 1000)} s${pass ? ` (a ${pass.kind} pass, running for ${Math.round(pass.runningMs / 1000)} s)` : ""}; ${r.slug} is looked at again on the next pass`);
             continue;
           }
           deps.log?.(`drain: a scheduling pass has held the swap since ${settleSince}; ${r.slug} goes ahead without it`);

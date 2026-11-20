@@ -23,16 +23,23 @@ import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "
 export { WorkError };
 
 /**
- * Once a ticket is merged, its owner setup steps are the ones review saw: an agent may no longer change
- * them, because the "Ready to use" card is raised at go-live from whatever is stored and nothing checks it
- * again (BOS-443). The owner's own web edit is unaffected (it passes no actor), and an empty patch changes nothing.
+ * A merged ticket's owner setup steps (BOS-443, widened by BOS-2075). Until the go-live card is raised from them
+ * (`ownerSetupDecisionId` still null), the ticket's assignee or the CEO may correct them: the MCP write path runs
+ * them through the card check again, logs the reason and tells the reviewers who approved, so "nothing checks it
+ * again" no longer holds. Once the card is raised they are frozen against agents: the owner is already reading
+ * them. This also covers the CEO's DR-052 fix card, which is only raised when the owner's card wasn't.
+ * The owner's own web edit is unaffected (it passes no actor), and a write that changes nothing passes.
  */
-function setupFrozenRefusal(mergeCommit: string | null, current: string | null, patch: { byAgentId?: string | null; ownerSetup?: string | null }): string | null {
-  if (!mergeCommit || !patch.byAgentId || patch.ownerSetup === undefined) return null;
+function setupFrozenRefusal(t: { mergeCommit: string | null; ownerSetup: string | null; ownerSetupDecisionId: string | null; assigneeAgentId: string | null }, patch: { byAgentId?: string | null; ownerSetup?: string | null }, byCeo: boolean): string | null {
+  if (!t.mergeCommit || !patch.byAgentId || patch.ownerSetup === undefined) return null;
   const next = patch.ownerSetup?.trim() || null;
-  if (next === (current?.trim() || null)) return null;
-  return 'This ticket is merged, so its setup steps are frozen: they are the ones review saw, and Boss Man raises the owner\'s "Ready to use" card from them when it goes live. An agent can\'t change them now. If they are wrong, ask the owner to fix them on the ticket page, or open a follow-up ticket with the right steps.';
+  if (next === (t.ownerSetup?.trim() || null)) return null;
+  if (t.ownerSetupDecisionId) return SETUP_CARD_RAISED;
+  if (byCeo || t.assigneeAgentId === patch.byAgentId) return null;
+  return "This ticket is merged and its owner's card isn't raised yet, so only its assignee or the CEO can correct its setup steps (update_ticket ownerSetup with a reason). Ask them, or tell the CEO.";
 }
+
+export const SETUP_CARD_RAISED = 'This ticket\'s setup steps are frozen: Boss Man has already raised the owner\'s "Ready to use" card from them, so the owner is reading these steps. An agent can\'t change them now. If they are wrong, ask the owner to fix them on the ticket page, or open a follow-up ticket with the right steps.';
 
 /** Ticket ids a wake's note or a nudge's reason names, the way those notes write them. */
 const NOTE_TICKET_IDS = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
@@ -81,8 +88,6 @@ type TicketPatch = {
   /** BOS-1650: the one-line "why" and "if skipped" the go-live card opens with; blank clears. Written with the steps. */
   ownerSetupWhy?: string | null;
   ownerSetupIfSkipped?: string | null;
-  /** The CEO is fixing a merged ticket's steps while Boss Man's "can't go to the owner" card is open (DR-052). */
-  setupFix?: boolean;
   /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
   fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
@@ -754,10 +759,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (refusal) throw new WorkError(409, refusal);
       }
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
-      // A merged ticket's steps are frozen against agents (BOS-443); the owner's web edit still works.
+      // A merged ticket's steps are frozen against agents once the owner's card is raised (BOS-443, BOS-2075).
       if (patch.ownerSetup !== undefined) {
-        // DR-052: the CEO fixing steps that failed the go-live card check (the caller checked its card is open).
-        const frozen = patch.setupFix ? null : setupFrozenRefusal(t.mergeCommit, t.ownerSetup, patch);
+        const [who] = t.mergeCommit && patch.byAgentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, patch.byAgentId)) : [];
+        const frozen = setupFrozenRefusal(t, patch, who?.role === "ceo");
         if (frozen) throw new WorkError(409, frozen);
         fields.ownerSetup = patch.ownerSetup?.trim() || null;
         // An override covers only the text it came with, so any other write of the steps clears it.

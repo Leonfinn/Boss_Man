@@ -122,7 +122,7 @@ export const OWNER_CONTROLS = {
   Agents: [
     "Refresh models", "Asking the runner", "Choose from the list", "Hire …", "Use the default", "Replace with the current …",
     "Fill in from the …", "Rehire", "Undo", "Save", "Add note", "Cancel", "Edit", "Delete", "Start", "Pause", "Close",
-    "History", "Retire", "Refresh",
+    "History", "Retire", "Refresh", "Refreshing",
   ],
   Skills: [
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",

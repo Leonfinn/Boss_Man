@@ -45,6 +45,9 @@ describe("wake classes: the table", () => {
   // Strings that follow `reason:` in the source but are never a wake's reason.
   const NOT_WAKE_REASONS = new Set([
     "runner offline",
+    // The runner update's early hold (BOS-1955, maintenance.ts): a drain reason and hold note, not a wake's reason.
+    "building",
+    "building the new runner image",
     "not_found",
     // The nightly secrets pass's ticket-move reasons (BOS-1932, secret-scan.ts), not a wake's reason.
     "the nightly secrets pass still finds this match on main",

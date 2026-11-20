@@ -96,7 +96,15 @@ export function featureRoutes(
     }
     // BOS-967: the back link must be a full https address, or empty for none.
     if (b.backUrl && !/^https:\/\/[^\s]+$/i.test(b.backUrl)) throw new FeedbackError(422, "Enter a full web address that starts with https://");
-    return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
+    const before = await feedback.settings(id);
+    const saved = await feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
+    // BOS-2101: a line in Activity for each switch that really changed. Never the link's token.
+    const lines: string[] = [];
+    if (b.enabled !== undefined && b.enabled !== before.portalEnabled) lines.push(b.enabled ? "Owner turned the public portal on" : "Owner turned the public portal off");
+    if (b.portalAtBareAddress !== undefined && b.portalAtBareAddress !== before.portalAtBareAddress) lines.push(b.portalAtBareAddress ? "Owner made the portal the one the bare public address opens" : "Owner stopped the portal opening at the bare public address");
+    if (b.confirmByEmail !== undefined && b.confirmByEmail !== before.confirmByEmail) lines.push(b.confirmByEmail ? "Owner turned on email confirmation of portal posts, comments and votes" : "Owner turned off email confirmation of portal posts, comments and votes");
+    for (const summary of lines) await record(db, { companyId: id, kind: "settings", summary });
+    return saved;
   });
   owner.put("/api/companies/:id/feedback/portal-logo", { bodyLimit: 400 * 1024 }, async (req, reply) => {
     const { id } = IdParam.parse(req.params);
@@ -118,7 +126,12 @@ export function featureRoutes(
     return logo ? sendLogo(reply, logo) : reply.code(404).send({ error: "not_found", message: "No logo." });
   });
 
-  owner.post("/api/companies/:id/portal/rotate", async (req) => feedback.rotatePortal(IdParam.parse(req.params).id));
+  owner.post("/api/companies/:id/portal/rotate", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    const saved = await feedback.rotatePortal(id);
+    await record(db, { companyId: id, kind: "settings", summary: "Owner made a new portal link; old links stop working" });
+    return saved;
+  });
   owner.get("/api/companies/:id/features", async (req) => feedback.scored(IdParam.parse(req.params).id));
   owner.post("/api/companies/:id/features", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
