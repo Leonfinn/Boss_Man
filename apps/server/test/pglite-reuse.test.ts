@@ -22,6 +22,38 @@ describe("openPglite reuse", () => {
     await second.close();
   });
 
+  // BOS-1940: close() deletes from the tables that hold rows (foreign-key checks off for the deletes) instead of truncating all of them.
+  it("empties linked rows in any order, and the next test still has foreign keys and triggers on", async () => {
+    const first = await openPglite();
+    const [co] = await rows(first.db, "insert into companies (name) values ('A') returning id");
+    const [pr] = await rows(first.db, `insert into projects (company_id, name) values ('${co!.id}', 'P') returning id`);
+    await first.db.execute(sql.raw(`insert into tickets (company_id, project_id, title) values ('${co!.id}', '${pr!.id}', 'T')`));
+    await first.close();
+
+    const second = await openPglite();
+    for (const t of ["companies", "projects", "tickets", "ticket_transitions"]) expect(await rows(second.db, `select 1 from ${t}`), t).toHaveLength(0);
+    // The emptied tables hold no pages, as after a truncate, so new rows are stored (and read back unordered) in the order written.
+    expect((await rows(second.db, "select sum(pg_relation_size(c.oid))::int as n from pg_class c where c.relname in ('companies', 'projects', 'tickets', 'ticket_transitions')"))[0]?.n).toBe(0);
+    // Foreign keys are enforced again: a project for a company that doesn't exist is refused.
+    await expect(second.db.execute(sql`insert into projects (company_id, name) values (gen_random_uuid(), 'orphan')`)).rejects.toThrow();
+    // Triggers are on again: a new ticket gets number 1 from its company's counter.
+    const [co2] = await rows(second.db, "insert into companies (name) values ('B') returning id");
+    const [pr2] = await rows(second.db, `insert into projects (company_id, name) values ('${co2!.id}', 'P') returning id`);
+    const [t] = await rows(second.db, `insert into tickets (company_id, project_id, title) values ('${co2!.id}', '${pr2!.id}', 'T') returning number`);
+    expect(t?.number).toBe(1);
+    await second.close();
+  });
+
+  it("restarts a sequence a test used", async () => {
+    const a = await openPglite();
+    await a.db.execute(sql`create sequence if not exists reuse_probe_seq`);
+    await a.db.execute(sql`select nextval('reuse_probe_seq'), nextval('reuse_probe_seq')`);
+    await a.close();
+    const b = await openPglite();
+    expect((await rows(b.db, "select nextval('reuse_probe_seq')::int as n"))[0]?.n).toBe(1);
+    await b.close();
+  });
+
   it("really reuses the instance (the cost saved)", async () => {
     const a = await openPglite();
     await a.db.execute(sql`create temp table marker (x int)`); // temp tables live on the connection, so only the same instance sees it

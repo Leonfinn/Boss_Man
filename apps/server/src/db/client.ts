@@ -32,14 +32,49 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
 // lost on restart, harmless because it's rebuilt from the migrations on the next call.
 let migratedTemplate: Promise<Blob> | undefined;
 
-// BOS-657: opening a copy costs ~0.7 CPU-s, emptying its tables ~0.08. close() empties a template copy and parks it here for the next openPglite().
+// BOS-657: opening a copy costs ~0.7 CPU-s, emptying its tables ~0.015 (BOS-1940). close() empties a template copy and parks it here for the next openPglite().
 // Opt out with `{ fresh: true }`, or for a whole run with BOSSMAN_PGLITE_REUSE=0.
 type PgliteClient = InstanceType<(typeof import("@electric-sql/pglite"))["PGlite"]>;
-const idlePool: { client: PgliteClient; tables: string }[] = [];
+type PoolEntry = { client: PgliteClient; tables: string; whichHaveRows: string };
+const idlePool: PoolEntry[] = [];
 
 async function listTables(client: PgliteClient): Promise<string> {
   const r = await client.query<{ tablename: string }>("select tablename from pg_tables where schemaname = 'public' order by tablename");
   return r.rows.map((x) => x.tablename).join(",");
+}
+
+const ident = (t: string) => `"${t.replaceAll('"', '""')}"`;
+const literal = (t: string) => `'${t.replaceAll("'", "''")}'`;
+
+async function poolEntry(client: PgliteClient): Promise<PoolEntry> {
+  const tables = await listTables(client);
+  const names = tables ? tables.split(",") : [];
+  // One query that names the tables holding any row: a test touches a handful of the ~85 tables.
+  const whichHaveRows = names.length ? `select t from (values ${names.map((t) => `(${literal(t)}, exists(select 1 from ${ident(t)}))`).join(", ")}) v(t, f) where f` : "";
+  return { client, tables, whichHaveRows };
+}
+
+/**
+ * Back to the migrated, empty state: no rows, sequences from the start (what `truncate ... restart identity cascade` gives).
+ * BOS-1940: truncating all ~85 tables cost ~130 ms per test (each truncate swaps in new files for the table and its
+ * indexes); deleting from only the tables that hold rows and vacuuming them costs ~12 ms. session_replication_role = replica turns off
+ * foreign-key checks and ordinary triggers for the deletes, as truncate skips them, so the order doesn't matter.
+ */
+async function emptyTables(entry: PoolEntry): Promise<void> {
+  const { client } = entry;
+  if (entry.whichHaveRows) {
+    const full = (await client.query<{ t: string }>(entry.whichHaveRows)).rows.map((r) => r.t);
+    if (full.length) {
+      await client.exec(`set session_replication_role = replica; ${full.map((t) => `delete from ${ident(t)};`).join(" ")} set session_replication_role = default;`);
+      // Vacuum hands the emptied pages back (the tables end at 0 bytes, as after a truncate), so the next test's rows are
+      // stored, and read back by an unordered select, in the order they were written. Without it a reused table's free
+      // space put new rows out of order and a test reading two rows without "order by" failed (watchdog's review loop).
+      await client.exec(`vacuum ${full.map(ident).join(", ")}`);
+    }
+  }
+  // The schema has no sequences today (uuid ids); this keeps "restart identity" true if one is added, and costs ~1 ms.
+  const used = await client.query<{ s: string }>("select sequencename as s from pg_sequences where schemaname = 'public' and last_value is not null");
+  if (used.rows.length) await client.exec(used.rows.map((r) => `alter sequence public.${ident(r.s)} restart;`).join(" "));
 }
 
 /** Tests: really close every parked copy (a test file's last step). */
@@ -55,7 +90,7 @@ export async function closePglitePool(): Promise<void> {
  * Tests and quick local runs: an in-process Postgres (PGlite), migrated with the same SQL.
  * `logQuery` (tests only) sees every statement, so a test can prove a pass made none.
  */
-export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: string) => void; fresh?: boolean } = {}): Promise<{ db: Db; close: () => Promise<void> }> {
+export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: string) => void; fresh?: boolean } = {}): Promise<{ db: Db; close: () => Promise<void>; empty: () => Promise<void> }> {
   const { PGlite } = await import("@electric-sql/pglite");
   const { drizzle } = await import("drizzle-orm/pglite");
   const { migrate } = await import("drizzle-orm/pglite/migrator");
@@ -78,8 +113,9 @@ export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: stri
       const client = new PGlite({ extensions: { vector }, loadDataDir: await migratedTemplate });
       // A copy's first query loads PGlite's array types; a close during that never returns, so do it now.
       await client.query("select 1");
-      entry = { client, tables: await listTables(client) };
+      entry = await poolEntry(client);
     }
+    const parked = entry;
     const { client, tables } = entry;
     let closed = false;
     const close = async () => {
@@ -90,8 +126,8 @@ export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: stri
           // Back to the migrated, empty state: no rows, sequences from 1. If a test added or dropped a table, the copy is not the template any more.
           const now = await listTables(client);
           if (now === tables) {
-            if (now) await client.exec(`truncate table ${now.split(",").map((t) => `"${t}"`).join(", ")} restart identity cascade`);
-            idlePool.push({ client, tables });
+            await emptyTables(parked);
+            idlePool.push(parked);
             return;
           }
         } catch {
@@ -100,10 +136,10 @@ export async function openPglite(dataDir?: string, opts: { logQuery?: (sql: stri
       }
       await client.close();
     };
-    return { db: drizzle(client, { schema, logger }) as unknown as Db, close };
+    return { db: drizzle(client, { schema, logger }) as unknown as Db, close, empty: () => emptyTables(parked) };
   }
   const client = new PGlite({ dataDir, extensions: { vector } });
   const db = drizzle(client, { schema, logger });
   await migrate(db, { migrationsFolder });
-  return { db: db as unknown as Db, close: () => client.close() };
+  return { db: db as unknown as Db, close: () => client.close(), empty: async () => emptyTables(await poolEntry(client)) };
 }
