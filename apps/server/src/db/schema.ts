@@ -478,6 +478,11 @@ export const tickets = pgTable(
     /** When the agent's WIP limit first held this ticket in Ready (BOS-1180). A field, not note text, so a state note can't erase it; cleared when the ticket leaves Ready. */
     wipHeldAt: timestamp("wip_held_at", { withTimezone: true }),
     /**
+     * "Next up" (BOS-1908): set with `wip_held_at` when a start was held only because the assignee is running another ticket.
+     * One per agent. The scheduler starts it when that run ends; cleared whenever the ticket leaves Ready or is held for another reason.
+     */
+    nextUpAt: timestamp("next_up_at", { withTimezone: true }),
+    /**
      * "Being checked" (BOS-1906): set while a ticket handed in to review waits for its quick check. It is in review, but no review
      * round is open and no reviewer is woken until the check passes (then the slots open) or fails (it goes back to In progress).
      * Cleared on any move out of review.

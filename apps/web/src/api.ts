@@ -243,7 +243,12 @@ export type Ticket = {
   assignedToOwner: boolean;
   dueDate: string | null;
   /** Why this in-progress ticket doesn't count towards the WIP limit; null when it counts (BOS-1172). */
-  wipExempt?: "waits" | "plan" | "live" | null;
+  wipExempt?: "waits" | "plan" | "live" | "busy" | null;
+  /** BOS-1908: the ticket this In progress ticket's agent is running instead ("Agent busy on BOS-N"). */
+  busyOnTicketId?: string | null;
+  busyOnNumber?: number | null;
+  /** BOS-1908: in Ready, the agent's one "Next up": starts by itself when the agent finishes what it is running. */
+  nextUp?: boolean;
   blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; ticketNumber?: number | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];

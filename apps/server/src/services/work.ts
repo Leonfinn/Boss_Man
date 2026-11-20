@@ -370,6 +370,20 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         r.origin === REVIEW_REASON ? (!r.ticketId || r.ticketId === ticketId ? "reviewing" : "working") : r.origin === "check due" ? "re-checking" : r.origin === "ci passed" ? "checking the merge" : r.origin === "nudge" ? "picking this up" : "working";
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
       const notHere = everyLive.filter((r) => about(r).size === 0);
+      // BOS-1908: the ticket each busy agent is running now (a live run that isn't a chat), so an In progress ticket of theirs says "Agent busy on BOS-N".
+      const runningNow = new Map<string, { id: string; number: number | null }>();
+      {
+        const live = everyLive.filter((r) => isWorkingRun(r) && r.agentId && r.ticketId);
+        // The ticket's number and whether it has started; a run on a ticket still in Backlog or Ready (a held start) is not "busy on" it.
+        const known = new Map<string, { number: number | null; started: boolean }>(rows.map((r) => [r.t.id, { number: r.t.number, started: r.t.systemState !== "backlog" && r.t.systemState !== "ready" }]));
+        const unknown = [...new Set(live.map((r) => r.ticketId!).filter((id) => !known.has(id)))];
+        if (unknown.length) for (const o of await db.select({ id: tickets.id, number: tickets.number, state: tickets.systemState }).from(tickets).where(inArray(tickets.id, unknown))) known.set(o.id, { number: o.number, started: o.state !== "backlog" && o.state !== "ready" });
+        for (const r of live) if (!runningNow.has(r.agentId!) && known.get(r.ticketId!)?.started) runningNow.set(r.agentId!, { id: r.ticketId!, number: known.get(r.ticketId!)!.number });
+      }
+      const busyOn = (t: typeof tickets.$inferSelect) => {
+        const r = t.assigneeAgentId ? runningNow.get(t.assigneeAgentId) : undefined;
+        return r && r.id !== t.id ? r : null;
+      };
       // A run on a ticket in another project is real, tracked work: name the ticket and its project instead of calling it ticketless.
       const candidates = (r: (typeof everyLive)[number]) => [r.ticketId, r.runTicketId, ...named(r)].filter((x): x is string => !!x);
       const elsewhereIds = [...new Set(notHere.flatMap((r) => (r.purpose === "chat" ? [] : candidates(r))))];
@@ -459,7 +473,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, ticketNumber: rows.find((r) => r.t.id === d.blockerTicketId)?.t.number ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         // Why an in-progress ticket doesn't count towards a WIP limit (BOS-1172); null when it counts.
-        wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit))) : null,
+        wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)), busyOn(t)?.id ?? null) : null,
+        // BOS-1908: the ticket this one's agent is running instead ("Agent busy on BOS-N"), and the one marked Next up in Ready.
+        busyOnTicketId: t.systemState === "in_progress" ? (busyOn(t)?.id ?? null) : null,
+        busyOnNumber: t.systemState === "in_progress" ? (busyOn(t)?.number ?? null) : null,
+        nextUp: t.systemState === "ready" && !!t.nextUpAt,
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),

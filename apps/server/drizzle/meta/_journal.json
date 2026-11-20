@@ -1114,6 +1114,13 @@
       "when": 1795128526766,
       "tag": "0177_merged_watch",
       "breakpoints": true
+    },
+    {
+      "idx": 178,
+      "version": "7",
+      "when": 1795142690103,
+      "tag": "0178_next_up",
+      "breakpoints": true
     }
   ]
 }
