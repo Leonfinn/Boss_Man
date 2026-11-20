@@ -30,7 +30,9 @@ export type ClearWhen =
   /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
   | { kind: "serverCalm"; rule: "memory" | "freezes" }
   /** The cost sanity check's card (BOS-1866): the company's latest checked runs are all in band. */
-  | { kind: "costBackInBand"; companyId: string };
+  | { kind: "costBackInBand"; companyId: string }
+  /** The idle-slots alert (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
+  | { kind: "idleSlotsGone"; companyId: string };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -234,6 +236,11 @@ export const ALERT_KINDS = {
   // cost-check.ts (BOS-1866): a run's recorded cost is far from its tokens at list price. Stops at the CEO, never the
   // owner; one card per company, closes by itself (costBackInBand) once the latest checked runs are in band.
   cost_out_of_band: {
+    topRung: "ceo",
+  },
+  // idle-slots-alert.ts (BOS-1881): free run slots outnumbered the startable Ready tickets, with an agent idle, for 30
+  // minutes. Stops at the CEO, never the owner; one card per company, closes by itself (idleSlotsGone).
+  idle_slots: {
     topRung: "ceo",
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
