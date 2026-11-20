@@ -94,9 +94,17 @@ else
   user="${user%$'\r'}"; pass="${pass%$'\r'}"
   user="${user//\\/\\\\}"; user="${user//\"/\\\"}"; pass="${pass//\\/\\\\}"; pass="${pass//\"/\\\"}"
   body="$(printf '{"username":"%s","password":"%s"}' "$user" "$pass")"
+  # A fresh staging (new host, or its data removed with down -v) has no owner at all, so the smoke account can't exist yet.
+  # Boss Man's first-run setup (POST /api/setup) creates the one owner and refuses with 409 once an owner exists, so it can
+  # never change an account that is already there. Staging holds no real data; the smoke account becomes its owner.
+  created=""
+  if [[ $(api "$BASE/api/setup" 2>/dev/null | field needsSetup) == true ]]; then
+    scode="$(printf '%s' "$body" | api -o /dev/null -w '%{http_code}' --data-binary @- "$BASE/api/setup" 2>/dev/null)"
+    [[ $scode == 201 ]] && created=1
+  fi
   code="$(printf '%s' "$body" | api -o /dev/null -w '%{http_code}' --data-binary @- "$BASE/api/login" 2>/dev/null)"
   if [[ $code == 200 ]]; then
-    report signin pass "the smoke account signs in"
+    report signin pass "the smoke account signs in${created:+ (staging had no owner, so the smoke account was created as its first owner)}"
     companies="$(api "$BASE/api/companies" 2>/dev/null)"
     pid="$(grep -oE '"projects":\[\{"id":"[0-9a-f-]{36}"' <<<"$companies" | head -n 1 | grep -oE '[0-9a-f-]{36}')"
     cid="$(grep -oE '"projects":\[\{"id":"[0-9a-f-]{36}","companyId":"[0-9a-f-]{36}"' <<<"$companies" | head -n 1 | grep -oE '[0-9a-f-]{36}"$' | tr -d '"')"
@@ -118,7 +126,8 @@ else
       report runner skipped "no staging company yet"
     fi
   else
-    report signin fail "the smoke account could not sign in (HTTP ${code:-none})"; report ticket skipped "not signed in"; report runner skipped "not signed in"
+    hint=""; [[ $code == 401 ]] && hint=": staging already has an owner whose name or password differs from the credentials file"
+    report signin fail "the smoke account could not sign in (HTTP ${code:-none})$hint"; report ticket skipped "not signed in"; report runner skipped "not signed in"
   fi
 fi
 
