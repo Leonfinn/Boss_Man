@@ -450,6 +450,29 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.ownerSetupDecisionId).toBe(card!.id);
   });
 
+  it("BOS-1953: a host command in a fenced block names where it runs, passes the check and the owner's card has a Where line; a failing ticket's CEO card never reaches the owner's queue", async () => {
+    const c = (ctx = await setupApp());
+    await hostReport(c);
+    const { companyId, projectId } = await withReleaseManager(c);
+    const fenced = "```sh host=\"example-host\" as=\"root\"\nls -l /srv/example\n```";
+    await doneTicket(c, projectId, { title: "Fenced", mergeCommit: B, ownerSetup: fenced, at: new Date("2026-11-03T12:00:00Z") });
+    await live(c, companyId);
+    const [card] = await setupCards(c);
+    expect(card).toMatchObject({ status: "open", tier: "owner" });
+    expect(card!.question).toContain("ls -l /srv/example");
+    expect(card!.question).toMatch(/Where:/);
+  });
+
+  it("BOS-1953: the CEO's setup-fix card sits on the CEO's rung and never climbs, so it is not in the owner's queue", async () => {
+    const c = (ctx = await setupApp());
+    await hostReport(c);
+    const { companyId, projectId } = await withReleaseManager(c);
+    const t = await doneTicket(c, projectId, { title: "Vague", mergeCommit: B, ownerSetup: "Restart the notifications add-on", at: new Date("2026-11-03T12:00:00Z") });
+    await live(c, companyId);
+    const fix = await fixCard(c, t.id);
+    expect((fix!.context as { ladder?: { rung?: string; topRung?: string } }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo" });
+  });
+
   it("with no deployer report, a token in the words becomes the label and the card says Boss Man doesn't know this server's folders yet", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);

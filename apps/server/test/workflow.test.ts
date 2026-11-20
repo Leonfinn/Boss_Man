@@ -120,6 +120,20 @@ describe("scorecard", () => {
     return { ...c, dee, rae, t1 };
   }
 
+  it("gives whole-team figures and the window before (BOS-1936)", async () => {
+    const c = await seed();
+    const card = await c.svc.scorecardWithPrevious(c.company.id, 7);
+    // Last 7 days: t2 (5d ago) and t3 (2d ago) finished; the middle of 24h and 48h is 36h.
+    expect(card.overall).toMatchObject({ done: 2, medianCycleMs: 36 * H });
+    // The 7 days before (7 to 14 days ago): only t1, finished 8 days ago after 24h.
+    expect(card.previous.overall).toMatchObject({ done: 1, medianCycleMs: D, watchdogFlags: 1 });
+    expect(Object.keys(card.previous).sort()).toEqual(["handoffs", "overall"]);
+    expect(card.previous.handoffs.find((h) => h.kind === "review")).toMatchObject({ from: "developer", to: "reviewer", count: 2 });
+    // The whole team over 14 days matches the one role that finished everything.
+    const wide = await c.svc.scorecard(c.company.id, 14);
+    expect(wide.overall).toMatchObject({ done: 3, medianCycleMs: D, answered: 2 });
+  });
+
   it("scores roles and agents", async () => {
     const c = await seed();
     const card = await c.svc.scorecard(c.company.id, 14);

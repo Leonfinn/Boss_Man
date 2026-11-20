@@ -132,6 +132,7 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
             <th scope="col">Agent</th>
             <th scope="col">What for</th>
             <th scope="col">Model</th>
+            <th scope="col">Paid from</th>
             <th scope="col">Result</th>
             {finished && <th scope="col" style={{ textAlign: "right" }}>Used</th>}
           </tr>
@@ -161,6 +162,7 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
                 )}
               </td>
               <td className="mono">{r.model ?? "default"}</td>
+              <td>{r.account ?? <span className="muted">none</span>}</td>
               <td>
                 {outcomeTag(finished ? r.outcome : null)}
                 {finished && failureReason(r.outcome) && (

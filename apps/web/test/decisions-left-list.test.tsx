@@ -78,6 +78,28 @@ describe("a card that leaves the list says why (BOS-1691)", () => {
     expect(section.textContent).not.toContain("An old card");
   });
 
+  it("a long question rolls up with Show more / Show less; a short one has no control (BOS-1935)", () => {
+    // jsdom has no layout: pretend the long text overflows its 3 lines (scrollHeight > clientHeight) and the short one fits.
+    const sh = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) { return this.textContent && this.textContent.length > 100 ? 100 : 20; });
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(60);
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    const mk = (id: string, question: string): ClosedNoticeCard => ({ id, companyId: "c1", question, context: {}, notice: { why: "withdrawn", text: "Withdrawn by CEO.", at, until } });
+    const long = `Main has moved to abc1234. It includes ${"BOS-1: a ticket title; ".repeat(12)}`;
+    render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} closedNotices={[mk("long", long), mk("short", "Short card")]} />);
+    const buttons = screen.getAllByRole("button", { name: "Show more" });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]!.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(buttons[0]!);
+    const less = screen.getByRole("button", { name: "Show less" });
+    expect(less.getAttribute("aria-expanded")).toBe("true");
+    expect(document.querySelector(".rolled-text.open")).not.toBeNull();
+    expect(screen.getByTestId("left-your-list").textContent?.match(/Withdrawn by CEO\./g)).toHaveLength(2);
+    fireEvent.click(less);
+    expect(screen.getByRole("button", { name: "Show more" })).toBeTruthy();
+    sh.mockRestore();
+  });
+
   it("touching a card marks it opened, once", () => {
     const calls = stubFetch();
     render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);

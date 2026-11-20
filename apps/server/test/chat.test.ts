@@ -137,6 +137,30 @@ describe("owner chat", () => {
     expect(await namedThingLines(c.db, c.company.id, [{ kind: "Worker", name: "Unknown", needles: ["Unknown"], record: null }])).toEqual([]);
   });
 
+  it("DR-069 D3: a CEO reply that names something first gets up to 2 'You said' lines; a thing the owner named, or with no owner answer, gets none; the reply is saved as written", async () => {
+    const c = await setup();
+    const { youSaidLines } = await import("../src/services/named-things.js");
+    await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
+    await c.db.insert(checkWorkers).values({ name: "Quietbox", tokenHash: randomUUID(), companyIds: [c.company.id] });
+    const [card] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Keep Truenas off?", options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer: "Done: Truenas stays off", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } })
+      .returning({ id: decisions.id });
+    const reply = "I'd move merges to Truenas and Quietbox.";
+    const lines = await youSaidLines(c.db, c.company.id, reply, ["What should we do about merges?"]);
+    expect(lines).toHaveLength(1); // Quietbox: the owner never said anything about it
+    expect(lines[0], lines[0]).toContain(`on card ${card!.id.slice(0, 8)}`);
+    expect(lines[0]).toContain("Truenas stays off");
+    // the owner named it first: nothing to say
+    expect(await youSaidLines(c.db, c.company.id, reply, ["Can Truenas take merges?"])).toEqual([]);
+    // at most 2
+    for (const n of ["Aa1", "Bb2", "Cc3"]) {
+      await c.db.insert(checkWorkers).values({ name: n, tokenHash: randomUUID(), companyIds: [c.company.id] });
+      await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: `Use ${n}?`, options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer: `Done: ${n} fine`, answeredAt: new Date(), context: { type: "question" } });
+    }
+    expect((await youSaidLines(c.db, c.company.id, "Try Aa1, Bb2 and Cc3.", ["hi"])).length).toBe(2);
+  });
+
   it("BOS-1870: a Settings path through Limits shows the saved and in-force values; other paths and a failing source say nothing", async () => {
     const c = await setup();
     const { namedThingsSection } = await import("../src/services/named-things.js");

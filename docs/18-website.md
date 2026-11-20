@@ -24,8 +24,8 @@ After a successful deploy, the publish step runs `node apps/site/scripts/indexno
 
 `scripts/publish-site.sh` is the one publish step (every release ends with it, see the comment at the top of `CHANGELOG.md`). It builds the site from the commit checked out, saves the live sitemap, deploys to Cloudflare Pages, then sends the IndexNow notice — in that order. The notice is best-effort: it never fails the publish. Settings come from the environment, so it works on any host and any Cloudflare account:
 
-- `SITE_URL` (required): the site's https origin.
-- `CF_PAGES_PROJECT`: the Cloudflare Pages project. Empty: the script builds and checks only, and deploys nothing (a safe dry run).
+- `SITE_URL` (required): the site's https origin. Stored in Settings → Secrets; set it in the command only to override.
+- `CF_PAGES_PROJECT`: the Cloudflare Pages project (stored in Settings → Secrets the same way). Empty: the script builds and checks only, and deploys nothing (a safe dry run).
 - `INDEXNOW_KEY`: the key from Boss Man's Secrets. Empty: no key file is served and no notice is sent.
 - `UMAMI_SCRIPT_URL` and `UMAMI_WEBSITE_ID` (set both or neither): the https address of the Umami script (for example `https://stats.example.com/script.js`) and the site ID Umami shows for bossman.website. Both are public (they sit in every page), so they are settings, not secrets; an Umami login or API key never goes in the site. With them set, the build adds the script to every page, adds a `data-umami-event` to the Install (`install-click`), GitHub (`github-click`) and Roadmap (`roadmap-click`) links, and lets that one address into the Content-Security-Policy (`script-src` and `connect-src`). Umami sets no cookies, so there is no banner; the script is told to honour Do Not Track and to leave the query string out of recorded addresses. Without them the build prints a warning and the site has no statistics.
 - `INDEXNOW_ON_FAILURE`: a shell command to raise a CEO ticket after the notice fails twice (gets a summary in `INDEXNOW_FAILURE`).
@@ -39,14 +39,14 @@ The build ends with the pre-publish check (`scripts/check.mjs`): a page without 
 
 This is for anyone who has to change a setting the website build or publish reads.
 
-Every release ends with a site publish: the Release Manager runs `scripts/publish-site.sh` from the released commit, on the "Release log: record" wake (see the comment at the top of `CHANGELOG.md`). The script builds on the runner and uploads with wrangler, so the Cloudflare Pages build settings below are not used by it. It and the build read plain environment variables. A run gets some of them from Boss Man's Secrets; the rest are typed in for each publish or come from a file in the repo.
+Every release ends with a site publish: the Release Manager runs `scripts/publish-site.sh` from the released commit, on the "Release log: record" wake (see the comment at the top of `CHANGELOG.md`). The script builds on the runner and uploads with wrangler, so the Cloudflare Pages build settings below are not used by it. It and the build read plain environment variables. A run gets most of them from Boss Man's Secrets (one entry per name, no value in the repo); the rest are typed in for each publish or come from a file in the repo. On a new install the owner adds `SITE_URL`, `CF_PAGES_PROJECT` and `INDEXNOW_KEY` there once, next to the Umami and Cloudflare entries.
 
 | Setting | Read by | Where it is set | Who can change it | Republish after a change? |
 |---|---|---|---|---|
 | `UMAMI_SCRIPT_URL`, `UMAMI_WEBSITE_ID` | `build.mjs` (script tag, click markers, CSP), `check.mjs` | Settings → Secrets, one entry each. Every Boss Man run gets them. | The owner | Yes: pages keep the old values until the next publish. |
 | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | wrangler (the deploy step) | Settings → Secrets | The owner | No: the next publish uses the new values. |
-| `SITE_URL` | `publish-site.sh` (required), `build.mjs` (canonical links, sitemap, `og:` URLs), `check.mjs`, `indexnow.mjs` | Not stored. The Release Manager sets it for each publish; the release log entry records it. | Release Manager | Yes |
-| `CF_PAGES_PROJECT` | `publish-site.sh` | Not stored. Typed in for each publish. Empty: build and check only, nothing is deployed. | Release Manager | Yes: the next publish goes to the new project. |
+| `SITE_URL` | `publish-site.sh` (required), `build.mjs` (canonical links, sitemap, `og:` URLs), `check.mjs`, `indexnow.mjs` | Settings → Secrets (not a secret, but stored there so every run gets it and anyone can look it up). A value set in the publish command overrides it for that publish only. Not set anywhere: the script stops and says where to add it. | The owner | Yes |
+| `CF_PAGES_PROJECT` | `publish-site.sh` | Settings → Secrets, same as `SITE_URL`; a value set in the command overrides it. A name that is not lowercase letters, digits and dashes is refused before the deploy. Empty: build and check only, nothing is deployed. | The owner | Yes: the next publish goes to the new project. |
 | `CF_PAGES_BRANCH` | `publish-site.sh` | Typed in for each publish. Default `main`. | Release Manager | Yes |
 | `INDEXNOW_KEY` | `build.mjs` (key file), `indexnow.mjs` | Settings → Secrets. Not there: no key file and no IndexNow notice. | The owner | Yes: the key file has to be on the live site. |
 | `INDEXNOW_ON_FAILURE` | `indexnow.mjs` | Supplied by the publish step. Empty: a failed notice is only printed. | Release Manager | No |

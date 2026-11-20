@@ -2,6 +2,8 @@
 # Everything in CI's "check" job that runs without Docker or a real Postgres, for Boss Man's
 # "Before merging" command. CI still runs leader.test.ts (real Postgres) and the image job
 # on pushes that touch those areas, every night, and on every pull request.
+# The last two steps (ShellCheck, shell tests) are skipped in a merge check when no file they read changed (BOS-1939,
+# scripts/shell-tests-needed.sh); every other kind of run does them.
 set -euo pipefail
 self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "$self")/.."
@@ -125,8 +127,11 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # Per-step times ("check-all: step <name> took <s>s"), as {"name":seconds,...} in order, so the result shows where the time went.
     local steps
     steps=$(sed -n 's/^check-all: step \([A-Za-z0-9:._-]*\) took \([0-9]*\)s.*/"\1":\2/p' "$log" | paste -sd, -)
-    printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s,"steps":{%s}}\n' \
-      "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" >"$STORE/$key.json" || return 0
+    # Steps that were skipped ("check-all: step <name> skipped", BOS-1939) are listed apart, so a skip never reads as a pass.
+    local skipped
+    skipped=$(sed -n 's/^check-all: step \([A-Za-z0-9:._-]*\) skipped.*/"\1"/p' "$log" | paste -sd, -)
+    printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s,"steps":{%s},"skipped":[%s]}\n' \
+      "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" "$skipped" >"$STORE/$key.json" || return 0
     # Per-file test times of this run (best effort): the slowest server test files and shell tests, in seconds, for the next speed-up.
     if [ -n "$(ls -A "$times_dir" 2>/dev/null)" ]; then
       if node "$(dirname "$self")/test-times.mjs" "$times_dir" >"$STORE/$key.test-times.tmp" 2>/dev/null; then
@@ -270,7 +275,28 @@ if [ -n "$mem_peak" ]; then
 fi
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
-step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
+# Time budgets (BOS-1926), in seconds: what a step should take on the merge runner. A step over its budget is reported in the log
+# ("check-all: budget ... over by Ns") but never fails the check; the line is there so a slow stage is seen while it is still small.
+# The server tests grew from about 7 minutes (199 files) to 16 to 17.5 (411 files); the budget is the level they are trimmed to, and
+# a new file that pushes past it should be sped up or cut, not hidden by raising this number without a ticket.
+# BOSSMAN_BUDGET_TEST_SERVER_SECONDS overrides it (0 = no budget line).
+step_budget() {
+  case "$1" in
+    test:server) echo "${BOSSMAN_BUDGET_TEST_SERVER_SECONDS:-840}" ;;
+    *) echo 0 ;;
+  esac
+}
+step() {
+  local name=$1 began=$SECONDS rc=0 took budget; shift; "$@" || rc=$?
+  took=$((SECONDS - began))
+  echo "check-all: step $name took ${took}s (exit $rc, at $(date -u +%H:%M:%S) UTC)"
+  budget=$(step_budget "$name")
+  if [ "$budget" -gt 0 ] 2>/dev/null; then
+    if [ "$took" -gt "$budget" ]; then echo "check-all: budget $name ${budget}s: over by $((took - budget))s (a note, not a failure)"
+    else echo "check-all: budget $name ${budget}s: within, $((budget - took))s to spare"; fi
+  fi
+  return "$rc"
+}
 step in-memory-state node scripts/check-in-memory-state.mjs
 step test-lines node scripts/check-test-lines.mjs
 # The list guards (BOS-1727) run before the long typecheck and build, so a missing line in a hand-kept list fails in the
@@ -362,6 +388,15 @@ for d in "${pkg_dirs[@]}"; do
   if [ "${d##*/}" = web ]; then step "test:web" web_tests "$d"; continue; fi
   step "test:${d##*/}" pkg_tests "$d"
 done
-step shellcheck scripts/check-shell.sh
-step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
+# ShellCheck and the shell tests (about 6 of 29 minutes) are skipped in a merge check on a branch that changed nothing they read
+# (BOS-1939; the list and the rules are in scripts/shell-tests-needed.sh). GitHub CI still runs them on every branch and on main.
+# A skip is recorded as skipped, never as a pass: "check-all: step <name> skipped" fills the result's "skipped" list, not "steps".
+if scripts/shell-tests-needed.sh >/dev/null; then
+  step shellcheck scripts/check-shell.sh
+  step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
+else
+  echo "check-all: shell tests: skipped, no file they test changed (GitHub CI still runs them)"
+  echo "check-all: step shellcheck skipped"
+  echo "check-all: step shell-tests skipped"
+fi
 echo "check-all: everything passed"

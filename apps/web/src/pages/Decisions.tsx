@@ -1578,7 +1578,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
             {recentNotices.map((n) => (
               <li key={n.id} className="strip stack-narrow strip-cols" style={{ fontSize: 14 }}>
-                <strong className="strip-title">{n.question.split("\n")[0]}</strong> <span className="muted strip-when">· {atTime(n.notice.at)}</span>
+                <RolledTitle text={n.question.split("\n")[0] ?? ""} /> <span className="muted strip-when">· {atTime(n.notice.at)}</span>
                 <div>{n.notice.text}</div>
                 {n.notice.newer && <a href={`#/decisions/${n.notice.newer.decisionId}`}>Open the newer card ›</a>}
               </li>
@@ -1588,6 +1588,34 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       )}
       <ClosedGroup notices={shownNotices} advised={advised} />
     </>
+  );
+}
+
+/**
+ * (BOS-1935) A "Left your list recently" card's question, rolled up to its first 3 lines with an ellipsis. "Show more"
+ * appears only when the text really is cut (measured, so it follows the screen width), and expands this one card.
+ */
+function RolledTitle({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const [cut, setCut] = useState(false);
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || open) return;
+    const measure = () => setCut(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [text, open]);
+  return (
+    <span className="strip-title rolled-wrap">
+      <strong ref={ref} className={`rolled-text${open ? " open" : ""}`}>{text}</strong>
+      {(cut || open) && (
+        <button type="button" className="link-btn rolled-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? "Show less" : "Show more"}
+        </button>
+      )}
+    </span>
   );
 }
 

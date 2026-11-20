@@ -113,7 +113,7 @@ describe("finished-run history through MCP", () => {
       const rows = JSON.parse(textOf(await m.callTool(hist({}))));
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ id: finished!.id, agent: "Engineer", model: "m1", outcome: "done", seconds: 90, inputTokens: 10, outputTokens: null, cachedReadTokens: 500, cachedWriteTokens: 70, costMicros: 1_750_000 });
-      expect(Object.keys(rows[0]).sort()).toEqual(["agent", "cachedReadTokens", "cachedWriteTokens", "costMicros", "endedAt", "id", "inputTokens", "model", "origin", "outcome", "outputTokens", "seconds", "startedAt", "stopReason", "ticket"]);
+      expect(Object.keys(rows[0]).sort()).toEqual(["account", "agent", "cachedReadTokens", "cachedWriteTokens", "costMicros", "endedAt", "id", "inputTokens", "model", "origin", "outcome", "outputTokens", "seconds", "startedAt", "stopReason", "ticket"]);
       await m.close();
     }
     const m = await c.mcp(analyst!.id);

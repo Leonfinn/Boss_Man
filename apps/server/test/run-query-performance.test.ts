@@ -8,10 +8,9 @@ import { desc, eq, gte, inArray, isNull, lte, isNotNull, and, sql } from "drizzl
 import { drizzle } from "drizzle-orm/pglite";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
-import { migrate } from "drizzle-orm/pglite/migrator";
 import * as schema from "../src/db/schema.js";
 import { agents, checkJobs, checkResults, decisions, notifications, nudges, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { migrationsFolder } from "../src/db/client.js";
+import { openPglite } from "../src/db/client.js";
 import { runOriginQuery } from "../src/services/runs.js";
 import { mergeQueueQueries } from "../src/services/merge-queue.js";
 
@@ -23,11 +22,11 @@ afterEach(async () => {
 });
 
 async function setup() {
-  const client = new PGlite({ extensions: { vector: (await import("@electric-sql/pglite-pgvector")).vector } });
-  const db = drizzle(client, { schema });
-  await migrate(db, { migrationsFolder });
-  const close = async () => client.close();
-  ctx = { db, client, close };
+  // BOS-1926: a copy of the run's migrated template (parked and emptied on close), not a fresh migration per test (~4.5 s each).
+  const opened = await openPglite();
+  const db = opened.db as unknown as Db;
+  const client = (db as unknown as { $client: PGlite }).$client;
+  ctx = { db, client, close: opened.close };
   return ctx;
 }
 

@@ -105,7 +105,7 @@ import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { ownerAnswerEmbedLoop } from "./services/owner-answers.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
-import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
+import { DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
 import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -2096,7 +2096,7 @@ export async function buildApp(opts: AppOptions) {
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {
       const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(req.query);
-      return workflow.scorecard(IdParam.parse(req.params).id, q.days);
+      return workflow.scorecardWithPrevious(IdParam.parse(req.params).id, q.days);
     });
 
     // Workflow retros (docs/19 parts 2 and 3): who runs them, the latest findings and changes, and a run on demand.
@@ -2144,7 +2144,7 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title, assigneeAgentId: tickets.assigneeAgentId, systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
       if (!t) return reply.code(404).send({ error: "not_found" });
-      const release = { status: "queued" as const, statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` };
+      const release = { status: "queued" as const, statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${OWNER_OVERRIDE_PRIORITY})` };
       const released = await db
         .update(wakes)
         .set(release)
@@ -2160,7 +2160,7 @@ export async function buildApp(opts: AppOptions) {
           .where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
           .limit(1);
         if (waiting) await db.update(wakes).set(release).where(eq(wakes.id, waiting.id));
-        else await scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: id, reason: "woken by owner", priority: DEFAULT_LIMITS.highPriority, note: "The owner ran this ticket now, past the quota hold." });
+        else await scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: id, reason: "woken by owner", priority: OWNER_OVERRIDE_PRIORITY, note: "The owner ran this ticket now, past the quota hold." });
         released.push({ id: waiting?.id ?? id });
       }
       if (released.length) await scheduler.tick();

@@ -34,6 +34,7 @@ export * from "./watchdog.js";
 export * from "./destructive.js";
 export * from "./runs.js";
 export * from "./retro.js";
+export * from "./workflow-report.js";
 export * from "./sizing.js";
 export * from "./permission-judge.js";
 export * from "./devices.js";
