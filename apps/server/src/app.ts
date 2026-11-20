@@ -1012,6 +1012,8 @@ export async function buildApp(opts: AppOptions) {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     alert: (input) => alerts.raise(input),
     clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    closeTicket: (ticketId, note) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
     log: (m) => app.log.warn(m),
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).

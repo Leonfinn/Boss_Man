@@ -1764,8 +1764,27 @@ export const githubWatches = pgTable("github_watches", {
   backoffUntil: timestamp("backoff_until", { withTimezone: true }),
   lastRunAt: timestamp("last_run_at", { withTimezone: true }),
   lastNewNotes: integer("last_new_notes").notNull().default(0),
+  /** BOS-1929: also open a ticket for each open Dependabot and secret-scanning alert (no owner step: on by default). */
+  watchAlerts: boolean("watch_alerts").notNull().default(true),
+  /** Why the token can't read the alerts (the missing permission), or null. Set once per episode so the card is raised once. */
+  alertsError: text("alerts_error"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** BOS-1929: the ticket opened for a GitHub security alert. One row per alert, so the same alert never gets a second ticket. */
+export const githubAlertTickets = pgTable(
+  "github_alert_tickets",
+  {
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    /** "dependabot:<number>" or "secret:<number>" (numbers are per repo). */
+    alertKey: text("alert_key").notNull(),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** Set once the alert was seen closed on GitHub and the ticket was closed. */
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("github_alert_tickets_alert").on(t.projectId, t.alertKey)],
+);
 
 /** A link from (a passage of) a note to a feature, with how much it matters to them. */
 export const insights = pgTable(
