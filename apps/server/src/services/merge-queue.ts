@@ -609,6 +609,11 @@ export function mergeQueueService(
       const approved = await approvedOnly(await mergeQueueQueries.inReview(db, companyId));
       return approved.filter((r) => !running.has(r.id)).length;
     },
+    /** Everything in the merge line, waiting or landing (including a landing that only waits for GitHub CI): the cheap form of `get(...).lineCount`. */
+    async lineSize(companyId: string): Promise<number> {
+      const { live, ciWait } = await liveMerges(companyId);
+      return (await this.waitingCount(companyId)) + live.length + ciWait.size;
+    },
     async get(companyId: string): Promise<MergeQueueView> {
       const t = now();
       const [company] = await db.select({ prefix: companies.ticketPrefix, brakeLimit: companies.holdStartsMergesWaiting }).from(companies).where(eq(companies.id, companyId));

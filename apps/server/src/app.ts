@@ -622,7 +622,7 @@ export async function buildApp(opts: AppOptions) {
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
     mergeTrain: (id) => mergeTrainStatus(db, id),
-    idleCheckSlots: (id) => checks.idleSlots(id).map(idleView),
+    idleCheckSlots: async (id) => (await checkIdle.view(id)).map(idleView),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -1228,6 +1228,11 @@ export async function buildApp(opts: AppOptions) {
   // Idle check capacity (R46, BOS-1814): the CEO after 5 minutes, the owner after 30, once per machine and job.
   const checkIdle = checkIdleService({
     slots: () => checks.idleSlots(),
+    // The slot kept for merges is expected while a merge check is queued or running, or an approved ticket is in the merge line (waiting on GitHub CI included).
+    mergeActive: async (companyId) => {
+      const [j] = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]))).limit(1);
+      return !!j || (await mergeQueue.lineSize(companyId)) > 0;
+    },
     tellCeo: async ({ companyId, ticketId, note }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (ceo) await scheduler.notify(ceo.id, { reason: IDLE_CHECK_SLOT_REASON, ticketId, priority: 2, note });
@@ -2093,7 +2098,7 @@ export async function buildApp(opts: AppOptions) {
       const queue = await checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
       // R46: "free, not taking X because …" for every machine with a free slot that declined a job it could take.
       // BOS-1942: the server's own host name, so "Running on this server (name)" reads the same as on the Merges tab.
-      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: checks.idleSlots(id).map(idleView) };
+      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: (await checkIdle.view(id)).map(idleView) };
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
