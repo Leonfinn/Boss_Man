@@ -2,6 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, type Agent, type Company, type Project } from "../../api";
 import { usePoll } from "../../hooks";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
+import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 import { ProjectReviews } from "../../components/ReviewPolicy";
 import { QuickAdd } from "../Board";
 import { StarButton } from "../Agents";
@@ -214,8 +216,14 @@ export function GithubWatch({ projectId }: { projectId: string }) {
     setForm(f);
     sv.reset(f);
   };
-  useEffect(() => void api<GithubWatchView>(url).then(load).catch(() => {}), [projectId]);
-  if (!w || !form) return null;
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const fetchWatch = () => {
+    setLoadError(null);
+    api<GithubWatchView>(url).then(load).catch((e: Error) => setLoadError(e.message));
+  };
+  useEffect(fetchWatch, [projectId]);
+  if (loadError && !w) return <LoadError what="the GitHub feedback watcher" message={loadError} onRetry={fetchWatch} />;
+  if (!w || !form) return <Loader label="Loading the GitHub feedback watcher" />;
   const save = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {

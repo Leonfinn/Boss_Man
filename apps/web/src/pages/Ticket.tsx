@@ -18,6 +18,7 @@ import { usePoll } from "../hooks";
 import { clearDraft, readDraft, saveDraft as keepDraftText } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { NotFoundBlock } from "../components/NotFoundBlock";
+import { Loader } from "../components/Loader";
 import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
@@ -706,7 +707,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   };
 
   if (ticket.error && !away(ticket.error)) return ticket.error.status === 404 ? <NotFoundBlock title="Ticket not found" backHref="#/board" backLabel="Back to Tickets">This ticket doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{ticket.error.message}</p>;
-  if (!t) return null;
+  if (!t) return <Loader label="Loading the ticket" />;
   const made = outputs.data ?? [];
   // Collapsed, a long description still shows its first 8 lines.
   const longBody = (t.body?.split("\n").length ?? 0) > 8 || (t.body?.length ?? 0) > 800;
