@@ -11,6 +11,7 @@ import { agents, checkWorkers, companies, decisions, runnerEvents, runs, setting
 import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UPDATE, STOP_CHECKS_UPDATE_NOW, STOP_THESE_CARRY_ON, SWAP_WHEN_DONE, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
+import { untrusted } from "@boss-man/shared";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, type RunnerCheck } from "./runner-busy.js";
 
 export const MAINTENANCE_KEY = "maintenance";
@@ -71,6 +72,8 @@ export type Hold = {
   ignoreChecks?: boolean;
   /** BOS-1807: the hard cap passed with work still going, the hold lifted and the owner was told (once). */
   capNotified?: boolean;
+  /** BOS-1954: when the CEO was woken because the swap waited past its expected finish (once per hold). */
+  ceoWokenAt?: string;
   /** slug -> when its runner was recreated; the hold waits for these to reconnect. */
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
@@ -131,6 +134,11 @@ export function drainForecast(input: { runs: number; checks: RunnerCheck[]; dead
   return { phase: "waiting", expectedFinishAt: known ? new Date(Math.max(...(ends as number[]))).toISOString() : null, overdue };
 }
 
+/** BOS-1954: the longest a drain pass waits for a scheduling pass to end before it tries again on the next pass. */
+export const SETTLE_WAIT_MS = 60_000;
+/** BOS-1954: how long past a check's usual finish the swap may wait before the CEO is woken. */
+export const OVERDUE_GRACE_MS = 5 * 60_000;
+
 /** A clock time for a card: 24-hour UTC, so it reads the same on any host. */
 const fmtTime = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
 
@@ -168,6 +176,8 @@ export type MaintenanceDeps = {
   landingMerges?: () => Promise<Map<string, number>>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
+  /** BOS-1954: how long to wait for `settled` (default SETTLE_WAIT_MS); a test makes it short. */
+  settleWaitMs?: number;
   tick: () => Promise<unknown>;
   /** The per-run Stop (runs.ts cancel): BOS-1377's "Stop these and carry on" and BOS-1238's button stop runs through it. */
   cancelRun?: (runId: string) => Promise<unknown>;
@@ -176,6 +186,9 @@ export type MaintenanceDeps = {
   tellRunning?: (text: string) => Promise<unknown>;
   /** BOS-988: sends the message to just these runs and answers with the ids it reached, so a run is told once. */
   tellRuns?: (text: string, runIds: string[]) => Promise<string[]>;
+  /** BOS-1954: wakes the CEO with this note (the swap waited past its expected finish). Once per hold. */
+  /** Wakes one company's CEO; the note only ever holds that company's own work (BOS-1954, security round 1). */
+  wakeCeo?: (companyId: string, note: string) => Promise<unknown>;
   /** The hold has lifted: wake the agents who ended their runs for it, as WRAP_UP promised (BOS-574). */
   afterHold?: (since: Date) => Promise<unknown>;
   /** The deployer folder; update-runner.sh drops inbox/drain.json there to ask for a drain. */
@@ -231,6 +244,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     const live = await db
       .select({
         runId: runs.id,
+        companyId: runs.companyId,
         agentId: runs.agentId,
         agentName: agents.name,
         ticketId: runs.ticketId,
@@ -287,6 +301,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       return {
         ...(activity.get(r.runId) ?? { gotMessage: false, step: null }),
         runId: r.runId,
+        companyId: r.companyId,
         agentId: r.agentId,
         agent: r.agentName,
         ticketId: r.ticketId,
@@ -691,6 +706,33 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         await deps.notify({ companyId: null, level: "note", title: "Runner update: new work is no longer held", body: `The update waited ${HOLD_CAP_MINUTES} minutes for ${first.runsTotal} run${first.runsTotal === 1 ? "" : "s"} and ${first.checksTotal} check${first.checksTotal === 1 ? "" : "s"} and you did not answer, so new runs and checks start again. The update still goes ahead by itself once a company has none going. Open Settings > Server and runner to hold again or cancel.`, link: "#/settings" });
       }
 
+      // BOS-1954: the swap waited past when it should have finished: wake the CEO once (not the owner), naming what it waits on.
+      if (!h.ceoWokenAt && deps.wakeCeo && (total > 0 || (await landing()).size > 0)) {
+        const checksNow = h.ignoreChecks ? [] : await runnerChecks(db, t);
+        const forecast = drainForecast({ runs: first.runsTotal, checks: checksNow, deadline: h.deadline, now: t });
+        // Checks only: their usual finish plus a few minutes. Anything with an agent run in it has no usual time: the hold's deadline.
+        const due = forecast.expectedFinishAt ? new Date(new Date(forecast.expectedFinishAt).getTime() + OVERDUE_GRACE_MS) : new Date(h.deadline);
+        if (t >= due) {
+          const live = await liveWorkRuns(db, h.since, { ...h.startTold, ...startTold });
+          const landings = await landing();
+          // One note per company, with only that company's own work (security round 1: no other company's agents,
+          // tickets or step text). The step title is agent-written, so it is wrapped as untrusted.
+          const byCompany = new Map<string, string[]>();
+          const add = (companyId: string, line: string) => byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), line]);
+          for (const r of live) add(r.companyId, `- ${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"}): running ${r.runningForMinutes} min${r.gotMessage ? "" : ", has not read the wrap-up message (an agent that can't be steered, such as OpenCode, only reads it when its step ends)"}${r.step ? `, inside a tool step for ${r.step.sinceMinutes} min: ${untrusted("tool step", r.step.title)}` : ""}`);
+          for (const c of checksNow) add(c.companyId, `- ${c.kind} check${c.ticket ? ` for ${c.ticket}` : ""} (${c.scope}): running ${c.runningForMinutes} min${c.usuallyMinutes === null ? "" : `, usually ${c.usuallyMinutes} min`}`);
+          for (const [companyId, n] of landings) if (n > 0) add(companyId, `- ${n} merge${n === 1 ? "" : "s"} being pushed to main`);
+          if (byCompany.size) {
+            h = { ...h, ceoWokenAt: t.toISOString() };
+            await save(h);
+            const minutes = Math.round((t.getTime() - new Date(h.since).getTime()) / 60_000);
+            for (const [companyId, lines] of byCompany) {
+              await deps.wakeCeo(companyId, `The runner update started ${minutes} minutes ago and is still waiting. No new runs or checks start meanwhile, so your company is held. It waits on this of yours:\n${lines.join("\n")}\nNothing is stopped for you. The owner's card in Settings > Server and runner has the stop options ("Stop these and carry on", "Stop the checks and update now"). Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
+            }
+          }
+        }
+      }
+
       const failed = { ...h.failed };
       const swapped = { ...h.swapped };
       const tries = { ...h.tries };
@@ -702,7 +744,15 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // BOS-1645: a merge being pushed holds the swap even under force; the record is written as soon as the push answers.
         if (r.companyId && ((await landing()).get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
-        await deps.settled();
+        // BOS-1954: a scheduling pass that never ends must not freeze the drain (a loop never starts a second pass while one
+        // runs, so one hang would last until the next restart). Wait a bounded time, then look again on the next pass.
+        let timer: NodeJS.Timeout | undefined;
+        const settledInTime = await Promise.race([deps.settled().then(() => true), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), deps.settleWaitMs ?? SETTLE_WAIT_MS); timer.unref?.(); })]);
+        clearTimeout(timer);
+        if (!settledInTime) {
+          deps.log?.(`drain: a scheduling pass has not ended after ${Math.round((deps.settleWaitMs ?? SETTLE_WAIT_MS) / 1000)} s; ${r.slug} is looked at again on the next pass`);
+          continue;
+        }
         active = await withChat(waitedOn(await runnerBusy(db, true)));
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         if (r.companyId && ((await landing()).get(r.companyId) ?? 0) > 0) continue;

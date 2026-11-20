@@ -14,7 +14,7 @@ import { and, eq } from "drizzle-orm";
 import type { MainLogResult, RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, projects, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, projects, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { gateMergeMessage, isGateMergeOf, LIVE_UNPLACED_REASON, mergeMessageTicket } from "../src/services/missed-merges.js";
 
 const KEY = "k".repeat(43);
@@ -164,6 +164,28 @@ describe("the runner swap waits for a merge being pushed (BOS-1645)", () => {
     await c.maintenance.step();
     expect(c.recreated).toEqual(["app-co"]);
     expect((await c.row(t.id)).systemState).toBe("done");
+  });
+});
+
+describe("a merge whose check is still queued doesn't hold the runner swap (BOS-1954)", () => {
+  it("the swap goes ahead while the check waits for the hold; a merge past its check is still waited for", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the other thing");
+    c.setHoldPush(true);
+    await c.review.startLanding(t.id, "Sam", null, { skipChecks: true });
+    await until(() => c.heldPush.length > 0, "the merge push");
+    // The CI-gated path marks a merge "merging" before its check is queued; the update holds that check, so waiting for the
+    // merge would wait for the swap that waits for it (22:13 to 22:46 on 19 Nov).
+    const [job] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t.id, kind: "merge", scope: "full", commit: sha("b"), tree: "t1", state: "queued" }).returning();
+    expect((await c.review.landingMergesByCompany()).size).toBe(0);
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.maintenance.step();
+    expect(c.recreated).toEqual(["app-co"]);
+    // Past its check (the job ended), the same merge is a push in flight and is counted again.
+    await c.db.update(checkJobs).set({ state: "passed" }).where(eq(checkJobs.id, job!.id));
+    expect((await c.review.landingMergesByCompany()).get(c.company.id)).toBe(1);
+    c.heldPush.shift()!();
+    await until(async () => !(await c.review.landingMergesByCompany()).size, "the landing to end");
   });
 });
 
