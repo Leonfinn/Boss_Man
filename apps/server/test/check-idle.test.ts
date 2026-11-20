@@ -148,6 +148,74 @@ describe("idle check slot alarm", () => {
     expect(r.ceo).toHaveLength(2);
   });
 
+  describe("the slot kept for merges (BOS-1959)", () => {
+    function merges(active: { on: boolean }, slots: IdleSlot[] = [slot()]) {
+      const clock = { at: T(0) };
+      const ceo: string[] = [];
+      const owner: string[] = [];
+      const svc = checkIdleService({
+        slots: () => slots,
+        mergeActive: async () => active.on,
+        tellCeo: async ({ note }) => void ceo.push(note),
+        notify: async (i) => void owner.push(i.body),
+        now: () => clock.at,
+      });
+      return { svc, clock, ceo, owner };
+    }
+    const after = (min: number) => new Date(T(0).getTime() + min * 60_000);
+
+    it("does not wake the CEO or page the owner while merges are active, and shows the slot as expected", async () => {
+      const r = merges({ on: true });
+      r.clock.at = after(45);
+      await r.svc.run();
+      expect(r.ceo).toEqual([]);
+      expect(r.owner).toEqual([]);
+      expect((await r.svc.view("co1"))[0]).toMatchObject({ expected: true });
+    });
+
+    it("wakes the CEO once when no merge activity has been seen for 60 minutes, and pages the owner 25 minutes later", async () => {
+      const active = { on: true };
+      const r = merges(active);
+      r.clock.at = after(20);
+      await r.svc.run(); // active at minute 20
+      active.on = false;
+      r.clock.at = after(20 + 59);
+      await r.svc.run();
+      expect(r.ceo).toEqual([]);
+      expect((await r.svc.view("co1"))[0]).toMatchObject({ expected: false });
+      r.clock.at = after(20 + 60);
+      await r.svc.run();
+      await r.svc.run();
+      expect(r.ceo).toHaveLength(1);
+      expect(r.owner).toEqual([]);
+      r.clock.at = after(20 + 85);
+      await r.svc.run();
+      expect(r.owner).toHaveLength(1);
+    });
+
+    it("leaves the other reasons alone: a no_code decline still wakes at 5 minutes while merges are active", async () => {
+      const r = merges({ on: true }, [slot({ code: "no_code" })]);
+      r.clock.at = after(5);
+      await r.svc.run();
+      expect(r.ceo).toHaveLength(1);
+    });
+
+    it("stays quiet if merge activity can't be read", async () => {
+      const svc = checkIdleService({
+        slots: () => [slot()],
+        mergeActive: async () => {
+          throw new Error("db down");
+        },
+        tellCeo: async () => {
+          throw new Error("should not wake");
+        },
+        notify: async () => undefined,
+        now: () => after(45),
+      });
+      expect(await svc.run()).toEqual({ ceo: 0, owner: 0 });
+    });
+  });
+
   it("writes the line a person can act on", () => {
     expect(idleLine({ machine: "the company runner", text: "the last free slot is kept for a quick check", minutes: 7, ref: "the queued merge check" })).toBe(
       "the company runner has a free slot and is not taking the queued merge check because the last free slot is kept for a quick check (7 min).",
