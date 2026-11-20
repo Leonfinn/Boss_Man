@@ -119,7 +119,7 @@ export function runningMerges(this: ReviewSelf, ctx: ReviewCtx): Array<{ ticketI
 export async function landingMergesByCompany(this: ReviewSelf, ctx: ReviewCtx): Promise<Map<string, number>> {
   const { db } = ctx;
   const ids = await this.landingMergeIds();
-  const out = new Map<string, number>();
+  const out = new Map<string, number>(); // not state: local to this call
   if (!ids.length) return out;
   const rows = await db.select({ companyId: tickets.companyId }).from(tickets).where(inArray(tickets.id, ids));
   for (const r of rows) out.set(r.companyId, (out.get(r.companyId) ?? 0) + 1);
@@ -396,7 +396,7 @@ export async function sweepCiBranches(this: ReviewSelf, ctx: ReviewCtx, maxAgeMs
   const out = { repos: 0, deleted: [] as string[], failed: 0 };
   if (!deps.gitHosts) return out;
   const rows = await db.select({ companyId: projects.companyId, repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase }).from(projects).where(eq(projects.gitHost, "github"));
-  const seen = new Set<string>();
+  const seen = new Set<string>(); // not state: local to this call
   for (const p of rows) {
     const target = await prTarget(p.companyId, p.repoUrl, p.gitHost, p.gitApiBase).catch(() => null);
     if (!target) continue;
