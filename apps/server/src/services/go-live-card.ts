@@ -1,6 +1,9 @@
 // R38 (BOS-1683): a card that asks the owner to put something live (publish, deploy, release) is held to the same
 // proof as the work itself. A website publish card reached the owner (16 Nov) with its ticket's preview check
 // unreported and an untested "rolls back in seconds" promise. Self-deploy cards have their own gates and don't use this.
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import type { Db } from "../db/client.js";
+import { githubAlertTickets, tickets } from "../db/schema.js";
 import { criterionText, isAfterMerge, missingVerdicts, normQuote, pageClauses, readVerdicts, type Criterion } from "@boss-man/shared";
 
 /** Words that say a card is about putting something live. */
@@ -9,7 +12,6 @@ const GO_LIVE_WORDS = /\b(?:publish(?:ed|ing)?|deploy(?:ed|ing|ment)?|release[sd
 /** True when a card's question or steps talk about going live. */
 export const sayGoLive = (...texts: ReadonlyArray<string | undefined>): boolean => texts.some((t) => !!t && GO_LIVE_WORDS.test(t));
 
-/** The note for a card that talks about going live but isn't marked goLive: its checks are skipped, so say so. */
 /** BOS-2085 (R54): the first full 40-hex commit sha the question or steps name, lower-cased; undefined when none (a short sha is not enough to pin a release). */
 export function releasedCommitOf(...texts: ReadonlyArray<string | undefined>): string | undefined {
   for (const t of texts) {
@@ -19,6 +21,23 @@ export function releasedCommitOf(...texts: ReadonlyArray<string | undefined>): s
   return undefined;
 }
 
+/**
+ * BOS-2085 (R54): the live line on a go-live card: the repo security alerts open right now at high or critical (the risk
+ * of the ticket the watcher made for each), read each time the card is shown so it changes as alerts open and close.
+ */
+export async function openAlertsLine(db: Db, companyId: string): Promise<string> {
+  const rows = await db
+    .select({ key: githubAlertTickets.alertKey, repo: githubAlertTickets.repo, risk: tickets.risk })
+    .from(githubAlertTickets)
+    .innerJoin(tickets, eq(tickets.id, githubAlertTickets.ticketId))
+    .where(and(eq(tickets.companyId, companyId), isNull(githubAlertTickets.closedAt), inArray(tickets.risk, ["high", "critical"])))
+    .orderBy(asc(githubAlertTickets.createdAt));
+  if (!rows.length) return "No high or critical repo security alerts are open right now.";
+  const list = rows.map((r) => `${r.key.startsWith("secret:") ? "secret scanning" : "Dependabot"} ${r.risk} #${r.key.split(":")[1]}${r.repo ? ` on ${r.repo}` : ""}`).join("; ");
+  return `${rows.length} high or critical repo security alert${rows.length === 1 ? " is" : "s are"} open right now: ${list}. Check that the release is not affected before approving.`;
+}
+
+/** The note for a card that talks about going live but isn't marked goLive: its checks are skipped, so say so. */
 export const GO_LIVE_UNMARKED =
   "This card talks about putting something live (publish, deploy, release, go live or production) but isn't marked goLive. A go-live card is checked: its ticket's before-merge checks must be reported with page proof, and it must state its undo (rollback, tagged \"tested: <when, how>\" or \"not tested: <docs URL>\"). If it is one, withdraw it and raise it again with goLive true.";
 

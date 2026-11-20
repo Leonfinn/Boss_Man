@@ -83,6 +83,7 @@ import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, les
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import type { ClearWhen } from "./alert-clearing.js";
 import { unlinkedWaiters } from "./owner-todo.js";
+import { openAlertsLine } from "./go-live-card.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
@@ -2519,6 +2520,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const c = d.context as DecisionContext;
         if (c.type === "risk_review" && c.ticketId) signoffFactsOf.set(d.id, await signoffFacts(db, c.ticketId, typeof c.files === "number" ? c.files : null));
       }
+      // BOS-2085 (R54): a go-live card shows the high or critical repo alerts open now, read on every view (once per company).
+      const openAlertsOf = new Map<string, string>();
+      for (const { d } of open) {
+        if ((d.context as { goLive?: boolean }).goLive && !openAlertsOf.has(d.companyId)) openAlertsOf.set(d.companyId, await openAlertsLine(db, d.companyId));
+      }
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
@@ -2553,7 +2559,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
           : facts && c.type === "risk_review"
             ? { ...c, ...facts }
-            : d.context;
+            : openAlertsOf.has(d.companyId) && (c as { goLive?: boolean }).goLive
+              ? { ...c, openAlerts: openAlertsOf.get(d.companyId) }
+              : d.context;
         return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, projects: cardProjects, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, wakes } from "../src/db/schema.js";
+import { decisions, githubAlertTickets, wakes } from "../src/db/schema.js";
 import { releasedCommitOf } from "../src/services/go-live-card.js";
 import { securityAlertChanged, STALE_REASON } from "../src/services/stale-requests.js";
 
@@ -25,7 +25,7 @@ async function setup() {
   const req = (method: "POST", url: string, payload: unknown) => built.app.inject({ method, url, headers: { cookie }, payload: payload as object });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
-  return { ...built, db, close, company, worker };
+  return { ...built, db, close, company, worker, cookie };
 }
 
 describe("releasedCommitOf", () => {
@@ -33,6 +33,36 @@ describe("releasedCommitOf", () => {
     expect(releasedCommitOf("Tag 1c8d9227 now", `Release ${SHA.toUpperCase()} please`)).toBe(SHA);
     expect(releasedCommitOf("Tag 1c8d9227 now", undefined)).toBeUndefined();
     expect(releasedCommitOf("a".repeat(41))).toBeUndefined();
+  });
+});
+
+describe("the go-live card's open-alerts line", () => {
+  it("changes as high or critical alerts open and close, and only go-live cards carry it", async () => {
+    const c = (ctx = await setup());
+    const raise = (question: string, extra: Record<string, unknown> = {}) =>
+      c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question, options: ["Yes", "No"], recommended: "Yes", triedFirst: "Looked", ...extra });
+    const live = await raise("Tag the release?", { goLive: true });
+    const plain = await raise("Which colour?");
+    const lineOf = async (id: string) => ((await c.decisions.queue({ includeAll: true })).find((r) => r.id === id)!.context as { openAlerts?: string }).openAlerts;
+
+    expect(await lineOf(live.id)).toBe("No high or critical repo security alerts are open right now.");
+    expect(await lineOf(plain.id)).toBeUndefined();
+
+    const project = (await c.app.inject({ method: "POST", url: `/api/companies/${c.company.id}/projects`, headers: { cookie: c.cookie }, payload: { name: "Site" } })).json() as { id: string };
+    const mk = async (title: string, risk: "low" | "high" | "critical", key: string) => {
+      const t = await c.work.createTicket(project.id, { title, risk, state: "backlog" } as never);
+      await c.db.insert(githubAlertTickets).values({ projectId: project.id, alertKey: key, ticketId: t.id, repo: "example/repo" });
+    };
+    await mk("body-parser", "high", "dependabot:7");
+    await mk("tiny-lib", "low", "dependabot:8");
+    expect(await lineOf(live.id)).toMatch(/^1 high or critical repo security alert is open right now: Dependabot high #7 on example\/repo\./);
+
+    await mk("leaked", "critical", "secret:2");
+    expect(await lineOf(live.id)).toMatch(/^2 high or critical repo security alerts are open.*Dependabot high #7.*secret scanning critical #2/);
+
+    await c.db.update(githubAlertTickets).set({ closedAt: new Date() }).where(eq(githubAlertTickets.alertKey, "dependabot:7"));
+    await c.db.update(githubAlertTickets).set({ closedAt: new Date() }).where(eq(githubAlertTickets.alertKey, "secret:2"));
+    expect(await lineOf(live.id)).toBe("No high or critical repo security alerts are open right now.");
   });
 });
 
