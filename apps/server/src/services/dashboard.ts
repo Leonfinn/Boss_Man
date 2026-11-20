@@ -4,7 +4,7 @@ import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runners as runnersTable, runs, tickets, wakes } from "../db/schema.js";
 import { liveRuns, runOriginQuery } from "./runs.js";
-import { isWorkingRun } from "./agent-wip.js";
+import { cantMoveSql, isWorkingRun } from "./agent-wip.js";
 import { passedReviewTickets } from "./review-kinds.js";
 import { blockedSplit } from "./go-live-note.js";
 import type { LimitInForce } from "./deploy-wait-hold.js";
@@ -128,6 +128,16 @@ export function dashboardService(
         .groupBy(tickets.systemState);
       const count = (s: string) => states.find((x) => x.state === s)?.n ?? 0;
       const blockedCounts = await blockedSplit(db, companyId);
+      // BOS-1909: "Tasks in progress" is the counted work only (the WIP rule); the three groups that move by themselves are counted apart.
+      const [groups] = await db
+        .select({
+          counted: sql<number>`(count(*) filter (where ${tickets.systemState} = 'in_progress' and not ${cantMoveSql}))::int`,
+          nextUp: sql<number>`(count(*) filter (where ${tickets.systemState} = 'ready' and ${tickets.nextUpAt} is not null))::int`,
+          beingChecked: sql<number>`(count(*) filter (where ${tickets.systemState} = 'review' and ${tickets.checkHoldAt} is not null))::int`,
+          mergedInProgress: sql<number>`(count(*) filter (where ${tickets.systemState} = 'in_progress' and ${tickets.mergedAt} is not null))::int`,
+        })
+        .from(tickets)
+        .where(eq(tickets.companyId, companyId));
       // Of the tickets in review, those every reviewer has approved: only the merge (or the owner's sign-off) is left (BOS-667).
       const inReviewIds = count("review") ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))).map((r) => r.id) : [];
       const approved = (await passedReviewTickets(db, inReviewIds)).size;
@@ -216,6 +226,10 @@ export function dashboardService(
           running: new Set(live.filter(isWorkingRun).map((r) => r.agentId)).size,
           paused: team.filter((a) => a.paused).length,
           inProgress: count("in_progress"),
+          inProgressCounted: groups?.counted ?? 0,
+          nextUp: groups?.nextUp ?? 0,
+          beingChecked: groups?.beingChecked ?? 0,
+          watching: blockedCounts.liveCheck + (groups?.mergedInProgress ?? 0),
           inReview: count("review"),
           // inReview split in two, so the owner sees whether reviewers or the merge line hold work up.
           awaitingReview: count("review") - approved,

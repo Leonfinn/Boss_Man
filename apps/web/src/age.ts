@@ -26,3 +26,11 @@ export function ageShort(ms: number) {
 export function raisedAgo(iso: string, now = Date.now()) {
   return ageLabel(now - new Date(iso).getTime());
 }
+
+/** A date-only "YYYY-MM-DD" (a Postgres `date`) as a short day for the reader, like "1 Dec". It is
+ * read as a local calendar day: `new Date("2026-12-01")` is midnight UTC and shows 30 Nov west of UTC. */
+export function dayLabel(ymd: string, locale?: string) {
+  const [y, m, d] = ymd.slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return ymd;
+  return new Date(y, m - 1, d).toLocaleDateString(locale, { day: "numeric", month: "short" });
+}
