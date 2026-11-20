@@ -2,6 +2,8 @@
 # Checks request-ceo-ticket.sh: it posts a ticket to Boss Man's own API with the run's token, JSON-escapes the
 # reason, and never fails the publish (a missing token, address or reason only prints why). Nothing is sent.
 set -euo pipefail
+# The hook itself runs under `sh` (the publish step supplies it that way, BOS-2070); this test is a bash script
+# ([[ ]] below), so it keeps bash's own safety options.
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }

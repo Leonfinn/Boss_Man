@@ -13,7 +13,8 @@
 #
 # A website publish that changed no pages sends no notice, so a real failure is worth a look: the pages may have
 # changed without search engines being told, and the key file (or the key) is often the cause.
-set -euo pipefail
+set -euf
+# The publish step runs the hook with `sh` (it needs nothing from bash), so no `set -o pipefail` here.
 
 reason="${INDEXNOW_FAILURE:-}"
 [ -n "$reason" ] || { echo "request-ceo-ticket: no INDEXNOW_FAILURE given; nothing raised"; exit 0; }

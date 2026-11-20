@@ -72,6 +72,7 @@ $wrangler pages deploy "$dist" --project-name "$CF_PAGES_PROJECT" --branch "$bra
 echo "publish-site: sending the IndexNow notice"
 # A notice that fails twice raises a CEO ticket (scripts/request-ceo-ticket.sh). An INDEXNOW_ON_FAILURE set in the
 # command replaces it; an empty one leaves the failure in the log only.
-if [ -n "${INDEXNOW_ON_FAILURE+set}" ]; then on_failure="$INDEXNOW_ON_FAILURE"; else on_failure="bash $(dirname "${BASH_SOURCE[0]}")/request-ceo-ticket.sh"; fi
-SITE_URL="$site_url" DIST="$dist" INDEXNOW_ON_FAILURE="$on_failure" node apps/site/scripts/indexnow.mjs --previous "$previous" || true
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${INDEXNOW_ON_FAILURE+set}" ]; then on_failure="$INDEXNOW_ON_FAILURE"; else on_failure="sh $here/request-ceo-ticket.sh"; fi
+SITE_URL="$site_url" DIST="$dist" INDEXNOW_ON_FAILURE="$on_failure" node "$here/../apps/site/scripts/indexnow.mjs" --previous "$previous" || true
 echo "publish-site: done"
