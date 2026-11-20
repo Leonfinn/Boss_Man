@@ -32,6 +32,7 @@ export type PreflightDeps = {
   context: (ticket: { id: string; companyId: string; projectId: string }) => Promise<PreflightContext | null>;
   wake?: (agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => PromiseLike<unknown> | unknown;
   timing?: CiTiming;
+  log?: (line: string) => void;
 };
 
 const short = (s: string) => s.slice(0, 8);
@@ -132,9 +133,11 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
      * After a server restart: a run that started (row) but has no result (row) lost its in-memory run, and the author was told
      * to wait for a wake that would never come. Start those again. Safe to call twice: a run in memory is skipped.
      */
-    async recover(): Promise<number> {
+    async recover(): Promise<{ launched: number; skipped: number; skippedIds: string[] }> {
+      const skippedIds: string[] = [];
       const started = await db.select().from(checkResults).where(eq(checkResults.kind, PREFLIGHT_STARTED_KIND)).orderBy(desc(checkResults.at)).limit(200);
       let n = 0;
+      let skipped = 0;
       const seen = new Set<string>();
       for (const s of started) {
         if (seen.has(s.ticketId) || !s.sha || !s.detail) continue;
@@ -143,12 +146,55 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         if (await latest(s.ticketId, PREFLIGHT_KIND, s.sha)) continue;
         const [t] = await db.select().from(tickets).where(eq(tickets.id, s.ticketId));
         if (!t || (t.systemState !== "in_progress" && t.systemState !== "review")) continue;
-        const ctx = await deps.context(t).catch(() => null);
-        if (!ctx) continue;
+        const ctx = await deps.context(t).catch((err) => {
+          deps.log?.(`GitHub CI pre-check recovery: could not set up ticket ${short(t.id)}: ${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        });
+        if (!ctx) {
+          skipped++;
+          skippedIds.push(t.id); // no runner connected yet (or GitHub CI can't be used): a later try may find one
+          continue;
+        }
         launch(t, s.detail, s.sha, ctx);
         n++;
       }
-      return n;
+      deps.log?.(`GitHub CI pre-check recovery: ${n} relaunched, ${skipped} skipped (no runner connected yet)`);
+      return { launched: n, skipped, skippedIds };
+    },
+
+    /**
+     * recover() now, then again every `everyMs` while some ticket was skipped, until `forMs` has passed. A runner that
+     * reconnects after the first try is found on a later one. Returns a function that stops it.
+     */
+    recoverRepeatedly(o: { firstMs: number; everyMs: number; forMs: number }): () => void {
+      const startedAt = Date.now();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let stopped = false;
+      const tick = async () => {
+        let again = false;
+        let pending: string[] = [];
+        try {
+          const r = await this.recover();
+          pending = r.skippedIds;
+          again = r.skipped > 0;
+        } catch (err) {
+          deps.log?.(`GitHub CI pre-check recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+          again = true;
+        }
+        if (stopped || !again) return;
+        if (Date.now() - startedAt + o.everyMs > o.forMs) {
+          deps.log?.(`GitHub CI pre-check recovery: giving up after ${Math.round(o.forMs / 60000)} min; still skipped: ${pending.map(short).join(", ") || "none named (setup failed)"}`);
+          return;
+        }
+        timer = setTimeout(() => void tick(), o.everyMs);
+        timer.unref();
+      };
+      timer = setTimeout(() => void tick(), o.firstMs);
+      timer.unref();
+      return () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+      };
     },
 
     /**
