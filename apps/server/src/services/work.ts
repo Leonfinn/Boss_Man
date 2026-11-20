@@ -837,6 +837,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: `Waits on ticket ${blocker.ticketId} until it is ${until}`, at: now() });
           return changed!;
         }
+      } else {
+        const [same] = await db.select().from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerEngagementId, blocker.engagementId!)));
+        if (same) return same;
       }
       const dep = await addTicketDependency(db, {
         companyId: t.companyId,

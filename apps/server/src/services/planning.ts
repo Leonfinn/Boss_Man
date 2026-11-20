@@ -6,6 +6,7 @@ import { layoutPlan, milestoneHorizon, milestoneStatus, ticketRef, type Horizon,
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
 import { WorkError } from "./work.js";
+import { record } from "./activity.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
 import { heldReadyTickets } from "./agent-wip.js";
@@ -279,6 +280,21 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       if (!d) throw new WorkError(404, "No such dependency.");
       if (d.blockerDecisionId) throw new WorkError(422, "This ticket waits on a decision. Answer the decision to release it.");
       await db.delete(ticketDependencies).where(eq(ticketDependencies.id, id));
+      // Leave a line in the ticket's history, so it doesn't just start with no sign of why.
+      let what = "a ticket";
+      if (d.blockerTicketId) {
+        const [b] = await db
+          .select({ number: tickets.number, prefix: companies.ticketPrefix, title: tickets.title })
+          .from(tickets)
+          .innerJoin(companies, eq(companies.id, tickets.companyId))
+          .where(eq(tickets.id, d.blockerTicketId));
+        if (b) what = `${ticketRef(b.prefix, b.number)} ${b.title}`;
+      } else if (d.blockerEngagementId) {
+        const [e] = await db.select({ title: engagements.title }).from(engagements).where(eq(engagements.id, d.blockerEngagementId));
+        what = `engagement ${e?.title ?? d.blockerEngagementId}`;
+      }
+      const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, d.blockedTicketId));
+      if (t) await record(db, { companyId: t.companyId, ticketId: d.blockedTicketId, kind: "dependency", summary: `The owner removed the wait on ${what}`, at: new Date() });
       await deps.release(d.blockedTicketId);
     },
 
