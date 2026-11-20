@@ -237,11 +237,13 @@ docker compose kill -s SIGUSR2 server-green
 
 Then start the proxy and the other services except Tailscale (name them: for example `docker compose up -d --no-deps proxy launcher`; the service names are in your compose files). **Do not start Tailscale yet**: it starts in stage 5, after these checks.
 
-The app answers on port 3100 (the feedback portal is 3101, and has no `/api/ready`):
+The app answers on the port `BOSSMAN_HOST_PORT` sets in the new host's `.env` (3100 unless you changed it; the feedback portal uses `BOSSMAN_PORTAL_HOST_PORT`, 3101 by default, and has no `/api/ready`). Run this in the folder you run compose from. It reads the port from `.env` and falls back to 3100:
 
 ```sh
-curl -s http://<host-ip>:3100/api/ready
+PORT=$(grep -s '^BOSSMAN_HOST_PORT=' .env | tail -n1 | cut -d= -f2 | tr -d '"'); curl -sS "http://<host-ip>:${PORT:-3100}/api/ready"
 ```
+
+For example, with the default port: `curl -sS http://192.168.1.50:3100/api/ready`. If you see `Connection refused`, the server has not started yet or the port is wrong: wait a minute, then check the port matches `BOSSMAN_HOST_PORT` in `.env`.
 
 It must show `"role":"leader"`. Ticket and migration counts must equal the numbers you wrote down in stage 3.
 
