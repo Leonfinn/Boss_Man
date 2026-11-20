@@ -6,8 +6,12 @@ import type { GoLiveWait } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { decisions, tickets } from "../db/schema.js";
 
-/** BOS-1636: SQL twin of isLiveCheckWait (shared): in Blocked with a merge. Counts of "blocked" tickets leave these out. */
-export const liveCheckWaitSql = sql`(${tickets.systemState} = 'blocked' and ${tickets.mergeCommit} is not null)`;
+/**
+ * BOS-1636: SQL twin of isLiveCheckWait (shared) for the Blocked half: in Blocked with a merge, or (BOS-1907) a split-out
+ * check ticket whose parent is merged and not done. Counts of "blocked" tickets leave these out.
+ */
+export const liveCheckWaitSql = sql`(${tickets.systemState} = 'blocked' and (${tickets.mergeCommit} is not null
+  or exists (select 1 from tickets p where p.id = ${tickets.checksTicketId} and p.merge_commit is not null and p.system_state <> 'done')))`;
 
 /** Blocked tickets of a company that really are blocked, and those that are only merged work waiting for a live check. */
 export async function blockedSplit(db: Db, companyId: string): Promise<{ blocked: number; liveCheck: number }> {

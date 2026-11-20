@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, decisions, feedbackNotes, githubWatches } from "../src/db/schema.js";
+import { agents, decisions, feedbackNotes, githubWatches, tickets as ticketsTable } from "../src/db/schema.js";
 import { githubWatchService, looksLikeSecurityReport } from "../src/services/github-watch.js";
 import { clearOwnerTodo } from "../src/services/decisions.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -24,12 +24,17 @@ type Item = { id: number; number: number; title: string; body: string; user: str
 type Comment = { id: number; number: number; body: string; user: string; updated: string };
 type Disc = { id: string; number: number; title: string; body: string; user: string; updated: string; comments: Array<{ id: string; databaseId: number; body: string; user: string; updated: string }> };
 
+type DepAlert = { number: number; state: "open" | "fixed"; pkg: string; severity: string; summary: string; classification?: "general" | "malware" };
+type SecAlert = { number: number; state: "open" | "resolved"; type: string; value: string };
+
 /** A made-up GitHub. `mode` makes every call fail the way GitHub does. */
 function stub() {
   const gh = {
     issues: [] as Item[],
     comments: [] as Comment[],
     discussions: [] as Disc[],
+    dependabot: [] as DepAlert[] | "disabled" | "forbidden",
+    secrets: [] as SecAlert[] | "disabled" | "forbidden",
     mode: "ok" as "ok" | "401" | "404" | "rate" | "403",
     resetAt: Math.floor((START + 30 * MIN) / 1000),
     calls: [] as Array<{ url: string; auth: string | null }>,
@@ -43,6 +48,19 @@ function stub() {
     if (gh.mode === "403") return json(403, { message: "Resource not accessible by personal access token" });
     if (gh.mode === "rate") return json(403, { message: "API rate limit exceeded" }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(gh.resetAt) });
     const u = new URL(url);
+    if (u.pathname === `/repos/${REPO}/dependabot/alerts`) {
+      if (gh.dependabot === "disabled") return json(403, { message: "Dependabot alerts are disabled for this repository." });
+      if (gh.dependabot === "forbidden") return json(403, { message: "Resource not accessible by personal access token" });
+      return json(200, gh.dependabot.filter((a) => a.state === "open").map((a) => ({ number: a.number, state: a.state, html_url: "x", dependency: { package: { name: a.pkg, ecosystem: "npm" }, manifest_path: "pnpm-lock.yaml" }, security_advisory: { severity: a.severity, classification: a.classification ?? "general", ghsa_id: "GHSA-aaaa-bbbb-cccc", summary: a.summary }, security_vulnerability: { vulnerable_version_range: "< 2.0.0", first_patched_version: { identifier: "2.0.0" } } })));
+    }
+    if (u.pathname === `/repos/${REPO}/secret-scanning/alerts`) {
+      if (gh.secrets === "disabled") return json(404, { message: "Secret scanning is disabled on this repository." });
+      if (gh.secrets === "forbidden") return json(404, { message: "Not Found" });
+      // The real API puts the secret's value in the alert: the watcher must never copy it.
+      return json(200, gh.secrets.filter((a) => a.state === "open").map((a) => ({ number: a.number, state: a.state, secret_type_display_name: a.type, secret: a.value })));
+    }
+    const loc = /^\/repos\/.+\/secret-scanning\/alerts\/(\d+)\/locations$/.exec(u.pathname);
+    if (loc) return json(200, [{ type: "commit", details: { path: "src/config.ts", start_line: 12, commit_sha: "abcdef1234567" } }]);
     const since = u.searchParams.get("since") ?? "1970-01-01T00:00:00Z";
     const page = Number(u.searchParams.get("page") ?? 1);
     const slice = <T,>(all: T[]) => all.slice((page - 1) * 100, page * 100);
@@ -93,6 +111,8 @@ async function setup(opts: { token?: string | undefined; support?: boolean } = {
     notify: async (agentId, i) => void woken.push({ agentId, reason: i.reason, note: i.note }),
     alert: (i) => t!.alerts.raise(i),
     clearCard: (key, summary) => clearOwnerTodo(t!.db, key, summary),
+    createTicket: (projectId, input) => t!.work.createTicket(projectId, input),
+    closeTicket: (ticketId, note) => t!.work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
     log: (m) => logs.push(m),
   });
   await svc.save(project.id, company.id, { enabled: true, repo: REPO });
@@ -333,5 +353,109 @@ describe("the setting", () => {
     expect(loops).toContain('name: "github watch"');
     // The window is wide on purpose: main's takeover bookkeeping sits between onPromote and startBackground.
     expect(main).toMatch(/onPromote\([^)]*\)?[\s\S]{0,1000}startBackground\(\)/);
+  });
+});
+
+describe("security alerts (BOS-1929)", () => {
+  const secretValue = ["ghp", "ThisIsAMadeUpSecretValue0123456789"].join("_");
+  const allTickets = async (companyId: string) => (await t!.db.select().from(ticketsTable).where(eq(ticketsTable.companyId, companyId))).sort((a, b) => a.title.localeCompare(b.title));
+
+  it("opens one ticket per alert, never copies a secret's value, never duplicates, and closes the ticket when GitHub closes the alert", async () => {
+    const c = await setup();
+    const [sec] = await t!.db.insert(agents).values({ companyId: c.company.id, name: "Jane - Security Reviewer", role: "worker", agentKind: "claude", template: "security-reviewer" } as never).returning();
+    c.gh.dependabot = [
+      { number: 3, state: "open", pkg: "left-pad", severity: "high", summary: "Prototype pollution" },
+      { number: 4, state: "open", pkg: "tiny-lib", severity: "low", summary: "Minor" },
+    ];
+    c.gh.secrets = [{ number: 9, state: "open", type: "GitHub Personal Access Token", value: secretValue }];
+    await c.svc.runOne(c.project.id);
+    const rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(3);
+    const leak = rows.find((r) => r.title.startsWith("Leaked secret"))!;
+    expect(leak).toMatchObject({ risk: "high", urgent: true, assigneeAgentId: sec!.id, systemState: "ready" });
+    expect(leak.body).toContain("src/config.ts");
+    expect(leak.body).toContain("abcdef1234567");
+    // Nowhere: not the ticket, not the wake notes, not the logs.
+    expect(JSON.stringify(rows)).not.toContain(secretValue);
+    expect(JSON.stringify(c.woken)).not.toContain(secretValue);
+    expect(c.logs.join("\n")).not.toContain(secretValue);
+    const high = rows.find((r) => r.title.includes("left-pad"))!;
+    expect(high).toMatchObject({ risk: "high", assigneeAgentId: c.ceo!.id });
+    expect(rows.find((r) => r.title.includes("tiny-lib"))!.risk).toBe("low");
+    expect(c.woken.some((w) => w.reason === "github secret alert")).toBe(true);
+
+    // A later pass sees the same alerts: no second ticket.
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect(await allTickets(c.company.id)).toHaveLength(3);
+
+    // GitHub closes the secret alert and one Dependabot alert: those tickets close, the open one stays.
+    c.gh.secrets[0]!.state = "resolved";
+    c.gh.dependabot[1]!.state = "fixed";
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    const after = await allTickets(c.company.id);
+    expect(after.filter((r) => r.systemState === "done").map((r) => r.title).sort()).toEqual([leak.title, rows.find((r) => r.title.includes("tiny-lib"))!.title].sort());
+    expect(after.find((r) => r.id === high.id)!.systemState).toBe("ready");
+    // Reopened later: still no second ticket for it.
+    c.gh.secrets[0]!.state = "open";
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect(await allTickets(c.company.id)).toHaveLength(3);
+  });
+
+  it("treats malware-type Dependabot alerts as high risk even when GitHub rates them low, and still handles vulnerability alerts", async () => {
+    const c = await setup();
+    c.gh.dependabot = [
+      { number: 1, state: "open", pkg: "evil-pkg", severity: "low", summary: "Malicious code", classification: "malware" },
+      { number: 2, state: "open", pkg: "bad-crit", severity: "critical", summary: "Malicious code", classification: "malware" },
+      { number: 3, state: "open", pkg: "old-lib", severity: "low", summary: "Minor", classification: "general" },
+    ];
+    await c.svc.runOne(c.project.id);
+    const rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(3);
+    const evil = rows.find((r) => r.title.includes("evil-pkg"))!;
+    expect(evil).toMatchObject({ risk: "high", assigneeAgentId: c.ceo!.id });
+    expect(evil.title).toContain("malware");
+    expect(evil.body).toContain("MALICIOUS");
+    expect(rows.find((r) => r.title.includes("bad-crit"))).toMatchObject({ risk: "critical", urgent: true });
+    expect(rows.find((r) => r.title.includes("old-lib"))!.risk).toBe("low");
+  });
+
+  it("falls back to the CEO for a secret alert when the company has no security reviewer", async () => {
+    const c = await setup();
+    c.gh.secrets = [{ number: 1, state: "open", type: "Some token", value: secretValue }];
+    await c.svc.runOne(c.project.id);
+    expect((await allTickets(c.company.id))[0]).toMatchObject({ assigneeAgentId: c.ceo!.id, urgent: true });
+  });
+
+  it("stays quiet when Dependabot or secret scanning is switched off on the repo", async () => {
+    const c = await setup();
+    c.gh.dependabot = "disabled";
+    c.gh.secrets = "disabled";
+    await c.svc.runOne(c.project.id);
+    expect(await allTickets(c.company.id)).toHaveLength(0);
+    expect((await c.svc.get(c.project.id))!.alertsError).toBeNull();
+    expect(await t!.db.select().from(decisions).where(eq(decisions.companyId, c.company.id))).toHaveLength(0);
+  });
+
+  it("says once, naming the permission, when the token can't read the alerts, and withdraws the card when it can", async () => {
+    const c = await setup();
+    c.gh.dependabot = "forbidden";
+    c.gh.secrets = [];
+    await c.svc.runOne(c.project.id);
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    const cards = await t!.db.select().from(decisions).where(eq(decisions.companyId, c.company.id));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.question).toContain("Dependabot alerts (read)");
+    expect(cards[0]!.question).not.toContain("Secret scanning");
+    expect((await c.svc.get(c.project.id))!.status).toBe("ok");
+    expect(c.woken.filter((w) => w.reason === "github alerts unreadable")).toHaveLength(1);
+    c.gh.dependabot = [];
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect((await c.svc.get(c.project.id))!.alertsError).toBeNull();
+    expect((await t!.db.select().from(decisions).where(eq(decisions.companyId, c.company.id)))[0]!.status).not.toBe("open");
   });
 });

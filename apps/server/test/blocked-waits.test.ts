@@ -91,6 +91,35 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
     expect((await c.row(t.id)).systemState).toBe("blocked");
   });
 
+  // BOS-1907 criterion 2: the agent records a watch (one line and an end date) when it moves a merged ticket to Blocked.
+  it("records a watch on a merged ticket, refuses one on an unmerged ticket or without a future date", async () => {
+    const c = await setup();
+    const agent = await c.mcp(c.worker.id);
+    const crit = [{ text: "A week of real use shows no new alerts", after: "merge" as const }];
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress", mergeCommit: "d".repeat(40), mergedAt: new Date(), acceptanceCriteria: crit });
+    const until = new Date(Date.now() + 7 * 86_400_000).toISOString();
+    expect(await c.block(agent, t.id, { watching_for: "a week with no new stuck alerts", watch_until: until })).toContain("is now blocked");
+    const r = await c.row(t.id);
+    expect(r.systemState).toBe("blocked");
+    expect(r.watchingFor).toBe("a week with no new stuck alerts");
+    expect(r.watchUntil?.toISOString()).toBe(until);
+    // Already Blocked: a new line replaces the watch.
+    expect(await c.block(agent, t.id, { watching_for: "two weeks, not one", watch_until: until })).toContain("is now blocked");
+    expect((await c.row(t.id)).watchingFor).toBe("two weeks, not one");
+    // Open-ended: only the line; the end date stays empty and the 14-day default applies (shared watchEndsAt).
+    const open = await c.ticket();
+    await c.put(open.id, { systemState: "in_progress", mergeCommit: "e".repeat(40), mergedAt: new Date(), acceptanceCriteria: crit });
+    expect(await c.block(agent, open.id, { watching_for: "the nightly job" })).toContain("is now blocked");
+    expect((await c.row(open.id)).watchUntil).toBeNull();
+    // Refused: not merged, a past date, a date without a line.
+    const plain = await c.ticket();
+    expect(await c.block(agent, plain.id, { watching_for: "x", blocked_until: tomorrow(), blocked_reason: "y" })).toMatch(/has not merged/);
+    // test-lines-ok: a date one second in the past is refused however slow the machine is
+    expect(await c.block(agent, t.id, { watching_for: "x", watch_until: new Date(Date.now() - 1000).toISOString() })).toMatch(/must be in the future/);
+    expect(await c.block(agent, t.id, { watch_until: until })).toMatch(/goes with watching_for/);
+  });
+
   it("accepts a merged ticket waiting to go live, but not a live one whose after-merge checks are all that is left (R36)", async () => {
     const c = await setup();
     const t = await c.ticket();
@@ -100,11 +129,13 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
     expect(await c.block(agent, t.id)).toContain("is now blocked");
     expect((await c.row(t.id)).systemState).toBe("blocked");
 
-    // Live now: the checks alone no longer hold it (old code accepted this).
+    // BOS-1907 (criterion 3): live now, with the checks unreported and no date, link or card: accepted ("Merged, watching").
     const live = await c.ticket();
     await c.put(live.id, { systemState: "in_progress", mergeCommit: "c".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
-    expect(await c.block(agent, live.id)).toMatch(/Blocked is for a ticket that only waits/);
+    expect(await c.block(agent, live.id)).toContain("is now blocked");
+    expect((await c.row(live.id)).systemState).toBe("blocked");
 
+    // Every after-merge check already reported: nothing is left to watch, so the hold is gone and Blocked refuses it.
     const u = await c.ticket();
     await c.put(u.id, { systemState: "in_progress", mergeCommit: "b".repeat(40), acceptanceCriteria: crit, stateNote: "1 pass" });
     expect(await c.block(agent, u.id)).toMatch(/Blocked is for a ticket that only waits/);
@@ -154,14 +185,13 @@ describe("Blocked on an open card is freed when the card is answered (BOS-1209)"
     await plan(c, withCard.id);
     await c.put(withDate.id, { systemState: "blocked", stateChangedAt: old, blockedUntil: new Date(Date.now() + 86_400_000) });
     await c.put(merged.id, { systemState: "blocked", stateChangedAt: old, mergeCommit: "a".repeat(40), goLiveWait: "server", acceptanceCriteria: [{ text: "Panel shows the host", after: "merge" as const }] });
-    // R36: live, with after-merge checks unreported and nothing else holding it: freed (old code kept it Blocked forever).
+    // BOS-1907: live, with after-merge checks unreported and nothing else holding it: stays in Blocked ("Merged, watching"; R36 used to free it).
     const live = await c.ticket();
     await c.put(live.id, { systemState: "blocked", stateChangedAt: old, mergeCommit: "b".repeat(40), goLiveWait: null, acceptanceCriteria: [{ text: "Panel shows the host", after: "merge" as const }] });
     await c.sweeps.run();
     expect((await c.row(stranded.id)).systemState).toBe("ready");
     expect((await c.row(stranded.id)).stateNote).toMatch(/^Ready: nothing is holding it any more/);
-    expect((await c.row(live.id)).systemState).toBe("ready");
-    for (const id of [withCard.id, withDate.id, merged.id]) expect((await c.row(id)).systemState).toBe("blocked");
+    for (const id of [withCard.id, withDate.id, merged.id, live.id]) expect((await c.row(id)).systemState).toBe("blocked");
   });
 
   it("refuses a note that names a colleague with only a date behind it, and accepts it once their ticket is linked (R36)", async () => {

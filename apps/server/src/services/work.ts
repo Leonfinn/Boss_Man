@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { addsUsabilityCriterion, withUsabilityCriterion, columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
+import { addsUsabilityCriterion, watchEndsAt, withUsabilityCriterion,columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
@@ -465,6 +465,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         quotaHeldAgent: heldByAgent(t),
         // BOS-1546: a merged ticket that only waits to go live says so, so it doesn't look stuck in Blocked.
         goLiveNote: t.systemState !== "done" ? goLiveNote(t.goLiveWait as GoLiveWait | null, updateCards) : null,
+        // BOS-1907: a split-out check ticket joins the "Merged, watching" lane through its parent's merge; the card shows the watch.
+        checksParentMerged: (() => {
+          const parent = t.checksTicketId ? rows.find((r) => r.t.id === t.checksTicketId)?.t : undefined;
+          return !!parent?.mergeCommit && parent.systemState !== "done";
+        })(),
+        watchEndsAt: t.mergeCommit ? (watchEndsAt(t)?.toISOString() ?? null) : null,
         };
       });
       return {

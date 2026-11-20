@@ -23,7 +23,7 @@ import { modelProbeService } from "./services/model-probe.js";
 import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
-import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
+import { secretGrants, secrets as secretsTable, watchdogActions, checkWorkers } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
@@ -84,7 +84,7 @@ import { chatTraceService } from "./services/chat-trace.js";
 import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
-import { mergeQueueService } from "./services/merge-queue.js";
+import { mergeQueueService, runningCheckJobs, endedMergePlaces } from "./services/merge-queue.js";
 import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
 import { checkHoldService } from "./services/check-hold.js";
@@ -813,6 +813,7 @@ export async function buildApp(opts: AppOptions) {
     addons: addonFacts,
     release: (ticketId) => decisionsSvc.release(ticketId),
     serverCalm: (rule) => health?.calmReason(rule) ?? null,
+    freeSlots: (companyId) => scheduler.freeSlots(companyId),
     liveCommit: () => process.env.BOSSMAN_COMMIT || null,
     now: opts.now,
   });
@@ -1011,6 +1012,8 @@ export async function buildApp(opts: AppOptions) {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     alert: (input) => alerts.raise(input),
     clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    closeTicket: (ticketId, note) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
     log: (m) => app.log.warn(m),
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
@@ -1085,12 +1088,17 @@ export async function buildApp(opts: AppOptions) {
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
-    runningChecks: (companyId) =>
-      db
-        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt })
-        .from(checkJobs)
-        .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
-        .orderBy(asc(checkJobs.startedAt)),
+    // BOS-1942: where each running check runs, and where a finished merge check ran (read from the job records).
+    runningChecks: (companyId) => runningCheckJobs(db, companyId),
+    endedMergePlaces: (companyId, ticketIds) => endedMergePlaces(db, companyId, ticketIds),
+    serverHost: () => hostFacts.serverHost(),
+    // BOS-1942: which machine holds how many of the check slots (the server, then each ready worker), so the page can say what the total is made of.
+    slotSplit: async (companyId) => {
+      const ms = await checks.machines(companyId);
+      const ids = ms.map((m) => m.workerId).filter((x): x is string => !!x);
+      const names = ids.length ? await db.select({ id: checkWorkers.id, name: checkWorkers.name }).from(checkWorkers).where(inArray(checkWorkers.id, ids)) : [];
+      return ms.map((m) => ({ ranOn: m.workerId ? (names.find((n) => n.id === m.workerId)?.name ?? "a check worker") : "company runner", slots: m.limit }));
+    },
     queueStatus: async (companyId) => {
       const mode = await checkQueueSvc.mode();
       if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
@@ -2075,7 +2083,8 @@ export async function buildApp(opts: AppOptions) {
       const id = IdParam.parse(req.params).id;
       const queue = await checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
       // R46: "free, not taking X because …" for every machine with a free slot that declined a job it could take.
-      return { ...queue, idleSlots: checks.idleSlots(id).map(idleView) };
+      // BOS-1942: the server's own host name, so "Running on this server (name)" reads the same as on the Merges tab.
+      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: checks.idleSlots(id).map(idleView) };
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {

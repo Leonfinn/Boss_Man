@@ -122,4 +122,25 @@ export const GO_LIVE_WAIT_MAX_MS = 3 * 24 * 60 * 60 * 1000;
  * check. It is not stuck, so the board shows it in its own lane and the "N blocked" counts leave it out. The one rule;
  * the server's SQL twin is liveCheckWaitSql (services/go-live-note.ts).
  */
-export const isLiveCheckWait = (t: { systemState: string; mergeCommit?: string | null }): boolean => t.systemState === "blocked" && !!t.mergeCommit;
+/**
+ * BOS-1907: the lane is "Merged, watching". It holds a ticket with a merge in Blocked, and also one still in In progress
+ * (merged before this change; it never counts toward a limit either), and a split-out check ticket (checksCriterion) whose
+ * parent is merged and not done (`checksParentMerged`, set by the server from the parent link).
+ */
+export const isLiveCheckWait = (t: { systemState: string; mergeCommit?: string | null; checksParentMerged?: boolean | null }): boolean =>
+  (t.systemState === "blocked" || t.systemState === "in_progress") && (!!t.mergeCommit || !!t.checksParentMerged);
+
+/** BOS-1907: days a merged ticket is watched when the agent gave no end date for an open-ended event. */
+export const WATCH_DEFAULT_DAYS = 14;
+/** BOS-1907: the furthest ahead an agent may set a watch's end date. */
+export const WATCH_MAX_DAYS = 60;
+
+/**
+ * When a merged ticket's watch ends: the date the agent recorded, else WATCH_DEFAULT_DAYS after go-live (or after the merge
+ * when no go-live was recorded; existing rows have neither a watch date nor a go-live time). Null for a ticket that never merged.
+ */
+export function watchEndsAt(t: { watchUntil?: Date | string | null; liveAt?: Date | string | null; mergedAt?: Date | string | null }): Date | null {
+  if (t.watchUntil) return new Date(t.watchUntil);
+  const from = t.liveAt ?? t.mergedAt;
+  return from ? new Date(new Date(from).getTime() + WATCH_DEFAULT_DAYS * 24 * 60 * 60 * 1000) : null;
+}

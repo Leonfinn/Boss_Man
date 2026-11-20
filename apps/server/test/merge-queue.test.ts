@@ -409,6 +409,30 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(view.running[0]!.minutes).toBeGreaterThanOrEqual(15);
     });
 
+    // BOS-1942: where a running merge check runs comes from its check job, and the server's host name rides with the view.
+    it("carries where each running merge check runs, and the server's host name", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const view = await svc(c, { runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: new Date(), ranOn: "Worker One" }], serverHost: async () => "host-a", queueStatus: async () => ({ mode: "server", slots: 3, running: 1, waiting: 0 }) }).get(c.company.id);
+      expect(view.running[0]!.ranOn).toBe("Worker One");
+      expect(view.serverHost).toBe("host-a");
+      // No job on record names no place (and a failing host lookup is not an error).
+      const none = await svc(c, { runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: new Date() }], serverHost: async () => { throw new Error("no report"); }, queueStatus: async () => ({ mode: "server", slots: 3, running: 1, waiting: 0 }) }).get(c.company.id);
+      expect(none.running[0]!.ranOn).toBeUndefined();
+      expect(none.serverHost).toBeNull();
+    });
+
+    // BOS-1942: the slot total says what it is made of (server plus worker), only when more than one machine holds slots.
+    it("carries the slot split only when several machines hold slots", async () => {
+      const c = (ctx = await setup());
+      await waitingMerge(c);
+      const q = { queueStatus: async () => ({ mode: "server" as const, slots: 5, running: 0, waiting: 0 }) };
+      const two = await svc(c, { ...q, slotSplit: async () => [{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }] }).get(c.company.id);
+      expect(two.slotSplit).toEqual([{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }]);
+      const one = await svc(c, { ...q, slotSplit: async () => [{ ranOn: "company runner", slots: 5 }] }).get(c.company.id);
+      expect(one.slotSplit).toBeUndefined();
+    });
+
     it("says no runner is connected before anything else, even with every slot busy", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);

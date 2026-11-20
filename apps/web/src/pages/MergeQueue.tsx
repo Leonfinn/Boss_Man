@@ -10,19 +10,20 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
+import { checkDoneOnText, runningOnText, slotSplitText, SERVER_PLACE } from "../check-place";
 import { HeldBehindFixLine, heldSummary, inLineOf, pausedSlotsText, pausedSummary, pausedText, pausedWaitText, type HeldSummary, type MergeLine, type PausedSummary } from "../components/MergesStuckBanner";
 import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git";
-type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; statusLine?: StatusLine };
-type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
+type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; ranOn?: string | null; statusLine?: StatusLine };
+type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held" | "waiting_for_ci";
 /** Approved work held by the carried-work guard (BOS-130, BOS-766): the ticket(s) it waits for. */
 type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
 /** The card a waiting merge is held by (BOS-1078): named, with who raised it and a link straight to it. */
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
-type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; statusLine?: StatusLine };
+type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; ranOn?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string; stageLine?: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
@@ -151,10 +152,11 @@ function SectionHead({ title, fact }: { title: string; fact: string }) {
   );
 }
 
-function Running({ rows, slots, paused }: { rows: RunningNow[]; slots: number; paused?: PausedSummary | null }) {
+function Running({ rows, slots, paused, serverHost, slotSplit }: { rows: RunningNow[]; slots: number; paused?: PausedSummary | null; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }> }) {
+  const split = slotSplitText(slotSplit, serverHost);
   return (
     <section>
-      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} of ${slots} merge ${slots === 1 ? "slot" : "slots"} busy · flagged after an hour`} />
+      <SectionHead title="Running now" fact={paused ? pausedSlotsText(paused) : `${rows.length} merge ${rows.length === 1 ? "check" : "checks"} running · ${slots} check ${slots === 1 ? "slot" : "slots"} in all${split ? ` (${split})` : ""}, shared with quick checks · flagged after an hour`} />
       {!rows.length ? (
         <p className="muted">Nothing is checking or merging right now.</p>
       ) : (
@@ -172,6 +174,7 @@ function Running({ rows, slots, paused }: { rows: RunningNow[]; slots: number; p
                   Slot {r.slot}: {PHASE[r.phase]} (the {r.what === "merge_check" ? "merge check" : "agent's own check"}). Started {waited(r.minutes)} ago at {new Date(r.startedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} by {r.startedBy}.
                 </p>
               )}
+              {r.ranOn ? <p className="mq-line" data-check-ran-on={r.ranOn === SERVER_PLACE ? "server" : "worker"}>{runningOnText(r.ranOn, serverHost)}</p> : null}
               {r.ci && (
                 <p className="mq-line" data-ci-wait>
                   {ciWaitText(r.ci)}
@@ -244,7 +247,7 @@ function MoveToFront({ companyId, row, onMoved }: { companyId: string; row: Wait
   );
 }
 
-export function Waiting({ rows, companyId, onMoved }: { rows: WaitingRow[]; companyId?: string; onMoved?: () => void }) {
+export function Waiting({ rows, companyId, onMoved, serverHost }: { rows: WaitingRow[]; companyId?: string; onMoved?: () => void; serverHost?: string | null }) {
   const firstFailed = rows.findIndex((r) => r.actor !== "owner" && r.state === "check_failed_retrying");
   const firstStuck = rows.findIndex((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck);
   return (
@@ -275,6 +278,8 @@ export function Waiting({ rows, companyId, onMoved }: { rows: WaitingRow[]; comp
                   {companyId && onMoved && ((r.place && r.place > 1 && (r.state === "waiting_for_slot" || r.state === "waiting_for_check_capacity")) || r.state === "waiting_for_seat") ? <> <MoveToFront companyId={companyId} row={r} onMoved={onMoved} /></> : null}
                 </p>
                 {r.statusLine ? <StatusLineView line={r.statusLine} /> : null}
+                {/* BOS-1942: no check is running (it waits only for GitHub CI), so say where the finished check ran. */}
+                {r.ranOn && r.state === "waiting_for_ci" ? <p className="mq-line" data-check-ran-on={r.ranOn === SERVER_PLACE ? "server" : "worker"}>{checkDoneOnText(r.ranOn, serverHost)} Waiting for GitHub CI.</p> : null}
                 {/* A carried-work hold (BOS-130, BOS-766, BOS-819): name the ticket it waits for, from the typed
                     list, so the row never depends on reading a title out of the hold's sentence. */}
                 {r.carried?.length ? (
@@ -344,7 +349,7 @@ export function Recent({ rows }: { rows: RecentRow[] }) {
 type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null; seatPlace?: number | null; lane?: string | null };
 type IdleSlotRow = { machine: string; line: string; expected: boolean };
 type FinishedCheck = { id: string; ticketId: string; ref: string | null; title: string; passed: boolean; at: string; stageLine: string | null };
-type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[]; idleSlots?: IdleSlotRow[]; finished?: FinishedCheck[] };
+type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; serverHost?: string | null; rows: CheckRow[]; idleSlots?: IdleSlotRow[]; finished?: FinishedCheck[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
 /** The one "main is red" banner (BOS-1207): said once, naming the ticket that fixes main when one is queued. */
@@ -425,8 +430,8 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
                 {r.why && !r.fixesMain ? <span className="tag grey"> {r.why}</span> : null}{" "}
                 {upFirst(KIND[r.kind])}
                 {r.requestedBy ? `, requested by ${r.requestedBy}` : ""}.
-                {/* BOS-1435: only a check on a check worker says where; the company runner is the usual place. */}
-                {r.ranOn && r.ranOn !== "company runner" ? <span data-check-ran-on="worker"> Running on the check worker {r.ranOn}.</span> : null}
+                {/* BOS-1435, BOS-1942: where a running check runs, in the same words as the Merges tab. */}
+                {r.ranOn ? <span data-check-ran-on={r.ranOn === SERVER_PLACE ? "server" : "worker"}> {runningOnText(r.ranOn, data.serverHost)}</span> : null}
                 {/* BOS-1602: why a waiting check waits, e.g. "waiting for a merge slot: 2 of 2 busy". */}
                 {r.state === "waiting" && r.heldBy ? <span className="muted" data-check-wait-why=""> {upFirst(r.heldBy)}{r.seatPlace ? ` (${r.seatPlace === 1 ? "next for a seat" : `${r.seatPlace - 1} ahead for a seat`})` : ""}.</span> : null}
                 {/* BOS-1803: a background-lane wait says so, and for how long newer ordinary work still goes first. */}
@@ -560,8 +565,8 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
               {pausedLine && (
                 <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong> {pausedWaitText(pausedLine)}</p>
               )}
-              <Running rows={data.running} slots={data.slots} paused={pausedLine} />
-              <Waiting rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
+              <Running rows={data.running} slots={data.slots} paused={pausedLine} serverHost={data.serverHost} slotSplit={data.slotSplit} />
+              <Waiting serverHost={data.serverHost} rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />
             </>
           ) : null}

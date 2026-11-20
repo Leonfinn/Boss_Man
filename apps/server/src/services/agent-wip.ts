@@ -31,8 +31,8 @@ export async function countWip(db: Db, where: SQL | undefined, exceptId?: string
 
 /**
  * In-progress tickets that can't move don't count towards a limit (BOS-1172): one with an open waits-on link to an
- * unfinished ticket, a plan-first one whose plan waits on the owner, and a merged one that only waits for its
- * after-merge (go-live) check. A ticket with only a schedule_check booked still counts: nobody visibly holds it.
+ * unfinished ticket, a plan-first one whose plan waits on the owner, and any merged one (BOS-1907: it only waits for its
+ * after-merge check or watch, whether or not it is live yet). A ticket with only a schedule_check booked still counts: nobody visibly holds it.
  */
 /** The tickets table or an alias of it (a subquery's `doing`, `mine`): only the columns the rule reads. */
 type TicketsOrAlias = Record<"id" | "planFirst" | "planApprovedAt" | "plan" | "mergedAt" | "goLiveWait", SQLWrapper>;
@@ -40,7 +40,7 @@ export const cantMoveFor = (t: TicketsOrAlias) => sql`(
   exists (select 1 from ticket_dependencies d join tickets b on b.id = d.blocker_ticket_id
           where d.blocked_ticket_id = ${t.id} and ${ticketBlockerOpenSql("d", "b")})
   or (${t.planFirst} and ${t.planApprovedAt} is null and ${t.plan} is not null)
-  or (${t.mergedAt} is not null and ${t.goLiveWait} is not null)
+  or ${t.mergedAt} is not null
 )`;
 export const cantMoveSql = cantMoveFor(tickets);
 
@@ -77,7 +77,7 @@ export type WipExempt = "waits" | "plan" | "live";
 export function wipExemptKind(t: { planFirst: boolean; planApprovedAt: Date | null; plan: string | null; mergedAt: Date | null; goLiveWait: string | null }, openWaits: boolean): WipExempt | null {
   if (openWaits) return "waits";
   if (t.planFirst && !t.planApprovedAt && t.plan) return "plan";
-  if (t.mergedAt && t.goLiveWait) return "live";
+  if (t.mergedAt) return "live";
   return null;
 }
 
