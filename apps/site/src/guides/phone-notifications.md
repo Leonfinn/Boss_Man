@@ -34,7 +34,7 @@ You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your p
 
 1. Add `NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443` to `.env`.
 2. Start ntfy as its own Compose project with `docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d`.
-3. In Boss Man, open **Notifications**. Under **How you're told**, choose **Set up ntfy for me**. Within a minute it makes the publish user and its token, saves the token encrypted, and fills in the **ntfy server** and a **Topic** if you have not chosen them.
+3. In Boss Man, open **Notifications**. Under **How you're told**, choose **Set up ntfy for me**. Within a minute it makes the publish user and its token, saves the token encrypted, and fills in the **ntfy server** and a **Topic** if you have not chosen them. If you type your own topic, use only letters, digits, `-` and `_`, up to 64 characters. Boss Man refuses any other topic and leaves the saved token as it was.
 4. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's Tailscale address, and choose **Save**.
 5. Under **Set up your phone**, choose **Create phone login** and copy the password. It is shown only once.
 6. On your phone, install the ntfy app. Add the exact `NTFY_BASE_URL` address from step 1, including `:8443`. Do not use Boss Man's own address. Log in as the phone user with that password, and subscribe to your topic.
