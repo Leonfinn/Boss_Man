@@ -16,6 +16,14 @@ services:
     command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env (docs/33-public-portal-cloudflare.md)}
+    # `tunnel ready` asks the metrics address for the tunnel's own state (healthy only with a live connection to Cloudflare).
+    # The image is distroless (no shell, curl or wget), so the check is the cloudflared binary itself (BOS-2113).
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks: [default]
     read_only: true
     cap_drop: [ALL]
