@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { ciPushSecrets, gitAuthEnv } from "../src/workspace.js";
 
-const basic = (env: Record<string, string>) => Buffer.from(env.GIT_CONFIG_VALUE_0.replace("Authorization: Basic ", ""), "base64").toString();
+const basic = (env: Record<string, string>) => Buffer.from((env.GIT_CONFIG_VALUE_0 ?? "").replace("Authorization: Basic ", ""), "base64").toString();
 
 describe("ciPushSecrets", () => {
   it("keeps GIT_TOKEN when the company has no GIT_CI_TOKEN", () => {
