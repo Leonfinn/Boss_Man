@@ -144,6 +144,13 @@ p { margin: 0; }
 
 /* ---------- Cards and states ---------- */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+/* Workflow report: "What this shows" (BOS-1883) */
+.findings h2 { font-size: 18px; margin: 0 0 4px; }
+.findings .scope { font-size: 14px; margin: 0 0 12px; }
+.findings ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.findings li { border-left: 3px solid var(--line-strong); padding-left: 12px; }
+.findings .see { white-space: nowrap; }
+@media (max-width: 640px) { .findings { padding: 14px 16px; } .findings .btn { width: 100%; min-height: 44px; } }
 /* One shared status tag (BOS-1124, Q5): sentence case, 12px body font, a coloured dot plus the word.
    Amber waits on you, red failed or blocked, green done; blue is kept for links and the main action,
    so the blue and purple tones read as neutral grey tags with a grey dot. The code font stays on IDs and figures. */
@@ -1738,3 +1745,11 @@ details.pushes[open] > summary { margin-bottom: 8px; }
   .strip.stack-narrow .strip-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-weight: 600; }
   .strip.stack-narrow .strip-when { display: block; }
 }
+
+/* (BOS-1935) "Left your list recently": the question rolls up to 3 lines; "Show more" expands one card in place. */
+.strip.stack-narrow .strip-title.rolled-wrap { display: block; -webkit-line-clamp: unset; overflow: visible; font-weight: 600; }
+.rolled-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.rolled-text.open { display: block; overflow: visible; }
+.rolled-toggle { background: none; border: 0; padding: 2px 0; color: var(--link); font: inherit; font-weight: 400; cursor: pointer; text-decoration: underline; }
+.rolled-toggle:hover { color: var(--link-hover); }
+@media (pointer: coarse) { .rolled-toggle { min-height: 44px; padding: 0 4px 0 0; } }

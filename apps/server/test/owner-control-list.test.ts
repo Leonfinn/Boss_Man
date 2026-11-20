@@ -83,6 +83,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/ImageAttach.tsx": "Any screen",
   // Opened from a picture in any Markdown text.
   "components/Lightbox.tsx": "Any screen",
+  "components/LoadError.tsx": "Any screen",
   // The owner's message box, on five screens (Ticket, Board, Chat, Decisions, Run).
   "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",

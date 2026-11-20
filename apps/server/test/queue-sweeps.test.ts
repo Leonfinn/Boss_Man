@@ -88,7 +88,11 @@ async function setup() {
   // A stalled-run card climbs the alert ladder now (DR-017): it belongs to the Scrum Master/CEO, never the
   // owner's queue unless it is an owner kind. These tests read the card itself, whatever rung holds it, in
   // the CEO's own view (which carries the same evidence and reasons the owner's queue shows).
-  const alerts = async () => (await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[];
+  // The idle-slots alert (BOS-1881) is not about runs and fires on these tests' big clock jumps, so it is left out.
+  const alerts = async () =>
+    ((await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[]).filter(
+      (d) => !JSON.stringify(d).includes('"kind":"idle_slots"'),
+    );
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; neverStartedRuns: number; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
   return { ...built, db, reads, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
@@ -1000,11 +1004,14 @@ describe("stalled runs (R32)", () => {
       await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
       expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
     }
-    expect(await ctx.alerts()).toEqual([]);
+    // The idle-slots alert (BOS-1881) wakes the CEO, and a wake left unrun for an hour lets the no-progress card
+    // appear in this test's long clock jumps; this test is about stalled-run cards only.
+    const stalledCards = async () => (await ctx.alerts()).filter((d) => !/no_progress/.test(JSON.stringify(d)));
+    expect(await stalledCards()).toEqual([]);
     ctx.advance(29 * 60_000);
     await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
-    expect(await ctx.alerts()).toEqual([]);
+    expect(await stalledCards()).toEqual([]);
     ctx.advance(2 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
   });

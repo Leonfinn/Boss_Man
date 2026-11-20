@@ -292,7 +292,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     return (await queue.slots()) + workers.reduce((n, w) => n + w.limit, 0);
   }
 
-  async function done(machine: string | { workerId: string }, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string }) {
+  async function done(machine: string | { workerId: string }, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string; stages?: Array<{ name: string; seconds: number }>; ranFull?: boolean }) {
     // BOS-1628: the install died of the machine (EAGAIN, ENOSPC, EMFILE), not the branch. Back in line, never a failed check for
     // the agent, up to MACHINE_FAULT_RETRIES times for one job; after that it fails with the reason in the log, so it can't loop.
     if (msg.exitCode === 75 && !msg.timedOut && msg.tail.includes(MACHINE_FAULT_MARKER)) {
@@ -310,7 +310,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         }
       }
     }
-    const job = await queue.complete(msg.jobId, { runnerId: machine, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog });
+    const job = await queue.complete(msg.jobId, { runnerId: machine, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog, stages: msg.stages, ranFull: msg.ranFull });
     // The machine may forget the result once the server has seen the job end, whether or not this answer counted.
     const ack = { type: "check.ack" as const, jobId: msg.jobId };
     if (typeof machine === "string") deps.send(machine, ack);

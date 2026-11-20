@@ -6,7 +6,7 @@
 //  - while a project's main is red only jobs fixing main run (merge jobs of other tickets wait, they don't fail); pre-review jobs keep running;
 //  - a passed job on the same tree satisfies a request of equal or narrower scope, so the same tree is never checked twice;
 //  - a job never leaves the queue without a recorded reason (stuck / cancelled / re-queued all carry one).
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, checkJobLogs, checkJobs, checkWorkers, companies, projects, settings, tickets } from "../db/schema.js";
 import { BACKGROUND_LANE_AGE_KEY, checkPriority, isBackgroundLaneTitle, laneAgeMinutes, laneWords, readLaneAgeMinutes } from "./check-gate.js";
@@ -543,7 +543,7 @@ export function checkQueue(db: Db) {
       // Guarded on state so two callers can't both start the same job.
       const [row] = await tx
         .update(checkJobs)
-        .set({ state: "running", runnerId: worker ? null : (machine as string | null), workerId: worker, startedAt: now, lastOutputAt: now, reason: null })
+        .set({ state: "running", runnerId: worker ? null : (machine as string | null), workerId: worker, startedAt: now, lastOutputAt: now, reason: null, busyAtStart: use.merge + use.check })
         .where(and(eq(checkJobs.id, j.id), eq(checkJobs.state, "queued")))
         .returning();
       if (!row) continue;
@@ -585,7 +585,7 @@ export function checkQueue(db: Db) {
    * The runner's answer. Accepted only for a job that is still running and only for the commit that was checked,
    * so a late answer for a job that was re-queued or replaced is ignored. Returns the finished job, or null if ignored.
    */
-  async function complete(jobId: string, result: { runnerId: Machine; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean; fullLog?: string }, now = new Date()): Promise<CheckJob | null> {
+  async function complete(jobId: string, result: { runnerId: Machine; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean; fullLog?: string; stages?: Array<{ name: string; seconds: number }>; ranFull?: boolean }, now = new Date()): Promise<CheckJob | null> {
     const ok = result.exitCode === 0 && !result.timedOut;
     const facts = ok ? "" : checkFailureFacts(result.logTail);
     const [row] = await db
@@ -594,6 +594,7 @@ export function checkQueue(db: Db) {
         state: ok ? "passed" : "failed",
         exitCode: result.exitCode,
         logTail: result.logTail.slice(-8192),
+        ...(result.stages ? { stages: JSON.stringify(result.stages.slice(0, 60).map((s) => ({ name: s.name.slice(0, 60), seconds: s.seconds }))), ranFull: result.ranFull ?? null } : {}),
         reason: ok ? null : result.timedOut ? "The check ran past its time limit and was stopped." : typeof result.exitCode === "number" ? `The check failed with exit code ${result.exitCode}${facts ? ` (${facts})` : ""}.` : `The check was stopped before it reported${facts ? ` (${facts})` : ""}.`,
         endedAt: now,
       })
@@ -648,6 +649,8 @@ export function checkQueue(db: Db) {
   /** Kept logs older than the retention period are deleted. Returns how many. */
   async function pruneLogs(now = new Date(), days = FULL_LOG_RETENTION_DAYS): Promise<number> {
     const gone = await db.delete(checkJobLogs).where(lt(checkJobLogs.createdAt, new Date(now.getTime() - days * 86_400_000))).returning({ id: checkJobLogs.jobId });
+    // BOS-1923: the step times are kept as long as a failed log.
+    await db.update(checkJobs).set({ stages: null }).where(and(isNotNull(checkJobs.stages), lt(checkJobs.endedAt, new Date(now.getTime() - days * 86_400_000))));
     return gone.length;
   }
 
@@ -809,7 +812,7 @@ export function checkQueue(db: Db) {
       const k = merge ? seen.merge : seen.check;
       const what = merge ? "merge" : "check";
       if (!k.slots) return merge ? "no machine that takes merge checks is ready" : "no machine that takes pre-review checks is ready";
-      return k.busy >= k.slots ? `waiting for a ${what} slot: ${k.busy} of ${k.slots} busy` : null;
+      return k.busy >= k.slots ? `waiting for a ${what} slot: ${k.busy} of the ${k.slots} slots that take ${merge ? "merge" : "pre-review"} checks busy` : null;
     };
   }
 

@@ -114,3 +114,49 @@ export function checkFailureSentence(v: { exitCode?: number | null; timedOut?: b
   if (typeof v.exitCode === "number") return `failed (exit code ${v.exitCode}${more})`;
   return `was stopped before it reported${v.reason ? `: ${v.reason}` : ""}${facts ? ` (${facts})` : ""}`;
 }
+
+/** BOS-1923: one finished step of a check (its name and seconds), read from the check's output as it streams. */
+export type CheckStage = { name: string; seconds: number };
+export const MAX_CHECK_STAGES = 60;
+
+/**
+ * Reads a check's per-step times from its output, for a record kept even when the check passes. A full check prints
+ * "check-all: step NAME took Ns" (exact). check-quick prints "PASS  label" / "FAIL  label" per step with no time, so its
+ * seconds are the gap since the previous step line (or since the slot was taken). `full` is true once any check-all step
+ * line was seen, i.e. the full check ran after the quick one. Feed it chunks with a clock reading; it keeps no log text.
+ */
+export function createStageTracker(startMs: number) {
+  const stages: CheckStage[] = [];
+  let full = false;
+  let mark = startMs;
+  let partial = "";
+  const add = (name: string, seconds: number) => {
+    if (stages.length < MAX_CHECK_STAGES) stages.push({ name: name.slice(0, 60), seconds });
+  };
+  const line = (l: string, nowMs: number) => {
+    const full1 = /^check-all: step ([A-Za-z0-9:._-]+) took (\d+)s/.exec(l);
+    if (full1) {
+      full = true;
+      add(full1[1]!, Number(full1[2]));
+      mark = nowMs;
+      return;
+    }
+    if (l.includes("check-all: slot taken, running the checks")) {
+      mark = nowMs; // time spent waiting for the runner's own check slot is not a step
+      return;
+    }
+    const quick = /^(PASS|FAIL)  (.{1,80}?)(?: \(exit \d+\))?\s*$/.exec(l);
+    if (quick) {
+      add(quick[2]!, Math.max(0, Math.round((nowMs - mark) / 1000)));
+      mark = nowMs;
+    }
+  };
+  return {
+    feed(chunk: string, nowMs: number) {
+      const parts = (partial + chunk).split("\n");
+      partial = (parts.pop() ?? "").slice(-300);
+      for (const p of parts) line(p.replace(/\r$/, "").replace(/\u001b\[[0-9;]*m/g, ""), nowMs);
+    },
+    result: () => ({ stages: [...stages], full }),
+  };
+}

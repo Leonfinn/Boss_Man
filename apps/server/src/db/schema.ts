@@ -372,6 +372,9 @@ export const tickets = pgTable(
     liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
     /** BOS-1586: when the merge went live (the go-live wait ended). Null when none was recorded; readers fall back to mergedAt. A host report older than this proves nothing about the new code. */
     liveAt: timestamp("live_at", { withTimezone: true }),
+    /** BOS-1907: what a merged ticket still watches for after go-live (one line) and until when. Null date: 14 days after go-live (watchEndsAt, shared). */
+    watchingFor: text("watching_for"),
+    watchUntil: timestamp("watch_until", { withTimezone: true }),
     liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
@@ -383,6 +386,14 @@ export const tickets = pgTable(
     pullRequestHead: text("pull_request_head"),
     /** The head commit and check result the agent was last told about ("sha:failed"), so each is told once (R86). */
     pullRequestCi: text("pull_request_ci"),
+    /**
+     * R52 (BOS-1911): a ticket asked for in an owner chat is reported back in that chat. The agent whose chat run created or
+     * changed it, and when; null for a ticket that did not come from chat (existing rows stay off).
+     */
+    reportInChatAgentId: uuid("report_in_chat_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
+    reportInChatAt: timestamp("report_in_chat_at", { withTimezone: true }),
+    /** Set when it closed (or handed out follow-ups) and the chat has not been told yet; cleared once a chat reply names it or Boss Man's own line is posted. */
+    chatReportDueAt: timestamp("chat_report_due_at", { withTimezone: true }),
     /** A watcher (R80): an agent that reports this ticket's progress to the owner every so often. Off when null. */
     watcherAgentId: uuid("watcher_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
     watchEveryMinutes: integer("watch_every_minutes"),
@@ -466,6 +477,12 @@ export const tickets = pgTable(
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** When the agent's WIP limit first held this ticket in Ready (BOS-1180). A field, not note text, so a state note can't erase it; cleared when the ticket leaves Ready. */
     wipHeldAt: timestamp("wip_held_at", { withTimezone: true }),
+    /**
+     * "Being checked" (BOS-1906): set while a ticket handed in to review waits for its quick check. It is in review, but no review
+     * round is open and no reviewer is woken until the check passes (then the slots open) or fails (it goes back to In progress).
+     * Cleared on any move out of review.
+     */
+    checkHoldAt: timestamp("check_hold_at", { withTimezone: true }),
     /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
     stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
@@ -1144,6 +1161,12 @@ export const checkJobs = pgTable(
     /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
     reason: text("reason"),
     logTail: text("log_tail"),
+    /** BOS-1923: how many slots (this machine's) were busy when the job started, itself not counted; null for a job from before. */
+    busyAtStart: integer("busy_at_start"),
+    /** BOS-1923: each step's seconds as JSON [{name, seconds}], read from the output on the machine; emptied after FULL_LOG_RETENTION_DAYS. */
+    stages: text("stages"),
+    /** BOS-1923: true once the full check (check-all) ran after the quick one; null when the machine didn't say. */
+    ranFull: boolean("ran_full"),
     queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     lastOutputAt: timestamp("last_output_at", { withTimezone: true }),
@@ -1744,8 +1767,27 @@ export const githubWatches = pgTable("github_watches", {
   backoffUntil: timestamp("backoff_until", { withTimezone: true }),
   lastRunAt: timestamp("last_run_at", { withTimezone: true }),
   lastNewNotes: integer("last_new_notes").notNull().default(0),
+  /** BOS-1929: also open a ticket for each open Dependabot and secret-scanning alert (no owner step: on by default). */
+  watchAlerts: boolean("watch_alerts").notNull().default(true),
+  /** Why the token can't read the alerts (the missing permission), or null. Set once per episode so the card is raised once. */
+  alertsError: text("alerts_error"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** BOS-1929: the ticket opened for a GitHub security alert. One row per alert, so the same alert never gets a second ticket. */
+export const githubAlertTickets = pgTable(
+  "github_alert_tickets",
+  {
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    /** "dependabot:<number>" or "secret:<number>" (numbers are per repo). */
+    alertKey: text("alert_key").notNull(),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** Set once the alert was seen closed on GitHub and the ticket was closed. */
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("github_alert_tickets_alert").on(t.projectId, t.alertKey)],
+);
 
 /** A link from (a passage of) a note to a feature, with how much it matters to them. */
 export const insights = pgTable(

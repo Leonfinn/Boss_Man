@@ -27,7 +27,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MergeCarried, type MainLogResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { createStageTracker, CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MergeCarried, type MainLogResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -1840,8 +1840,12 @@ export class Workspaces {
           logRest = logRest.slice(-room);
         }
       };
+      const stageTracker = createStageTracker(started);
       const onData = (chunk: string) => {
-        if (job) keepLog(chunk);
+        if (job) {
+          keepLog(chunk);
+          stageTracker.feed(chunk, Date.now());
+        }
         tail = (tail + chunk).slice(-8192);
         job?.onOutput?.(tail);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
@@ -1870,7 +1874,7 @@ export class Workspaces {
         if (tmp) rmSync(tmp, { recursive: true, force: true });
         // Only a log that is going to be kept is cut and redacted (a pass is not stored); a stop by the server adds its own line after.
         const fullLog = job && !(exitCode === 0 && !timedOut) ? prepareFullLog(logHead + (logCut ? `\n[... ${logCut} characters cut from the middle of the log ...]\n` : "") + logRest).log : undefined;
-        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started, ...fenced, ...(fullLog !== undefined ? { fullLog } : {}) });
+        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started, ...fenced, ...(fullLog !== undefined ? { fullLog } : {}), ...(job ? { stages: stageTracker.result().stages, ranFull: stageTracker.result().full } : {}) });
       };
       let timer: NodeJS.Timeout;
       const arm = (ms: number) => {

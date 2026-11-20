@@ -340,6 +340,19 @@ describe("scheduler", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, routine.id)))[0]!.systemState).toBe("backlog");
   });
 
+  it("holds routine priority-3 wakes (resume, check result) at the hold, but not a review request (BOS-1943)", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("PATCH", `/api/agents/${worker.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.99, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Routine work", assigneeAgentId: worker.id })).json();
+    await ctx.scheduler.notify(worker.id, { ticketId: t.id, reason: "resume", priority: 3, note: "Pick up." });
+    expect(await ctx.tick()).toMatchObject({ launched: 0 });
+    const [held] = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === t.id);
+    expect(held!.statusReason).toBe("subscription seven_day window nearly used up");
+  });
+
   it("holds even an urgent ticket under the default pause once the window is at its limit", async () => {
     ctx = await setup({ agent: 5 });
     const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();

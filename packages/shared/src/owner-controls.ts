@@ -22,6 +22,8 @@ export const OWNER_CONTROLS = {
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
     "Switch company", "Create", "New company", "Close menu", "Menu …", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
+    // The error line a page shows when its first load fails (Features, Chat).
+    "Retry",
     // The owner's message box (Ticket, Board, Chat, Decisions and Run show it).
     "Send as a .txt file", "Sending",
     // A picture opened from Markdown text.
@@ -42,7 +44,7 @@ export const OWNER_CONTROLS = {
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
-    "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
+    "Show more", "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
     // The project filter chips (BOS-1744); project names are data, these two are fixed.
     "All projects", "Company-wide",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
@@ -180,7 +182,8 @@ export const OWNER_CONTROLS = {
   Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
   Secrets: ["Revoke", "Rotate", "Delete", "Check with Claude", "Check", "Remove"],
-  Workflow: [],
+  // The "What this shows" card's button when there is too little data (BOS-1937).
+  Workflow: ["Show the last …"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type OwnerScreen = keyof typeof OWNER_CONTROLS;

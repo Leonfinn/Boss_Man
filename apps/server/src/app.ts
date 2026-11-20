@@ -23,7 +23,7 @@ import { modelProbeService } from "./services/model-probe.js";
 import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
-import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
+import { secretGrants, secrets as secretsTable, watchdogActions, checkWorkers } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
@@ -84,9 +84,10 @@ import { chatTraceService } from "./services/chat-trace.js";
 import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
-import { mergeQueueService } from "./services/merge-queue.js";
+import { mergeQueueService, runningCheckJobs, endedMergePlaces } from "./services/merge-queue.js";
 import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
+import { checkHoldService } from "./services/check-hold.js";
 import { mainCiService } from "./services/main-ci.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
@@ -104,7 +105,7 @@ import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { ownerAnswerEmbedLoop } from "./services/owner-answers.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
-import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
+import { DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
 import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -357,6 +358,7 @@ export async function buildApp(opts: AppOptions) {
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
+  let checkHold: ReturnType<typeof checkHoldService> | undefined;
   // BOS-1093: a set private-details list that can't be read says so once, in the log and to the owner, and the scan runs its secret rules only.
   const scanListWarning: ScanListWarning = {
     log: (m) => app.log.warn(m),
@@ -381,6 +383,7 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     can: (id) => runners.can(id, "check-jobs"),
     wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
+    onEnded: (job) => checkHold?.onEnded(job),
     workers: checkWorkersSvc,
     bundles: {
       store: bundleStore,
@@ -810,6 +813,7 @@ export async function buildApp(opts: AppOptions) {
     addons: addonFacts,
     release: (ticketId) => decisionsSvc.release(ticketId),
     serverCalm: (rule) => health?.calmReason(rule) ?? null,
+    freeSlots: (companyId) => scheduler.freeSlots(companyId),
     liveCommit: () => process.env.BOSSMAN_COMMIT || null,
     now: opts.now,
   });
@@ -834,6 +838,7 @@ export async function buildApp(opts: AppOptions) {
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
+    checkHold: async () => checkHold?.sweep(),
     priorityWatch: () => priorityWatch.run(),
     mergeStall: () => mergeStall.run(),
     // R46: refresh what each free check slot declined (the pump), then tell on any that has sat idle with a job waiting.
@@ -1007,6 +1012,8 @@ export async function buildApp(opts: AppOptions) {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     alert: (input) => alerts.raise(input),
     clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    closeTicket: (ticketId, note) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
     log: (m) => app.log.warn(m),
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
@@ -1065,6 +1072,12 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
+  // BOS-1906: a held ticket ("Being checked") opens its reviews on a pass, or goes back to its agent on a failure; no agent run on a pass.
+  checkHold = checkHoldService(db, {
+    openReviews: async (ticketId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, null)),
+    wake: (agentId, w) => scheduler.notify(agentId, w),
+    now: opts.now,
+  });
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
   // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and
@@ -1075,12 +1088,17 @@ export async function buildApp(opts: AppOptions) {
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
-    runningChecks: (companyId) =>
-      db
-        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt })
-        .from(checkJobs)
-        .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
-        .orderBy(asc(checkJobs.startedAt)),
+    // BOS-1942: where each running check runs, and where a finished merge check ran (read from the job records).
+    runningChecks: (companyId) => runningCheckJobs(db, companyId),
+    endedMergePlaces: (companyId, ticketIds) => endedMergePlaces(db, companyId, ticketIds),
+    serverHost: () => hostFacts.serverHost(),
+    // BOS-1942: which machine holds how many of the check slots (the server, then each ready worker), so the page can say what the total is made of.
+    slotSplit: async (companyId) => {
+      const ms = await checks.machines(companyId);
+      const ids = ms.map((m) => m.workerId).filter((x): x is string => !!x);
+      const names = ids.length ? await db.select({ id: checkWorkers.id, name: checkWorkers.name }).from(checkWorkers).where(inArray(checkWorkers.id, ids)) : [];
+      return ms.map((m) => ({ ranOn: m.workerId ? (names.find((n) => n.id === m.workerId)?.name ?? "a check worker") : "company runner", slots: m.limit }));
+    },
     queueStatus: async (companyId) => {
       const mode = await checkQueueSvc.mode();
       if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
@@ -2065,7 +2083,8 @@ export async function buildApp(opts: AppOptions) {
       const id = IdParam.parse(req.params).id;
       const queue = await checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
       // R46: "free, not taking X because …" for every machine with a free slot that declined a job it could take.
-      return { ...queue, idleSlots: checks.idleSlots(id).map(idleView) };
+      // BOS-1942: the server's own host name, so "Running on this server (name)" reads the same as on the Merges tab.
+      return { ...queue, serverHost: await hostFacts.serverHost().catch(() => null), idleSlots: checks.idleSlots(id).map(idleView) };
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
@@ -2086,7 +2105,7 @@ export async function buildApp(opts: AppOptions) {
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {
       const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(req.query);
-      return workflow.scorecard(IdParam.parse(req.params).id, q.days);
+      return workflow.scorecardWithPrevious(IdParam.parse(req.params).id, q.days);
     });
 
     // Workflow retros (docs/19 parts 2 and 3): who runs them, the latest findings and changes, and a run on demand.
@@ -2134,7 +2153,7 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title, assigneeAgentId: tickets.assigneeAgentId, systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
       if (!t) return reply.code(404).send({ error: "not_found" });
-      const release = { status: "queued" as const, statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` };
+      const release = { status: "queued" as const, statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${OWNER_OVERRIDE_PRIORITY})` };
       const released = await db
         .update(wakes)
         .set(release)
@@ -2150,7 +2169,7 @@ export async function buildApp(opts: AppOptions) {
           .where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
           .limit(1);
         if (waiting) await db.update(wakes).set(release).where(eq(wakes.id, waiting.id));
-        else await scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: id, reason: "woken by owner", priority: DEFAULT_LIMITS.highPriority, note: "The owner ran this ticket now, past the quota hold." });
+        else await scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: id, reason: "woken by owner", priority: OWNER_OVERRIDE_PRIORITY, note: "The owner ran this ticket now, past the quota hold." });
         released.push({ id: waiting?.id ?? id });
       }
       if (released.length) await scheduler.tick();

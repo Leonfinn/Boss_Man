@@ -739,6 +739,26 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
   });
 
+  // BOS-1907 criterion 6 and 7: a merged ticket in Blocked is quiet until its watch ends, then the usual hand-off follows
+  // (the assignee first); the watchdog never opens an owner flag for it. An existing row with no watch recorded gets 14 days from go-live.
+  it("a merged ticket stays quiet until its watch date, then is flagged for its assignee, and an old row gets the 14-day default", async () => {
+    await ctx.switchOn();
+    const days = (n: number) => new Date(ctx.now().getTime() + n * 24 * H);
+    const base = { systemState: "blocked" as const, stateChangedAt: ctx.ago(60 * 24 * 20), mergeCommit: "a".repeat(40), mergedAt: days(-20) };
+    const dated = await ctx.ticket({ ...base, title: "Watches a week", watchingFor: "a week of real use", watchUntil: days(3), liveAt: days(-20) });
+    const lapsed = await ctx.ticket({ ...base, title: "Watch ended", watchingFor: "a week of real use", watchUntil: days(-1), liveAt: days(-20) });
+    const freshOld = await ctx.ticket({ ...base, title: "Old row, live 5 days ago", liveAt: days(-5) });
+    const staleOld = await ctx.ticket({ ...base, title: "Old row, live 15 days ago", liveAt: days(-15) });
+    await ctx.watchdog.run();
+    const flags = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.status, "open"));
+    const flagged = new Set(flags.map((f) => f.ticketId));
+    expect(flagged.has(dated.id)).toBe(false);
+    expect(flagged.has(freshOld.id)).toBe(false);
+    expect(flagged.has(lapsed.id)).toBe(true);
+    expect(flagged.has(staleOld.id)).toBe(true);
+    expect(flags.some((f) => f.rule === "owner_decision_waiting")).toBe(false);
+  });
+
   it("the backtest gives an idle ticket at most two hand-offs in four hours", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
     const t = await ctx.stalled({ stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });

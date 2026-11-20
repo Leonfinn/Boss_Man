@@ -281,10 +281,17 @@ export type Ticket = {
   reviewWait?: string | null;
   /** BOS-1546: a merged ticket that only waits to go live, in plain words, and the owner's open update card if there is one. */
   goLiveNote?: { text: string; cardId: string | null } | null;
-  /** The merge commit, set once merged; with systemState "blocked" it puts the card in the "Merged, waiting for a live check" lane (BOS-1636). */
+  /** BOS-1907: what a merged ticket watches for after go-live, when the watch ends (the agent's date, else 14 days after go-live), and whether this split-out check ticket's parent is merged. */
+  watchingFor?: string | null;
+  watchUntil?: string | null;
+  watchEndsAt?: string | null;
+  checksParentMerged?: boolean;
+  /** The merge commit, set once merged; with systemState "blocked" or "in_progress" it puts the card in the "Merged, watching" lane (BOS-1636, BOS-1907). */
   mergeCommit?: string | null;
   /** In review and not the owner's to act on: still with its reviewers, or approved by all of them and only merging (BOS-667). */
-  reviewStage?: "awaiting_review" | "merging" | "held" | null;
+  reviewStage?: "awaiting_review" | "merging" | "held" | "checking" | null;
+  /** BOS-1906: with reviewStage "checking", where its quick check stands ("running now", "no. 3 in line"). */
+  checkLine?: string | null;
   /** A reviewer passed it but holds the merge (BOS-808). */
   hold?: ReviewHold | null;
   /** Where an approved ticket's merge is, in plain words ("Waiting for a check slot."). */
@@ -382,6 +389,8 @@ export type RunRow = {
   cachedWriteTokens?: number | null;
   /** "subscription" or "api_credit": subscriptions show tokens, API credit shows money. */
   fundingKind?: string | null;
+  /** The funding account the run was paid from, by name (BOS-1943). */
+  account?: string | null;
 };
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };

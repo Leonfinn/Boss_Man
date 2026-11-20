@@ -13,9 +13,10 @@ import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
 import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
-import { namedThingsSection, type NamedSources } from "./named-things.js";
+import { namedThingsSection, youSaidLines, type NamedSources } from "./named-things.js";
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
+import { reportBackSection, settleReports } from "./chat-report-back.js";
 
 export const CHAT_REASON = "owner_chat";
 
@@ -121,6 +122,24 @@ export function chatService(
   const saving = new Map<string, Promise<unknown>>();
   // shortcut: how many changes the run had when it last replied, so the run-end line lists only what came after (BOS-758).
   const changesAtReply = new Map<string, number>();
+  async function isCeo(agentId: string): Promise<boolean> {
+    const [a] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, agentId));
+    return a?.role === "ceo";
+  }
+  /** The "you said" lines under a CEO reply (DR-069 D3); empty on any failure. */
+  async function youSaid(companyId: string, agentId: string, text: string): Promise<string[]> {
+    try {
+      const owner = await db
+        .select({ text: ownerChatMessages.text })
+        .from(ownerChatMessages)
+        .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId), eq(ownerChatMessages.role, "owner")))
+        .orderBy(desc(ownerChatMessages.createdAt))
+        .limit(HISTORY);
+      return await youSaidLines(db, companyId, text, owner.map((m) => m.text), deps.named);
+    } catch {
+      return [];
+    }
+  }
   async function agentOf(companyId: string, agentId: string): Promise<Agent> {
     const [a] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, agentId)));
     if (!a) throw new ChatError(404, "No such agent in this company.");
@@ -275,6 +294,8 @@ export function chatService(
         "- When your answer is substantial (an analysis, a comparison, research into options), also save it as a wiki page (Product/Analysis, or the folder it belongs in) and link it, so it isn't lost in the chat.",
         "- To link a wiki page, name it as [[slug]] (or [[slug#Section]]): the chat turns that into a working link. The wiki tools' replies give the exact link too (Link: #/wiki/<company>/<slug>), so copy that rather than writing the company id and page name yourself.",
         "- End with a short reply that lists everything you created or changed, each as `#/tickets/<id>` followed by its title, so the owner can open it.",
+        // R52: tickets asked for in this chat that have closed or handed out follow-ups since, to be reported back here.
+        ...(await reportBackSection(db, companyId, agentId, new Date()).catch(() => [])),
         "",
         "The conversation so far, oldest first:",
         ...recent.map((m) => `${m.role === "owner" ? "Owner" : m.role === "assistant" ? "You" : "Boss Man"}: ${m.text}`),
@@ -291,6 +312,8 @@ export function chatService(
 
     /** The answering run's final message becomes the agent's reply. */
     async onAgentMessage(runId: string, text: string) {
+      // Registered at once, so the run-end check waits for the whole save, however many lookups build the notes first.
+      const work = (async () => {
       const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
       // The PA speaks only through pa_reply, which is checked; its own closing text never reaches the owner (R87).
       if (r?.purpose !== "chat" || r.duty === "assistant") return;
@@ -299,7 +322,9 @@ export function chatService(
       const links = await missingPageNote(db, r.companyId, text);
       // What the run actually changed is checked against its claims, in code (BOS-758).
       const done = await doneInThisReply(db, runId, text, changesAtReply.get(runId));
-      const notes = [links, done].filter(Boolean);
+      // DR-069 D3: up to two "you said X on card Y" lines for things this CEO reply names first; never holds or rewrites the reply.
+      const said = r.duty !== "assistant" && r.agentId && (await isCeo(r.agentId)) ? await youSaid(r.companyId, r.agentId, text) : [];
+      const notes = [links, done, said.length ? said.join("\n") : null].filter(Boolean);
       const saved = notes.length ? `${text}\n\n${notes.join("\n\n")}` : text;
       // The Thinking trace so far is saved with the reply (BOS-1368), so a reload shows it; a reply
       // with no steps saves nothing, so it shows no trace. Taken before the insert can fail, so its
@@ -313,9 +338,11 @@ export function chatService(
         .then(([row]) => {
           if (trace && row) return db.insert(ownerChatTraces).values({ messageId: row.id, companyId: r.companyId, agentId: r.agentId, runId, trace }).then(() => {});
         });
-      saving.set(runId, save.catch(() => {}));
       changesAtReply.set(runId, runTrace(runId).changes.length);
       await save;
+      })();
+      saving.set(runId, work.catch(() => {}));
+      await work;
     },
 
     async onRunEnded(runId: string, error: string | null, interrupted = false) {
@@ -333,6 +360,8 @@ export function chatService(
         .innerJoin(agents, eq(agents.id, runs.agentId))
         .where(eq(runs.id, runId));
       if (r?.purpose !== "chat") return;
+      // R52: tickets this chat was owed a report on are kept by a reply that names them, or Boss Man says it itself, whatever way the run ended.
+      if (!interrupted && r.duty !== "assistant" && r.agentId && r.startedAt) await settleReports(db, r.companyId, r.agentId, r.startedAt, runId).catch(() => 0);
       if (error) {
         await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "system", text: `The reply couldn't be finished: ${error.slice(0, 500)}`, runId });
         return;

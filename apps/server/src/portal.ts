@@ -36,7 +36,7 @@ export const DEFAULT_PORTAL_LIMITS: PortalLimits = { writesPerIpPerHour: 40, wri
 
 /** A sliding-window counter per key, bounded in memory. */
 export const WINDOW_COUNTER_MAX_KEYS = 20_000;
-export function windowCounter(now: () => number) {
+export function windowCounter(now: () => number, maxKeys = WINDOW_COUNTER_MAX_KEYS) {
   // shortcut: rate-limit counters in memory; lost on restart, harmless because it only forgets recent hits.
   const hits = new Map<string, number[]>();
   return {
@@ -54,7 +54,7 @@ export function windowCounter(now: () => number) {
       }
       list.push(now());
       hits.set(key, list);
-      if (hits.size > WINDOW_COUNTER_MAX_KEYS) hits.delete(hits.keys().next().value!);
+      if (hits.size > maxKeys) hits.delete(hits.keys().next().value!);
       return true;
     },
   };
@@ -67,11 +67,12 @@ export function sendLogo(reply: FastifyReply, logo: { bytes: Buffer; type: strin
 
 type Feedback = ReturnType<typeof feedbackService>;
 
-export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number; clientAddress?: (req: FastifyRequest) => string; mailer?: PortalMailer; portalUrl?: string }) {
+export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number; counterMaxKeys?: number; clientAddress?: (req: FastifyRequest) => string; mailer?: PortalMailer; portalUrl?: string }) {
   const limits = { ...DEFAULT_PORTAL_LIMITS, ...deps.limits };
   /** The address the per-visitor limits count against (the proxy-aware one when the portal listener sets it). */
   const addressOf = (req: FastifyRequest) => (deps.clientAddress ? deps.clientAddress(req) : req.ip);
-  const counter = windowCounter(deps.now ?? (() => Date.now()));
+  // `counterMaxKeys` (BOS-1926) is for tests: a small bound shows the eviction in a few requests instead of 20,001.
+  const counter = windowCounter(deps.now ?? (() => Date.now()), deps.counterMaxKeys);
   // BOS-1407: the per-portal caps live apart from the per-address ones. In one shared Map a flood of
   // reads from new addresses evicted the oldest key, usually `portal:<id>`, and reset the portal's
   // write cap. Portal keys are only made after the token checks out, so this Map holds one key per
@@ -254,7 +255,7 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
 }
 
 /** A listener with only the portal: its page, its assets and its API. Nothing else answers. */
-export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string; secureCookies: boolean; logger?: boolean; trustedProxies?: string[]; clientHeader?: string; limits?: Partial<PortalLimits>; mailer?: PortalMailer; portalUrl?: string }) {
+export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string; secureCookies: boolean; logger?: boolean; trustedProxies?: string[]; clientHeader?: string; limits?: Partial<PortalLimits>; counterMaxKeys?: number; mailer?: PortalMailer; portalUrl?: string }) {
   const app = Fastify({ logger: opts.logger ?? false, trustProxy: false });
   await app.register(cookie);
   // BOSSMAN_PORTAL_TRUSTED_PROXY: empty means the connecting address is the visitor, as before.
@@ -264,6 +265,7 @@ export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string
     feedback: opts.feedback,
     secureCookies: opts.secureCookies,
     limits: opts.limits,
+    counterMaxKeys: opts.counterMaxKeys,
     mailer: opts.mailer,
     portalUrl: opts.portalUrl,
     clientAddress: matcher.size ? (req) => portalClientAddress(req.socket.remoteAddress ?? req.ip, req.headers, matcher, header) : undefined,

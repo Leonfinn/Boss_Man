@@ -28,8 +28,29 @@ export function imageContains(image: string | null, commit: string | null | unde
   return serverContains(image, commit, order, contains);
 }
 
-/** A ticket's setup steps as lines: one per step, blank lines and a leading "1." left off. */
-export const splitSteps = (text: string) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+/**
+ * A ticket's setup steps: one per line, blank lines left off. A fenced command block (an opening ``` line, the
+ * command, a closing ``` line) stays together as ONE step, so a host command can say where it runs with
+ * ```sh host="<name>" as="root" (BOS-1953). A fence that is never closed is read line by line, as before.
+ */
+export function splitSteps(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    if (!line) continue;
+    if (/^```[^`]*$/.test(line)) {
+      const close = lines.findIndex((l, j) => j > i && /^```\s*$/.test(l.trim()));
+      if (close > 0) {
+        out.push([line, ...lines.slice(i + 1, close).map((l) => l.trimEnd()), "```"].join("\n"));
+        i = close;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out;
+}
 
 /** Spaces, tabs and newlines alike, so the same step written differently reads the same (BOS-741). */
 export const stepKey = (step: string) => step.replace(/\s+/g, " ").trim();

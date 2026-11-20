@@ -101,12 +101,12 @@ export class CheckJobs {
         },
       })
       .then(
-        (r) => ({ exitCode: cancelled ? null : r.exitCode, timedOut: r.timedOut && !cancelled, tail: cancelled ? `${r.output}\nStopped by the server.` : r.output, fullLog: r.fullLog === undefined ? undefined : cancelled ? `${r.fullLog}\nStopped by the server.` : r.fullLog }),
-        (err: Error) => ({ exitCode: null as number | null, timedOut: false, tail: `The runner could not start the check: ${String(err.message).slice(0, 1000)}`, fullLog: undefined as string | undefined }),
+        (r) => ({ stages: r.stages, ranFull: r.ranFull, exitCode: cancelled ? null : r.exitCode, timedOut: r.timedOut && !cancelled, tail: cancelled ? `${r.output}\nStopped by the server.` : r.output, fullLog: r.fullLog === undefined ? undefined : cancelled ? `${r.fullLog}\nStopped by the server.` : r.fullLog }),
+        (err: Error) => ({ stages: undefined, ranFull: undefined, exitCode: null as number | null, timedOut: false, tail: `The runner could not start the check: ${String(err.message).slice(0, 1000)}`, fullLog: undefined as string | undefined }),
       )
       .then((r) => {
         this.cancels.delete(cmd.jobId);
-        const done: Done = { type: "check.done", jobId: cmd.jobId, commit: cmd.commit, exitCode: r.exitCode, timedOut: r.timedOut, tail: redactForModel(withCheckFacts(r.tail)), ...(r.fullLog !== undefined ? { fullLog: r.fullLog } : {}) };
+        const done: Done = { type: "check.done", jobId: cmd.jobId, commit: cmd.commit, exitCode: r.exitCode, timedOut: r.timedOut, tail: redactForModel(withCheckFacts(r.tail)), ...(r.fullLog !== undefined ? { fullLog: r.fullLog } : {}), ...(r.stages ? { stages: r.stages, ranFull: r.ranFull } : {}) };
         this.unsent.set(cmd.jobId, done);
         this.send(done);
         this.log(`check job ${cmd.jobId} ended (exit ${r.exitCode}${r.timedOut ? ", timed out" : ""})`);

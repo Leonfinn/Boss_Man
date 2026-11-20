@@ -7,6 +7,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne,
 import { REAL_USE_LABEL, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
+import { dueChatReport } from "./chat-report-back.js";
 import { agentHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
@@ -111,6 +112,8 @@ export const IDLE_SLOT_REASON = "idle slot";
 export const IDLE_AGENTS_REASON = "idle agents";
 /** Free run slots and idle agents for 30 minutes, but every open ticket waits on another: the CEO is told what everything waits on (BOS-1662). */
 export const NOTHING_STARTABLE_REASON = "nothing startable";
+/** The owner's "Run now" on a held ticket (BOS-1943): the one priority that skips the quota hold whatever the wake's reason. */
+export const OWNER_OVERRIDE_PRIORITY = 5;
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** Tickets moved to review, gathered into one CEO run (R85). */
@@ -2047,7 +2050,10 @@ export function schedulerService(
         // check: under the default "pause" it is held at the limit, so nothing spends unapproved
         // extra usage (BOS-253).
         const [urgentTicket] = w.ticketId && w.reason !== WATCH_REASON ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
-        const holdApplies = w.priority < limits.highPriority || !!urgentTicket?.urgent;
+        // BOS-1943: a high priority alone no longer skips the hold. Resumes, check results, GitHub feedback
+        // and "changes requested" wakes carry priority 3 but are routine work; they were starting on a held
+        // account. Only a wake someone is waiting on (chats, reviews, owner answers, alerts) skips it.
+        const holdApplies = w.priority < limits.highPriority || (w.priority < OWNER_OVERRIDE_PRIORITY && wakeClassOf(w) !== "waiting") || !!urgentTicket?.urgent;
         let onSource: string | undefined;
         if (agent?.fundingSourceId) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
@@ -2251,6 +2257,9 @@ export function schedulerService(
       // so the parent's "unblocked" note already reads the recorded verdict.
       const reported = await reportCheckTicket(db, ticketId, now());
       if (reported) await this.notify(reported.agentId, { ticketId: reported.ticketId, reason: CHECK_REPORTED_REASON, note: reported.note, causedByRunId });
+      // R52 (BOS-1911): a ticket asked for in chat is reported back in that chat: one chat wake, whose run (or Boss Man's own line) tells the owner.
+      const owed = await dueChatReport(db, ticketId, now(), causedByRunId);
+      if (owed) await this.notify(owed.agentId, { reason: CHAT_REASON, priority: 4, causedByRunId });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
       for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
       // The wiki maintainer files what finished work produced (R73). One waiting run covers

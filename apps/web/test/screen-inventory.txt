@@ -32,9 +32,10 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Being checked
   - Costliest tasks
   - Filter tasks
-  - Merged, waiting for a live check
+  - Merged, watching
   - On your subscriptions
   - Passed, held
   - Pay-as-you-go spend
@@ -423,6 +424,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
+  - What this shows
   - Workflow report
 reads: 
   - /api/companies/:id/retros/latest
