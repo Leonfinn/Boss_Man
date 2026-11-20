@@ -335,6 +335,27 @@ p { margin: 0; }
 .lane-title .count-badge { color: var(--side); }
 .lane-empty { margin: 0; font-size: 13px; color: var(--muted); }
 .lane-hint { font-size: 12px; color: var(--muted); }
+/* BOS-1909: lanes that move by themselves (Being checked, Merged watching) read as parked: a dashed edge, flat cards. */
+.lane.parked { background: transparent; border: 1px dashed var(--line-strong); }
+.lane.parked h2 { color: var(--muted); }
+.lane.parked .ticket, .ticket.quietcard { box-shadow: none; background: transparent; border-style: dashed; }
+.lane h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.lane .show-more { align-self: stretch; min-height: 40px; }
+@media (pointer: coarse) { .lane .show-more { min-height: 44px; } }
+.ticket .state-line { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.ticket .state-line .ico { flex: none; width: 1.2em; text-align: center; }
+/* The "Where work stands" strip (BOS-1909): counted work first, then a lighter dashed group for what moves by itself. */
+.standing { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.standing-item { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 12px; border-radius: 999px; font-size: 13px; color: var(--head); text-decoration: none; }
+.standing-item.inProgress { background: var(--green-soft); color: var(--green-ink); }
+.standing-item.inProgress .standing-icon { animation: pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .standing-item.inProgress .standing-icon { animation: none; } }
+.standing-quiet { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 0 6px 0 12px; border: 1px dashed var(--line-strong); border-radius: 999px; }
+.standing-quiet-title { font-size: 12px; color: var(--muted); }
+.standing-quiet .standing-item { color: var(--muted); padding: 0 8px; }
+.standing-item:hover { text-decoration: underline; }
+@media (pointer: coarse) { .standing-item { min-height: 44px; } }
+@media (max-width: 640px) { .standing-item { min-height: 44px; } .standing-quiet { border-radius: 14px; padding: 4px 6px 4px 12px; } }
 .icon-btn { margin-left: auto; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn:hover { background: var(--card); color: var(--head); }
 .rename { display: flex; flex-direction: column; gap: 6px; padding: 2px; }

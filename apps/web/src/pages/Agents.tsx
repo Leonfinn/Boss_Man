@@ -39,6 +39,9 @@ type AgentRow = {
   /** Tickets in progress, and the owner's limit per agent (null: no limit), for "3 of 2 tickets in progress" (BOS-1029). */
   wipCount?: number;
   wipLimit?: number | null;
+  /** BOS-1909: tickets of this agent's that count toward no limit: being checked, and next up in Ready. Missing from an older server. */
+  beingChecked?: number;
+  nextUp?: number;
   pa: { posted: number; escalated: number; wrong: number } | null;
   month: { costMicros: number; runs: number; tokens: number };
 };
@@ -812,6 +815,8 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
                   <span title="Tickets in progress, against the limit per agent set in Settings" className={a.wipCount > a.wipLimit ? "over-limit" : undefined}>
                     {a.wipCount} of {a.wipLimit} tickets in progress{a.wipCount > a.wipLimit ? ", over the limit" : ""}
                   </span>
+                  {!!a.beingChecked && <span title="Handed in, waiting for the quick check. Counts toward no limit."> · {a.beingChecked} being checked</span>}
+                  {!!a.nextUp && <span title="Waiting in Ready; starts by itself when the agent finishes. Counts toward no limit."> · {a.nextUp} next up</span>}
                 </>
               )}
               {isInfiniteModel(a.model) && (

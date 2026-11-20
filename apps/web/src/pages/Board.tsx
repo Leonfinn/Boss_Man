@@ -23,9 +23,15 @@ import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 import { ago } from "./Dashboard";
 import { ageShort } from "../age";
+import { WorkStands } from "../components/WorkStands";
 import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
 const DONE_SHOWN = 8;
+const PARKED_SHOWN = 4;
+/** A merged ticket whose watch has run past its end date (the agent's date, or the 14-day default): it sorts first in Merged, watching. */
+const watchPastEnd = (t: { watchEndsAt?: string | null }) => !!t.watchEndsAt && Date.parse(t.watchEndsAt) < Date.now();
+/** Past the 14-day default with no date from the agent: the amber "No date" tag; whole days since the watch began. */
+const watchNoDateDays = (t: { watchEndsAt?: string | null; watchUntil?: string | null }) => (t.watchEndsAt && !t.watchUntil && watchPastEnd(t) ? 14 + Math.floor((Date.now() - Date.parse(t.watchEndsAt)) / 86_400_000) : null);
 const PROJECT_TABS = [
   { id: "kanban", label: "Kanban" },
   { id: "budget", label: "Budget" },
@@ -540,7 +546,7 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
-function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, mergeLine }: { mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, mergeLine, quiet }: { quiet?: boolean; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -560,7 +566,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
   const hover = (cut: boolean, text: string) => (cut && !open ? text : undefined);
   const first = who ? name.split(" ")[0]! : name;
   return (
-    <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId}>
+    <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId}>
       <div className="top">
         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
         {(t.risk === "high" || t.risk === "critical") && (
@@ -576,10 +582,14 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
         {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : t.blockedBy.length}</span>}
         {t.nextUp && t.systemState === "ready" && (
-          <span className="tag blue" title="The agent is busy on another ticket. This one starts by itself when they finish, and counts toward no limit until then.">
+          <span className="tag" title="The agent is busy on another ticket. This one starts by itself when they finish, and counts toward no limit until then.">
             Next up
           </span>
         )}
+        {t.reviewStage === "checking" && <span className="tag">Being checked</span>}
+        {isLiveCheckWait(t) && <span className="tag green">Merged</span>}
+        {isLiveCheckWait(t) && watchNoDateDays(t) !== null && <span className="tag amber">No date · {watchNoDateDays(t)} days</span>}
+        {t.wipExempt === "busy" && !isLiveCheckWait(t) && <span className="tag">Agent busy</span>}
         {t.hold && (
           <span className="tag amber" title={t.hold.reason}>
             Held: {t.hold.label}
@@ -604,9 +614,22 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
           {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
         </a>
       )}
-      {t.wipExempt && (
-        <span className="note" title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
-          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : t.wipExempt === "busy" ? `Agent busy on ${t.busyOnNumber ? ticketRef(prefix, t.busyOnNumber) : "another ticket"}` : `waits on ${blockers.map((b) => refOf(b) ?? b.ticketTitle ?? "a task").join(", ")}`}
+      {t.wipExempt && t.wipExempt !== "live" && !isLiveCheckWait(t) && (
+        <span className={t.wipExempt === "busy" ? "state-line" : "note"} title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
+          {t.wipExempt === "busy" ? (
+            <>
+              <span className="ico" aria-hidden="true">⏸</span>
+              <span>{first} is on {t.busyOnNumber ? ticketRef(prefix, t.busyOnNumber) : "another ticket"} right now. Not counted.</span>
+            </>
+          ) : (
+            <>Not counted: {t.wipExempt === "plan" ? "plan with owner" : `waits on ${blockers.map((b) => refOf(b) ?? b.ticketTitle ?? "a task").join(", ")}`}</>
+          )}
+        </span>
+      )}
+      {t.nextUp && t.systemState === "ready" && (
+        <span className="state-line" data-testid="board-next-up-note">
+          <span className="ico" aria-hidden="true">→</span>
+          <span>Starts by itself when {first} finishes what they are running. Counts toward no limit until then.</span>
         </span>
       )}
       {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
@@ -652,7 +675,12 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
       )}
       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
       {merging && t.mergeNote && !mergeLine && <span className="note">{t.mergeNote}</span>}
-      {t.reviewStage === "checking" && <span className="note" data-testid="board-being-checked-note">Quick check: {t.checkLine ?? "waiting"}.</span>}
+      {t.reviewStage === "checking" && (
+        <span className="state-line" data-testid="board-being-checked-note">
+          <span className="ico" aria-hidden="true">⧗</span>
+          <span>Quick check: {t.checkLine ?? "waiting"}. Reviewers are woken when it passes.</span>
+        </span>
+      )}
       {mergeLine && <span className="note" data-testid="board-merge-line">{statusLineText(mergeLine)}</span>}
       {/* BOS-1565: a held card says what it waits for even before the merge queue's own line has loaded or if it has none. */}
       {t.reviewStage === "held" && t.hold && !mergeLine && (
@@ -667,14 +695,17 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         </span>
       )}
       {isLiveCheckWait(t) && !t.goLiveNote && (
-        <span className="note" data-testid="board-live-check-note">
-          {t.ownerQuestionId ? (
-            <>
-              Merged and live. Waiting for your answer on a card. <a href={`#/decisions/${t.ownerQuestionId}`}>Open the card</a>
-            </>
-          ) : (
-            `Merged and live. ${t.watchingFor ? `Watching for: ${t.watchingFor}. ` : "Waiting for the agent to report the after-merge check. "}${t.watchEndsAt ? `${t.watchingFor ? "Watch" : "The check"} runs to ${new Date(t.watchEndsAt).toLocaleDateString()}${t.watchingFor && !t.watchUntil ? " (the 14-day default)" : ""}. ` : ""}Nothing for you to do.`
-          )}
+        <span className="state-line" data-testid="board-live-check-note">
+          <span className="ico" aria-hidden="true">👁</span>
+          <span>
+            {t.ownerQuestionId ? (
+              <>
+                Merged and live. Waiting for your answer on a card. <a href={`#/decisions/${t.ownerQuestionId}`}>Open the card</a>
+              </>
+            ) : (
+              `${t.watchingFor ? `Watching for: ${t.watchingFor}` : "Waiting for the agent to report the after-merge check"}${t.watchEndsAt ? ` · until ${new Date(t.watchEndsAt).toLocaleDateString()}${t.watchUntil ? "" : " (14-day default)"}` : ""}.${watchNoDateDays(t) !== null ? " Past 14 days with no date. The watchdog and then the CEO are told, not you." : ""}`
+            )}
+          </span>
         </span>
       )}
       {!!t.working?.length && (
@@ -740,6 +771,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       return next;
     });
   const [allDone, setAllDone] = useState(false);
+  // BOS-1909: a parked lane shows this many cards, then "Show N more" (once pressed, all of them).
+  const [moreOpen, setMoreOpen] = useState<Record<string, boolean>>({});
   const [shownStates, setShownStates] = useState(readShownStates);
   const toggleState = (st: FeatureStatus) =>
     setShownStates((cur) => {
@@ -800,6 +833,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       return [{ col, tickets: open.filter((t) => !isLiveCheckWait(t)), mine: false }, ...(live.length ? [{ col, tickets: live, mine: false, liveCheck: true }] : [])];
     }
     if (col.systemState === "in_progress") return [{ col, tickets: open.filter((t) => !isLiveCheckWait(t)), mine: false }];
+    // BOS-1909: in Ready the "Next up" tickets (an agent's one waiting start) sit on top.
+    if (col.systemState === "ready") return [{ col, tickets: [...open].sort((a, b) => Number(!!b.nextUp) - Number(!!a.nextUp)), mine: false }];
     if (col.systemState !== "review") return [{ col, tickets: open, mine: false }];
     // A reviewer's hold (BOS-808): passed, kept from merging on purpose. Its own lane, shown only when something is held.
     const held = open.filter((t) => t.reviewStage === "held");
@@ -815,6 +850,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   });
   const heldCount = lanes.find((l) => l.held)?.tickets.length ?? 0;
   const shownTotal = lanes.reduce((n, l) => n + l.tickets.filter(passes).length, 0);
+  // BOS-1909: the "Where work stands" strip. Counts follow the filters and the search, like the lanes, so they match what is shown.
+  const cols = board.data?.columns ?? [];
+  const progressCol = cols.find((c) => c.systemState === "in_progress");
+  const readyCol = cols.find((c) => c.systemState === "ready");
+  const standing = {
+    inProgress: (progressCol?.tickets ?? []).filter((t) => !t.waitingOnOwner && !t.wipExempt && passes(t)).length,
+    nextUp: (readyCol?.tickets ?? []).filter((t) => t.nextUp && passes(t)).length,
+    beingChecked: lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0,
+    watching: lanes.find((l) => l.liveCheck)?.tickets.filter(passes).length ?? 0,
+  };
+  const standingTargets = { inProgress: progressCol ? `lane-${progressCol.id}` : undefined, nextUp: readyCol ? `lane-${readyCol.id}` : undefined, beingChecked: "lane-being-checked", watching: "lane-live-check" };
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
@@ -1063,6 +1109,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           )}
         </div>
       </div>
+      {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} />}
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
         <div className="segmented state-filter" role="group" aria-label="Show features that are">
@@ -1093,8 +1140,13 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const done = col.systemState === "done";
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
             const visible = done && !allDone && !words.length ? rows.slice(0, DONE_SHOWN) : rows;
+            // BOS-1909: parked lanes show 4 cards then "Show N more"; in Merged, watching a watch past its end sorts first.
+            const parked = !!liveCheck || !!checking;
+            const parkedKey = liveCheck ? "live-check" : "being-checked";
+            const parkedRows = liveCheck ? [...shown].sort((x, y) => Number(watchPastEnd(y)) - Number(watchPastEnd(x))) : shown;
+            const parkedShown = parked && !moreOpen[parkedKey] ? parkedRows.slice(0, PARKED_SHOWN) : parkedRows;
             return (
-              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : liveCheck ? "live-check" : checking ? "being-checked" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : liveCheck ? "lane-live-check" : checking ? "lane-being-checked" : `lane-${col.id}`}>
+              <section className={`lane${mine ? " mine" : ""}${parked ? " parked" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : liveCheck ? "live-check" : checking ? "being-checked" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : liveCheck ? "lane-live-check" : checking ? "lane-being-checked" : `lane-${col.id}`}>
                 {mine ? (
                   <header className="lane-head">
                     <div className="lane-title">
@@ -1128,7 +1180,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                 ) : checking ? (
                   <header className="lane-head">
                     <div className="lane-title">
-                      <h2 id="lane-being-checked">Being checked</h2>
+                      <h2 id="lane-being-checked" tabIndex={-1}>Being checked</h2>
                       <span className="mono">{shown.length}</span>
                     </div>
                     <span className="lane-hint">Handed in. Boss Man is running each quick check, and nobody is asked to review until it passes. If it fails, the task goes back to its agent. Nothing is stuck.</span>
@@ -1136,7 +1188,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                 ) : liveCheck ? (
                   <header className="lane-head">
                     <div className="lane-title">
-                      <h2 id="lane-live-check">Merged, watching</h2>
+                      <h2 id="lane-live-check" tabIndex={-1}>Merged, watching</h2>
                       <span className="mono">{shown.length}</span>
                     </div>
                     <span className="lane-hint">Already merged. Each card says what it waits for. Nothing is stuck and none of these count as blocked.</span>
@@ -1146,7 +1198,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                 ) : (
                   <header className="lane-head">
                     <div className="lane-title">
-                      <h2 id={`lane-${col.id}`}>{label(col)}</h2>
+                      <h2 id={`lane-${col.id}`} tabIndex={-1}>{label(col)}</h2>
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
                         {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : shown.length}
                       </span>
@@ -1198,9 +1250,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </>
                 ) : (
-                  shown.map((t) => (
+                  <>
+                  {(parked ? parkedShown : shown).map((t) => (
                     <TicketCard
                       key={t.id}
+                      quiet={parked}
                       t={t}
                       mine={!!mine}
                       merging={!!merging}
@@ -1212,7 +1266,13 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       onRunNow={(id) => void runNow(id)}
                       mergeLine={t.reviewStage === "merging" || t.reviewStage === "held" ? mergeLineOf(t.id) : undefined}
                     />
-                  ))
+                  ))}
+                  {parked && parkedRows.length > PARKED_SHOWN && (
+                    <button type="button" className="btn show-more" aria-expanded={!!moreOpen[parkedKey]} onClick={() => setMoreOpen({ ...moreOpen, [parkedKey]: !moreOpen[parkedKey] })}>
+                      {moreOpen[parkedKey] ? "Show fewer" : `Show ${parkedRows.length - PARKED_SHOWN} more`}
+                    </button>
+                  )}
+                  </>
                 )}
               </section>
             );
