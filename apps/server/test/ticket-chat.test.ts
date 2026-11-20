@@ -65,6 +65,19 @@ describe("ticket conversation (R65)", () => {
     expect((await c.req("GET", `/api/tickets/${t.id}/messages`)).json()).toMatchObject({ items: [{ author: "owner", text: "Is this still needed?" }], live: null });
   });
 
+  it("lists the newest 200 runs of a ticket, oldest first", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Standing review" })).json() as { id: string };
+    const base = Date.UTC(2026, 0, 1);
+    await c.db.insert(runsTable).values(
+      Array.from({ length: 205 }, (_, i) => ({ companyId: c.company.id, agentId: c.worker.id, ticketId: t.id, purpose: "ticket", startedAt: new Date(base + i * 60_000), endedAt: new Date(base + i * 60_000 + 1000) })),
+    );
+    const list = (await c.req("GET", `/api/tickets/${t.id}/runs`)).json() as { startedAt: string }[];
+    expect(list).toHaveLength(200);
+    expect(new Date(list[0]!.startedAt).getTime()).toBe(base + 5 * 60_000);
+    expect(new Date(list[199]!.startedAt).getTime()).toBe(base + 204 * 60_000);
+  });
+
   it("sends into the live run, records its last message, then wakes the agent once for later messages", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
