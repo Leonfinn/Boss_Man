@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { NoCompany } from "../components/NoCompany";
 import { api, type Company, type Plan as PlanData, type PlanNode } from "../api";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
@@ -261,7 +262,7 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
       </header>
       {plan.error && !away(plan.error) && <p className="error">{plan.error.message}</p>}
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : p && !p.nodes.length ? (
         <p className="muted">No open task waits on anything. Add what a task waits on from its page.</p>
       ) : p ? (

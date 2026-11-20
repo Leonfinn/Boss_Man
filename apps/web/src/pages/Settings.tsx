@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Company } from "../api";
+import { NoCompany } from "../components/NoCompany";
 import { CompanyReviews } from "../components/ReviewPolicy";
 
 import { Section, useAction } from "./settings/shared";
@@ -195,13 +196,13 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     </nav>
   );
   const line = !company ? (
-    <p>
-      Create a company on the Kanban first, or{" "}
+    <NoCompany>
+      , or{" "}
       <button type="button" className="linkish" onClick={() => go("setup")}>
         run the setup wizard
       </button>
       .
-    </p>
+    </NoCompany>
   ) : null;
   const panels: Record<SettingsPage, ReactNode> = {
     funding: (

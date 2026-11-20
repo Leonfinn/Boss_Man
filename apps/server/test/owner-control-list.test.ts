@@ -203,7 +203,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
 /** Components the Settings page renders that hold no controls of their own (a wrapper), so need no tab above. */
 // JumpLinks is the "on this page" nav, which holds no controls of its own; HTMLHeadingElement is the focused page
 // title's type in the useRef call.
-const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement"]);
+const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement", "NoCompany"]);
 /** Components whose `label` prop is a form field's label (rendered as a <label> from the prop). */
 const FIELD_COMPONENTS = new Set(["CheckPicker"]);
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { NoCompany } from "../components/NoCompany";
 import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type MilestoneStatus, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
 import { usePoll } from "../hooks";
 import { STATUS_TONE } from "./Features";
@@ -536,7 +537,7 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
           board.data?.map((c) => <FeatureBoard key={c.id} c={c} onChanged={reload} />)
         )}
       </div>
-      {companies.length > 0 ? <AddObjective companies={companies} onAdded={reload} /> : <p>Create a company on the Kanban first.</p>}
+      {companies.length > 0 ? <AddObjective companies={companies} onAdded={reload} /> : <NoCompany />}
     </>
   );
 }

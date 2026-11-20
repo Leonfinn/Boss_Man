@@ -1,6 +1,7 @@
 // Skills (R71): the company's library of Agent Skills, and who has each. A skill is added from
 // a GitHub link (pinned to a commit), written here, or uploaded as a folder, files or a zip.
 import { RUNNER_ADDONS } from "@boss-man/shared";
+import { NoCompany } from "../components/NoCompany";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
 import { api, ApiError, type Company } from "../api";
@@ -592,7 +593,7 @@ export function Skills({ company }: { company: Company | undefined }) {
   const [pickedPack, setPickedPack] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
-  if (!company) return <p>Create a company on the Kanban first.</p>;
+  if (!company) return <NoCompany />;
   const rows = list.data ?? [];
   const packs = [...new Set(rows.map((r) => r.pack).filter((p): p is string => !!p))].sort();
   const loose = rows.filter((r) => !r.pack);

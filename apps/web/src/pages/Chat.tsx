@@ -3,6 +3,7 @@
 // directly. On a phone the list and the conversation take turns.
 import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
+import { NoCompany } from "../components/NoCompany";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
 import { when } from "./Runs";
@@ -193,7 +194,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
         </div>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <section className="card messenger" data-picked={agentId ? "yes" : "no"} aria-label="Chat">
           <nav className="messenger-list" aria-label="Team">

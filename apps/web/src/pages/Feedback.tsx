@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { NoCompany } from "../components/NoCompany";
 import { figureText } from "@boss-man/shared";
 import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
 import { copyMessage, copyText } from "../clipboard";
@@ -564,7 +565,7 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
         </div>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
