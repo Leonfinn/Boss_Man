@@ -7,8 +7,29 @@ import { openPglite } from "../src/db/client.js";
 import type { Db } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { serverWaitChecks } from "../src/services/runner-busy.js";
-import { activeWaits, blocksClass, describeWait, ruleProblems, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
+import { activeWaits, blocksClass, describeWait, LANDING_END_MS, landingsThatCount, ruleProblems, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
 import { duringUpdate, PASSES_UPDATE_HOLD, WAKE_CLASS } from "../src/services/wake-classes.js";
+
+// 20 Nov 11:44: a merge whose check had passed and which was only waiting for GitHub CI on its merge copy (phase "merging",
+// beat kept fresh by the CI poll) held the runner swap until its CI wait ended. Before the fix every such landing counted.
+describe("which landings a runner swap waits on (BOS-2058, the 11:44 hold)", () => {
+  const now = Date.parse("2026-01-01T12:00:00Z");
+  const started = new Map([
+    ["ci", now - 6 * 60_000],
+    ["pushing", now - 6 * 60_000],
+    ["old", now - LANDING_END_MS - 1],
+    ["unknown", Number.NaN],
+  ]);
+  const facts = { ciWaiting: (id: string) => id === "ci", startedMs: (id: string) => started.get(id)!, now };
+
+  it("drops a landing waiting for GitHub CI and one past its own end; keeps a push and a landing of unknown start", () => {
+    expect(landingsThatCount(["ci", "pushing", "old", "unknown"], facts)).toEqual(["pushing", "unknown"]);
+  });
+
+  it("counts the same landing again once its CI wait is over and it pushes", () => {
+    expect(landingsThatCount(["ci"], { ...facts, ciWaiting: () => false })).toEqual(["ci"]);
+  });
+});
 
 describe("every wait kind meets the rule (a to e)", () => {
   it("has an end, an earlier CEO wake, words, and waits only for what its hold stops from starting", () => {

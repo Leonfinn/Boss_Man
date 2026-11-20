@@ -78,6 +78,19 @@ export const WAIT_RULES: Record<WaitKind, WaitRule> = {
 
 /** BOS-2058: a merge landing counts as "being pushed" for at most this long. Past it the swap goes ahead (DR-014: a restart fails an in-flight merge at once, and the gate retries it). */
 export const LANDING_END_MS = WAIT_RULES["runner-landing"].endMin * 60_000;
+/**
+ * Which "merging" landings a runner swap still waits on, before the heartbeat test (review.ts landingMergeIds). Dropped:
+ * a landing waiting for GitHub CI on its merge copy (it has pushed nothing to main and keeps its beat fresh while it polls:
+ * the 20 Nov 11:44 hold, BOS-1991), and one past LANDING_END_MS. A landing with an unknown start is kept.
+ */
+export function landingsThatCount(ids: string[], facts: { ciWaiting: (id: string) => boolean; startedMs: (id: string) => number; now: number }): string[] {
+  return ids.filter((id) => {
+    if (facts.ciWaiting(id)) return false;
+    const started = facts.startedMs(id);
+    return !(Number.isFinite(started) && facts.now - started > LANDING_END_MS);
+  });
+}
+
 /** A wrap-up with no update behind it lifts by itself after this long. */
 export const STANDALONE_WRAPUP_MS = WAIT_RULES.wrapup.endMin * 60_000;
 
