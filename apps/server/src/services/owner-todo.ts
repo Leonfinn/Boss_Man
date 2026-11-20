@@ -3,9 +3,9 @@
 // a reply that asks the owner to act is held until a card covers it (mcp.ts), a state note that says the ticket
 // waits on the owner is refused without a card (mcp-tickets.ts), and this hourly sweep tells the CEO about older
 // notes that slipped through (written before the rule, or left behind when a card was withdrawn or expired).
-import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, tickets } from "../db/schema.js";
+import { companies, decisions, ticketDependencies, tickets } from "../db/schema.js";
 import { openBlockers, openCardIds } from "./ticket-links.js";
 
 /** What a note says when the ticket waits on the owner: "waiting on the owner", "needs the owner", "keep or drop". */
@@ -95,6 +95,38 @@ export async function ticketHasOpenCard(db: Db, ticketId: string): Promise<boole
   if ((await openCardIds(db, ticketId)).length) return true;
   return (await openBlockers(db, ticketId)).some((b) => b.kind === "decision");
 }
+
+/** A full card id or a prefix of 8 or more hex digits, as a reply would quote it. */
+const CARD_REF = /(?<![0-9a-f-])[0-9a-f]{8}(?:-?[0-9a-f]{1,4}){0,4}(?:-?[0-9a-f]{12})?(?![0-9a-f])/gi;
+
+/**
+ * Open owner-tier cards a reply names by full id or 8+ character prefix (R53, BOS-2084) that are not about this ticket:
+ * the card order and any go-ahead for a card belong in chat, not on a ticket the owner doesn't watch. A card is about
+ * the ticket when its context names it or the ticket waits on it. Returns the prefixes found, empty when none.
+ */
+export async function otherTicketCardsNamed(db: Db, companyId: string, ticketId: string, body: string): Promise<string[]> {
+  const refs = [...new Set([...body.matchAll(CARD_REF)].map((m) => m[0].toLowerCase()).filter((r) => r.replace(/-/g, "").length >= 8))];
+  if (!refs.length) return [];
+  const found: string[] = [];
+  const linked = new Set((await db.select({ d: ticketDependencies.blockerDecisionId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, ticketId))).map((r) => r.d));
+  for (const ref of refs.slice(0, 20)) {
+    const rows = await db
+      .select({ id: decisions.id, context: decisions.context })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner"), sql`${decisions.id}::text like ${`${ref}%`}`));
+    for (const r of rows) {
+      const about = (r.context as { ticketId?: string } | null)?.ticketId;
+      if (about === ticketId || linked.has(r.id)) continue;
+      found.push(ref);
+      break;
+    }
+  }
+  return found;
+}
+
+/** What a reply is told when it names another ticket's open owner card (R53). */
+export const OTHER_CARD_HELD =
+  "Not posted. This reply names an open owner card that is not about this ticket. A card order, or a go-ahead for a card, belongs in chat with the owner, not here: they don't watch tickets, and an old go-ahead left on a ticket gets read later as if it were current. Say it in chat, and keep this reply to what the ticket itself needs. If the id you quoted is a card about this ticket, raise it with blocksTicketId set to this ticket, then send the reply again.";
 
 /** The refusal when a state note says the ticket waits on the owner and no card is open on it. */
 export const OWNER_WAIT_REFUSAL =
