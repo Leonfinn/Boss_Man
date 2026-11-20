@@ -16,11 +16,22 @@ export class ApiError extends Error {
   }
 }
 
+/** The server's short error codes, as sentences the owner can read. */
+const PLAIN_ERROR_CODES: Record<string, string> = {
+  not_found: "That item no longer exists. Reload the page.",
+  already_exists: "Something with that name already exists.",
+  unknown_reference: "Something this refers to has been removed. Reload and try again.",
+  constraint_violated: "That change clashes with existing data, so it wasn't saved.",
+  internal_error: "Something went wrong on the server. Try again; if it keeps happening, tell the CEO.",
+};
+
 /** What a failed request means in plain words, for when the server sent no message of its own. */
 export function plainStatus(status: number, error?: unknown): string {
   if (status === 502 || status === 503 || status === 504) return "Boss Man is restarting or switching versions for a moment, so your click may not have gone through. Wait a few seconds and look at the page: if the card is still there, press the button again.";
   if (status === 404 && error === "not_open") return "This card was already closed, so there is nothing more to do here.";
   if (status === 401) return "You have been signed out. Sign in again, then repeat that.";
+  const plain = typeof error === "string" && Object.hasOwn(PLAIN_ERROR_CODES, error) ? PLAIN_ERROR_CODES[error] : undefined;
+  if (plain) return plain;
   return typeof error === "string" && error ? error : `Something went wrong (code ${status}). Nothing needs doing from you; try again, and tell the CEO if it keeps happening.`;
 }
 
