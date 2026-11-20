@@ -50,6 +50,17 @@ export function reviewService(
   // `reviewState`, not `state`: settle and others have a local `state` (the review verdict) that would hide it.
   const { state: reviewState, landings, gate, landingBeat, phases, ciWaits, beatNow, ticketWithRepo, clashOnMain, landingStale, prTarget, approvedAndWaiting, closeAfterMerge, tellCeo, mergeStuck, checkStuck, setGitNote, tellAgent, checkMergedResult, waitForCi, mergeCarry, mergeRetarget, mergeTurnMinutes, templates, checkHoldInput, startHold, ownerSignoffOpen, refuseIfHeld } = ctx;
 
+  async function landingMergeIds(): Promise<string[]> {
+    let ids = [...landings.entries()].filter(([id, l]) => l.state === "running" && phases.get(id) === "merging").map(([id]) => id);
+    if (!ids.length) return [];
+    // BOS-1954: a merge whose check job is still queued has not pushed anything: the phase is "merging" from before its
+    // prepare, but its check can't start while the update holds new checks, so counting it made the swap wait for a merge
+    // that waited for the swap (a deadlock only a server restart cleared). Once the job runs it counts as a running check
+    // (runner-busy.ts); once it has passed, the push is what is counted here.
+    const waitingOnCheck = new Set((await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(inArray(checkJobs.ticketId, ids), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "queued")))).map((r) => r.ticketId));
+    return ids.filter((id) => !waitingOnCheck.has(id));
+  }
+
   return {
     setWakeHook(hook: NotifyHook) {
       reviewState.wake = hook;
@@ -542,20 +553,16 @@ export function reviewService(
      * for these: cutting the runner off between push and record leaves main with a merge its ticket doesn't know about.
      */
     async landingMergesByCompany(): Promise<Map<string, number>> {
-      let ids = [...landings.entries()].filter(([id, l]) => l.state === "running" && phases.get(id) === "merging").map(([id]) => id);
+      const ids = await landingMergeIds();
       const out = new Map<string, number>();
-      if (!ids.length) return out;
-      // BOS-1954: a merge whose check job is still queued has not pushed anything: the phase is "merging" from before its
-      // prepare, but its check can't start while the update holds new checks, so counting it made the swap wait for a merge
-      // that waited for the swap (a deadlock only a server restart cleared). Once the job runs it counts as a running check
-      // (runner-busy.ts); once it has passed, the push is what is counted here.
-      const waitingOnCheck = new Set((await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(inArray(checkJobs.ticketId, ids), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "queued")))).map((r) => r.ticketId));
-      ids = ids.filter((id) => !waitingOnCheck.has(id));
       if (!ids.length) return out;
       const rows = await db.select({ companyId: tickets.companyId }).from(tickets).where(inArray(tickets.id, ids));
       for (const r of rows) out.set(r.companyId, (out.get(r.companyId) ?? 0) + 1);
       return out;
     },
+
+    /** BOS-1951: the tickets whose merge a runner swap waits on, so the banner can name them (see landingMergesByCompany). */
+    landingMergeIds,
 
     /**
      * BOS-1645 (R27): records the merges on main the gate never recorded (its answer was lost, e.g. to a runner swap between

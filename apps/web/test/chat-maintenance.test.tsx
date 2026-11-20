@@ -29,6 +29,14 @@ describe("chat while a runner update waits (BOS-349)", () => {
     expect(screen.getByRole("status").textContent).toMatch(/taking longer than expected/);
   });
 
+  it("says a merge being pushed, or a wait on nothing it can name, keeps chat open (BOS-1951)", () => {
+    const { unmount } = render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", merges: 1 }} />);
+    expect(screen.getByRole("status").textContent).toBe("Update waiting for a merge being pushed to main: chat stays open until then.");
+    unmount();
+    render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", overdue: true, unknownWait: true }} />);
+    expect(screen.getByRole("status").textContent).toMatch(/running late.*Chat stays open.*stop waiting or cancel/);
+  });
+
   it("says it in the singular for one agent", () => {
     render(<UpdateNote m={{ on: true, runs: 1, chatOpen: true }} />);
     expect(screen.getByRole("status").textContent).toBe("Update waiting for 1 agent to finish: chat stays open until then.");

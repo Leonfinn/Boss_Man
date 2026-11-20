@@ -27,7 +27,7 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts, unknownWait } from "./maintenance.js";
 import { limitUnderHold, softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
@@ -265,6 +265,8 @@ export function schedulerService(
     onFeature?: (featureId: string) => Promise<unknown>;
     limits?: Partial<Limits>;
     now?: () => Date;
+    /** BOS-1951: tickets whose merge is being pushed to main; a runner swap waits for them, so chat keeps answering meanwhile. */
+    landingMergeIds?: () => Promise<string[]>;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
     quietHours?: () => Promise<QuietHours | null>;
     /** Tells the owner something without needing an answer (quota holds, credits in use). */
@@ -1788,7 +1790,13 @@ export function schedulerService(
         // for them too (the swap then waits for that chat run). Not for a wrap-up hold, or once checks are not waited on.
         const checksWaited = hold.kind !== "wrapup" && !hold.force && !hold.ignoreChecks ? [...(await checkJobsByCompany(db, true)).values()].reduce((a, n) => a + n, 0) : 0;
         // While work runs or checks are still going, only chat and reply wakes go on to launch; every other wake is held.
-        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
+        // BOS-1951: nor is the swap near while a merge is being pushed to main, or while it waits on something Boss Man can't
+        // name (the 19 Nov update sat 86 minutes with chat paused): chat pauses only for the swap itself.
+        const merging = hold.kind !== "wrapup" && work === 0 && checksWaited === 0 && deps.landingMergeIds ? (await deps.landingMergeIds().catch(() => [] as string[])).length : 0;
+        const mystery = work === 0 && checksWaited === 0 && merging === 0 && unknownWait(hold, t);
+        // Only the owner's chat passes for the two new cases: the CEO's one-off replies (such as BOS-1954's late-swap wake)
+        // stay held there, so a run that ends is not followed by a reply run the swap would then wait for.
+        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : merging > 0 || mystery ? queue.filter((w) => w.reason === CHAT_REASON) : [];
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
         const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);

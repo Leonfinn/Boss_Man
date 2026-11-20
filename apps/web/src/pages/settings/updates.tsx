@@ -6,7 +6,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -18,15 +18,19 @@ export function checkSentence(c: RunnerCheckView): string {
  * What a runner update is waiting for, in plain words, from live state (BOS-1600). "swapping the runners now" only
  * when nothing is left to wait for. Agent runs and checks are named separately.
  */
-export function waitingFor(m: { runs: number; companies: number; checks?: number; checksList?: RunnerCheckView[] }): string {
+export function waitingFor(m: { runs: number; companies: number; checks?: number; checksList?: RunnerCheckView[]; merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean }): string {
   const n = m.runs;
   const k = m.checks ?? 0;
+  const g = m.merges ?? 0;
   const agents = `${plural(n, "run", "runs")} in ${plural(m.companies, "company", "companies")} to finish`;
   const list = (m.checksList ?? []).map(checkSentence).join("; ");
   const checks = `${plural(k, "check", "checks")} to finish before swapping the runners${list ? `: ${list}` : ""}`;
-  if (n > 0 && k > 0) return `waiting for ${agents}, and for ${checks}`;
-  if (n > 0) return `waiting for ${agents}`;
-  if (k > 0) return `waiting for ${checks}`;
+  // BOS-1951: a merge being pushed to main holds the swap too (a few seconds normally), named by ticket.
+  const names = (m.mergesList ?? []).map((x) => x.ticket).filter((t): t is string => !!t).join(", ");
+  const merges = `${plural(g, "merge", "merges")} being pushed to main${names ? ` (${names})` : ""}`;
+  const parts = [...(n > 0 ? [agents] : []), ...(k > 0 ? [checks] : []), ...(g > 0 ? [merges] : [])];
+  if (parts.length) return `waiting for ${parts.join(", and for ")}`;
+  if (m.unknownWait) return "waiting on something Boss Man cannot name (no agent run, check or merge is going)";
   return "swapping the runners now";
 }
 /**
