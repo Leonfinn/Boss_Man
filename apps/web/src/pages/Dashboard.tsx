@@ -5,6 +5,7 @@ import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
+import { Loader } from "../components/Loader";
 import { NeedsYou, RightNow, healthLines, type HealthData } from "../components/DashboardPanels";
 import { MergesStuckBanner, brakeOffSummary, pausedSummary, slowSummary, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
 import { RunLabelLink } from "./Runs";
@@ -122,7 +123,7 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
   if (!company) return <p>Create a company on the Kanban first.</p>;
   if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
   const d = data.data;
-  if (!d) return null;
+  if (!d) return <Loader label="Loading the dashboard" />;
   const s = d.stats;
   const tokens = s.monthSubscriptionTokens.input + s.monthSubscriptionTokens.output;
   // While the company is paused nothing moves, so a stuck-merges banner would only be noise.
