@@ -6,7 +6,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -225,6 +225,10 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
     };
   }
 
+  // 1b. BOS-1955: the new image is being built; new work is held from now so the swap does not wait for it later.
+  if (maint && maint.on && maint.kind === "building")
+    return { tone: "blue", tag: "Building", say: "The new runner image is being built and checked. New runs wait until the update has gone in.", more: "Runs already going carry on. If the build fails, new runs start again by themselves.", next: null, primary: null, normal: [{ id: "cancel-update", label: "Cancel the runner update" }] };
+
   // 2. Waiting for agents (and a plain wrap-up, which holds new work the same way).
   if (maint && maint.on && maint.kind !== "wrapup") {
     // BOS-1600: no agent is left but a check on a runner is. Say so, and give the plain choice: wait, or stop the checks.
@@ -375,7 +379,7 @@ export function runnerProgress(live: LiveRow[] | null | undefined, maint: Mainte
   const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
   const done = runners.filter((l) => l.connected && !l.swap && l.imageVersion === newest).length;
   // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
-  const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup";
+  const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup" && maint.kind !== "building";
   return { inProgress: held, done, total: runners.length, newest };
 }
 

@@ -531,6 +531,7 @@ export async function buildApp(opts: AppOptions) {
       return !!r && runners.isConnected(r.id);
     },
     settled: () => scheduler.settled(),
+    passInfo: () => scheduler.passInfo(),
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
     tick: () => scheduler.tick(),

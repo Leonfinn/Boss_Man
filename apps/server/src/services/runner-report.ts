@@ -142,7 +142,7 @@ export function describeLive(r: RunnerLive | null, launcherOn = true): { ok: boo
  */
 export function swapFor(hold: Hold | null, slug: string | undefined, nowMs: number = Date.now()): Pick<RunnerLive, "swap" | "swapFailed"> {
   const none = { swap: null, swapFailed: null };
-  if (!hold || !slug || hold.kind === "wrapup") return none;
+  if (!hold || !slug || hold.kind === "wrapup" || hold.kind === "building") return none;
   const failed = hold.failed?.[slug];
   if (failed) return { swap: null, swapFailed: failed };
   const t = hold.tries?.[slug];

@@ -20,7 +20,7 @@ import type { TraceBody } from "@boss-man/shared";
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
 type Chat = { agentId: string; items: Message[]; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; runs: number; chatOpen: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -75,6 +75,12 @@ function busyText(state: string, name: string) {
 /** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
 export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (m.kind === "building")
+    return (
+      <p className="banner" role="status">
+        A runner update is being built. Chat stays open; new agent runs start once the update has gone in.
+      </p>
+    );
   if (m.kind === "settings")
     return (
       <p className="banner" role="status">
