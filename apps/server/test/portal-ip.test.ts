@@ -1,9 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { parseClientHeader, parseTrustedProxies, portalClientAddress } from "../src/portal-ip.js";
+import { normaliseAddress, parseClientHeader, parseTrustedProxies, portalClientAddress } from "../src/portal-ip.js";
 
 const proxy = "203.0.113.10";
 const m = (raw: string) => parseTrustedProxies(raw).matcher;
 const who = (peer: string, headers: Record<string, string | string[]>, list = proxy) => portalClientAddress(peer, headers, m(list));
+
+describe("normaliseAddress (BOS-1948)", () => {
+  it("keeps a plain IPv4 address, ignoring surrounding whitespace", () => {
+    expect(normaliseAddress("192.168.1.50")).toBe("192.168.1.50");
+    expect(normaliseAddress("  192.168.1.50  ")).toBe("192.168.1.50");
+  });
+
+  it("lower-cases IPv6 so one address has one spelling", () => {
+    expect(normaliseAddress("2001:db8::1")).toBe("2001:db8::1");
+    expect(normaliseAddress("2001:DB8::1")).toBe("2001:db8::1");
+    expect(normaliseAddress("  2001:DB8::1  ")).toBe("2001:db8::1");
+  });
+
+  it("unwraps an IPv4-mapped IPv6 address to the plain IPv4 one", () => {
+    expect(normaliseAddress("::ffff:192.168.1.50")).toBe("192.168.1.50");
+    expect(normaliseAddress("::FFFF:192.168.1.50")).toBe("192.168.1.50");
+    expect(normaliseAddress("  ::ffff:192.168.1.50  ")).toBe("192.168.1.50");
+  });
+
+  it("leaves a port on, and does not pretend to understand junk", () => {
+    expect(normaliseAddress("192.168.1.50:443")).toBe("192.168.1.50:443");
+    expect(normaliseAddress("[2001:db8::1]:443")).toBe("[2001:db8::1]:443");
+    expect(normaliseAddress("not-an-address")).toBe("not-an-address");
+    expect(normaliseAddress("999.1.1.1")).toBe("999.1.1.1");
+    // Only a dotted IPv4 tail is unwrapped; a plain IPv6 tail is left as it is.
+    expect(normaliseAddress("::ffff:2001:db8::1")).toBe("::ffff:2001:db8::1");
+  });
+
+  it("turns blank input into an empty string", () => {
+    expect(normaliseAddress("")).toBe("");
+    expect(normaliseAddress("   ")).toBe("");
+    expect(normaliseAddress("\t\n")).toBe("");
+  });
+});
 
 describe("portalClientAddress (BOS-1386)", () => {
   it("takes CF-Connecting-IP from a trusted proxy only when that header is chosen", () => {

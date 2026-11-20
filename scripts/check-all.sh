@@ -304,6 +304,7 @@ step test-lines node scripts/check-test-lines.mjs
 step guard:wake-classes scripts/check-guards.sh wake-classes
 step guard:owner-controls scripts/check-guards.sh owner-controls
 step guard:screen-inventory scripts/check-guards.sh screen-inventory
+step guard:update-waits scripts/check-guards.sh update-waits
 # Memory-safe on a shared runner: one package at a time, at most 4 PGlite workers, and a capped heap for tsc only.
 # Callers can override any of these. The 4 is only a ceiling: apps/server/vitest.config.ts also takes the smaller of
 # this slot's CPU and free-memory share (scripts/check-threads.mjs, split across the check slots) and backs off by the

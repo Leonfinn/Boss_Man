@@ -15,11 +15,30 @@ import { mergeLineApproved } from "./merge-line-conflicts.js";
 import { CHECK_MERGED_KEY, MERGE_CARRY_KEY, MERGE_RETARGET_KEY, MERGE_TURN_KEY, MERGE_TURN_MAX_MIN, ReviewError, WAIT_FOR_CI_KEY, type GitTemplates, type LandingView } from "./review-common.js";
 import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
+import { landingsThatCount } from "./update-waits.js";
+
+function landingStartMs(ctx: ReviewCtx, id: string): number {
+  const l = ctx.landings.get(id);
+  return l?.state === "running" ? Date.parse(l.startedAt) : NaN;
+}
 
 /** BOS-1951: the tickets whose merge a runner swap waits on, so the banner can name them (see landingMergesByCompany). */
 export async function landingMergeIds(this: ReviewSelf, ctx: ReviewCtx): Promise<string[]> {
-  const { db, landings, phases } = ctx;
+  const { db, landings, phases, ciWaits, landingStale } = ctx;
   let ids = [...landings.entries()].filter(([id, l]) => l.state === "running" && phases.get(id) === "merging").map(([id]) => id);
+  if (!ids.length) return [];
+  // BOS-2058: a wait counts live work only (landingsThatCount). The 20 Nov 11:44 hold was BOS-1991 waiting for GitHub CI
+  // on its merge copy: it had pushed nothing to main, and ciPublishAndWait keeps the beat fresh while it polls, so only
+  // the ciWaits test catches it (its check passed 11:47:23, the CI wait ended 11:53:10, the runner swapped 11:53:19).
+  // ciWaits is cleared (ci-publish.ts `finally`) before the push, so the push itself is still waited for. A landing past
+  // its own end, or whose ticket stopped beating, no longer holds the swap either: DR-014, a restart fails an in-flight
+  // merge at once and the gate retries it.
+  const live: string[] = [];
+  for (const id of landingsThatCount(ids, { ciWaiting: (id) => ciWaits.has(id), startedMs: (id) => landingStartMs(ctx, id), now: Date.now() })) {
+    if (await landingStale(id)) continue;
+    live.push(id);
+  }
+  ids = live;
   if (!ids.length) return [];
   // BOS-1954: a merge whose check job is still queued has not pushed anything: the phase is "merging" from before its
   // prepare, but its check can't start while the update holds new checks, so counting it made the swap wait for a merge
@@ -27,6 +46,13 @@ export async function landingMergeIds(this: ReviewSelf, ctx: ReviewCtx): Promise
   // (runner-busy.ts); once it has passed, the push is what is counted here.
   const waitingOnCheck = new Set((await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(inArray(checkJobs.ticketId, ids), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "queued")))).map((r) => r.ticketId));
   return ids.filter((id) => !waitingOnCheck.has(id));
+}
+
+/** BOS-2058: the live landings the swap waits on with when the oldest began, for the one list of waits (update-waits.ts). */
+export async function landingWaitFacts(this: ReviewSelf, ctx: ReviewCtx): Promise<{ since: string | null; ids: string[] }> {
+  const ids = await this.landingMergeIds();
+  const starts = ids.map((id) => landingStartMs(ctx, id)).filter((n) => Number.isFinite(n));
+  return { since: starts.length ? new Date(Math.min(...starts)).toISOString() : null, ids };
 }
 
 /**

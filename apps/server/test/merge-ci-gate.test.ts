@@ -41,7 +41,7 @@ const MERGE = "e".repeat(40);
 const TREE = "f".repeat(40);
 const FINAL = "c".repeat(40);
 
-type Job = { id: number; name: string; status: string; conclusion: string | null; html_url?: string; runner_name?: string | null; steps?: Array<{ number: number; name: string; status: string; conclusion: string | null }> };
+type Job = { id: number; name: string; status: string; conclusion: string | null; html_url?: string; runner_name?: string | null; steps?: Array<{ number: number; name: string; status: string; conclusion: string | null; started_at?: string; completed_at?: string }> };
 /** One workflow run on the commit and its jobs, as GitHub's Actions API gives them. */
 type WorkflowRun = { id: number; name: string; workflow_id: number; event: string; status: string; conclusion: string | null; created_at: string; html_url?: string; jobs: Job[] };
 type Ci = { runs: WorkflowRun[] };
@@ -78,6 +78,8 @@ function fakeGitHub() {
     /** BOS-1733: a public repo: annotations read without a token are answered even when the token has no Checks. */
     publicRepo: false,
     ciBranches: new Map<string, number>(),
+    /** BOS-2082: the workflow's recent green runs (`/actions/workflows/<id>/runs?status=success`) and their jobs. */
+    greenRuns: [] as Array<{ id: number; jobs: Job[] }>,
   };
   const last = new Map<number, WorkflowRun>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -118,7 +120,8 @@ function fakeGitHub() {
       for (const r of list) last.set(r.id, r);
       return json(200, { total_count: list.length, workflow_runs: list.map(({ jobs: _jobs, ...r }) => ({ ...r, head_sha: sha })) });
     }
-    if (jobs) return json(200, { jobs: last.get(Number(jobs[1]))?.jobs ?? [] });
+    if (/\/actions\/workflows\/\d+\/runs\?status=success/.test(url)) return json(200, { total_count: state.greenRuns.length, workflow_runs: state.greenRuns.map((r) => ({ id: r.id, status: "completed", conclusion: "success" })) });
+    if (jobs) return json(200, { jobs: last.get(Number(jobs[1]))?.jobs ?? state.greenRuns.find((r) => r.id === Number(jobs[1]))?.jobs ?? [] });
     const logUrl = /\/actions\/jobs\/(\d+)\/logs/.exec(url);
     if (logUrl) {
       const l = state.logs.get(Number(logUrl[1]));
@@ -1278,6 +1281,74 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         expect((await c.state()).systemState).toBe("review");
         // Not cancelled: the server now in charge reuses it for the same commit and tree.
         expect((await c.db.select().from(checkJobs).where(eq(checkJobs.id, rerun.id)))[0]!.state).toBe("queued");
+      });
+
+      // BOS-2082: BOS-2066's docs-only merge (run 44731483832): the web-browser step took 698 s against 209 to 343 s that
+      // day, and 4 browser files timed out. More than 3 files, so BOS-1733's table bounced it.
+      describe("a slow GitHub machine (BOS-2082)", () => {
+        const STEP = "Web tests in a real browser";
+        const timed = (seconds: number) => ({ started_at: "2026-11-20T11:00:00Z", completed_at: new Date(Date.parse("2026-11-20T11:00:00Z") + seconds * 1000).toISOString() });
+        const webJob = (id: number, conclusion: string, seconds: number): Job => ({
+          id,
+          name: "web-browser",
+          status: "completed",
+          conclusion,
+          runner_name: "GitHub Actions 2",
+          html_url: `https://github.com/leon/site/actions/runs/9/job/${id}`,
+          steps: [
+            { number: 1, name: "Set up job", status: "completed", conclusion: "success" },
+            { number: 2, name: STEP, status: "completed", conclusion, ...timed(seconds) },
+          ],
+        });
+        const FILES = ["apps/web/test/board-wheel.test.ts", "apps/web/test/decisions-closed-fold.test.ts", "apps/web/test/readonly-text-contrast.test.ts", "apps/web/test/wrap-up-layout.test.ts"];
+        const slow = async (seconds: number, opts: { after?: "green" | "red" } = {}) => {
+          const c = (ctx = await setup({ changed: ["docs/02-install.md"] }));
+          await serverMode(c);
+          c.gh.state.publicRepo = true;
+          c.gh.state.greenRuns = [211, 343, 209, 260, 298, 275, 240, 330].map((s, i) => ({ id: 200 + i, jobs: [webJob(300 + i, "success", s)] }));
+          c.gh.state.ci = (sha) => (sha !== MERGE ? green() : c.gh.state.failedReruns.length && opts.after !== "red" ? green() : red([job("check", "success", 1), webJob(5, "failure", seconds)]));
+          // The real shape (ci.yml's web-browser step, BOS-1590): one summary annotation on ".github", no file, entries
+          // joined by " | ", so the job names no test file and BOS-1733's table bounced it as unnamed (Morph, on BOS-2081).
+          const summary = FILES.map((f, i) => `${f.split("/").pop()}: renders the page: Error: Test timed out in ${15_000 * 2 ** (i % 3)}ms.`).join(" | ");
+          c.gh.state.annotations.set(5, [
+            { annotation_level: "failure", path: ".github", title: "web tests failed", message: summary },
+            { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
+          ]);
+          return c;
+        };
+
+        it("698 s against a usual 268 s, all timeouts in 4 files (one summary annotation naming no file): one GitHub retry on a fresh machine, no gate re-run, recorded, merged", async () => {
+          const c = await slow(698);
+          const res = approveAndWait(c.req, c.ticket.id);
+          await finish(c, (j) => !isRerun(j), { state: "passed", exitCode: 0 });
+          expect((await res).json()).toMatchObject({ outcome: "merged" });
+          expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).filter(isRerun)).toEqual([]);
+          expect(c.gh.state.failedReruns).toEqual([`${API}/actions/runs/9/rerun-failed-jobs`]);
+          expect(await retryRows(c)).toEqual([expect.objectContaining({ sha: MERGE, detail: "slow machine: web-browser" })]);
+          const said = (await c.events()).join("\n");
+          expect(said).toContain(`web-browser's "${STEP}" step took 698 s against a usual 268 s (median of 8 green runs)`);
+          expect(said).toContain("asked GitHub to re-run the failed jobs once on a fresh machine (web-browser: slow-machine retry 1 of 5 this week)");
+          expect(said).toContain("the timeouts came from a slow GitHub machine, not this branch");
+          // A slow machine is not a flaky test: no "Flaky on GitHub" ticket for the CEO.
+          expect((await c.db.select().from(tickets)).filter((t) => t.title.startsWith("Flaky on GitHub"))).toEqual([]);
+          expect(await authorWake(c)).toBeUndefined();
+        });
+
+        it("the retry fails too: sent back saying it failed twice, the retry stays recorded", async () => {
+          const c = await slow(698, { after: "red" });
+          expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+          expect(c.gh.state.failedReruns).toHaveLength(1);
+          expect((await authorWake(c))!.note).toContain("It failed on GitHub twice");
+          expect(await retryRows(c)).toHaveLength(1);
+        });
+
+        it("a usual time (300 s) with the same 4 timeouts: sent back as before, no retry asked", async () => {
+          const c = await slow(300);
+          expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+          expect(c.gh.state.failedReruns).toEqual([]);
+          expect(await retryRows(c)).toEqual([]);
+          expect((await authorWake(c))!.note).toContain("Boss Man didn't ask GitHub for a retry: the failure in web-browser doesn't name a test file");
+        });
       });
     });
   });

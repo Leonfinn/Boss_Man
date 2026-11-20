@@ -189,6 +189,30 @@ describe("security_alert close", () => {
     expect(patchOf(c.gh)[0]!.body).toMatchObject({ state: "resolved", resolution: "false_positive" });
   });
 
+  it("BOS-2055: on a ticket with two open alerts, close needs `alert` and dismisses only that one", async () => {
+    const c = await setup();
+    const id = await c.alertTicket("dependabot:9", c.ceo.id);
+    await t!.db.insert(githubAlertTickets).values({ projectId: c.project.id, alertKey: "dependabot:8", ticketId: id, repo: REPO });
+    const input = { reason: "not_used", note: "Only a dev tool that never ships" };
+    const refused = await c.svc.alertClose(c.company.id, c.ceo.id, id, input);
+    expect(refused.ok).toBe(false);
+    expect(refused.text).toContain("#8");
+    expect(patchOf(c.gh)).toHaveLength(0);
+    // An alert that isn't one of the ticket's own is refused too.
+    expect((await c.svc.alertClose(c.company.id, c.ceo.id, id, { ...input, alert: 77 })).ok).toBe(false);
+    expect(patchOf(c.gh)).toHaveLength(0);
+    const ok = await c.svc.alertClose(c.company.id, c.ceo.id, id, { ...input, alert: 9 });
+    expect(ok.ok).toBe(true);
+    expect(patchOf(c.gh)).toHaveLength(1);
+    expect(patchOf(c.gh)[0]!.url).toContain("/dependabot/alerts/9");
+    const links = await t!.db.select().from(githubAlertTickets).where(eq(githubAlertTickets.ticketId, id));
+    expect(links.find((l) => l.alertKey === "dependabot:9")!.closedAt).not.toBeNull();
+    expect(links.find((l) => l.alertKey === "dependabot:8")!.closedAt).toBeNull();
+    // With one alert left open, close needs no number, and it closes the ticket.
+    expect((await c.svc.alertClose(c.company.id, c.ceo.id, id, input)).ok).toBe(true);
+    expect(patchOf(c.gh)[1]!.url).toContain("/dependabot/alerts/8");
+  });
+
   it("dismisses a Dependabot alert only with a GitHub reason and a note", async () => {
     const c = await setup();
     const id = await c.alertTicket("dependabot:9", c.ceo.id);
