@@ -137,7 +137,9 @@ describe("wakes that report on an update pass its hold", () => {
   it("only listed reasons pass, and each is a real wake reason", () => {
     expect(PASSES_UPDATE_HOLD.length).toBeGreaterThan(0);
     for (const r of PASSES_UPDATE_HOLD) expect(r in WAKE_CLASS).toBe(true);
-    expect(duringUpdate("ceo reply")).toBe("passes");
+    expect(duringUpdate("update alert")).toBe("passes");
+    // The generic reply lane stays held once nothing else runs (DR-048 A, ceo-reply-lane.test.ts).
+    expect(duringUpdate("ceo reply")).toBe("held");
     expect(duringUpdate("checking an old card")).toBe("held");
     expect(duringUpdate("nudge")).toBe("held");
   });

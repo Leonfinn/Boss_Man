@@ -9,7 +9,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 import { drainForecast, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
-import { CEO_REPLY_REASON, MISSED_REASON } from "../src/services/scheduler.js";
+import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -410,7 +410,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.wake(a);
     await c.scheduler.tick();
     await c.maintenance.start({ minutes: 30 });
-    const ceoWakes = async () => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, a.ceo), eq(wakes.reason, CEO_REPLY_REASON)))).filter((w) => (w.note ?? "").includes("runner update"));
+    const ceoWakes = async () => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, a.ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).filter((w) => (w.note ?? "").includes("runner update"));
     c.advance(10 * MIN);
     await c.maintenance.step();
     expect(await ceoWakes()).toHaveLength(0); // an agent run has no usual length: nothing is late before the deadline
@@ -438,7 +438,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.maintenance.start({ minutes: 30 });
     c.advance(31 * MIN);
     await c.maintenance.step();
-    const noteOf = async (ceo: string) => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, ceo), eq(wakes.reason, CEO_REPLY_REASON)))).map((w) => w.note ?? "").filter((n) => n.includes("runner update"));
+    const noteOf = async (ceo: string) => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).map((w) => w.note ?? "").filter((n) => n.includes("runner update"));
     const [forA, forB] = [await noteOf(a.ceo), await noteOf(b.ceo)];
     expect(forA).toHaveLength(1);
     expect(forB).toHaveLength(1);
@@ -1017,18 +1017,21 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
 
   // 20 Nov 11:48: the CEO's note that the update was late sat "update pending" because the swap waited on something it could
   // not name (or on a merge record). A wake that reports on the update is never held by it; every other wake still is.
-  it("BOS-2058: the CEO's reply-lane note starts while the hold is on and nothing nameable is left; other wakes stay held", async () => {
+  it("BOS-2058: the CEO's update-alert note starts while the hold is on and nothing nameable is left; other wakes, routine replies included, stay held", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
+    const b = await c.company("Other Co", "other-co");
     await c.maintenance.start({ minutes: 30 });
     c.advance(3 * MIN); // past UNKNOWN_WAIT_MS: no run, check or merge is left, and the swap has still not happened
     await c.scheduler.wake({ agentId: a.ceo, reason: "nudge", note: "routine" });
-    await c.scheduler.notify(a.ceo, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note: "The update is late." });
+    // A routine reply-lane wake (DR-048 A) stays held: the swap may happen at any moment.
+    await c.scheduler.notify(b.ceo, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note: "A card is waiting." });
+    await c.scheduler.notify(a.ceo, { reason: UPDATE_ALERT_REASON, ticketId: null, priority: 4, note: "The update is late." });
     await c.scheduler.tick();
     const started = await c.db.select().from(runs);
-    expect(started.map((r) => r.purpose)).toEqual(["reply"]);
+    expect(started.map((r) => [r.purpose, r.origin])).toEqual([["reply", UPDATE_ALERT_REASON]]);
     const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
-    expect(held.map((w) => [w.reason, w.statusReason])).toEqual([["nudge", HOLD_REASON]]);
+    expect(held.map((w) => [w.reason, w.statusReason]).sort()).toEqual([[CEO_REPLY_REASON, HOLD_REASON], ["nudge", HOLD_REASON]]);
   });
 
   it("BOS-2058: a wrap-up pressed while a server update waits belongs to it and lifts when that wait is over", async () => {

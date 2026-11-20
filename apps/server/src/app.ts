@@ -107,7 +107,7 @@ import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { ownerAnswerEmbedLoop } from "./services/owner-answers.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
-import { CEO_REPLY_REASON, DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
+import { UPDATE_ALERT_REASON, DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
 import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -565,7 +565,7 @@ export async function buildApp(opts: AppOptions) {
     // company's own work, through the reply lane (the only wake a drain lets through while work is going); the owner is not asked.
     wakeCeo: async (companyId, note) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (ceo) await scheduler.notify(ceo.id, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note });
+      if (ceo) await scheduler.notify(ceo.id, { reason: UPDATE_ALERT_REASON, ticketId: null, priority: 4, note });
     },
     // `sweeps` is built further down; this only runs when a hold lifts.
     afterHold: (since) => sweeps.resumeAfterUpdate(since),
@@ -1210,7 +1210,7 @@ export async function buildApp(opts: AppOptions) {
       const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
       if (!home) return;
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, home.id), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (ceo) await scheduler.notify(ceo.id, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note });
+      if (ceo) await scheduler.notify(ceo.id, { reason: UPDATE_ALERT_REASON, ticketId: null, priority: 4, note });
     },
     released: async () => {
       await review.gatePump();
