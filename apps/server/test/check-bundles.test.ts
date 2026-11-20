@@ -18,6 +18,7 @@ import { checkDispatcher } from "../src/services/check-dispatcher.js";
 import { BUNDLE_FEATURE, checkWorkersService } from "../src/services/check-workers.js";
 import { checkBundleStore } from "../src/services/check-bundles.js";
 import { checkBundleRoutes } from "../src/routes/check-bundles.js";
+import type { WaitKind } from "../src/services/update-waits.js";
 
 const shared = openPglite();
 afterAll(async () => (await shared).close());
@@ -114,10 +115,10 @@ async function world() {
   const co = await company();
   const q = checkQueue(db);
   let n = 0;
-  const req = async (c = co) => {
+  const req = async (c = co, extra: Record<string, unknown> = {}) => {
     n++;
     const [t] = await db.insert(tickets).values({ companyId: c.id, projectId: c.projectId, title: `T${n}`, number: n }).returning();
-    return (await q.enqueue({ companyId: c.id, projectId: c.projectId, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: `${n}`.padStart(40, "c"), tree: `tree-${n}-${Math.random()}`, requestedBy: c.agentId } as never)).job;
+    return (await q.enqueue({ companyId: c.id, projectId: c.projectId, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: `${n}`.padStart(40, "c"), tree: `tree-${n}-${Math.random()}`, requestedBy: c.agentId, ...extra } as never)).job;
   };
   const workers = checkWorkersService(db);
   const toWorker: Array<{ workerId: string; command: any }> = [];
@@ -142,8 +143,10 @@ describe("check bundle dispatch (BOS-1436)", () => {
     const packs: any[] = [];
     const removed: string[] = [];
     let runnerTakes = false;
+    let drain: WaitKind | null = null;
     const toRunner: any[] = [];
     const d = checkDispatcher(w0.db, {
+      drainPending: async () => drain,
       send: (_id, c) => (toRunner.push(c), true),
       isConnected: () => true,
       can: () => runnerTakes,
@@ -161,8 +164,34 @@ describe("check bundle dispatch (BOS-1436)", () => {
       await d.pump();
       await d.settled();
     };
-    return { ...w0, d, packs, removed, toRunner, pump, runnerTakes: (v: boolean) => (runnerTakes = v) };
+    return { ...w0, d, packs, removed, toRunner, pump, runnerTakes: (v: boolean) => (runnerTakes = v), setDrain: (k: WaitKind | null) => (drain = k) };
   }
+
+  it("BOS-2108: during a runner drain the worker keeps taking quick checks; the runner, merge and full checks wait for the swap", async () => {
+    const s = await setup();
+    s.runnerTakes(true);
+    const w = await s.worker(3);
+    const merge = await s.req(s.co, { kind: "merge" });
+    const full = await s.req(s.co, { scope: "full" });
+    const quick = await s.req();
+    for (const kind of ["runner-drain", "owner-force"] as const) {
+      s.setDrain(kind);
+      await s.pump();
+      // Before BOS-2108 pump() returned at once: the worker's free slots sat idle for the whole drain (BOS-2106).
+      expect(ran(s.toWorker)).toEqual([{ workerId: w.id, command: expect.objectContaining({ jobId: quick.id }) }]);
+      expect(ran(s.toRunner.map((command) => ({ command })))).toEqual([]);
+      expect((await s.job(merge.id)).state).toBe("queued");
+      expect((await s.job(full.id)).state).toBe("queued");
+    }
+    // The worker's decline says why (R46), as an expected pause, not an idle-slot alarm.
+    expect(s.d.idleSlots(s.co.id)).toEqual([expect.objectContaining({ machineKey: `worker:${w.id}`, code: "update_hold", expected: true, text: expect.stringMatching(/runner update/) })]);
+    // The swap is done: the runner and the worker take the rest.
+    s.setDrain(null);
+    await s.pump();
+    expect((await s.job(merge.id)).state).toBe("running");
+    expect((await s.job(full.id)).state).toBe("running");
+    expect(ran(s.toRunner.map((command) => ({ command }))).length).toBe(1);
+  });
 
   it("packs the job's commit for the worker, then sends it the job with the bundle details; the upload is open only while it packs", async () => {
     let s!: Awaited<ReturnType<typeof setup>>;

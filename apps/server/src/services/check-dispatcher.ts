@@ -14,6 +14,7 @@ import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, SUPERSEDED_TEXT, type
 export type IdleSlot = CheckDecline & { companyId: string; machineKey: string; machine: string; since: Date; minutes: number };
 import type { Eligible } from "./check-workers.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
+import { blocksClass, type WaitKind } from "./update-waits.js";
 
 /** scripts/install-packages.sh (used by check-quick.sh and check-all.sh) prints this and exits 75 when the install stopped on a machine error. */
 export const MACHINE_FAULT_MARKER = "check-quick: install stopped on a machine fault";
@@ -55,8 +56,12 @@ export type CheckDispatcherDeps = {
   workerGraceMs?: number;
   /** Only the leader re-queues a dropped worker's jobs (a standby closed the socket itself). Absent: always the leader. */
   isLeader?: () => boolean;
-  /** A runner drain (image update or setting change) is under way (BOS-1471): no new job goes to any runner until it ends. Running ones finish; queued ones wait. */
-  drainPending?: () => Promise<boolean>;
+  /**
+   * A runner drain (image update or setting change) is under way (BOS-1471): which wait it is ("runner-drain", or
+   * "owner-force" once the owner chose to stop checks or runs), or null/false when none. `true` means "runner-drain".
+   * What it stops is that wait's `blocks` in WAIT_RULES (BOS-2108): the runner takes nothing new, a worker quick checks only.
+   */
+  drainPending?: () => Promise<WaitKind | boolean | null>;
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
@@ -200,9 +205,18 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   /** Start whatever the free slots allow. Safe to call any time: a job is never claimed twice. */
   async function pump(): Promise<void> {
     if ((await queue.mode()) !== "server") return;
-    // The runner is about to be swapped: a job started now would be killed by it. Workers wait too: a worker only takes
-    // jobs while its image commit equals the runner's (DR-042), and the swap is what changes the runner's commit.
-    if (await deps.drainPending?.()) return;
+    // The runner is about to be swapped: a job started now would be killed by it, so the runner takes nothing new.
+    // BOS-2108: a check worker follows the drain's row in WAIT_RULES, which does not block "quick-check-worker". The swap
+    // does not touch the worker's container, and the drain does not wait for worker jobs (runner-busy counts runner jobs
+    // only), so a worker's quick check neither dies in the swap nor holds it back. It is matched with the runner's image
+    // as it is now (DR-042, by tools since BOS-1570), like a job it started a second before the drain; once the swap
+    // lands, eligible() compares with the new image and a worker that no longer matches takes nothing more. Merge and
+    // full checks wait for the swap (the row blocks them), as under a server update (BOS-1748). Before this, the
+    // worker sat idle for the whole drain: 14:44:50 to 14:54:10 on 20 Nov (BOS-2106).
+    const raw = (await deps.drainPending?.()) ?? null;
+    const drain: WaitKind | null = raw === true ? "runner-drain" : raw || null;
+    if (drain && blocksClass(drain, "quick-check-worker")) return;
+    const workerQuickOnly = !!drain && (blocksClass(drain, "merge-check") || blocksClass(drain, "full-check"));
     const queuedCompanies = await db.selectDistinct({ companyId: checkJobs.companyId }).from(checkJobs).where(eq(checkJobs.state, "queued"));
     for (const k of [...idle.keys()]) if (!queuedCompanies.some((q) => q.companyId === idle.get(k)!.companyId)) idle.delete(k);
     for (const { companyId } of queuedCompanies) {
@@ -219,7 +233,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       };
       const prior = new Map([...idle].filter(([, v]) => v.companyId === companyId));
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
-      const runnerUp = !!runner && deps.isConnected(runner.id) && deps.can(runner.id);
+      // During a drain the runner is not offered jobs (every check class is in its row's `blocks`), but it still packs code for workers.
+      const runnerUp = !drain && !!runner && deps.isConnected(runner.id) && deps.can(runner.id);
       // BOS-1436: a worker gets the code only through the company runner, so with no runner able to pack it, no worker is used.
       const packer = runner && deps.bundles && deps.isConnected(runner.id) && deps.bundles.canPack(runner.id) ? runner.id : null;
       const workers = packer ? ((await deps.workers?.eligible(companyId)) ?? []) : [];
@@ -250,7 +265,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
         // never holds up the line); a job this worker couldn't get the code for is left to the others.
         for (const w of workers) {
-          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly });
+          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly, quickOnly: workerQuickOnly });
           if (!dedicatedOnly) declined.set(`worker:${w.id}`, { machine: `check worker "${w.name}"`, why: r.declined });
           for (const job of r.jobs) track(codeFor(job, w, list, packer!, false));
         }
