@@ -101,7 +101,7 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
           detail: { reused, scope, outcome: job.state },
         }).catch(() => {});
       }
-      const uncommitted = d.files.length && d.head ? " Anything you have not committed is not in this check." : "";
+      const uncommitted = (d.files.length && d.head ? " Anything you have not committed is not in this check." : "") + (t.systemState === "in_progress" && scope === "quick" ? " If your code is finished, move the ticket to review now instead of waiting in In progress: Boss Man holds it as \"Being checked\" and opens the reviews on a pass." : "");
       if (reused === "passed") return `Already answered: the same code (commit ${job.commit.slice(0, 8)}) passed a ${job.scope} check, so nothing was queued.${uncommitted}${extra}`;
       // BOS-1412: the same code already waits (or runs). Hand back that job and where it stands; it is not re-queued,
       // so the agent reading its place never sends it to the back of the line.

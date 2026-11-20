@@ -854,7 +854,10 @@ export async function buildApp(opts: AppOptions) {
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
-    checkHold: async () => checkHold?.sweep(),
+    checkHold: async () => {
+      await checkHold?.sweepProgress().catch(() => undefined); // BOS-2114
+      return checkHold?.sweep();
+    },
     priorityWatch: () => priorityWatch.run(),
     mergeStall: () => mergeStall.run(),
     // R46: refresh what each free check slot declined (the pump), then tell on any that has sat idle with a job waiting.
@@ -1101,6 +1104,7 @@ export async function buildApp(opts: AppOptions) {
     openReviews: async (ticketId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, null)),
     wake: (agentId, w) => scheduler.notify(agentId, w),
     now: opts.now,
+    branchHead: opts.branchHead ?? ((ticketId) => review.diff(ticketId).then((d) => d.head)),
   });
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
