@@ -34,6 +34,10 @@ describe("openPglite reuse", () => {
     for (const t of ["companies", "projects", "tickets", "ticket_transitions"]) expect(await rows(second.db, `select 1 from ${t}`), t).toHaveLength(0);
     // The emptied tables hold no pages, as after a truncate, so new rows are stored (and read back unordered) in the order written.
     expect((await rows(second.db, "select sum(pg_relation_size(c.oid))::int as n from pg_class c where c.relname in ('companies', 'projects', 'tickets', 'ticket_transitions')"))[0]?.n).toBe(0);
+    // The planner's row counts are "never counted" again (-1, as after a truncate), for the tables and their indexes, not the
+    // vacuum's "0 rows": with 0 it plans seq scans and the query-plan tests (run-query-performance) see other plans.
+    const counted = await rows(second.db, "select c.relname, c.reltuples from pg_class c where (c.relname in ('companies', 'projects', 'tickets') or c.oid in (select indexrelid from pg_index where indrelid = 'public.tickets'::regclass)) and c.reltuples <> -1");
+    expect(counted).toEqual([]);
     // Foreign keys are enforced again: a project for a company that doesn't exist is refused.
     await expect(second.db.execute(sql`insert into projects (company_id, name) values (gen_random_uuid(), 'orphan')`)).rejects.toThrow();
     // Triggers are on again: a new ticket gets number 1 from its company's counter.

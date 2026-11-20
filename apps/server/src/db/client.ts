@@ -70,6 +70,14 @@ async function emptyTables(entry: PoolEntry): Promise<void> {
       // stored, and read back by an unordered select, in the order they were written. Without it a reused table's free
       // space put new rows out of order and a test reading two rows without "order by" failed (watchdog's review loop).
       await client.exec(`vacuum ${full.map(ident).join(", ")}`);
+      // Vacuum also records "0 rows" (reltuples 0) for each table and index, where a truncate leaves "never counted" (-1).
+      // The planner reads 0 as "really empty" and plans a few rows with seq scans; -1 makes it assume 10 pages and use the
+      // indexes, as on a fresh copy. Put back the truncate's values so query-plan tests (run-query-performance) see the
+      // plans they would on a fresh database. PGlite runs as superuser, so this test-only database may write pg_class.
+      const oids = full.map((t) => `${literal(`public.${ident(t)}`)}::regclass`).join(", ");
+      await client.exec(
+        `update pg_class set reltuples = -1, relallvisible = 0 where oid in (${oids}) or oid in (select indexrelid from pg_index where indrelid in (${oids}))`,
+      );
     }
   }
   // The schema has no sequences today (uuid ids); this keeps "restart identity" true if one is added, and costs ~1 ms.
