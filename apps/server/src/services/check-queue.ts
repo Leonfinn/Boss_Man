@@ -327,7 +327,10 @@ export function checkQueue(db: Db) {
     // DR-056: a quick pre-review job that has waited QUICK_AGE_MS sorts with the merges, by queue time, so a long line of quick checks drains.
     // BOS-1519: an urgent (top-tier) or moved-to-front quick check sorts there from the moment it is queued. Otherwise it sorted
     // below every aged quick check for its first QUICK_AGE_MS, so urgency and Move to front did nothing in a long line.
-    const withMerges = (j: CheckJob) => j.kind === "merge" || (!isLong(j) && (now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS || !!j.frontAt || prio(j) === 0));
+    // BOS-2105: a full pre-review check (request_check scope full) follows the same rule. It used to be left out, so it sat in
+    // the last group for good, even when urgent, and started only once every merge and aged quick check had gone. Slot use is
+    // unchanged: `admits` still counts it as a long job, so it can't take the slot kept for a waiting quick check.
+    const withMerges = (j: CheckJob) => j.kind === "merge" || now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS || !!j.frontAt || prio(j) === 0;
     // BOS-1504, merge train on: the train decides which landing goes next, so the queue follows it. A merge job of a ticket still
     // waiting for a seat is held back (it keeps its place: it stays queued, and its landing's own job replaces it once seated). The
     // seated members' merge jobs are served as one block in seat order, at the block's best place: the latest Move to front and
