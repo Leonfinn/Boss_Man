@@ -102,6 +102,12 @@ export function policyRulesService(db: Db) {
       return view(row);
     },
 
+    /** One rule as the routes show it, or null; the routes read it before an edit or delete to write the activity line. */
+    async get(id: string) {
+      const [row] = await db.select().from(policyRules).where(and(eq(policyRules.id, id), eq(policyRules.trigger, "permission")));
+      return row ? view(row) : null;
+    },
+
     async remove(id: string) {
       const rows = await db.delete(policyRules).where(eq(policyRules.id, id)).returning({ id: policyRules.id });
       if (!rows.length) throw new RuleError(404, "No such rule.");

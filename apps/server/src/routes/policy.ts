@@ -106,19 +106,49 @@ export function policyRoutes(
     throw err;
   };
   owner.get("/api/policy-rules", async (req) => rules.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null));
+  // Every change leaves a "settings" activity line (BOS-1963). A rule for every company (companyId null)
+  // has no single company, so the same line is recorded against each company.
+  const noteRuleChange = async (companyId: string | null, summary: string, detail: Record<string, unknown>) => {
+    const ids = companyId ? [companyId] : (await db.select({ id: companies.id }).from(companies)).map((c) => c.id);
+    for (const id of ids) await record(db, { companyId: id, kind: "settings", summary, detail });
+  };
+  const scopeText = (companyId: string | null) => (companyId ? "" : " for every company");
   owner.post("/api/policy-rules", async (req, reply) => {
     const b = z.object({ companyId: Uuid.nullable(), name: z.string().trim().min(1).max(120), match: Match, outcome: Outcome }).parse(req.body);
-    return rules.create(b).then((r) => reply.code(201).send(r), ruleErrors(reply));
+    return rules.create(b).then(async (r) => {
+      await noteRuleChange(r.companyId, `Owner added the permission rule "${r.name}"${scopeText(r.companyId)} (outcome: ${r.outcome})`, { ruleId: r.id, change: "created", outcome: r.outcome });
+      return reply.code(201).send(r);
+    }, ruleErrors(reply));
   });
   owner.patch("/api/policy-rules/:id", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const b = z.object({ name: z.string().trim().min(1).max(120), match: Match, outcome: Outcome }).partial().parse(req.body);
-    return rules.update(id, b).catch(ruleErrors(reply));
+    const before = await rules.get(id);
+    return rules.update(id, b).then(async (r) => {
+      const fields: string[] = [];
+      if (b.name !== undefined && b.name !== before?.name) fields.push("name");
+      if (b.match !== undefined && JSON.stringify(r.match) !== JSON.stringify(before?.match))fields.push("what it matches");
+      if (b.outcome !== undefined && b.outcome !== before?.outcome) fields.push("outcome");
+      const edited = fields.length ? fields.join(", ") : "nothing changed";
+      const renamed = before && before.name !== r.name ? ` (was "${before.name}")` : "";
+      await noteRuleChange(r.companyId, `Owner edited the permission rule "${r.name}"${renamed}${scopeText(r.companyId)}: ${edited}; outcome now ${r.outcome}`, { ruleId: r.id, change: "edited", fields, outcome: r.outcome, previousOutcome: before?.outcome ?? null });
+      return r;
+    }).catch(ruleErrors(reply));
   });
-  owner.delete("/api/policy-rules/:id", async (req, reply) => rules.remove(IdParam.parse(req.params).id).then(() => reply.code(204).send(), ruleErrors(reply)));
+  owner.delete("/api/policy-rules/:id", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const before = await rules.get(id);
+    return rules.remove(id).then(async () => {
+      if (before) await noteRuleChange(before.companyId, `Owner deleted the permission rule "${before.name}"${scopeText(before.companyId)} (outcome was ${before.outcome})`, { ruleId: id, change: "deleted", outcome: before.outcome });
+      return reply.code(204).send();
+    }, ruleErrors(reply));
+  });
   owner.post("/api/policy-rules/order", async (req, reply) => {
     const b = z.object({ companyId: Uuid.nullable(), ids: z.array(Uuid).max(500) }).parse(req.body);
-    return rules.reorder(b.companyId, b.ids).catch(ruleErrors(reply));
+    return rules.reorder(b.companyId, b.ids).then(async (list) => {
+      await noteRuleChange(b.companyId, `Owner reordered the permission rules${scopeText(b.companyId)}: ${list.map((r) => r.name).join(" > ")}`.slice(0, 500), { change: "reordered", order: list.map((r) => r.id) });
+      return list;
+    }).catch(ruleErrors(reply));
   });
   // The owner asks in plain words; the CEO drafts the rule and it comes back as a decision.
   owner.post("/api/companies/:id/rule-requests", async (req, reply) => {
