@@ -37,7 +37,7 @@ import { askCheckNotes, checkOwnerAsk } from "./services/owner-answers.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
-import { RunError, type runsService } from "./services/runs.js";
+import { RunError, runOriginQuery, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { openReviewLines } from "./services/review-kinds.js";
@@ -806,7 +806,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (from >= to) return fail("from must be before to.");
         if (to.getTime() - from.getTime() > 14 * 86_400_000) return fail("Ask for at most 14 days at a time.");
         const rows = await db
-          .select({ id: runsTable.id, agent: agents.name, number: tickets.number, origin: runsTable.origin, model: runsTable.model, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, stopReason: runsTable.stopReason, inputTokens: runsTable.inputTokens, outputTokens: runsTable.outputTokens, cachedReadTokens: runsTable.cachedReadTokens, cachedWriteTokens: runsTable.cachedWriteTokens })
+          .select({ id: runsTable.id, agent: agents.name, number: tickets.number, origin: runsTable.origin, model: runsTable.model, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, stopReason: runsTable.stopReason, account: runOriginQuery("runs").account, inputTokens: runsTable.inputTokens, outputTokens: runsTable.outputTokens, cachedReadTokens: runsTable.cachedReadTokens, cachedWriteTokens: runsTable.cachedWriteTokens })
           .from(runsTable)
           .leftJoin(agents, eq(agents.id, runsTable.agentId))
           .leftJoin(tickets, eq(tickets.id, runsTable.ticketId))

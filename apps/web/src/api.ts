@@ -384,6 +384,8 @@ export type RunRow = {
   cachedWriteTokens?: number | null;
   /** "subscription" or "api_credit": subscriptions show tokens, API credit shows money. */
   fundingKind?: string | null;
+  /** The funding account the run was paid from, by name (BOS-1943). */
+  account?: string | null;
 };
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };
