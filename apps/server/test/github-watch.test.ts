@@ -471,6 +471,27 @@ describe("security alerts (BOS-1929)", () => {
     expect(fresh[0]!.projectId).toBe(high);
   });
 
+  it("BOS-2126: the owner's alerts setting names the owning project, even the higher id; with no setting the clash is shown", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await t!.db.insert(githubWatches).values({ projectId: second.id, companyId: c.company.id, enabled: true, repo: REPO });
+    const [low, high] = [c.project.id, second.id].sort() as [string, string];
+    // Old data, nothing named: each project is told the other one holds the alerts too.
+    expect(await c.svc.alertsHeldBy(low, c.company.id)).not.toBeNull();
+    expect(await c.svc.alertsHeldBy(high, c.company.id)).not.toBeNull();
+    // The owner names the higher id by switching alerts off on the lower one.
+    await c.svc.save(low, c.company.id, { watchAlerts: false });
+    expect(await c.svc.alertsHeldBy(high, c.company.id)).toBeNull();
+    // Switching it back on while the other holds them is refused.
+    await expect(c.svc.save(low, c.company.id, { watchAlerts: true })).rejects.toThrow(/already watched/);
+    c.gh.dependabot = [{ number: 70, state: "open", pkg: "named-lib", severity: "high", summary: "N" }];
+    await c.svc.runOne(low);
+    await c.svc.runOne(high);
+    const rows = (await allTickets(c.company.id)).filter((r) => r.title.includes("named-lib"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.projectId).toBe(high);
+  });
+
   it("BOS-2055: a project that doesn't own the repo's alerts still closes its own existing tickets", async () => {
     const c = await setup();
     const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();

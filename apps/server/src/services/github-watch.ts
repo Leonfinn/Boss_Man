@@ -82,7 +82,7 @@ class WatchError extends Error {
 }
 
 export type WatchRow = typeof githubWatches.$inferSelect;
-export type WatchSettings = { enabled?: boolean; repo?: string | null; intervalMinutes?: number; watchIssues?: boolean; watchDiscussions?: boolean; skipLogins?: string[] };
+export type WatchSettings = { enabled?: boolean; repo?: string | null; intervalMinutes?: number; watchAlerts?: boolean; watchIssues?: boolean; watchDiscussions?: boolean; skipLogins?: string[] };
 
 type Candidate = { externalId: string; title: string; text: string; updatedAt: Date; login: string };
 type Json = Record<string, unknown>;
@@ -996,6 +996,13 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
     async get(projectId: string): Promise<WatchRow | null> {
       return (await db.select().from(githubWatches).where(eq(githubWatches.projectId, projectId)))[0] ?? null;
     },
+    /** The name of another project that also watches this project's repo's alerts (old data), or null. */
+    async alertsHeldBy(projectId: string, companyId: string): Promise<string | null> {
+      const [cur] = await db.select().from(githubWatches).where(eq(githubWatches.projectId, projectId));
+      if (!cur?.repo || !cur.enabled || !cur.watchAlerts) return null;
+      const others = await db.select({ repo: githubWatches.repo, name: projects.name }).from(githubWatches).innerJoin(projects, eq(projects.id, githubWatches.projectId)).where(and(eq(githubWatches.companyId, companyId), eq(githubWatches.enabled, true), eq(githubWatches.watchAlerts, true), ne(githubWatches.projectId, projectId)));
+      return others.find((w) => w.repo?.toLowerCase() === cur.repo!.toLowerCase())?.name ?? null;
+    },
     /** Saves the owner's setting. A new repo starts from a fresh cursor. */
     async save(projectId: string, companyId: string, patch: WatchSettings): Promise<WatchRow> {
       if (patch.repo != null && patch.repo !== "" && !REPO_RE.test(patch.repo)) throw new Error("The repository must look like owner/name.");
@@ -1003,16 +1010,19 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
       const repo = patch.repo === undefined ? (cur?.repo ?? null) : patch.repo === "" ? null : patch.repo;
       // BOS-2055: one alert watcher per repo. Refused here, naming the project that has it.
       // Only when this save turns the watcher on or points it at another repo, so a legacy row can still change its other settings.
-      const turnsOn = (patch.enabled === true && !cur?.enabled) || (patch.repo !== undefined && repo !== (cur?.repo ?? null));
-      if (repo && turnsOn && (patch.enabled ?? cur?.enabled) && (cur?.watchAlerts ?? true)) {
+      // BOS-2126: `watchAlerts` is the setting that names the project owning a repo's alerts; switching it on claims them.
+      const alertsOn = patch.watchAlerts ?? cur?.watchAlerts ?? true;
+      const turnsOn = (patch.enabled === true && !cur?.enabled) || (patch.repo !== undefined && repo !== (cur?.repo ?? null)) || (patch.watchAlerts === true && !(cur?.watchAlerts ?? true));
+      if (repo && turnsOn && (patch.enabled ?? cur?.enabled) && alertsOn) {
         const others = await db.select({ projectId: githubWatches.projectId, repo: githubWatches.repo, name: projects.name }).from(githubWatches).innerJoin(projects, eq(projects.id, githubWatches.projectId)).where(and(eq(githubWatches.companyId, companyId), eq(githubWatches.enabled, true), eq(githubWatches.watchAlerts, true), ne(githubWatches.projectId, projectId)));
         const taken = others.find((w) => w.repo?.toLowerCase() === repo.toLowerCase());
-        if (taken) throw new Error(`${repo} is already watched by the project "${taken.name}", and one project watches a repository's alerts. Turn the watcher off there first.`);
+        if (taken) throw new Error(`${repo} is already watched by the project "${taken.name}", and one project watches a repository's alerts. Turn its alert watching off there first.`);
       }
       const set: Partial<typeof githubWatches.$inferInsert> = {
         ...(patch.enabled !== undefined ? { enabled: patch.enabled && !!repo } : {}),
         ...(patch.repo !== undefined ? { repo } : {}),
         ...(patch.intervalMinutes !== undefined ? { intervalMinutes: clampInterval(patch.intervalMinutes) } : {}),
+        ...(patch.watchAlerts !== undefined ? { watchAlerts: patch.watchAlerts } : {}),
         ...(patch.watchIssues !== undefined ? { watchIssues: patch.watchIssues } : {}),
         ...(patch.watchDiscussions !== undefined ? { watchDiscussions: patch.watchDiscussions } : {}),
         ...(patch.skipLogins !== undefined ? { skipLogins: patch.skipLogins.map((l) => l.trim()).filter((l) => /^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$/.test(l)).slice(0, 20) } : {}),

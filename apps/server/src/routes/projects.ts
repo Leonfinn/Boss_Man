@@ -76,6 +76,7 @@ export function projectRoutes(
       enabled: z.boolean(),
       repo: z.string().trim().max(140).regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, "The repository must look like owner/name."),
       intervalMinutes: z.number().int().min(MIN_INTERVAL_MINUTES, `Check at most every ${MIN_INTERVAL_MINUTES} minutes.`).max(MAX_INTERVAL_MINUTES),
+      watchAlerts: z.boolean(),
       watchIssues: z.boolean(),
       watchDiscussions: z.boolean(),
       skipLogins: z.array(z.string().trim().max(45)).max(20),
@@ -89,6 +90,9 @@ export function projectRoutes(
       enabled: w?.enabled ?? false,
       repo: w?.repo ?? "",
       intervalMinutes: w?.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES,
+      watchAlerts: w?.watchAlerts ?? true,
+      // BOS-2126: the other project that holds this repo's alert watching (old data only), so the choice is never silent.
+      alertsHeldBy: await githubWatch.alertsHeldBy(projectId, companyId),
       watchIssues: w?.watchIssues ?? true,
       watchDiscussions: w?.watchDiscussions ?? true,
       skipLogins: w?.skipLogins ?? [],

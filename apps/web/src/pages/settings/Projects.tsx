@@ -188,6 +188,8 @@ type GithubWatchView = {
   enabled: boolean;
   repo: string;
   intervalMinutes: number;
+  watchAlerts: boolean;
+  alertsHeldBy: string | null;
   watchIssues: boolean;
   watchDiscussions: boolean;
   skipLogins: string[];
@@ -207,12 +209,12 @@ type GithubWatchView = {
 export function GithubWatch({ projectId }: { projectId: string }) {
   const url = `/api/projects/${projectId}/github-watch`;
   const [w, setW] = useState<GithubWatchView | null>(null);
-  const [form, setForm] = useState<{ enabled: boolean; repo: string; intervalMinutes: string; watchIssues: boolean; watchDiscussions: boolean; skip: string } | null>(null);
+  const [form, setForm] = useState<{ enabled: boolean; repo: string; intervalMinutes: string; watchAlerts: boolean; watchIssues: boolean; watchDiscussions: boolean; skip: string } | null>(null);
   const act = useAction();
   const sv = useSaveState(form);
   const load = (v: GithubWatchView) => {
     setW(v);
-    const f = { enabled: v.enabled, repo: v.repo, intervalMinutes: String(v.intervalMinutes), watchIssues: v.watchIssues, watchDiscussions: v.watchDiscussions, skip: v.skipLogins.join(", ") };
+    const f = { enabled: v.enabled, repo: v.repo, intervalMinutes: String(v.intervalMinutes), watchAlerts: v.watchAlerts, watchIssues: v.watchIssues, watchDiscussions: v.watchDiscussions, skip: v.skipLogins.join(", ") };
     setForm(f);
     sv.reset(f);
   };
@@ -229,7 +231,7 @@ export function GithubWatch({ projectId }: { projectId: string }) {
     void act.run(async () => {
       const v = await api<GithubWatchView>(url, {
         method: "PUT",
-        body: { enabled: form.enabled, repo: form.repo.trim(), intervalMinutes: Number(form.intervalMinutes), watchIssues: form.watchIssues, watchDiscussions: form.watchDiscussions, skipLogins: form.skip.split(/[,\s]+/).filter(Boolean) },
+        body: { enabled: form.enabled, repo: form.repo.trim(), intervalMinutes: Number(form.intervalMinutes), watchAlerts: form.watchAlerts, watchIssues: form.watchIssues, watchDiscussions: form.watchDiscussions, skipLogins: form.skip.split(/[,\s]+/).filter(Boolean) },
       });
       setW(v);
       sv.markSaved();
@@ -268,6 +270,10 @@ export function GithubWatch({ projectId }: { projectId: string }) {
         <label>
           <input type="checkbox" checked={form.watchDiscussions} onChange={(e) => setForm({ ...form, watchDiscussions: e.target.checked })} /> Discussions
         </label>
+        <label>
+          <input type="checkbox" checked={form.watchAlerts} onChange={(e) => setForm({ ...form, watchAlerts: e.target.checked })} /> Security alerts (this project owns the repo's alerts)
+        </label>
+        {w.alertsHeldBy ? <span className="error" style={{ fontSize: 13 }}>Project "{w.alertsHeldBy}" also watches this repo's alerts. Turn alerts off on one of them.</span> : null}
       </div>
       <div className="field" style={{ gridColumn: "1 / -1" }}>
         <label htmlFor={`gw-skip-${projectId}`}>Skip posts by these GitHub logins (yours, Boss Man's account)</label>
