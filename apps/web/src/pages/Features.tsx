@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { NoCompany } from "../components/NoCompany";
+import { short } from "../short-date";
 import { featureHorizon, HORIZONS, portalTitle, type Horizon } from "@boss-man/shared";
 import {
   api,
@@ -804,7 +805,7 @@ export function GoalSelect({ id, tree, value, onChange }: { id: string; tree: Tr
           {o.milestones.map((m) => (
             <option key={m.id} value={`m:${m.id}`}>
               {m.title}
-              {m.targetDate ? ` (${m.targetDate})` : ""}
+              {m.targetDate ? ` (${short(m.targetDate)})` : ""}
             </option>
           ))}
         </optgroup>
