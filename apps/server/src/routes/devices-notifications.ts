@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { deviceProfilesService } from "../services/device-profiles.js";
 import type { hostFactsService } from "../services/host-facts.js";
-import { NotifySettings, NtfyUrl, type notificationsService } from "../services/notifications.js";
+import { NotifySettings, NtfyTopic, NtfyUrl, type notificationsService } from "../services/notifications.js";
 import type { phoneApproveService } from "../services/phone-approve.js";
 import type { phoneLoginService } from "../services/phone-login.js";
 import type { secretsService } from "../services/secrets.js";
@@ -190,7 +190,7 @@ export function notificationSettingsRoutes(
   owner.put("/api/notification-settings", async (req) => {
     const b = NotifySettings.omit({ ntfy: true })
       .extend({
-        ntfy: z.object({ url: NtfyUrl, topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
+        ntfy: z.object({ url: NtfyUrl, topic: NtfyTopic, token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
       })
       .parse(req.body);
     const current = await notes.getSettings();
