@@ -71,8 +71,10 @@ async function leaderOn(o: Parameters<typeof createLeader>[0] = {}) {
 
 // BOS-1940: the two freeze tests ran a 5 s freeze against the default 3 s deadline (about 12 s of this file's 19 s).
 // They now freeze 2 s against a 1 s deadline. What they catch is the same: a freeze longer than the heartbeat's
-// deadline, ending after the reply (sent 300 ms into the freeze) has arrived. On the BOS-432 code, a plain timer,
-// that read as a miss. The heartbeat's timer now fires ~1 s late, past leader.ts's LATE_MS (500), so it re-arms.
+// deadline, ending after the reply (sent 300 ms into the freeze) has arrived; the heartbeat's timer fires ~1 s late,
+// past leader.ts's LATE_MS (500), so it re-arms. Checked by mutation: with withinFairTime cut back to a plain timer
+// (no yield, no re-arm) these two pass at 5 s/3 s and at 2 s/1 s alike (one miss is within the miss tolerance);
+// the withinFairTime unit tests above are what fail, in both versions.
 const DEADLINE_MS = 1000;
 const FREEZE_MS = 2000;
 
