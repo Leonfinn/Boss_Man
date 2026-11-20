@@ -184,7 +184,8 @@ export const OWNER_CONTROLS = {
   Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
   Secrets: ["Revoke", "Rotate", "Delete", "Save", "Check with Claude", "Check", "Remove"],
-  Workflow: [],
+  // The "What this shows" card's button when there is too little data (BOS-1937).
+  Workflow: ["Show the last …"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type OwnerScreen = keyof typeof OWNER_CONTROLS;
