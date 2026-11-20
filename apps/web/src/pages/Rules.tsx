@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { SCRATCH_RULE } from "@boss-man/shared";
-import { api, type Company } from "../api";
+import { api, type Agent, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -22,9 +22,16 @@ const outcomeTag = (o: Outcome) => {
   return <span className={`tag ${x.tone}`}>{x.label}</span>;
 };
 
-function describeMatch(m: Match) {
+/** "from Kit" / "from Kit or Zippy"; an id no agent list knows falls back to the old wording. */
+function describeAgents(ids: string[], agents: Agent[]) {
+  const names = ids.map((id) => agents.find((a) => a.id === id)?.name);
+  if (names.some((n) => !n)) return ids.length === 1 ? "the request is from one named agent" : "the request is from one of several named agents";
+  return `the request is from ${names.join(" or ")}`;
+}
+
+function describeMatch(m: Match, agents: Agent[] = []) {
   const parts: string[] = [];
-  if (m.agentIds?.length) parts.unshift(`the request is from one named agent`);
+  if (m.agentIds?.length) parts.unshift(describeAgents(m.agentIds, agents));
   if (m.kinds?.length) parts.push(`tool kind is ${m.kinds.join(" or ")}`);
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
@@ -38,7 +45,7 @@ function describeMatch(m: Match) {
   return parts.join(" and ");
 }
 
-function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule[]; shadowed: string[]; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
+function RuleRows({ rules, agents, shadowed, onMove, onChange, onDelete }: { rules: Rule[]; agents: Agent[]; shadowed: string[]; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
   if (!rules.length) return <p className="muted">None yet.</p>;
   return (
     <ol className="rules">
@@ -48,7 +55,7 @@ function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule
           <div style={{ minWidth: 0 }}>
             <strong>{r.name}</strong>
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
-              When {describeMatch(r.match)}
+              When {describeMatch(r.match, agents)}
             </p>
             {r.createdBy && (
               <p className="muted" style={{ fontSize: 12.5 }}>
@@ -84,6 +91,7 @@ function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule
 export function Rules({ companies, companyId, go }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void }) {
   const scopeId = companyId && companyId !== "all" ? companyId : null;
   const company = companies.find((c) => c.id === scopeId);
+  const allAgents = (scopeId ? company?.agents : companies.flatMap((c) => c.agents)) ?? [];
   const list = usePoll((signal) => api<RuleList>(`/api/policy-rules${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 60_000, scopeId ?? "all");
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
@@ -170,6 +178,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         </h2>
         <RuleRows
           rules={rules}
+          agents={allAgents}
           shadowed={list.data?.shadowedIds ?? []}
           onMove={move}
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}

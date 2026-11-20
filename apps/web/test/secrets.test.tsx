@@ -33,6 +33,19 @@ describe("secrets page", () => {
     expect((await screen.findAllByText("Boss Man Github token")).length).toBeGreaterThan(0);
   });
 
+  it("names the deploy target a secret is limited to, and falls back when it is unknown", async () => {
+    const grant = (id: string, target: string) => ({ id, secretId: "s1", envName: `VAR_${id}`, secretName: "Token", hint: null, deployTargetId: target, agentIds: [] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url === "/api/companies/c1/grants" ? json([grant("a", "t1"), grant("b", "gone")]) : url === "/api/companies/c1/deploy-targets" ? json([{ id: "t1", name: "Staging box" }]) : json([]),
+      ),
+    );
+    render(<Secrets companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Staging box")).toBeTruthy();
+    expect(screen.getByText("One deploy target")).toBeTruthy();
+  });
+
   it("removes a key from just this company", async () => {
     const calls: string[] = [];
     vi.stubGlobal("confirm", () => true);
