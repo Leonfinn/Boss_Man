@@ -2,10 +2,10 @@
 // whole group has merged, and the place a Priority 1 ticket keeps after a send-back.
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, companies, features, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, checkJobs, companies, features, ticketDependencies, tickets } from "../src/db/schema.js";
 import { readyUrgentFor, priorityGroup } from "../src/services/priority-group.js";
 import { checkQueue } from "../src/services/check-queue.js";
 
@@ -62,6 +62,27 @@ describe("Priority 1 on a feature", () => {
     expect(await row(open.id)).toMatchObject({ urgent: false, urgentByOwner: false });
     // The owner's switch takes over a mark the CEO had set, so switching it off clears that one too.
     expect(await row(ceoMark.id)).toMatchObject({ urgent: false, urgentByOwner: false });
+  });
+});
+
+describe("Priority 1 on a feature leaves a line per changed task (BOS-2090)", () => {
+  it("records on and off lines for the tasks it changed, none for unchanged or done ones", async () => {
+    const f = await ctx.feature();
+    const open = await ctx.ticket({ featureId: f.id });
+    const already = await ctx.ticket({ featureId: f.id, urgent: true, urgentByOwner: true });
+    const done = await ctx.ticket({ featureId: f.id, systemState: "done" });
+    const lines = async (id: string) => (await ctx.db.select().from(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "quota")))).map((r) => r.summary);
+    await ctx.req("PUT", `/api/features/${f.id}/priority-one`, { on: true });
+    expect(await lines(open.id)).toEqual([`Owner turned on Priority 1 for feature "Big feature": this task now goes first`]);
+    expect(await lines(already.id)).toEqual([]);
+    expect(await lines(done.id)).toEqual([]);
+    await ctx.req("PUT", `/api/features/${f.id}/priority-one`, { on: false });
+    expect(await lines(open.id)).toContain(`Owner turned off Priority 1 for feature "Big feature"`);
+    expect(await lines(open.id)).toHaveLength(2);
+    expect(await lines(done.id)).toEqual([]);
+    // Off again with nothing left to change: no new line.
+    await ctx.req("PUT", `/api/features/${f.id}/priority-one`, { on: false });
+    expect(await lines(open.id)).toHaveLength(2);
   });
 });
 
