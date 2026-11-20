@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
+import { Loader } from "../components/Loader";
 import { figureText } from "@boss-man/shared";
 import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
 import { copyMessage, copyText } from "../clipboard";
@@ -192,7 +193,7 @@ export function LinkPanel({ companyId, noteId, highlight, features, onLinked, on
   );
 }
 
-function NotePane({ id, companyId, features, onChanged, onClose }: { id: string; companyId: string; features: Feature[]; onChanged: () => void; onClose: () => void }) {
+export function NotePane({ id, companyId, features, onChanged, onClose }: { id: string; companyId: string; features: Feature[]; onChanged: () => void; onClose: () => void }) {
   const data = usePoll((signal) => api<NoteDetail>(`/api/feedback/${id}`, { signal }), 60_000, `note-${id}`);
   const [highlight, setHighlight] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -211,10 +212,24 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
     return () => document.removeEventListener("selectionchange", on);
   }, []);
   const reload = () => (data.reload(), onChanged());
-  const act = (p: Promise<unknown>) => void p.then(() => (setError(null), reload()), (err: Error) => setError(err.message));
+  // One request at a time: the buttons and the importance menu are disabled while one runs, so a
+  // double click can't send it twice. `start` is a function so a second call never sends a request.
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const act = (start: () => Promise<unknown>, after: () => void = reload) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    void start()
+      .then(() => (setError(null), after()), (err: Error) => setError(err.message))
+      .finally(() => {
+        busyRef.current = false;
+        setBusy(false);
+      });
+  };
   if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Note not found" backHref="#/feedback" backLabel="Back to Feedback">This note doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
   const d = data.data;
-  if (!d) return null;
+  if (!d) return <Loader label="Loading the note" />;
   const n = d.note;
   return (
     <article className="card note-pane" aria-labelledby="note-h">
@@ -255,7 +270,11 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
                     className="mini"
                     aria-label={`How much ${i.feature.title} matters to them`}
                     value={i.importance}
-                    onChange={(e) => act(api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: i.feature.id, importance: e.target.value, highlight: i.highlight } }))}
+                    disabled={busy}
+                    onChange={(e) => {
+                      const importance = e.target.value;
+                      act(() => api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: i.feature.id, importance, highlight: i.highlight } }));
+                    }}
                   >
                     {IMPORTANCES.map((x) => (
                       <option key={x} value={x}>
@@ -263,7 +282,7 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
                       </option>
                     ))}
                   </select>
-                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => act(api(`/api/insights/${i.id}`, { method: "DELETE" }))}>
+                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} disabled={busy} onClick={() => act(() => api(`/api/insights/${i.id}`, { method: "DELETE" }))}>
                     Unlink
                   </button>
                 </div>
@@ -283,7 +302,8 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
                 type="button"
                 className="chip"
                 title={`Shares: ${s.shared.join(", ")}`}
-                onClick={() => act(api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: s.id, importance: "important", ...(highlight ? { highlight } : {}) } }).then(() => setHighlight("")))}
+                disabled={busy}
+                onClick={() => act(() => api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: s.id, importance: "important", ...(highlight ? { highlight } : {}) } }).then(() => setHighlight("")))}
               >
                 Link to {s.title}
               </button>
@@ -294,20 +314,20 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
       <LinkPanel companyId={companyId} noteId={id} highlight={highlight} features={features} onLinked={reload} onClearHighlight={() => setHighlight("")} />
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         {n.state === "unprocessed" ? (
-          <button type="button" className="btn primary" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "processed" } }))}>
+          <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "processed" } }))}>
             Done: mark processed
           </button>
         ) : (
-          <button type="button" className="btn" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "unprocessed" } }))}>
+          <button type="button" className="btn" disabled={busy} onClick={() => act(() => api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "unprocessed" } }))}>
             Back to unprocessed
           </button>
         )}
         {n.state !== "archived" && (
-          <button type="button" className="btn" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "archived" } }))}>
+          <button type="button" className="btn" disabled={busy} onClick={() => act(() => api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "archived" } }))}>
             Archive
           </button>
         )}
-        <button type="button" className="btn" onClick={() => window.confirm("Delete this feedback and its links?") && void api(`/api/feedback/${id}`, { method: "DELETE" }).then(() => (onChanged(), onClose()), (err: Error) => setError(err.message))}>
+        <button type="button" className="btn" disabled={busy} onClick={() => window.confirm("Delete this feedback and its links?") && act(() => api(`/api/feedback/${id}`, { method: "DELETE" }), () => (onChanged(), onClose()))}>
           Delete
         </button>
       </div>

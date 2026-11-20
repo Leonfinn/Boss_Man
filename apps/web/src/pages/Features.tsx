@@ -183,8 +183,14 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
   const [area, setArea] = useState("");
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => void p.then(() => (setError(null), s.reload(), onChanged()), (err: Error) => setError(err.message));
-  if (!s.data) return null;
+  const [adding, setAdding] = useState<"driver" | "area" | null>(null);
+  if (!s.data) return s.error ? <p className="error">{s.error.message}</p> : <Loader label="Loading settings" />;
   const d = s.data;
+  const add = (kind: "driver" | "area", start: () => Promise<unknown>) => {
+    if (adding) return;
+    setAdding(kind);
+    run(start().finally(() => setAdding(null)));
+  };
   return (
     <section className="card" aria-labelledby="prio-h" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <h2 id="prio-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -235,7 +241,7 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            run(api(`/api/companies/${companyId}/feature-drivers`, { method: "POST", body: { name: driver.name.trim(), weight: driver.weight } }).then(() => setDriver({ name: "", weight: 1 })));
+            add("driver", () => api(`/api/companies/${companyId}/feature-drivers`, { method: "POST", body: { name: driver.name.trim(), weight: driver.weight } }).then(() => setDriver({ name: "", weight: 1 })));
           }}
           style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 8 }}
         >
@@ -253,8 +259,8 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
               ))}
             </select>
           </div>
-          <button className="btn" type="submit">
-            Add
+          <button className="btn" type="submit" disabled={adding !== null}>
+            {adding === "driver" ? "Adding…" : "Add"}
           </button>
         </form>
       </div>
@@ -276,7 +282,7 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            run(api(`/api/companies/${companyId}/feature-areas`, { method: "POST", body: { name: area.trim() } }).then(() => setArea("")));
+            add("area", () => api(`/api/companies/${companyId}/feature-areas`, { method: "POST", body: { name: area.trim() } }).then(() => setArea("")));
           }}
           style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 8 }}
         >
@@ -284,8 +290,8 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
             <label htmlFor="new-area">New area</label>
             <input id="new-area" required maxLength={80} placeholder="e.g. Billing, Reporting" value={area} onChange={(e) => setArea(e.target.value)} />
           </div>
-          <button className="btn" type="submit">
-            Add
+          <button className="btn" type="submit" disabled={adding !== null}>
+            {adding === "area" ? "Adding…" : "Add"}
           </button>
         </form>
       </div>
@@ -853,7 +859,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
     );
   if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Feature not found" backHref="#/features" backLabel="Back to Features">This feature doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
   const d = data.data;
-  if (!d) return null;
+  if (!d) return <Loader label="Loading feature" />;
   const f = d.feature;
   const parents = (list.data?.features ?? []).filter((x) => !x.parentId && x.id !== id);
   const hasChildren = d.subfeatures.length > 0;

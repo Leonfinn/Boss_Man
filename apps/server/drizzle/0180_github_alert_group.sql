@@ -1,0 +1,1 @@
+ALTER TABLE "github_alert_tickets" ADD COLUMN "group_key" text;

@@ -176,9 +176,48 @@ describe("deploy wait (BOS-420)", () => {
     offset += 10 * MIN;
     await svc.step();
     expect(await cards()).toHaveLength(0);
+    // BOS-2058: the wait now has its own end at 60 minutes, which comes before the second card's deadline (61): with only a
+    // check in the way and memory fine, the update goes ahead by itself instead of asking again.
     offset += 25 * MIN;
     await svc.step();
-    expect(await cards()).toHaveLength(1);
+    expect(await cards()).toHaveLength(0);
+    expect(w.sent).toEqual([{ id: ID, override: true }]);
+  });
+
+  it("BOS-2058: a wait with only checks and runs in the way goes ahead at 60 minutes; the CEO was woken once at 30, the owner never", async () => {
+    const { w, deps } = world();
+    const woken: string[] = [];
+    deps.wakeCeo = async (note) => void woken.push(note);
+    w.checks = 1;
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    offset += 29 * MIN;
+    await svc.step();
+    expect(woken).toEqual([]);
+    offset += 2 * MIN;
+    await svc.step();
+    await svc.step();
+    expect(woken).toHaveLength(1);
+    expect(woken[0]).toMatch(/waited 31 minutes.*goes ahead by itself at 11:00 UTC/);
+    offset += 30 * MIN;
+    expect((await svc.step())?.phase).toBe("sent");
+    expect(w.sent).toEqual([{ id: ID, override: true }]);
+    expect(w.notes.at(-1)).toMatchObject({ level: "note", title: expect.stringMatching(/is going ahead/) });
+  });
+
+  it("BOS-2058: at its end with memory really short the wait gives up and lifts, and the CEO is told", async () => {
+    const { w, deps } = world();
+    const told: string[] = [];
+    deps.tellCeo = async (note) => void told.push(note);
+    w.checks = 1;
+    w.headroom = { version: 1, writtenAt: "", availableMb: 2048, needMb: 4096 };
+    const svc = deployWaitService(db, deps);
+    await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
+    offset += 61 * MIN;
+    expect(await svc.step()).toBeNull();
+    expect(w.sent).toEqual([]);
+    expect((await svc.softHold()).on).toBe(false);
+    expect(told[0]).toMatch(/was not sent: it waited 60 minutes.*short of memory/);
   });
 
   it("update now anyway sends with the override, past the host's memory floor", async () => {
@@ -381,28 +420,30 @@ describe("deploy wait (BOS-420)", () => {
     expect(w.sent).toHaveLength(1);
   });
 
-  it("an approval the 3-hour cap never sent is told to the CEO with the reason (BOS-1805)", async () => {
+  it("an approval the wait's end never sent is told to the CEO with the reason (BOS-1805, BOS-2058)", async () => {
     const { w, deps } = world();
     const told: string[] = [];
     deps.tellCeo = async (note) => void told.push(note);
     w.checks = 2;
+    w.headroom = { version: 1, writtenAt: "", availableMb: 2048, needMb: 4096 };
     const svc = deployWaitService(db, deps);
     await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
-    offset += 3 * 60 * MIN + MIN;
+    offset += 61 * MIN;
     expect(await svc.step()).toBeNull();
     expect(told).toHaveLength(1);
-    expect(told[0]).toMatch(/was not sent: it waited 3 hours.*2 merge checks are running.*live server is unchanged/);
+    expect(told[0]).toMatch(/was not sent: it waited 60 minutes.*2 merge checks are running.*live server is unchanged/);
   });
 
-  it("the soft hold lifts itself after 3 hours with a page", async () => {
+  it("the soft hold lifts itself at the wait's end with a page, and never outlasts 3 hours (backstop)", async () => {
     const { w, deps } = world();
     w.checks = 1;
+    w.headroom = { version: 1, writtenAt: "", availableMb: 2048, needMb: 4096 };
     const svc = deployWaitService(db, deps);
     await svc.begin({ decisionId: ID, commit: B, fromCommit: A });
-    offset += 3 * 60 * MIN + 1;
-    expect((await svc.softHold()).on).toBe(false); // even before the pass runs
+    expect(await svc.step()).not.toBeNull(); // still waiting before its end
+    offset += 61 * MIN;
     expect(await svc.step()).toBeNull();
-    expect(w.notes.at(-1)).toEqual({ level: "page", title: "Update wait stopped after 3 hours" });
+    expect(w.notes.at(-1)).toEqual({ level: "page", title: "Update wait stopped after 60 minutes" });
     expect(w.sent).toEqual([]);
     const [row] = await db.select().from(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
     expect(row).toBeUndefined();
@@ -489,15 +530,15 @@ describe("deploy wait (BOS-420)", () => {
     expect(w.inbox).toBeNull(); // whatever the pass sent was taken back by the cancel that ran after it
   });
 
-  it("the 3-hour cap takes back a request the host is still holding for memory", async () => {
+  it("the sent phase's end (45 minutes) takes back a request the host is still holding for memory", async () => {
     const { w, deps } = world();
     const svc = deployWaitService(db, deps);
     await svc.begin({ decisionId: ID, commit: B, fromCommit: A }); // quiet: sent at once
     w.headroom = { version: 1, writtenAt: "", availableMb: 1000, needMb: 4096, holding: "low memory" };
-    offset += 3 * 60 * MIN + MIN;
+    offset += 46 * MIN;
     expect(await svc.step()).toBeNull();
     expect(w.inbox).toBeNull();
-    expect(w.notes.at(-1)).toMatchObject({ level: "page", title: "Update wait stopped after 3 hours" });
+    expect(w.notes.at(-1)).toMatchObject({ level: "page", title: "Update wait stopped after 45 minutes" });
   });
 
   it("'sent' is recorded before the request is written; a request that never reached the host goes back to waiting and is sent once more (Freddy)", async () => {

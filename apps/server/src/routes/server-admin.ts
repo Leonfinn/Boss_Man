@@ -11,6 +11,7 @@ import type { runnerReportService } from "../services/runner-report.js";
 import type { schedulerService } from "../services/scheduler.js";
 import type { deployWaitService } from "../services/deploy-wait.js";
 import type { selfDeployService } from "../services/self-deploy.js";
+import type { ActiveWait } from "../services/update-waits.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
@@ -27,9 +28,13 @@ export function serverAdminRoutes(
     deploysSvc: ReturnType<typeof deploysService>;
     /** The per-run stop (runsService.cancel). */
     cancelRun: (runId: string) => Promise<unknown>;
+    /** BOS-2058: every update wait that is on, from update-waits.ts (the same list server_status shows the CEO). */
+    activeWaits: () => Promise<ActiveWait[]>;
   },
 ) {
-  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun } = deps;
+  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits } = deps;
+  // One list for every screen (rule c): what each update wait waits on, since when, and when it goes ahead or ends.
+  owner.get("/api/update-waits", async () => ({ waits: await activeWaits() }));
 
   // Scheduling and kill switches (R30).
   owner.post("/api/agents/:id/wake", async (req, reply) => {

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners } from "../src/db/schema.js";
+import { activity, decisions, runners } from "../src/db/schema.js";
 
 // BOS-338: the optional model second opinion. Off by default; it can only make a card stricter; any failure
 // means the rules judge decides alone, within the deadline; what is sent is redacted, and the key only goes
@@ -292,5 +292,30 @@ describe("model second opinion (BOS-338)", () => {
     expect((await ctx.req("PUT", `/api/companies/${ctx.companyId}/second-opinion`, { enabled: false, baseUrl: "ftp://x", model: "m", secretId: null })).statusCode).toBe(400);
     const t = (await ctx.req("POST", `/api/companies/${ctx.companyId}/second-opinion/test`, { enabled: false, baseUrl: "http://localhost:11434/v1", model: "gpt-oss-safeguard:20b", secretId: null })).json() as { ok: boolean; message: string };
     expect(t).toMatchObject({ ok: true, message: expect.stringContaining("valid verdict") });
+    // The refused saves and the Test button wrote no activity line.
+    expect(await ctx.db.select().from(activity).where(eq(activity.kind, "settings"))).toHaveLength(0);
+  });
+
+  it("settings changes leave one activity line, with no key and no address path", async () => {
+    ctx = await setup();
+    const put = (b: Record<string, unknown>) => ctx!.req("PUT", `/api/companies/${ctx!.companyId}/second-opinion`, { enabled: true, baseUrl: "https://models.example/v1/", model: "some/model", secretId: null, ...b });
+    const lines = async () => (await ctx!.db.select().from(activity).where(eq(activity.kind, "settings"))).map((a) => a.summary);
+    const secretId = randomUUID();
+    expect((await put({ baseUrl: "https://models.example/v1/?token=abc", secretId })).statusCode).toBe(200);
+    expect(await lines()).toEqual(["Owner turned the second opinion on (model some/model)"]);
+    // Saving the same thing again, or only swapping the key, adds nothing.
+    await put({ baseUrl: "https://models.example/v1/?token=abc", secretId });
+    await put({ baseUrl: "https://models.example/v1/?token=abc", secretId: randomUUID() });
+    expect(await lines()).toHaveLength(1);
+    await put({ model: "other/model" });
+    await put({ enabled: false });
+    expect(await lines()).toEqual([
+      "Owner turned the second opinion on (model some/model)",
+      "Owner changed the second opinion model to other/model",
+      "Owner turned the second opinion off",
+    ]);
+    const all = JSON.stringify(await ctx.db.select().from(activity).where(eq(activity.kind, "settings")));
+    expect(all).not.toContain("token=abc");
+    expect(all).not.toContain(secretId);
   });
 });

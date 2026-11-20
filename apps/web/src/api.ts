@@ -258,6 +258,8 @@ export type Ticket = {
   /** BOS-1908: the ticket this In progress ticket's agent is running instead ("Agent busy on BOS-N"). */
   busyOnTicketId?: string | null;
   busyOnNumber?: number | null;
+  /** BOS-1910: the watchdog's verdict, set once it has handed the ticket to the Scrum Master; never for Being checked, Merged watching or Next up. */
+  looksStuck?: { rule: string; idleMs: number; since: string } | null;
   /** BOS-1908: in Ready, the agent's one "Next up": starts by itself when the agent finishes what it is running. */
   nextUp?: boolean;
   blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; ticketNumber?: number | null; engagementId: string | null; decisionId: string | null }>;

@@ -13,6 +13,7 @@ import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 import { untrusted } from "@boss-man/shared";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, type RunnerCheck } from "./runner-busy.js";
+import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 
@@ -68,12 +69,20 @@ export type Hold = {
   force?: boolean;
   /** BOS-1807: the owner chose "Swap as soon as these finish": the hold stays (no cap, no more questions) until the swap. */
   swapWhenDone?: boolean;
+  /** BOS-1982: when the owner chose "Swap as soon as these finish": that answer holds new work for SWAP_WHEN_DONE_CAP_MINUTES from here, not for ever. */
+  swapWhenDoneAt?: string;
   /** BOS-1807: the owner chose "Stop the checks and update now" while runs still go: checks are not waited for, runs are. */
   ignoreChecks?: boolean;
   /** BOS-1807: the hard cap passed with work still going, the hold lifted and the owner was told (once). */
   capNotified?: boolean;
   /** BOS-1954: when the CEO was woken because the swap waited past its expected finish (once per hold). */
   ceoWokenAt?: string;
+  /** BOS-2058 (rule b): when the drain reached its own end and went ahead by itself (stopped what was going, then swapped). */
+  wentAheadAt?: string;
+  /** BOS-2058 (rule b): since when a scheduling pass has kept a swap waiting; past the runner-settle end the swap goes ahead without it. */
+  settleSince?: string;
+  /** BOS-2058 (rule b): since when the launcher has not answered; past the runner-launcher end the update gives up and the hold lifts. */
+  launcherDownSince?: string;
   /** slug -> when its runner was recreated; the hold waits for these to reconnect. */
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
@@ -88,6 +97,13 @@ export type Hold = {
    * the update's own start message.
    */
   wrapSince?: string;
+  /**
+   * BOS-2058 (rule e): which update the owner's wrap-up belongs to, set when it is pressed. "runner": it joined the runner
+   * update's hold (which lifts it). "server": a server update was waiting for a quiet machine; the wrap-up lifts by
+   * itself when that wait is over. "none": no update was waiting; it lifts by itself after STANDALONE_WRAPUP_MS.
+   * Absent on a hold saved before this: read as "none" from `since`.
+   */
+  forUpdate?: "server" | "runner" | "none";
   /** The still-running-list timeout for the owner's wrap-up ask (BOS-929/988): only a flag, never an automatic stop. */
   wrapNotRespondingAfter?: number;
   /** runId -> when the owner's wrap-up message went to it (BOS-988), so a drain pass never tells a run twice. */
@@ -167,9 +183,27 @@ const fmtTime = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
  */
 export const holdBlocksStarts = (hold: Hold | null, at: Date): boolean => {
   if (!hold) return false;
-  if (hold.kind === "wrapup" || hold.wrapSince || hold.force || hold.swapWhenDone || hold.ignoreChecks) return true;
-  return at < holdCapAt(hold);
+  if (hold.kind === "wrapup" || hold.wrapSince || hold.force || hold.ignoreChecks) return true;
+  return at < holdEndsAt(hold);
 };
+/** BOS-1982: how long "Swap as soon as these finish" holds new work, counted from the answer (it used to have no end). */
+export { SWAP_WHEN_DONE_CAP_MINUTES };
+/** When the hold stops keeping new work out by itself: the cap, or for "swap as soon as these finish" the later of that and its own bound. */
+export const holdEndsAt = (hold: Hold): Date => {
+  const cap = holdCapAt(hold);
+  if (!hold.swapWhenDone || !hold.swapWhenDoneAt) return cap;
+  return new Date(Math.max(cap.getTime(), new Date(hold.swapWhenDoneAt).getTime() + SWAP_WHEN_DONE_CAP_MINUTES * 60_000));
+};
+/**
+ * BOS-2058 (rule b): the drain's own end. Past it, with work still going, the update goes ahead by itself through the
+ * existing stop options: the work runs still going are stopped with the per-run Stop (they were told to wrap up when the
+ * hold began), and the swap no longer waits for runs or checks (`force`, as "Stop the remaining runs and update now";
+ * a runner check cut off goes back in line and starts again). It replaces BOS-1807's "lift at 90 minutes and wait for
+ * luck" (20 Nov 06:23 to 09:03). Counted from the hold's start; an owner's "Wait 10 more minutes" deadline and
+ * "Swap as soon as these finish" bound (BOS-1982) are honoured. A merge being pushed is still waited for (its own end).
+ */
+export const DRAIN_GO_AHEAD_MINUTES = WAIT_RULES["runner-drain"].endMin;
+export const drainGoAheadAt = (hold: Hold): Date => drainEndsAt(hold);
 /** What a wake released after the cap shows in place of "update pending". */
 export const HOLD_RELEASED_REASON = `released: the runner update waited ${HOLD_CAP_MINUTES} minutes with work still going, so new runs are no longer held for it`;
 
@@ -193,6 +227,8 @@ export type MaintenanceDeps = {
   landingMerges?: () => Promise<Map<string, number>>;
   /** BOS-1951: the same merges as ticket ids, so the banner can name them. */
   landingMergeIds?: () => Promise<string[]>;
+  /** BOS-2058: a server update is waiting for a quiet machine right now (a wrap-up pressed then belongs to it, and lifts with it). */
+  serverUpdateWaiting?: () => Promise<boolean>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
   /** BOS-1954: how long to wait for `settled` (default SETTLE_WAIT_MS); a test makes it short. */
@@ -397,14 +433,15 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     const shown = await liveWorkRuns(db, h.wrapSince ?? h.since, told);
     const checks = await runnerChecks(db, now());
     // Each stop option shows whenever its work is still going (Brains's point 2), beside "Swap as soon as these finish".
-    const options = [...(shown.length ? [STOP_THESE_CARRY_ON] : []), ...(checks.length ? [STOP_CHECKS_UPDATE_NOW] : []), SWAP_WHEN_DONE, WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE];
+    const options = [...(shown.length ? [STOP_THESE_CARRY_ON] : []), ...(checks.length ? [STOP_CHECKS_UPDATE_NOW] : []), ...(h.swapWhenDone ? [] : [SWAP_WHEN_DONE]), WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE];
     const checkLine = (c: (typeof checks)[number]) => `${c.kind} check${c.ticket ? ` for ${c.ticket}` : ""} (${c.scope}): running ${c.runningForMinutes} min${c.usuallyMinutes === null ? ", no usual length known" : `, usually ${c.usuallyMinutes} min, about ${Math.max(0, c.usuallyMinutes - c.runningForMinutes)} min left`}`;
     const runLine = (r: (typeof shown)[number]) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"}): running ${r.runningForMinutes} min, an agent run has no usual length`;
     const stillGoing = [...checks.map(checkLine), ...shown.map(runLine)].map((l) => `- ${l}`).join("\n");
     // The swap is expected when the last check ends at its usual length; with runs going it cannot be forecast.
     const lefts = checks.map((c) => (c.usuallyMinutes === null ? null : Math.max(0, c.usuallyMinutes - c.runningForMinutes)));
     const expected = shown.length ? "when the last run ends (agent runs have no fixed length)" : lefts.length && lefts.every((m): m is number => m !== null) ? `about ${fmtTime(new Date(now().getTime() + Math.max(0, ...lefts) * 60_000))} if the checks take their usual time` : "when the last check ends (no usual length is known)";
-    const capAt = holdCapAt(h);
+    const goAt = drainGoAheadAt(h);
+    const swapLine = h.swapWhenDone ? `You chose "${SWAP_WHEN_DONE}", and the work is still going.` : `"${SWAP_WHEN_DONE}" keeps new runs and checks held and swaps by itself, with nothing more to press (for at most ${SWAP_WHEN_DONE_CAP_MINUTES} minutes).`;
     const stopText = [
       shown.length ? ` "Stop these and carry on" stops ${shown.map((r) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})`).join(", ")}: anything they haven't saved is lost, and their tickets wake again after the update. No other run is touched.` : "",
       checks.length ? ` "Stop the checks and update now" ends ${checks.length === 1 ? "the check" : "the checks"} running on the runner; ${checks.length === 1 ? "it starts" : "they start"} again from the beginning after the update, so the time already spent is lost.` : "",
@@ -414,13 +451,25 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n ? `${n} run${n === 1 ? " is" : "s are"}` : ""}${n && checksN ? " and " : ""}${checksN ? `${checksN} check${checksN === 1 ? " is" : "s are"}` : ""} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}:\n${stillGoing}\nThe swap is expected ${expected}. "${SWAP_WHEN_DONE}" keeps new runs and checks held and swaps by itself, with nothing more to press.${stopText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the work going carries on). Until you answer, new runs and checks stay held; if you don't answer, the hold lifts by itself at ${fmtTime(capAt)} (${HOLD_CAP_MINUTES} minutes after the update began) and new work starts again.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n ? `${n} run${n === 1 ? " is" : "s are"}` : ""}${n && checksN ? " and " : ""}${checksN ? `${checksN} check${checksN === 1 ? " is" : "s are"}` : ""} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}:\n${stillGoing}\nThe swap is expected ${expected}. ${swapLine}${stopText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the work going carries on). Until you answer, new runs and checks stay held; if you don't answer, the update goes ahead by itself at ${fmtTime(goAt)}: the runs still going are stopped (their tickets wake again after the update) and any check cut off starts again after the swap.`,
         options,
         recommendedOption: SWAP_WHEN_DONE,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
         context: { type: "maintenance", since: h.since, runIds: shown.map((r) => r.runId) },
       })
       .onConflictDoNothing();
+  }
+
+  /**
+   * BOS-1982: what the CEO's wake says the owner can do right now. Only a card that is open is named, with its own buttons;
+   * under "Swap as soon as these finish" the first card is closed, so the wake says when the hold ends instead.
+   */
+  async function ceoWakeOptions(h: Hold): Promise<string> {
+    const [card] = await db.select({ options: decisions.options }).from(decisions).where(and(eq(decisions.dedupeKey, `maintenance:${h.since}:${h.deadline}`), eq(decisions.status, "open")));
+    const buttons = ((card?.options as string[] | undefined) ?? []).filter((o) => o !== WAIT_TEN_MORE);
+    const ends = h.force ? "" : ` If the work is still going at ${fmtTime(drainGoAheadAt(h))}, the update goes ahead by itself then and stops it.`;
+    if (buttons.length) return `The owner has a card open in Settings > Server and runner with these options: ${buttons.map((b) => `"${b}"`).join(", ")}.${ends}`;
+    return `No question to the owner is open right now; the owner can cancel the update in Settings > Server and runner.${ends}`;
   }
 
   /**
@@ -458,7 +507,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // who it told. Runs already told keep their time, so pressing again tells only the runs that came after.
         if (kind === "wrapup" && have.kind !== "wrapup") {
           const asked = have.wrapSince ?? now().toISOString();
-          const up: Hold = { ...have, wrapSince: asked, wrapNotRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES };
+          const up: Hold = { ...have, wrapSince: asked, wrapNotRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES, forUpdate: "runner" };
           await save(up);
           const told = await tell(WRAP_UP_DURING_UPDATE, up, "wrapTold");
           return { ...up, wrapTold: told };
@@ -485,7 +534,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // "still going" timeout is only a flag for the owner (WRAPUP_NOT_RESPONDING_MINUTES).
       const minutes = opts.minutes ?? (kind === "wrapup" ? WRAPUP_NOT_RESPONDING_MINUTES : (deps.drainMinutes ?? 30));
       const t = now();
-      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? "asking agents to wrap up" : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
+      // BOS-2058: a wrap-up pressed while a server update waits for a quiet machine belongs to that update (it used to be a
+      // standalone hold that ended only when someone pressed Cancel: the 20 Nov 10:40 "wrapped up for no reason" entry).
+      const forServer = kind === "wrapup" && (await deps.serverUpdateWaiting?.().catch(() => false));
+      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? (forServer ? "asking agents to wrap up for the waiting server update" : "asking agents to wrap up") : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes, ...(kind === "wrapup" ? { forUpdate: forServer ? ("server" as const) : ("none" as const) } : {}) };
       await save(h);
       const said = kind === "settings" ? WRAP_UP_SETTINGS : kind === "wrapup" ? WRAP_UP_ASKED : WRAP_UP;
       const told = kind === "wrapup" ? await tell(said, h, "wrapTold") : await tell(said, h, "startTold");
@@ -519,7 +571,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       }
       if (!h) return last && !last.ok ? { on: false as const, last, healthy } : { on: false as const, last };
       // BOS-1600 (criterion A): the same runnerBusy result the swap's own drain waits on, so text and swap never disagree.
-      const busyNow = await runnerBusy(db, true);
+      const busyNow = await runnerBusy(db, true, now());
       const active = busyNow.runs;
       const runsTotal = busyNow.runsTotal;
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
@@ -566,7 +618,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     async updateNow(): Promise<{ ok: true } | { ok: false; reason: "no_update" | "agents_running" | "no_checks" }> {
       const h = await getHold(db);
       if (!h || h.kind === "wrapup") return { ok: false, reason: "no_update" };
-      const busy = await runnerBusy(db, true);
+      const busy = await runnerBusy(db, true, now());
       if (busy.runsTotal > 0) return { ok: false, reason: "agents_running" };
       if (busy.checksTotal === 0) return { ok: false, reason: "no_checks" };
       await save({ ...h, force: true });
@@ -656,7 +708,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         await self.stopRuns(ctx.runIds ?? [], ctx.runIds ?? []);
         // Give the stops time to land; the hold keeps new runs out meanwhile and asks again if some are still going.
         await save({ ...(await getHold(db) ?? h), deadline: later(DEADLINE_WAIT_MINUTES) });
-      } else if (answer === SWAP_WHEN_DONE) await save({ ...h, swapWhenDone: true });
+      } else if (answer === SWAP_WHEN_DONE) {
+        // BOS-1982: the answer holds for at most SWAP_WHEN_DONE_CAP_MINUTES; one more question comes half way, with the stop options.
+        await save({ ...h, swapWhenDone: true, swapWhenDoneAt: now().toISOString(), deadline: later(SWAP_WHEN_DONE_CAP_MINUTES / 2) });
+      }
       else if (answer === STOP_CHECKS_UPDATE_NOW) {
         // BOS-1807: checks are not waited for; runs still going are (and the card asks again about them at the new deadline).
         await save({ ...h, ignoreChecks: true, deadline: later(DEADLINE_WAIT_MINUTES) });
@@ -692,7 +747,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
       // A wrap-up hold (BOS-929) swaps nothing and asks nothing: it only keeps new runs from starting until the
       // owner cancels it, or a real update takes it over in start() above. The scheduler's hold already does that.
-      if (h.kind === "wrapup") return;
+      if (h.kind === "wrapup") {
+        // BOS-2058 (rule e): a wrap-up belongs to an update and lifts by itself. For a server update it lifts when that wait
+        // is over (sent, cancelled or given up); with no update behind it, after an hour. It never waits for a press.
+        const t = now();
+        if (h.forUpdate === "server" && !(await deps.serverUpdateWaiting?.().catch(() => true))) {
+          await end("Wrap-up lifted", "note", "The server update it was asked for is no longer waiting for the machine, so new runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+        } else if (h.forUpdate !== "server" && t.getTime() - Date.parse(h.wrapSince ?? h.since) > STANDALONE_WRAPUP_MS) {
+          await end("Wrap-up lifted after 60 minutes", "note", "No update was waiting for it, so new runs start again after 60 minutes. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+        }
+        return;
+      }
 
       // BOS-988: the hold's own message went only to the runs going when it started, and the runner puts a message
       // behind the run's current turn. A run that started just before the hold (its start already on the wire) or
@@ -710,15 +775,31 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         fleet = await deps.fleet();
       } catch (err) {
         deps.log?.(`drain: the launcher did not answer: ${(err as Error).message}`);
+        // BOS-2058 (rule b): a launcher that never answers again must not hold every company for ever. Past the
+        // runner-launcher end the update gives up: the hold lifts, the owner is told, and each company's CEO is woken.
+        const t = now();
+        const downSince = h.launcherDownSince ?? t.toISOString();
+        if (t.getTime() - Date.parse(downSince) >= WAIT_RULES["runner-launcher"].endMin * 60_000) {
+          const minutes = Math.round((t.getTime() - Date.parse(downSince)) / 60_000);
+          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Start the update again from Settings > Server and runner once the launcher is back.`);
+          if (deps.wakeCeo) {
+            for (const co of await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))) {
+              await deps.wakeCeo(co.id, `The runner update gave up: the runner launcher did not answer for ${minutes} minutes, so the hold lifted and new runs start again on the old runner image. Nothing was stopped. The owner was told; the update needs starting again once the launcher answers.`).catch((e) => deps.log?.(`drain: waking the CEO failed: ${(e as Error).message}`));
+            }
+          }
+          return;
+        }
+        if (!h.launcherDownSince) await save({ ...h, launcherDownSince: downSince });
         return;
       }
+      if (h.launcherDownSince) h = { ...h, launcherDownSince: undefined };
       if (fleet.some((r) => r.current === undefined)) {
         await end("Runner update stopped", "page", "The launcher is older than the server and cannot say which runners are on the new image. Update the launcher (scripts/deploy.sh --runner), then start the update again.");
         return;
       }
       const t = now();
       // BOS-1471: running check jobs hold a swap like agent runs do, with the same deadline and the same ask.
-      const first = await runnerBusy(db, true); // BOS-1600: checks on a separate check worker do not hold a swap
+      const first = await runnerBusy(db, true, t); // BOS-1600: checks on a separate check worker do not hold a swap
       // BOS-1807: "Stop the checks and update now" with runs still going: the swap waits for the runs only.
       const waitedOn = (b: Awaited<ReturnType<typeof runnerBusy>>) => (h!.ignoreChecks ? b.runs : b.byCompany);
       // BOS-1877: a chat or CEO-reply run is let through while checks run, so the swap waits for it too (never killed).
@@ -730,12 +811,40 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       };
       let active = await withChat(waitedOn(first));
       const total = h.ignoreChecks ? first.runsTotal : first.runsTotal + first.checksTotal;
-      // "Swap as soon as these finish" is the owner's answer: no more questions, the hold stays until the swap.
-      if (!h.force && !h.swapWhenDone && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, first.runsTotal, waitedOn(first).size, h.ignoreChecks ? 0 : first.checksTotal);
+      // BOS-2058 (rule b): the drain's own end passed with work still going: go ahead through the existing stop options,
+      // never "lift and wait for luck". Every work run still going is stopped with the per-run Stop, then the swap stops
+      // waiting for runs and checks (force); a merge being pushed is still waited for below, on its own 20-minute end.
+      if (!h.force && t >= drainGoAheadAt(h) && (total > 0 || [...active.values()].some((n) => n > 0))) {
+        const going = await liveWorkRuns(db, h.since, { ...h.startTold, ...h.wrapTold, ...startTold });
+        const checksNow = h.ignoreChecks ? [] : await runnerChecks(db, t);
+        const ids = going.map((r) => r.runId);
+        const { stopped } = await self.stopRuns(ids, ids);
+        // The go-ahead wake below is this hold's one CEO note; the "still waiting" wake must not follow it in the same pass.
+        h = { ...h, force: true, wentAheadAt: t.toISOString(), ceoWokenAt: h.ceoWokenAt ?? t.toISOString() };
+        await save(h);
+        await withdrawQuestion();
+        const minutes = Math.round((t.getTime() - new Date(h.since).getTime()) / 60_000);
+        const stoppedSet = new Set(stopped);
+        const runLine = (r: (typeof going)[number]) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})${stoppedSet.has(r.runId) ? "" : " (could not be stopped; it ends with the swap)"}`;
+        const checkLine = (c: (typeof checksNow)[number]) => `${c.kind} check${c.ticket ? ` for ${c.ticket}` : ""} (${c.scope})`;
+        const parts = [going.length ? `stopped ${going.map(runLine).join(", ")}` : "", checksNow.length ? `restarts ${checksNow.map(checkLine).join(", ")} after the swap` : ""].filter(Boolean);
+        await deps.notify({ companyId: null, level: "note", title: "Runner update went ahead by itself", body: `The update waited ${minutes} minutes, its own limit, with work still going, so it went ahead without anyone pressing anything: it ${parts.join(" and ") || "stopped what was still going"}. Stopped tickets wake again after the update.`, link: "#/settings" });
+        if (deps.wakeCeo) {
+          const byCompany = new Map<string, string[]>();
+          const add = (companyId: string, line: string) => byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), line]);
+          for (const r of going) add(r.companyId, `- stopped: ${runLine(r)}`);
+          for (const c of checksNow) add(c.companyId, `- ${checkLine(c)}: cut off by the swap, goes back in line`);
+          for (const [companyId, lines] of byCompany) {
+            await deps.wakeCeo(companyId, `The runner update waited ${minutes} minutes, its own limit, so it went ahead by itself. Of yours:\n${lines.join("\n")}\nStopped tickets wake again after the update; check that their state notes say where they stopped. Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
+          }
+        }
+      }
+      // BOS-1982: "Swap as soon as these finish" holds for at most SWAP_WHEN_DONE_CAP_MINUTES; the deadline it set asks once more, with the stop options.
+      if (!h.force && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, first.runsTotal, waitedOn(first).size, h.ignoreChecks ? 0 : first.checksTotal);
       // BOS-1807: the hard cap passed with work still going: new work is no longer held; say so once.
       if (!h.capNotified && total > 0 && !holdBlocksStarts(h, t)) {
         h = { ...h, capNotified: true };
-        await deps.notify({ companyId: null, level: "note", title: "Runner update: new work is no longer held", body: `The update waited ${HOLD_CAP_MINUTES} minutes for ${first.runsTotal} run${first.runsTotal === 1 ? "" : "s"} and ${first.checksTotal} check${first.checksTotal === 1 ? "" : "s"} and you did not answer, so new runs and checks start again. The update still goes ahead by itself once a company has none going. Open Settings > Server and runner to hold again or cancel.`, link: "#/settings" });
+        await deps.notify({ companyId: null, level: "note", title: "Runner update: new work is no longer held", body: `The update waited for ${first.runsTotal} run${first.runsTotal === 1 ? "" : "s"} and ${first.checksTotal} check${first.checksTotal === 1 ? "" : "s"} and ${h.swapWhenDone ? `they did not finish within ${SWAP_WHEN_DONE_CAP_MINUTES} minutes of "${SWAP_WHEN_DONE}"` : `you did not answer within ${HOLD_CAP_MINUTES} minutes`}, so new runs and checks start again. The update still goes ahead by itself once a company has none going. Open Settings > Server and runner to hold again or cancel.`, link: "#/settings" });
       }
 
       // BOS-1954: the swap waited past when it should have finished: wake the CEO once (not the owner), naming what it waits on.
@@ -759,7 +868,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
             await save(h);
             const minutes = Math.round((t.getTime() - new Date(h.since).getTime()) / 60_000);
             for (const [companyId, lines] of byCompany) {
-              await deps.wakeCeo(companyId, `The runner update started ${minutes} minutes ago and is still waiting. No new runs or checks start meanwhile, so your company is held. It waits on this of yours:\n${lines.join("\n")}\nNothing is stopped for you. The owner's card in Settings > Server and runner has the stop options ("Stop these and carry on", "Stop the checks and update now"). Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
+              await deps.wakeCeo(companyId, `The runner update started ${minutes} minutes ago and is still waiting. No new runs or checks start meanwhile, so your company is held. It waits on this of yours:\n${lines.join("\n")}\nNothing is stopped for you. ${await ceoWakeOptions(h)} Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
             }
           }
         }
@@ -782,10 +891,19 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const settledInTime = await Promise.race([deps.settled().then(() => true), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), deps.settleWaitMs ?? SETTLE_WAIT_MS); timer.unref?.(); })]);
         clearTimeout(timer);
         if (!settledInTime) {
-          deps.log?.(`drain: a scheduling pass has not ended after ${Math.round((deps.settleWaitMs ?? SETTLE_WAIT_MS) / 1000)} s; ${r.slug} is looked at again on the next pass`);
-          continue;
+          // BOS-2058 (rule b): the scheduling pass gets the runner-settle end, counted from the first pass it held up. Past
+          // it the swap goes ahead without it: the runs are counted again just below, so a launch that did land is waited for.
+          const settleSince: string = h.settleSince ?? t.toISOString();
+          if (now().getTime() - Date.parse(settleSince) < WAIT_RULES["runner-settle"].endMin * 60_000) {
+            h = { ...h, settleSince };
+            deps.log?.(`drain: a scheduling pass has not ended after ${Math.round((deps.settleWaitMs ?? SETTLE_WAIT_MS) / 1000)} s; ${r.slug} is looked at again on the next pass`);
+            continue;
+          }
+          deps.log?.(`drain: a scheduling pass has held the swap since ${settleSince}; ${r.slug} goes ahead without it`);
+        } else if (h.settleSince) {
+          h = { ...h, settleSince: undefined };
         }
-        active = await withChat(waitedOn(await runnerBusy(db, true)));
+        active = await withChat(waitedOn(await runnerBusy(db, true, now())));
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         if (r.companyId && ((await landing()).get(r.companyId) ?? 0) > 0) continue;
         try {
@@ -813,6 +931,21 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // No swap for twice the reconnect time while runners still wait: say so once, so a hold is never silently stuck.
       // A runner whose swap failed and is being tried again is not stuck: it is on its retry schedule (BOS-382), and the end of it pages.
       const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug] && !tries[r.slug]);
+      // BOS-1982: nothing counted (no run, check or merge) and runners still wait: the swap is held up by something Boss Man
+      // can't name (a scheduling pass that never ends). The wake above needs counted work, so wake each such company's CEO once.
+      if (waiting.length && !h.ceoWokenAt && deps.wakeCeo && total === 0 && (await landing()).size === 0) {
+        const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
+        const idleCompanies = [...new Set(waiting.map((r) => r.companyId).filter((id): id is string => !!id && !(active.get(id) ?? 0)))];
+        if (t.getTime() - lastProgress >= 2 * reconnectMs && idleCompanies.length) {
+          h = { ...h, ceoWokenAt: t.toISOString() };
+          await save(h);
+          const minutes = Math.round((t.getTime() - lastProgress) / 60_000);
+          const options = await ceoWakeOptions(h);
+          for (const companyId of idleCompanies) {
+            await deps.wakeCeo(companyId, `The runner update has waited ${minutes} minutes with nothing of yours running, and your runner is still not swapped. No new runs or checks start meanwhile, so your company is held. Boss Man can't name what it waits on (a scheduling pass may not have ended). Nothing is stopped for you. ${options} Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
+          }
+        }
+      }
       if (waiting.length && !h.stalledPaged) {
         const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
         if (t.getTime() - lastProgress >= 2 * reconnectMs) {

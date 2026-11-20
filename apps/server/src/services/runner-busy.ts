@@ -4,6 +4,7 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { checkJobs, runs } from "../db/schema.js";
+import { DEFAULT_NO_OUTPUT_MINUTES } from "./check-queue.js";
 
 /**
  * Live agent runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
@@ -34,16 +35,39 @@ export async function chatRunsByCompany(db: Db, since: Date): Promise<Map<string
 }
 
 /**
+ * BOS-1982: a "running" row on a runner whose last sign of life (its last output, or its start when it never printed)
+ * is older than the stuck window is a dead row, not work: the runner swap does not wait on it. It is the same window
+ * check-queue's sweepStuck uses, but that sweep skips a row with no output time at all, so such a row could hold a swap
+ * forever. The row itself is left as it is.
+ */
+const liveOnRunner = (at: Date) => sql`coalesce(${checkJobs.lastOutputAt}, ${checkJobs.startedAt}, ${checkJobs.queuedAt}) >= ${new Date(at.getTime() - DEFAULT_NO_OUTPUT_MINUTES * 60_000)}`;
+
+/**
  * Check jobs the server has handed to a machine and not seen end, per company. `onRunnerOnly` leaves out jobs on a
  * separate check worker (BOS-1435): swapping a runner does not touch that container, so those never hold a swap.
  */
-export async function checkJobsByCompany(db: Db, onRunnerOnly = false): Promise<Map<string, number>> {
+export async function checkJobsByCompany(db: Db, onRunnerOnly = false, at: Date = new Date()): Promise<Map<string, number>> {
   const rows = await db
     .select({ companyId: checkJobs.companyId, n: sql<number>`count(*)::int` })
     .from(checkJobs)
-    .where(onRunnerOnly ? and(eq(checkJobs.state, "running"), isNull(checkJobs.workerId)) : eq(checkJobs.state, "running"))
+    .where(onRunnerOnly ? and(eq(checkJobs.state, "running"), isNull(checkJobs.workerId), liveOnRunner(at)) : eq(checkJobs.state, "running"))
     .groupBy(checkJobs.companyId);
   return new Map(rows.map((r) => [r.companyId, r.n]));
+}
+
+/**
+ * BOS-2058: the running check jobs a waiting server update counts as "not quiet": exactly the ones its soft hold also
+ * stops from starting. The hold lets a separate check worker start quick pre-review checks (BOS-1748, check-queue.ts),
+ * so counting those made the wait look for a quiet moment its own hold could never give: on 20 Nov a new worker quick
+ * check began each time the last one ended, 10:05 to 10:50. What a wait counts and what its hold blocks are one rule,
+ * `SERVER_WAIT_BLOCKS` in update-waits.ts, read by both.
+ */
+export async function serverWaitChecks(db: Db): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.state, "running"), sql`(${checkJobs.workerId} is null or ${checkJobs.kind} = 'merge' or ${checkJobs.scope} = 'full')`));
+  return row?.n ?? 0;
 }
 
 export type RunnerBusy = { runs: Map<string, number>; checks: Map<string, number>; byCompany: Map<string, number>; runsTotal: number; checksTotal: number };
@@ -52,8 +76,8 @@ export type RunnerBusy = { runs: Map<string, number>; checks: Map<string, number
  * Agent work runs and running check jobs, per company and in total. `onRunnerOnly` counts only checks on a runner
  * (what the runner swap waits on); the default counts every running check (the server update's quiet-host wait).
  */
-export async function runnerBusy(db: Db, onRunnerOnly = false): Promise<RunnerBusy> {
-  const [r, c] = await Promise.all([runsByCompany(db, true), checkJobsByCompany(db, onRunnerOnly)]);
+export async function runnerBusy(db: Db, onRunnerOnly = false, at: Date = new Date()): Promise<RunnerBusy> {
+  const [r, c] = await Promise.all([runsByCompany(db, true), checkJobsByCompany(db, onRunnerOnly, at)]);
   const byCompany = new Map(r);
   for (const [id, n] of c) byCompany.set(id, (byCompany.get(id) ?? 0) + n);
   const sum = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
@@ -76,7 +100,7 @@ export async function runnerChecks(db: Db, at: Date): Promise<RunnerCheck[]> {
       ticket: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${checkJobs.ticketId})`,
     })
     .from(checkJobs)
-    .where(and(eq(checkJobs.state, "running"), isNull(checkJobs.workerId)))
+    .where(and(eq(checkJobs.state, "running"), isNull(checkJobs.workerId), liveOnRunner(at)))
     .orderBy(checkJobs.startedAt);
   // lost on restart, harmless because it is a per-call cache local to this function, rebuilt on every call
   const usual = new Map<string, number | null>();

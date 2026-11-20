@@ -3,7 +3,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, INFINITE_MODEL_CHOICE, isClaudeModel, isInfiniteModel, harnessLabel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
+import { agentAvatars, agentChanges, agents, ceoChapters, companies, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
 import { cantMoveSql, isWorkingRun, readWipLimits } from "./agent-wip.js";
 import { pictureType } from "./company-import.js";
@@ -179,8 +179,12 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     modelOptions,
 
     approvals,
+    /** Saves the setting and logs it; null when the company doesn't exist (nothing is written). */
     async setApprovals(companyId: string, value: AgentApprovals) {
+      const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
+      if (!company) return null;
       await db.insert(settings).values({ key: `agent_approvals:${companyId}`, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      await logActivity(db, { companyId, kind: "settings", summary: `Owner set agent changes to ${value}`, detail: { setting: "agent_approvals", value } });
       return value;
     },
 

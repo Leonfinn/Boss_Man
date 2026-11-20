@@ -15,7 +15,8 @@ import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
 import { cantMoveSql, isWorkingRun, wipExemptKind } from "./agent-wip.js";
-import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
+import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, watchdogFlags, workflowColumns } from "../db/schema.js";
+import { looksStuck, type StuckFlag } from "./board-stuck.js";
 import { checkQueue } from "./check-queue.js";
 import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "./check-wording.js";
 
@@ -346,6 +347,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const withPr = new Set(rows.filter((r) => r.t.pullRequestUrl).map((r) => r.t.id));
       // BOS-1906: a ticket "Being checked" has no review open on purpose; it is not the owner's until its check has passed.
       const beingChecked = new Set(rows.filter((r) => r.t.systemState === "review" && r.t.checkHoldAt).map((r) => r.t.id));
+      // BOS-1910: the watchdog's open flag per ticket is the "Looks stuck" verdict (the same flag that goes to the Scrum Master).
+      const flagIds = rows.filter((r) => r.t.systemState !== "done" && r.t.systemState !== "backlog").map((r) => r.t.id);
+      const stuckFlags = new Map<string, StuckFlag>();
+      for (const f of flagIds.length ? await db.select().from(watchdogFlags).where(and(inArray(watchdogFlags.ticketId, flagIds), eq(watchdogFlags.status, "open"))) : []) {
+        const prev = stuckFlags.get(f.ticketId);
+        if (f.rule !== "owner_decision_waiting" && (!prev || f.openedAt < prev.openedAt)) stuckFlags.set(f.ticketId, f);
+      }
       // Where each one stands in the check line, in the words a check's owner hears ("queued at no. 3", "running now").
       const checkLines = new Map<string, string>();
       if (beingChecked.size) {
@@ -494,6 +502,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           return !!parent?.mergeCommit && parent.systemState !== "done";
         })(),
         watchEndsAt: t.mergeCommit ? (watchEndsAt(t)?.toISOString() ?? null) : null,
+        // BOS-1910: null for Being checked, Merged watching (before its date) and Next up, whatever the watchdog holds.
+        looksStuck: looksStuck(
+          stuckFlags.get(t.id),
+          { beingChecked: beingChecked.has(t.id), nextUp: t.systemState === "ready" && !!t.nextUpAt, watching: !!t.mergeCommit && (watchEndsAt(t)?.getTime() ?? 0) > now().getTime() },
+          now(),
+        ),
         };
       });
       return {
