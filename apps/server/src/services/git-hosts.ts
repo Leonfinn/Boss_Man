@@ -44,6 +44,20 @@ const billingRefusal = (text: string) => /\bjob was not started\b/i.test(text) &
 const BASELINE_READS = 12;
 /** BOS-2082: a test failure that ran out of time (vitest "Test timed out in 15000ms", Playwright "Timeout 30000ms exceeded"). */
 const TIMEOUT_MESSAGE = /timed? ?out|timeout/i;
+/** A summary annotation this long may have had its last entry cut by its writer's cap (ci.yml's web-browser job: 1500). */
+const SUMMARY_CUT_AT = 1400;
+/**
+ * BOS-2082: whether one failure annotation's message says only timeouts. A job may write one summary annotation for all its
+ * failures, entries joined by " | " (ci.yml's web-browser job: `file: test: first line`, at most 12, cut at 1500 characters,
+ * with no file, so it names no test file): each entry must be a timeout on its own. Only a last entry of a message long
+ * enough to have been cut may lack the word.
+ */
+export function allTimeouts(message: string): boolean {
+  const parts = message.split(" | ").filter((p) => p.trim());
+  if (!parts.length) return false;
+  const cut = parts.length > 1 && message.length >= SUMMARY_CUT_AT;
+  return parts.every((p, i) => TIMEOUT_MESSAGE.test(p) || (cut && i === parts.length - 1));
+}
 /** Seconds between two GitHub timestamps, or null when either is missing or they make no sense. */
 export function stepSeconds(start: unknown, end: unknown): number | null {
   if (typeof start !== "string" || typeof end !== "string") return null;
@@ -383,7 +397,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           .slice(0, per);
         // BOS-2082: every test failure ran out of time (judged on the message, not the test's title, which may say "timeout").
         const tests = failing.filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? "")));
-        const timeoutsOnly = tests.length > 0 && tests.every((a) => TIMEOUT_MESSAGE.test(String(a.message ?? "")));
+        const timeoutsOnly = tests.length > 0 && tests.every((a) => allTimeouts(String(a.message ?? "")));
         out.push({ run, lines, billing, paths, timeoutsOnly });
       }
       return out;

@@ -122,6 +122,12 @@ describe("BOS-2082: a slow GitHub machine gets one retry, whatever the file coun
     expect(flakeDecision(facts(null))).toMatchObject({ act: "bounce", why: "4 test files failed, more than a one-off" });
   });
 
+  it("comes before the 'doesn't name a test file' row: the web-browser job's one summary annotation names no file", () => {
+    const unnamed = { files: [], unnamed: ["web-browser"], unsafe: [] };
+    expect(flakeDecision(facts(slowJobs([web()]), { named: unnamed })).act).toBe("retry_slow");
+    expect(flakeDecision(facts(null, { named: unnamed }))).toMatchObject({ act: "bounce", why: expect.stringMatching(/web-browser doesn't name a test file/) });
+  });
+
   it.each([
     ["a normal time (300 s) with 4 timeouts", web({ seconds: 300 })],
     ["a failure that isn't a timeout", web({ timeoutsOnly: false })],

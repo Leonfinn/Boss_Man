@@ -1,6 +1,6 @@
 import { strToU8, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { GitHostError, gitHostService, MAX_LOG_CHARS } from "../src/services/git-hosts.js";
+import { allTimeouts, GitHostError, gitHostService, MAX_LOG_CHARS } from "../src/services/git-hosts.js";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 const cfg = (kind: "github" | "gitea") => ({ kind, apiBase: "https://host/api", owner: "leon", repo: "site" });
@@ -117,6 +117,22 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     expect((await notes([timedOut, playwright, exit]))[0]!.timeoutsOnly).toBe(true);
     expect((await notes([timedOut, assertion, exit]))[0]!.timeoutsOnly).toBe(false);
     expect((await notes([exit]))[0]!.timeoutsOnly).toBe(false);
+    // ci.yml's web-browser summary: one annotation on ".github", entries joined by " | ", each judged on its own.
+    const summary = (msg: string) => ({ annotation_level: "failure", path: ".github", title: "web tests failed", message: msg });
+    const t = (n: number) => `f${n}.test.tsx: renders: Error: Test timed out in 15000ms.`;
+    expect((await notes([summary([t(1), t(2), t(3)].join(" | ")), exit]))[0]!.timeoutsOnly).toBe(true);
+    expect((await notes([summary([t(1), "f2.test.tsx: renders: AssertionError: expected 1 to be 2", t(3)].join(" | ")), exit]))[0]!.timeoutsOnly).toBe(false);
+  });
+
+  it("BOS-2082: allTimeouts lets only the last entry of a summary cut at its cap lack the word", () => {
+    const t = (n: number) => `wrap-up-layout-${n}.test.tsx: keeps the layout when the panel opens: Error: Test timed out in 30000ms.`;
+    const full = Array.from({ length: 14 }, (_, i) => t(i)).join(" | ");
+    expect(full.length).toBeGreaterThan(1400);
+    // ci.yml cuts the joined text at 1500 characters, mid-entry: whole timeout entries, then a cut last one.
+    expect(allTimeouts(`${full} | board-wheel.test.tsx: scrolls the bo`)).toBe(true);
+    expect(allTimeouts(`${t(1)} | board-wheel.test.tsx: scrolls the bo`)).toBe(false);
+    expect(allTimeouts(`${full} | x.test.tsx: AssertionError: no | ${t(2)}`)).toBe(false);
+    expect(allTimeouts("")).toBe(false);
   });
 
   it("a cancelled run is no failure: its own state, unless a job in it really failed", async () => {

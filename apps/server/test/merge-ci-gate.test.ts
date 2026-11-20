@@ -1307,14 +1307,17 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
           c.gh.state.publicRepo = true;
           c.gh.state.greenRuns = [211, 343, 209, 260, 298, 275, 240, 330].map((s, i) => ({ id: 200 + i, jobs: [webJob(300 + i, "success", s)] }));
           c.gh.state.ci = (sha) => (sha !== MERGE ? green() : c.gh.state.failedReruns.length && opts.after !== "red" ? green() : red([job("check", "success", 1), webJob(5, "failure", seconds)]));
+          // The real shape (ci.yml's web-browser step, BOS-1590): one summary annotation on ".github", no file, entries
+          // joined by " | ", so the job names no test file and BOS-1733's table bounced it as unnamed (Morph, on BOS-2081).
+          const summary = FILES.map((f, i) => `${f.split("/").pop()}: renders the page: Error: Test timed out in ${15_000 * 2 ** (i % 3)}ms.`).join(" | ");
           c.gh.state.annotations.set(5, [
-            ...FILES.map((path, i) => ({ annotation_level: "failure", path, start_line: 10 + i, title: "renders the page", message: `Error: Test timed out in ${15_000 * 2 ** (i % 3)}ms.\nIf this is a long-running test, pass a timeout value.` })),
+            { annotation_level: "failure", path: ".github", title: "web tests failed", message: summary },
             { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
           ]);
           return c;
         };
 
-        it("698 s against a usual 268 s, all timeouts in 4 files: one GitHub retry on a fresh machine, no gate re-run, recorded, merged", async () => {
+        it("698 s against a usual 268 s, all timeouts in 4 files (one summary annotation naming no file): one GitHub retry on a fresh machine, no gate re-run, recorded, merged", async () => {
           const c = await slow(698);
           const res = approveAndWait(c.req, c.ticket.id);
           await finish(c, (j) => !isRerun(j), { state: "passed", exitCode: 0 });
@@ -1344,7 +1347,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
           expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
           expect(c.gh.state.failedReruns).toEqual([]);
           expect(await retryRows(c)).toEqual([]);
-          expect((await authorWake(c))!.note).toContain("Boss Man didn't ask GitHub for a retry: 4 test files failed, more than a one-off");
+          expect((await authorWake(c))!.note).toContain("Boss Man didn't ask GitHub for a retry: the failure in web-browser doesn't name a test file");
         });
       });
     });
