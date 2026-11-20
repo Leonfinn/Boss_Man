@@ -21,7 +21,7 @@ const s = http.createServer((req, res) => {
     if (req.url === "/api/health") return send(200, { ok: true, commit });
     if (req.url === "/") return send(200, "<html><body>board</body></html>", "text/html");
     if (req.url === "/api/setup" && req.method === "GET") return send(200, { needsSetup: fresh && !owner });
-    if (req.url === "/api/setup") { if (!fresh || owner) return send(409, { error: "already_set_up" }); owner = JSON.parse(data).password; return send(201, { username: "smoke" }); }
+    if (req.url === "/api/setup") { if (!fresh || owner) return send(409, { error: "already_set_up" }); if (JSON.parse(data).password.length < 12) return send(400, { error: "invalid" }); owner = JSON.parse(data).password; return send(201, { username: "smoke" }); }
     if (req.url === "/api/login" && fresh) return JSON.parse(data).password === owner ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
     if (req.url === "/api/login") return ["right", "pa\\ss\"w"].includes(JSON.parse(data).password) ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
     if (req.url === "/api/companies") return send(200, [{ id: C, projects: [{ id: P, companyId: C, name: "p" }] }]);
@@ -80,7 +80,7 @@ stop_server
 # An empty staging (no owner yet): the smoke account is created from the file, then signs in; a second run still signs in,
 # and a file with a different password then fails with the "already has an owner" hint (BOS-2072).
 start_server "$sha" fresh
-printf 'smoke_username=smoke\nsmoke_password=newpass\n' >"$t/creds-new"
+printf 'smoke_username=smoke\nsmoke_password=newpass-long-enough\n' >"$t/creds-new"
 out="$(SMOKE_CREDENTIALS="$t/creds-new" "$here/smoke-staging.sh" "$t/stg" "$sha")" || fail "fresh staging run failed: $out"
 [[ $(res signin) == pass && $(res ticket) == pass ]] || fail "fresh staging should create the smoke account: $out"
 [[ $out == *"first owner"* ]] || fail "fresh run should say it created the account: $out"
@@ -89,6 +89,14 @@ out="$(SMOKE_CREDENTIALS="$t/creds-new" "$here/smoke-staging.sh" "$t/stg" "$sha"
 if out="$(SMOKE_CREDENTIALS="$t/creds-bad" "$here/smoke-staging.sh" "$t/stg" "$sha")"; then fail "other password should fail"; fi
 [[ $out == *"already has an owner"* ]] || fail "401 on an existing owner should explain itself: $out"
 [[ $out != *newpass* ]] || fail "the password was printed"
+stop_server
+
+# An empty staging and a password under 12 characters: setup is refused, and the message says so (not "already has an owner").
+start_server "$sha" fresh
+printf 'smoke_username=smoke\nsmoke_password=short\n' >"$t/creds-short"
+if out="$(SMOKE_CREDENTIALS="$t/creds-short" "$here/smoke-staging.sh" "$t/stg" "$sha")"; then fail "short password should fail"; fi
+[[ $out == *"at least 12 characters"* && $out != *"already has an owner"* ]] || fail "short password should be named: $out"
+[[ $out != *short\;* && $out != *"=short"* ]] || fail "the password was printed"
 stop_server
 
 # Wrong commit on staging: version fails.

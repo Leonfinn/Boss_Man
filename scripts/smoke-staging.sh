@@ -97,8 +97,10 @@ else
   # A fresh staging (new host, or its data removed with down -v) has no owner at all, so the smoke account can't exist yet.
   # Boss Man's first-run setup (POST /api/setup) creates the one owner and refuses with 409 once an owner exists, so it can
   # never change an account that is already there. Staging holds no real data; the smoke account becomes its owner.
-  created=""
+  created=""; needs=""; scode=""
   if [[ $(api "$BASE/api/setup" 2>/dev/null | field needsSetup) == true ]]; then
+    needs=1
+    # Boss Man refuses a password under 12 characters (and a name over 64), so setup fails with 400 and no owner is made.
     scode="$(printf '%s' "$body" | api -o /dev/null -w '%{http_code}' --data-binary @- "$BASE/api/setup" 2>/dev/null)"
     [[ $scode == 201 ]] && created=1
   fi
@@ -126,7 +128,16 @@ else
       report runner skipped "no staging company yet"
     fi
   else
-    hint=""; [[ $code == 401 ]] && hint=": staging already has an owner whose name or password differs from the credentials file"
+    hint=""
+    if [[ $code == 401 ]]; then
+      if [[ -z $needs ]]; then
+        hint=": staging already has an owner whose name or password differs from the credentials file"
+      elif [[ $scode == 400 ]]; then
+        hint=": staging has no owner, but it refused to create one from the credentials file (the password must be at least 12 characters and the name at most 64; the password is ${#pass} characters, the name ${#user})"
+      else
+        hint=": staging has no owner and creating one from the credentials file failed (HTTP ${scode:-none})"
+      fi
+    fi
     report signin fail "the smoke account could not sign in (HTTP ${code:-none})$hint"; report ticket skipped "not signed in"; report runner skipped "not signed in"
   fi
 fi

@@ -18,12 +18,8 @@ const STOP_WORDS = new Set(["the", "and", "for", "with", "from", "that", "this",
 
 /** The key words of a title: lower case, at least 3 characters, not a stop word, each once. A trailing "s" is dropped so "tickets" and "ticket" match. */
 export function titleWords(title: string): Set<string> {
-  const out = new Set<string>();
-  for (const raw of title.toLowerCase().split(/[^a-z0-9]+/)) {
-    const w = raw.length > 3 && raw.endsWith("s") ? raw.slice(0, -1) : raw;
-    if (w.length >= 3 && !STOP_WORDS.has(w)) out.add(w);
-  }
-  return out;
+  const words = title.toLowerCase().split(/[^a-z0-9]+/).map((raw) => (raw.length > 3 && raw.endsWith("s") ? raw.slice(0, -1) : raw));
+  return new Set(words.filter((w) => w.length >= 3 && !STOP_WORDS.has(w)));
 }
 
 /** Similar when they share three key words, or two that make up at least 60% of the shorter title's key words. */

@@ -135,6 +135,8 @@ services:
       context: .
       dockerfile: apps/server/Dockerfile
     restart: unless-stopped
+    # Same reason as deploy/truenas-bluegreen.yml: Docker's default 10 s cuts the shutdown drain short with SIGKILL (BOS-794).
+    stop_grace_period: 60s
     depends_on:
       db:
         condition: service_healthy
