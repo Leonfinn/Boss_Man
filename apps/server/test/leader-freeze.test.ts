@@ -69,10 +69,17 @@ async function leaderOn(o: Parameters<typeof createLeader>[0] = {}) {
   return { pg, leader, logs, demotions: () => demotions };
 }
 
+// BOS-1940: the two freeze tests ran a 5 s freeze against the default 3 s deadline (about 12 s of this file's 19 s).
+// They now freeze 2 s against a 1 s deadline. What they catch is the same: a freeze longer than the heartbeat's
+// deadline, ending after the reply (sent 300 ms into the freeze) has arrived. On the BOS-432 code, a plain timer,
+// that read as a miss. The heartbeat's timer now fires ~1 s late, past leader.ts's LATE_MS (500), so it re-arms.
+const DEADLINE_MS = 1000;
+const FREEZE_MS = 2000;
+
 describe("leader heartbeat and server freezes (BOS-432)", () => {
-  it("a 5 s freeze while a heartbeat waits for its reply does not demote the leader", async () => {
-    const { pg, leader, logs, demotions } = await leaderOn(); // the default 3 s deadline, as on the live server
-    await pg.freezeDuringHeartbeat(5000);
+  it("a freeze twice the heartbeat deadline, while a heartbeat waits for its reply, does not demote the leader", async () => {
+    const { pg, leader, logs, demotions } = await leaderOn({ queryTimeoutMs: DEADLINE_MS });
+    await pg.freezeDuringHeartbeat(FREEZE_MS);
     await sleep(500);
     expect(logs.filter((l) => l.includes("STANDBY"))).toEqual([]);
     expect([leader.role(), demotions()]).toEqual(["leader", 0]);
@@ -123,10 +130,10 @@ describe("leader heartbeat and server freezes (BOS-432)", () => {
     expect(logs.some((l) => l.includes("heartbeat miss"))).toBe(false);
   });
 
-  it("a test server frozen for 5 s keeps the lead and its runner socket, and server_status shows the stall", async () => {
+  it("a test server frozen for twice the heartbeat deadline keeps the lead and its runner socket, and server_status shows the stall", async () => {
     const pg = await fakePg();
     cleanup.push(() => pg.close());
-    const leader = createLeader({ url: pg.url, intervalMs: 100 });
+    const leader = createLeader({ url: pg.url, intervalMs: 100, queryTimeoutMs: DEADLINE_MS });
     const { db, close } = await openPglite();
     cleanup.push(close);
     const { app, serverStatus } = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, leader });
@@ -146,7 +153,7 @@ describe("leader heartbeat and server freezes (BOS-432)", () => {
     ws.on("close", (code) => (closedWith = code));
     cleanup.push(async () => ws.close());
 
-    await pg.freezeDuringHeartbeat(5000);
+    await pg.freezeDuringHeartbeat(FREEZE_MS);
     await sleep(800);
 
     expect(leader.role()).toBe("leader");
@@ -157,7 +164,7 @@ describe("leader heartbeat and server freezes (BOS-432)", () => {
     const stalls = (await serverStatus.status(companyId)).stalls!;
     expect(stalls.count).toBeGreaterThanOrEqual(1);
     const worst = stalls.recent.reduce((a, b) => (b.ms > a.ms ? b : a));
-    expect(worst.ms).toBeGreaterThan(4500);
+    expect(worst.ms).toBeGreaterThan(FREEZE_MS - 500); // and over the stall monitor's 1 s floor
     expect(worst.memory.heapUsedMb).toBeGreaterThan(0);
     expect(worst.memory.rssMb).toBeGreaterThan(0);
     expect(worst.runnerSockets).toBe(1);
