@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actingText, ciWaitText, clockText, freeSlotsText, rowState } from "../src/pages/MergeQueue";
+import { actingText, ciWaitText, clockText, emptyQuickChecksSlotText, freeSlotsText, rowState } from "../src/pages/MergeQueue";
 
 // BOS-1846: the sentences the owner reads on the Merge queue page, pinned with a fixed clock. Clock times are built
 // from the reader's own locale in the test, so the pin holds on any runner's time zone and language.
@@ -59,6 +59,20 @@ describe("freeSlotsText", () => {
   });
   it("more free than slots still reads as all free", () => {
     expect(freeSlotsText(5, 3)).toBe("All 3 slots are free.");
+  });
+});
+
+describe("emptyQuickChecksSlotText", () => {
+  it("names the merge check holding the slot when no quick checks are listed (BOS-1896)", () => {
+    expect(emptyQuickChecksSlotText(0, 1)).toBe("A merge check is using the slot.");
+  });
+  it("names merge checks holding several slots", () => {
+    expect(emptyQuickChecksSlotText(0, 2)).toBe("Merge checks are using all 2 slots.");
+    expect(emptyQuickChecksSlotText(0, 4)).toBe("Merge checks are using all 4 slots.");
+  });
+  it("says how many slots are free when some are", () => {
+    expect(emptyQuickChecksSlotText(1, 1)).toBe("The slot is free.");
+    expect(emptyQuickChecksSlotText(1, 2)).toBe("1 of 2 slots are free.");
   });
 });
 

@@ -92,6 +92,15 @@ export function freeSlotsText(free: number, slots: number): string {
   return `${free} of ${slots} slots are free.`;
 }
 
+/**
+ * BOS-1896: the empty Quick checks tab lists no checks, so a busy slot is a merge check's (the queue
+ * counts merge checks in `running` too). Name it rather than leave "the slot is busy" unexplained.
+ */
+export function emptyQuickChecksSlotText(free: number, slots: number): string {
+  if (free === 0) return slots === 1 ? "A merge check is using the slot." : `Merge checks are using all ${slots} slots.`;
+  return freeSlotsText(free, slots);
+}
+
 /** The Needs you button for a row, by the kind of card behind it. Null when there is no card to open. */
 function needsButton(r: WaitingRow): { text: string; href: string } | null {
   const id = r.card?.id ?? r.decisionId;
@@ -411,7 +420,7 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
       {!rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
           <strong>No quick checks queued.</strong> When an agent asks for a quick check, it shows here until it finishes. Merge checks are on the Merges tab.{" "}
-          {freeSlotsText(free, data.slots)}
+          {emptyQuickChecksSlotText(free, data.slots)}
         </div>
       ) : (
         <div className="mq-list" data-checks-list="true">
