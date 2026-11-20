@@ -8,6 +8,16 @@ import { isRunnerOnlyStep, splitSteps, stepKey } from "../src/services/runner-im
 const BUILD = "Build and update runners";
 const REBUILD = "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners";
 
+describe("splitSteps: fenced command blocks (BOS-1953)", () => {
+  it("keeps a fenced block together as one step", () => {
+    const text = "Run this:\n```sh host=\"example-host\" as=\"root\"\nls -l /srv\ndf -h\n```\nDone.";
+    expect(splitSteps(text)).toEqual(["Run this:", "```sh host=\"example-host\" as=\"root\"\nls -l /srv\ndf -h\n```", "Done."]);
+  });
+  it("reads an unclosed fence line by line", () => {
+    expect(splitSteps("```sh\nls")).toEqual(["```sh", "ls"]);
+  });
+});
+
 describe("splitSteps", () => {
   it("splits one step per line and trims each line's ends", () => {
     expect(splitSteps("  Settings → Secrets\n   Paste the token  ")).toEqual(["Settings → Secrets", "Paste the token"]);
