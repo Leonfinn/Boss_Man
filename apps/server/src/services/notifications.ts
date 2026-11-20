@@ -15,6 +15,7 @@ import type { DecisionContext } from "./decisions.js";
  * The ntfy server's address. Pushes go to it with its path kept (BOS-243 rule 8), so one served under
  * a path such as https://host/ntfy works; a query or # part would be dropped silently, so it is refused.
  */
+export const NtfyTopic = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "The topic can only use letters, digits, - and _ (up to 64 characters)");
 export const NtfyUrl = z
   .string()
   .url()
@@ -42,7 +43,7 @@ export const NotifySettings = z.object({
   /** Notifications per agent per hour before the rest become notes. */
   agentHourlyCap: z.number().int().min(1).max(100),
   /** Phone push through the owner's own ntfy server; the token is held as a secret. */
-  ntfy: z.object({ url: NtfyUrl, topic: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Letters, digits, - and _ only"), tokenSecretId: z.string().uuid().nullable() }).nullable(),
+  ntfy: z.object({ url: NtfyUrl, topic: NtfyTopic, tokenSecretId: z.string().uuid().nullable() }).nullable(),
   /**
    * Which cards go to the phone (BOS-1006). "urgent" (the default, and what an install saved before the
    * setting existed reads as) sends only a blocking card, a fixesLive deploy, a page and the test push.

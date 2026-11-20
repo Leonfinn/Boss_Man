@@ -75,3 +75,12 @@ it("the setup saver keeps the token in the secrets store only, and a repeat chan
   await save({ token: next, topic: "abc123" });
   expect(await built.secrets.reveal(first!.tokenSecretId!)).toBe(next);
 });
+
+// BOS-1979: the route's schema refuses a bad topic with the same rule the settings use, before any secret is written.
+it("the ntfy topic rule is shared and says what is allowed", async () => {
+  const { NtfyTopic } = await import("../src/services/notifications.js");
+  expect(NtfyTopic.safeParse("abc_DEF-123").success).toBe(true);
+  for (const bad of ["a b", "", "x".repeat(65), "a/b"]) expect(NtfyTopic.safeParse(bad).success).toBe(false);
+  const r = NtfyTopic.safeParse("a b");
+  expect(r.success ? "" : r.error.issues[0]!.message).toContain("letters, digits");
+});
