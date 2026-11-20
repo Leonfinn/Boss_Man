@@ -33,6 +33,30 @@ describe("Features and Chat: a failed load says so (BOS-1889)", () => {
     await screen.findByText(/No features yet/);
   });
 
+  it("a feature's page shows the loader while its data is on the way, not a blank page (BOS-2065)", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+    const { container } = render(<Features companies={[company]} companyId="c1" featureId="f1" go={() => {}} />);
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(container.querySelector(".loader")).not.toBeNull();
+  });
+
+  it("the priority settings panel shows its error when the settings fail to load (BOS-2065)", async () => {
+    let panelOpen = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/features")) return json({ settings: { demandWeight: 1, ceoTriage: false }, drivers: [], maxDemand: 0, features: [] });
+        if (panelOpen) return json({ error: "settings boom" }, 500);
+        return json({ demandWeight: 1, ceoTriage: false, portalEnabled: true, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
+      }),
+    );
+    render(<Features companies={[{ ...company, id: "c2" }]} companyId="c2" featureId={undefined} go={() => {}} />);
+    const toggle = await screen.findByRole("button", { name: "Criteria and areas" });
+    panelOpen = true;
+    fireEvent.click(toggle);
+    await screen.findByText(/settings boom/);
+  });
+
   it("Chat shows an error with Retry when the team fails to load", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ error: "boom" }, 500)));
     render(<ChatPage companies={[company]} companyId="c1" agentId={undefined} go={() => {}} onChanged={() => {}} />);
