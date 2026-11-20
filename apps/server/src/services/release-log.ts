@@ -312,13 +312,18 @@ export const releaseLogService = (
    */
   function setupGroups(live: SetupTicket[]) {
     const withSteps = live.filter((t) => t.steps.size);
-    const signature = (t: SetupTicket) => [...t.steps.keys()].sort().join("\n");
+    // BOS-1953: a fenced command block is one step with newlines inside, so keys are joined on a NUL, and the card
+    // shows each step as it was written, not as its whitespace-squeezed key.
+    const SEP = "\u0000";
+    const written = new Map<string, string>();
+    for (const t of withSteps) for (const [k, v] of t.steps) if (!written.has(k)) written.set(k, v);
+    const signature = (t: SetupTicket) => [...t.steps.keys()].sort().join(SEP);
     const bySignature = new Map<string, SetupTicket[]>();
     for (const t of withSteps) bySignature.set(signature(t), [...(bySignature.get(signature(t)) ?? []), t]);
     // Biggest step sets first, so a ticket is left to a card that covers all of its steps when one is there.
     const cards: { steps: Set<string>; tickets: SetupTicket[] }[] = [];
-    for (const sig of [...bySignature.keys()].sort((a, b) => b.split("\n").length - a.split("\n").length || a.localeCompare(b))) {
-      const steps = new Set(sig.split("\n"));
+    for (const sig of [...bySignature.keys()].sort((a, b) => b.split(SEP).length - a.split(SEP).length || a.localeCompare(b))) {
+      const steps = new Set(sig.split(SEP));
       const covering = cards.find((c) => c.steps.size > steps.size && [...steps].every((s) => c.steps.has(s)));
       if (covering) covering.tickets.push(...bySignature.get(sig)!);
       else cards.push({ steps, tickets: [...bySignature.get(sig)!] });
@@ -328,7 +333,7 @@ export const releaseLogService = (
     // read an empty group and throw, aborting the whole pass so new tickets raised nothing).
     return cards.flatMap((c) => {
       const fresh = c.tickets.filter((t) => !t.decisionId);
-      return fresh.length ? [{ tickets: fresh, steps: [...c.steps.values()] }] : [];
+      return fresh.length ? [{ tickets: fresh, steps: [...c.steps].map((k) => written.get(k) ?? k) }] : [];
     });
   }
 

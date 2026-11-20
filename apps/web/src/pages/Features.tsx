@@ -22,6 +22,8 @@ import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
+import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
@@ -657,6 +659,8 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           </section>
           {showSettings && <PrioritySettings companyId={company.id} onChanged={() => (data.reload(), settings.reload())} />}
           {error && <p className="error">{error}</p>}
+          {!d && data.error && <LoadError what="your features" message={data.error.message} onRetry={data.reload} />}
+          {!d && !data.error && <Loader label="Loading features" />}
           {d && !shown.length ? (
             <p className="muted">No features yet. Add one above, or create one while linking feedback in the inbox.</p>
           ) : d && phone ? (

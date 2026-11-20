@@ -798,6 +798,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // BOS-734: a head that moves after the owner's sign-off card is raised can void it.
       const signoffHint = state === "review" && !sameState ? "\n\nWhile this waits on review or the owner's sign-off, don't merge main into the branch unless the merge gate says it clashes. Boss Man carries a sign-off over only when main was merged in automatically with no clashes and no new code; a hand-fixed merge or a new commit means the owner must sign off again." : "";
       if (moved.held) return text(`Ticket ${ticketId} did not start: ${moved.held} It is in Ready, assigned to you. Finish or hand over one of your in-progress tickets first, and it starts by itself.`);
+      // BOS-1958: still in review, so no new round opens; the reviewers who asked for changes and haven't seen the new code are asked again.
+      const reAsked = state === "review" && sameState ? await review.reAskChangesRequested(ticketId, scope.companyId, scope.runId).catch(() => []) : [];
       // BOS-1509: the CEO's plan and urgent tickets. The move stands; the mover is told, and so is the CEO, once per move.
       let planNote = "";
       if (!sameState) {
@@ -816,7 +818,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, !byCeo);
         if (state === "blocked" && withCriteria.prev === "in_progress" && waitsOnMergeOnly && (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId)).limit(1)).length) planNote += `\n\n${IN_PROGRESS_BLOCKED_WARNING}`;
       }
-      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
+      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? (reAsked.length ? ` It was already in review, so the note changed and no new round opened. ${reAsked.join(" and ")} asked for changes on earlier code and ${reAsked.length > 1 ? "were" : "was"} asked to review again; reviewers who approved were not asked.` : " It was already there, so only the note changed and no reviews were re-requested (no reviewer who asked for changes needed to look again).") : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
     },
   );
 }

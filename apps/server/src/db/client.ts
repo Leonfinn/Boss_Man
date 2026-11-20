@@ -47,6 +47,9 @@ export async function closePglitePool(): Promise<void> {
   const parked = idlePool.splice(0);
   await Promise.all(parked.map((e) => e.client.close().catch(() => undefined)));
 }
+// BOS-1926: the test setup file closes the pool through this handle, so a test file that never loads the database code
+// (about a quarter of them) doesn't import pg, drizzle and the whole schema just to close nothing.
+(globalThis as { __bossmanClosePglitePool?: () => Promise<void> }).__bossmanClosePglitePool = closePglitePool;
 
 /**
  * Tests and quick local runs: an in-process Postgres (PGlite), migrated with the same SQL.

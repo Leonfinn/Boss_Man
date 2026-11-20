@@ -274,6 +274,35 @@ describe("review kinds", () => {
     });
   });
 
+  describe("a move to review while still in review asks changes-requested reviewers again (BOS-1958)", () => {
+    afterEach(() => {
+      branch.head = null;
+    });
+    const move = async (c: Awaited<ReturnType<typeof kinds>>) =>
+      textOf(await (await c.mcp(c.worker.id)).callTool({ name: "set_ticket_state", arguments: { ticketId: c.t.id, state: "review", summary: "Fixed the filter." } }));
+
+    it("re-asks only the reviewer who asked for changes, and only once the head moved", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" });
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "diff" });
+      await c.call(c.sec.id, { action: "submit", verdict: "changes_requested", summary: "Escape the filter." });
+      expect((await c.row(c.t.id)).systemState).toBe("review");
+      await c.woken();
+      // Same head: nothing new to read, nobody is asked.
+      expect(await move(c)).toContain("no reviews were re-requested");
+      expect((await c.rows()).find((r) => r.kind === "security")?.status).toBe("changes_requested");
+      // The author committed a fix: the security reviewer is asked again; the approved code review is left alone.
+      branch.head = "e".repeat(40);
+      const reply = await move(c);
+      expect(reply).toContain("asked to review again");
+      const rows = await c.rows();
+      expect(rows.find((r) => r.kind === "security")).toMatchObject({ status: "pending", head: null });
+      expect(rows.find((r) => r.kind === "code")?.status).toBe("approved");
+      expect(await c.woken()).toEqual([c.sec.id]);
+    });
+  });
+
   it("sends the work back once everyone has answered if one asks for changes", async () => {
     const c = await kinds();
     await c.call(c.senior.id, { action: "submit", verdict: "approved" });

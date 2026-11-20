@@ -69,6 +69,17 @@ Example: a fast main machine and a slower NAS. Company runner: 3 checks at once,
 
 How a check is placed: a merge check goes to a kept slot first, then to a free either slot on a machine that takes merge checks. A quick check goes to a quick-checks-only machine first, then to a free either slot. On a machine with kept slots, a merge check doesn't take the last free either slot while a quick check waits (merge checks already have their kept slots); with nothing set, the older rule stands: a merge check never takes a machine's last free slot while a quick check waits. The merge train seats one ticket per slot that can run a merge check, so a quick-checks-only worker adds no seat. A waiting check says why on the Merge queue page (a pre-review check on the Quick checks tab, a merge on the Merges tab), for example "waiting for a merge slot: 3 of 3 busy", or that no ready machine takes its kind.
 
+### Letting a worker take merge checks, so merges spread across machines (BOS-1917)
+
+Every worker image can already run the full merge check: it carries the same browser, its libraries and the `playwright` module the web tests need, because it is built from the runner's own Dockerfile (a worker build always adds them, whatever the compose file passes). The only switch is the worker's **Takes** setting. A worker set to "quick checks only" stays out of merges; to let it in, open Settings → Server and runner → Limits and checks → Checks, pick the worker, set Takes to "Merge checks and quick checks" and save. The merge train then seats one more ticket per slot of that worker. To go back, set Takes to "Quick checks only"; a merge check already running there finishes first.
+
+- **Day 1:** change that one setting once. Nothing on the worker host.
+- **After a runner update, a restart or a worker restart:** nothing. Workers are matched by their tools, not the commit; a check that was running on a restarted worker goes back in line, and the company runner (or another worker) runs it from the start. One result counts: a late answer from the worker that dropped is refused, so a merge is never lost or done twice. Code only ever goes onto main from your Boss Man server.
+- **A week on:** nothing, unless the Checks panel says "Out of date" after a real toolchain change; then press Redeploy on that worker's host.
+- **You away:** a worker that goes offline is dropped after a short grace period and merges carry on on the runner, as before.
+
+Two guards keep the image able to do this: a test (`apps/runner/test/addons.test.ts`) fails if the Dockerfile stops adding the browsers to a worker build or CI stops running the whole suite in it, and the `check-worker-image` CI job runs the project's typecheck and tests inside the built worker image with `BOSSMAN_REQUIRE_BROWSER=1`, so a missing browser fails instead of being skipped.
+
 ## Per-host notes
 
 ### Plain Linux (VM or bare metal)

@@ -678,7 +678,9 @@ async function raiseOwnerSetupFix(db: Db, t: { companyId: string; tickets: { tic
       recommendedOption: "Got it",
       tier: "ceo",
       dedupeKey: ownerSetupFixKey(first.ticketId),
-      context: { type: "question", ticketId: first.ticketId, triedFirst: "Boss Man checked the setup steps against this server's host facts when the change went live, and they failed the owner-card check." } satisfies DecisionContext,
+      // BOS-1953: the owner can do nothing with this card, so it sits on the CEO's rung and never climbs to the owner
+      // (tier "ceo" alone doesn't keep it off the owner's queue: queue() filters on the ladder rung).
+      context: { type: "question", ticketId: first.ticketId, triedFirst: "Boss Man checked the setup steps against this server's host facts when the change went live, and they failed the owner-card check.", ladder: { ...ceoFirstLadder(first.ticketId, "only the CEO can fix a ticket's setup steps"), topRung: "ceo" } } as DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });

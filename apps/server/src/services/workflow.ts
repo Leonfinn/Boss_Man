@@ -370,7 +370,16 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         featureRows.push(row);
       }
 
-      return { days, since: since.toISOString(), costBasis, byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
+      // The whole team over the same window: a company-wide middle time can't be summed from the roles.
+      const overall = stats(done, flagRows.length, answeredRows.length, answeredRows.filter((x) => x.answer !== x.recommended).length, () => true);
+      return { days, since: since.toISOString(), costBasis, overall, byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
+    },
+    /** The scorecard plus `previous`: the whole team's figures and the handoffs for the same length of time just before (as the retro builds its earlier period). */
+    async scorecardWithPrevious(companyId: string, days: number) {
+      const sc = await workflowService(db, deps).scorecard(companyId, days);
+      const before = new Date(now().getTime() - days * DAY);
+      const prev = await workflowService(db, { now: () => before }).scorecard(companyId, days);
+      return { ...sc, previous: { overall: prev.overall, handoffs: prev.handoffs } };
     },
   };
 }

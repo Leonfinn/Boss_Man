@@ -276,18 +276,27 @@ describe("feedback portal", () => {
     const req = (method: "POST" | "PATCH", url: string, payload?: unknown) => t!.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
     const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json();
     const { portalToken } = (await req("PATCH", `/api/companies/${company.id}/portal`, { enabled: true })).json();
-    const v = visitor(t.app, portalToken);
-    expect((await v("POST", "/api/portal/ideas", { title: "One", text: "1" }, "198.51.100.1")).statusCode).toBe(201);
-    expect((await v("POST", "/api/portal/ideas", { title: "Two", text: "2" }, "198.51.100.2")).statusCode).toBe(201);
-    // 20,001 reads, each from its own address: one more key than the counter keeps. They carry no
-    // token, so each is counted and then answered 404 without touching the database.
-    for (let i = 0; i < 20_001; i++) {
-      const ip = `2001:db8::${i.toString(16)}`;
-      const res = await t.app.inject({ method: "GET", url: "/api/portal", remoteAddress: ip });
-      if (res.statusCode !== 404) expect(res.statusCode, ip).toBe(404);
+    // BOS-1926: the same routes on the portal's own listener with the counter's key bound set to 50 (it is 20,000 in
+    // production; the bound's own value is checked by the next test), so 51 distinct addresses show the eviction in
+    // milliseconds instead of 20,001 requests (30 s). What it still catches: a flood of new addresses evicting the
+    // per-portal write counter and resetting its cap.
+    const bound = 50;
+    const portal = await buildPortalApp({ feedback: t.feedback, secureCookies: false, limits: { writesPerPortalPerHour: 2, readsPerIpPerMinute: 1 }, counterMaxKeys: bound });
+    try {
+      const v = visitor(portal as unknown as TestApp["app"], portalToken);
+      expect((await v("POST", "/api/portal/ideas", { title: "One", text: "1" }, "198.51.100.1")).statusCode).toBe(201);
+      expect((await v("POST", "/api/portal/ideas", { title: "Two", text: "2" }, "198.51.100.2")).statusCode).toBe(201);
+      // One more address than the counter keeps. They carry no token, so each is counted and then answered 404 without touching the database.
+      for (let i = 0; i < bound + 1; i++) {
+        const ip = `2001:db8::${i.toString(16)}`;
+        const res = await portal.inject({ method: "GET", url: "/api/portal", remoteAddress: ip });
+        if (res.statusCode !== 404) expect(res.statusCode, ip).toBe(404);
+      }
+      expect((await v("POST", "/api/portal/ideas", { title: "Three", text: "3" }, "198.51.100.3")).statusCode).toBe(429);
+    } finally {
+      await portal.close();
     }
-    expect((await v("POST", "/api/portal/ideas", { title: "Three", text: "3" }, "198.51.100.3")).statusCode).toBe(429);
-  }, 120_000);
+  });
 
   it("keeps the rate-limit counter's memory bounded however many addresses call (BOS-1407)", () => {
     const counter = windowCounter(() => 1_000);
