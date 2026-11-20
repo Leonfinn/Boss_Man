@@ -139,7 +139,7 @@ describe("dispatch with the owner's split (BOS-1602)", () => {
     expect(s.toRunner).toEqual([m1, m2, q3]);
     expect(s.toWorker).toEqual([q1, q2]);
     const view = await s.q.list(s.co.id, new Date(), await s.d.capacity(s.co.id), await s.d.machines(s.co.id));
-    expect(view.rows.find((r) => r.id === m3)).toMatchObject({ state: "waiting", heldBy: "waiting for a merge slot: 3 of 3 busy" });
+    expect(view.rows.find((r) => r.id === m3)).toMatchObject({ state: "waiting", heldBy: "waiting for a merge slot: 3 of the 3 slots that take merge checks busy" });
   });
 
   it("a quick check goes to the quick-checks-only worker before the runner's either slot, and a merge never goes to that worker", async () => {

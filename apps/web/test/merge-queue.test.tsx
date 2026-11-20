@@ -161,7 +161,7 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     expect(await screen.findByText("Behind the queue")).toBeTruthy();
     expect(screen.getByText(/Waiting for a check slot \(2 ahead\)\. Boss Man starts it as soon as a slot frees/)).toBeTruthy();
-    expect(screen.getByText("0 of 1 merge slot busy · flagged after an hour")).toBeTruthy();
+    expect(screen.getByText("0 merge checks running · 1 check slot in all, shared with quick checks · flagged after an hour")).toBeTruthy();
   });
 });
 
@@ -184,7 +184,8 @@ describe("status line (BOS-1517)", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]!.textContent).toMatch(/^Slot 1: running the check · since .*\(12m\)\. Next: It merges by itself if the check passes\.$/);
     expect(lines[1]!.textContent).toMatch(/Next: It takes a seat as soon as one frees; its check then starts by itself\. In the way: Every merge-train seat is taken\.$/);
-    expect(screen.queryByText(/check slot/)).toBeNull();
+    // The page header's slot figures (BOS-1942) are not a "waiting for a check slot" line.
+    expect(screen.queryByText(/waiting for a check slot/i)).toBeNull();
   });
 
   it("shows Move to front on a row waiting for a train seat (BOS-1516, BOS-1510), a button with a real label for touch", async () => {
