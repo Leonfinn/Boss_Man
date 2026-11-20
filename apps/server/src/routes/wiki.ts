@@ -8,7 +8,7 @@ import { cleanFolder, HISTORY_PAGE_MAX, MAX_BODY, pageSlug, WikiError, type wiki
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
 
-export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<typeof wikiService>; semantic: ReturnType<typeof wikiSemanticService>; ownerAnswersNow?: () => unknown }) {
+export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<typeof wikiService>; semantic: ReturnType<typeof wikiSemanticService>; ownerAnswersNow?: () => unknown; ticketMeaningNow?: () => unknown }) {
   const { wiki, semantic } = deps;
   const wikiErrors = (reply: FastifyReply) => (err: unknown) => {
     if (err instanceof WikiError) return reply.code(err.status).send({ error: "wiki", message: err.message });
@@ -64,7 +64,7 @@ export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<type
   });
   // Semantic wiki search settings. dims stays at the 768 the embeddings column holds.
   // ownerAnswers (BOS-1593): the same provider also does meaning search over the owner's past answers; off by default.
-  const semanticView = (s: Awaited<ReturnType<typeof semantic.settings>>) => ({ enabled: s.enabled, baseUrl: s.baseUrl, model: s.model, dims: s.dims, secretId: s.secretId, ownerAnswers: s.ownerAnswers });
+  const semanticView = (s: Awaited<ReturnType<typeof semantic.settings>>) => ({ enabled: s.enabled, baseUrl: s.baseUrl, model: s.model, dims: s.dims, secretId: s.secretId, ownerAnswers: s.ownerAnswers, ticketMeaning: s.ticketMeaning });
   owner.get("/api/companies/:id/wiki-semantic", async (req) => {
     const id = IdParam.parse(req.params).id;
     return { ...semanticView(await semantic.settings(id)), status: await semantic.status(id) };
@@ -72,12 +72,14 @@ export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<type
   owner.post("/api/companies/:id/wiki-semantic/test", async (req) => semantic.test(IdParam.parse(req.params).id));
   owner.put("/api/companies/:id/wiki-semantic", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const b = z.object({ enabled: z.boolean(), baseUrl: z.string().url().max(300).regex(/^https?:/), model: z.string().trim().min(1).max(200), secretId: Uuid.nullable(), ownerAnswers: z.boolean().optional() }).parse(req.body);
+    const b = z.object({ enabled: z.boolean(), baseUrl: z.string().url().max(300).regex(/^https?:/), model: z.string().trim().min(1).max(200), secretId: Uuid.nullable(), ownerAnswers: z.boolean().optional(), ticketMeaning: z.boolean().optional() }).parse(req.body);
     const before = await semantic.settings(id);
     const after = await semantic.setSettings(id, b);
     if (after.enabled && (!before.enabled || before.model !== after.model || before.baseUrl !== after.baseUrl || before.secretId !== after.secretId)) await semantic.reindexAll(id);
     // Turned on, or the provider changed: embed the owner's past answers now rather than at the next pass.
     if (after.ownerAnswers && (!before.ownerAnswers || before.model !== after.model || before.baseUrl !== after.baseUrl || before.secretId !== after.secretId)) void deps.ownerAnswersNow?.();
+    // BOS-2116: same for tickets and the CEO's advice.
+    if (after.ticketMeaning && (!before.ticketMeaning || before.model !== after.model || before.baseUrl !== after.baseUrl || before.secretId !== after.secretId)) void deps.ticketMeaningNow?.();
     return semanticView(after);
   });
   owner.post("/api/companies/:id/wiki-semantic/reindex", async (req, reply) => reply.code(202).send({ pages: await semantic.reindexAll(IdParam.parse(req.params).id) }));

@@ -12,11 +12,12 @@ const MAX_CHARS = 6000;
 export const TOP = 50;
 
 /** `ownerAnswers`: the same provider and key also embed the owner's past answers (BOS-1593); off by default, ticked apart from the wiki. */
-export type SemanticSettings = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; ownerAnswers: boolean };
-export const DEFAULTS: SemanticSettings = { enabled: false, baseUrl: "https://openrouter.ai/api/v1", model: "google/gemini-embedding-001", dims: 768, secretId: null, ownerAnswers: false };
+export type SemanticSettings = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; ownerAnswers: boolean; ticketMeaning: boolean };
+export const DEFAULTS: SemanticSettings = { enabled: false, baseUrl: "https://openrouter.ai/api/v1", model: "google/gemini-embedding-001", dims: 768, secretId: null, ownerAnswers: false, ticketMeaning: false };
 /** Embeds texts with a company's saved provider, for a caller other than the wiki (owner answers, BOS-1593). */
 export type Embedder = { model: string; dims: number; embed: (input: string[], timeoutMs?: number) => Promise<number[][]> };
-export type SemanticHit = { slug: string; title: string; path: string; snippet: string };
+/** `score`: cosine similarity (1 = same direction), used by the CEO brief's relevance floor (BOS-2116). */
+export type SemanticHit = { slug: string; title: string; path: string; snippet: string; score?: number };
 
 /** The first `dims` numbers (Matryoshka models allow cutting), scaled to length 1. */
 function unit(v: number[], dims: number) {
@@ -39,7 +40,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
 
   async function settings(companyId: string): Promise<SemanticSettings> {
     const [row] = await db.select().from(wikiSemanticSettings).where(eq(wikiSemanticSettings.companyId, companyId));
-    return row ? { enabled: row.enabled, baseUrl: row.baseUrl, model: row.model, dims: row.dims, secretId: row.secretId, ownerAnswers: row.ownerAnswers } : DEFAULTS;
+    return row ? { enabled: row.enabled, baseUrl: row.baseUrl, model: row.model, dims: row.dims, secretId: row.secretId, ownerAnswers: row.ownerAnswers, ticketMeaning: row.ticketMeaning } : DEFAULTS;
   }
 
   /** The settings, but only when semantic search is on and its key resolves. */
@@ -111,30 +112,37 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
     return job;
   };
 
+  /**
+   * The company's provider for a meaning search that has its own box (owner answers, BOS-1593; tickets and advice, BOS-2116),
+   * or null when that box is off or the key doesn't resolve. A failure is kept as the panel's last error and rethrown for the caller to fall back.
+   */
+  async function embedderFor(companyId: string, box: "ownerAnswers" | "ticketMeaning"): Promise<Embedder | null> {
+    const s = await settings(companyId);
+    if (!s[box] || !s.secretId) return null;
+    const key = await deps.reveal(s.secretId);
+    if (!key) return null;
+    return {
+      model: s.model,
+      dims: s.dims,
+      embed: async (input, timeoutMs) => {
+        try {
+          return await embed(s, key, input, timeoutMs);
+        } catch (err) {
+          failed(companyId, err as Error);
+          throw err;
+        }
+      },
+    };
+  }
+
   return {
     settings,
-    /**
-     * The company's provider for owner-answer meaning search (BOS-1593), or null when that is off or the
-     * key doesn't resolve. A failure is kept as the panel's last error and rethrown for the caller to fall back.
-     */
-    async ownerAnswerEmbedder(companyId: string): Promise<Embedder | null> {
-      const s = await settings(companyId);
-      if (!s.ownerAnswers || !s.secretId) return null;
-      const key = await deps.reveal(s.secretId);
-      if (!key) return null;
-      return {
-        model: s.model,
-        dims: s.dims,
-        embed: async (input, timeoutMs) => {
-          try {
-            return await embed(s, key, input, timeoutMs);
-          } catch (err) {
-            failed(companyId, err as Error);
-            throw err;
-          }
-        },
-      };
+    ownerAnswerEmbedder: (companyId: string) => embedderFor(companyId, "ownerAnswers"),
+    /** Companies with ticket meaning search on, for its background embedder (BOS-2116). */
+    async ticketMeaningCompanies(): Promise<string[]> {
+      return (await db.select({ id: wikiSemanticSettings.companyId }).from(wikiSemanticSettings).where(eq(wikiSemanticSettings.ticketMeaning, true))).map((r) => r.id);
     },
+    ticketEmbedder: (companyId: string) => embedderFor(companyId, "ticketMeaning"),
     /** Companies with owner-answer meaning search on, for the background embedder (BOS-1593). */
     async ownerAnswerCompanies(): Promise<string[]> {
       return (await db.select({ id: wikiSemanticSettings.companyId }).from(wikiSemanticSettings).where(eq(wikiSemanticSettings.ownerAnswers, true))).map((r) => r.id);
@@ -214,7 +222,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
       }
       const dist = cosineDistance(wikiSectionEmbeddings.embedding, qv);
       const rows = await db
-        .select({ path: wikiSectionEmbeddings.sectionPath, slug: wikiPages.slug, title: wikiPages.title, body: wikiPages.body })
+        .select({ path: wikiSectionEmbeddings.sectionPath, slug: wikiPages.slug, title: wikiPages.title, body: wikiPages.body, d: dist })
         .from(wikiSectionEmbeddings)
         .innerJoin(wikiPages, eq(wikiPages.id, wikiSectionEmbeddings.pageId))
         .where(and(eq(wikiSectionEmbeddings.companyId, companyId), eq(wikiSectionEmbeddings.model, r.s.model), eq(wikiSectionEmbeddings.dims, r.s.dims)))
@@ -223,7 +231,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
       return rows.map((x) => {
         const s = splitSections(x.body).find((sec) => sec.path === x.path);
         const text = s ? x.body.slice(s.start, s.ownEnd).replace(/^#.*\n/, "") : "";
-        return { slug: x.slug, title: x.title, path: x.path, snippet: text.replace(/\s+/g, " ").trim().slice(0, 200) };
+        return { slug: x.slug, title: x.title, path: x.path, snippet: text.replace(/\s+/g, " ").trim().slice(0, 200), score: 1 - Number(x.d) };
       });
     },
   };

@@ -9,6 +9,7 @@ import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, ticketImages, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { DUPLICATE_HELP, duplicateRefusal, similarTickets } from "./services/duplicate-titles.js";
+import { ticketMeaningSearch } from "./services/ticket-meaning.js";
 import { FIXES_LIVE_MAX, fixesLiveProblem } from "./services/decisions.js";
 import { LINT_OVERRIDE_HELP, type LintOverrideInput, lintOverrideSchema, parseStoredOverride } from "./services/lint-override.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, SETUP_LINE_MAX, ownerSetupFacts, ownerSetupShapeProblem, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
@@ -93,7 +94,7 @@ async function approvingReviewers(db: Db, ticketId: string, except: string | nul
 const MERGED_SETUP_VIA_UPDATE = 'This ticket is merged. Its setup steps can still be corrected until the owner\'s "Ready to use" card is raised, by its assignee or the CEO, with update_ticket ownerSetup and a reason: the steps are checked like an owner card again, the reason goes on the ticket, and the reviewers who approved are told. set_ticket_state can\'t change them now.';
 
 /** assign_ticket, set_ticket_risk and create_ticket for a run. */
-export function registerTicketAdmin(server: McpServer, db: Db, { work, engagements, feedback, hostFacts, review }: Pick<Services, "work" | "engagements" | "feedback"> & Partial<Pick<Services, "hostFacts">> & Pick<Services, "review">, scope: Scope, hooks: McpHooks = {}) {
+export function registerTicketAdmin(server: McpServer, db: Db, { work, engagements, feedback, hostFacts, review, ticketEmbedder }: Pick<Services, "work" | "engagements" | "feedback"> & Partial<Pick<Services, "hostFacts" | "ticketEmbedder">> & Pick<Services, "review">, scope: Scope, hooks: McpHooks = {}) {
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
   const isManager = () => managerIn(db, scope);
@@ -285,7 +286,10 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       // BOS-2115: sub-tasks and check tickets are exempt; anything else with a similar open or recently done ticket is refused once.
       if (!parentTask && !checked && !notDuplicateReason?.trim()) {
         const similar = await similarTickets(db, scope.companyId, p.id, title);
-        if (similar.length) return fail(duplicateRefusal(similar));
+        // BOS-2116: with meaning search on, tickets that say the same in other words are listed too. Any failure there leaves the word check as it was.
+        const meaning = await ticketMeaningSearch(db, scope.companyId, `${title}\n${bodyGiven ?? ""}`, { embedder: ticketEmbedder, excludeIds: similar.map((s) => s.id) });
+        const byMeaning = meaning.ok ? meaning.matches : [];
+        if (similar.length || byMeaning.length) return fail(duplicateRefusal(similar, byMeaning));
       }
       // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate without anyone remembering it.
       const gate = { featureId, ownerSetup, noCode };

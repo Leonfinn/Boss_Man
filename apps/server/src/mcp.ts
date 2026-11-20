@@ -34,6 +34,7 @@ import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
 import { loadCompanyFacts } from "./services/company-facts.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
 import { askCheckNotes, checkOwnerAsk } from "./services/owner-answers.js";
+import { relatedTicketsNote } from "./services/ticket-meaning.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
@@ -191,6 +192,8 @@ export type Services = {
   selfDeployCards?: () => Promise<SelfDeployFacts>;
   /** The company's embedder for owner-answer meaning search (BOS-1593); absent or null: word search alone. */
   ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
+  /** The company's embedder for meaning search over tickets and the CEO's advice (BOS-2116); absent or null: word search alone. */
+  ticketEmbedder?: (companyId: string) => Promise<Embedder | null>;
   /** security_alert (BOS-1931) and github_reply (BOS-1933): the GitHub watcher's service, which makes the GitHub call; absent: the tools aren't registered. */
   githubWatch?: ReturnType<typeof githubWatchService>;
   /** Live read of whether the git token can read GitHub Actions (R34); absent where there is no git host. */
@@ -245,7 +248,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests, ownerAnswerEmbedder, gitTokenProbe }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests, ownerAnswerEmbedder, ticketEmbedder, gitTokenProbe }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -258,7 +261,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     return me?.role === "ceo" || me?.role === "manager";
   }
 
-  registerTicketAdmin(server, db, { work, engagements, feedback, hostFacts, review }, scope, hooks);
+  registerTicketAdmin(server, db, { work, engagements, feedback, hostFacts, review, ticketEmbedder }, scope, hooks);
 
   server.registerTool(
     "sizing_guide",
@@ -1109,7 +1112,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; link to it.`);
           const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, keepOffPortal: input.keepOffPortal ?? false, keepOffReason: input.keepOffReason ?? null, createdByAgentId: scope.agentId });
           await logTriage(`created the feature "${f.title}"`);
-          return text(`Created feature ${f.id}.`);
+          return text(`Created feature ${f.id}.${await relatedTicketsNote(db, scope.companyId, `${input.title}\n${input.description ?? ""}`, { embedder: ticketEmbedder })}`);
         }
         if (!input.noteId || !input.state) return fail("Give noteId and state.");
         await feedback.updateNote(input.noteId, { state: input.state }, scope.companyId);
@@ -1615,7 +1618,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
       if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; use its id as featureId.`);
       try {
         const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, keepOffPortal: input.keepOffPortal ?? false, keepOffReason: input.keepOffReason ?? null, createdByAgentId: scope.agentId });
-        return text(`Created feature ${f.id} "${f.title}": #/features/${scope.companyId}/${f.id}`);
+        return text(`Created feature ${f.id} "${f.title}": #/features/${scope.companyId}/${f.id}${await relatedTicketsNote(db, scope.companyId, `${input.title}\n${input.description ?? ""}`, { embedder: services.ticketEmbedder })}`);
       } catch (err) {
         if (err instanceof FeedbackError) return fail(err.message);
         throw err;

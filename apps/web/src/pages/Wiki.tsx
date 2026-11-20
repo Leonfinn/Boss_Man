@@ -317,7 +317,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
 /** Not a stored page: the server builds it when asked (R84). "~" can't appear in a page address. */
 const BRIEF = "~brief";
 
-type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; ownerAnswers: boolean; status?: { pages: number; indexed: number; lastError: { message: string; at: string } | null } };
+type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; ownerAnswers: boolean; ticketMeaning: boolean; status?: { pages: number; indexed: number; lastError: { message: string; at: string } | null } };
 
 /** Semantic search: off by default. The key is a secret from the encrypted store. */
 function SemanticSettings({ companyId }: { companyId: string }) {
@@ -339,9 +339,9 @@ function SemanticSettings({ companyId }: { companyId: string }) {
   const save = (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId, ownerAnswers: v.ownerAnswers } })
+    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId, ownerAnswers: v.ownerAnswers, ticketMeaning: v.ticketMeaning } })
       .then(
-        () => (sv.markSaved(), setMsg(v.enabled || v.ownerAnswers ? "Saved. Embedding runs in the background." : "Saved.")),
+        () => (sv.markSaved(), setMsg(v.enabled || v.ownerAnswers || v.ticketMeaning ? "Saved. Embedding runs in the background." : "Saved.")),
         (err: Error) => setMsg(err.message),
       )
       .finally(() => setBusy(false));
@@ -359,6 +359,12 @@ function SemanticSettings({ companyId }: { companyId: string }) {
         </label>
         <small className="muted" style={{ marginTop: -8 }}>
           Before anyone asks you something, Boss Man checks whether you already answered it (cards, ticket messages, chat and the CEO's notes). That check always matches by words. Tick this to also catch the same question in different words: your answers and messages are then sent to the provider below too. Off by default.
+        </small>
+        <label>
+          <input type="checkbox" checked={v.ticketMeaning} onChange={(e) => setV({ ...v, ticketMeaning: e.target.checked })} /> Also search tickets and the CEO's earlier advice by meaning
+        </label>
+        <small className="muted" style={{ marginTop: -8 }}>
+          Before the CEO creates a ticket, Boss Man checks for open or recently finished tickets with similar titles. Tick this to also catch the same idea in different words, and to show the CEO the closest tickets, wiki pages and its own earlier advice to you when you write to it. Ticket text and the CEO's replies are then sent to the provider below. Needs the API key below; it is saved with the rest. Off by default.
         </small>
         <div className="field">
           <label htmlFor="sem-url">Provider address</label>
