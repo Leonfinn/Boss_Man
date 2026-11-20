@@ -3556,6 +3556,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           if (ownerNote || ownWords || answer === TODO_PARTLY) {
             const about = await decisionTicketIds(db, d);
             const states = about.length ? await db.select({ s: tickets.systemState }).from(tickets).where(inArray(tickets.id, about)) : [];
+            // An agent-raised card counts only when every ticket it is about is done: while one is open, its agent is woken as before.
             const finished = states.length > 0 && states.every((r) => r.s === "done");
             if (!d.raisedByAgentId || finished) {
               await raiseOwnerHandBack(db, { companyId: d.companyId, decisionId: id, question: d.question, answer, note: ownerNote, ticketId: about[0] ?? null, why: !d.raisedByAgentId ? "that Boss Man raised itself" : "whose ticket is done", wake, now: now() });

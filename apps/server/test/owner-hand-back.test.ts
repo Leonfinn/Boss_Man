@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, tickets, wakes } from "../src/db/schema.js";
+import { decisions, runs, tickets, wakes } from "../src/db/schema.js";
 import { HAND_BACK_MINUTES, HAND_BACK_NO_TICKET, HAND_BACK_TICKETED, OWNER_HAND_BACK, TODO_DONE, TODO_PARTLY, handBackKey } from "../src/services/decisions.js";
 import { WAKE_CLASS } from "../src/services/wake-classes.js";
 import { issueRunToken } from "../src/mcp.js";
@@ -20,8 +20,10 @@ afterEach(async () => {
 });
 
 async function setup() {
+  let clock = new Date();
+  const advance = (minutes: number) => (clock = new Date(clock.getTime() + minutes * 60_000));
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => clock });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -51,7 +53,7 @@ async function setup() {
         .values({ companyId: company.id, kind: "question", question: "Sitemap is live.\n\nSteps:\n\n1. Add the sitemap in Search Console", options: [TODO_DONE, TODO_PARTLY], recommendedOption: TODO_DONE, tier: "owner", context: { type: "owner_setup", ticketId, steps: ["Add the sitemap in Search Console"], commit: "abc" } })
         .returning()
     )[0]!;
-  return { ...built, db, close, req, company, ceo, worker, project, mcp, clients, ticket, setupCard };
+  return { ...built, db, close, advance, now: () => clock, req, company, ceo, worker, project, mcp, clients, ticket, setupCard };
 }
 
 const handBackWakes = (c: NonNullable<typeof ctx>) => c.db.select().from(wakes).where(and(eq(wakes.agentId, c.ceo.id), eq(wakes.reason, OWNER_HAND_BACK)));
@@ -109,6 +111,39 @@ describe("owner hand-back (BOS-2077)", () => {
     await c.db.update(decisions).set({ raisedByAgentId: c.worker.id }).where(eq(decisions.id, card.id));
     await c.decisions.answer(card.id, TODO_DONE, { note: "also add the second sitemap" });
     expect((await handBackWakes(c)).length).toBe(1);
+  });
+
+  it("a hand-back card nobody settles stays with the CEO until 2 hours, then reaches the owner (injected clock, no CEO run)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Sitemap", true);
+    const card = await c.setupCard(t.id);
+    await c.decisions.answer(card.id, TODO_DONE, { note: "you should be able to add the sitemap" });
+    const rungOf = async () => {
+      const [hb] = await handBackCards(c, card.id);
+      return { status: hb!.status, tier: hb!.tier, rung: (hb!.context as { ladder: { rung: string } }).ladder.rung };
+    };
+    // No CEO run ever starts, so only the outer cap (counted from the raise) can move it: it must still be 2 hours, not 20 minutes.
+    c.advance(HAND_BACK_MINUTES - 1);
+    expect((await c.alerts.sweep()).moved).toBe(0);
+    expect(await rungOf()).toEqual({ status: "open", tier: "ceo", rung: "ceo" });
+    c.advance(2);
+    expect((await c.alerts.sweep()).moved).toBe(1);
+    expect(await rungOf()).toEqual({ status: "open", tier: "owner", rung: "owner" });
+  });
+
+  it("a CEO run that starts late does not push the alert past 2 hours from the raise", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Sitemap", true);
+    const card = await c.setupCard(t.id);
+    await c.decisions.answer(card.id, TODO_DONE, { note: "you should be able to add the sitemap" });
+    c.advance(90);
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.ceo.id, startedAt: new Date(c.now()) });
+    c.advance(29);
+    expect((await c.alerts.sweep()).moved).toBe(0);
+    c.advance(2);
+    expect((await c.alerts.sweep()).moved).toBe(1);
+    const [hb] = await handBackCards(c, card.id);
+    expect(hb!.tier).toBe("owner");
   });
 
   it("the CEO closes the hand-back card with either answer", async () => {
