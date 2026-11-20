@@ -10,6 +10,15 @@ const GO_LIVE_WORDS = /\b(?:publish(?:ed|ing)?|deploy(?:ed|ing|ment)?|release[sd
 export const sayGoLive = (...texts: ReadonlyArray<string | undefined>): boolean => texts.some((t) => !!t && GO_LIVE_WORDS.test(t));
 
 /** The note for a card that talks about going live but isn't marked goLive: its checks are skipped, so say so. */
+/** BOS-2085 (R54): the first full 40-hex commit sha the question or steps name, lower-cased; undefined when none (a short sha is not enough to pin a release). */
+export function releasedCommitOf(...texts: ReadonlyArray<string | undefined>): string | undefined {
+  for (const t of texts) {
+    const m = t ? /(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])/.exec(t) : null;
+    if (m) return m[0].toLowerCase();
+  }
+  return undefined;
+}
+
 export const GO_LIVE_UNMARKED =
   "This card talks about putting something live (publish, deploy, release, go live or production) but isn't marked goLive. A go-live card is checked: its ticket's before-merge checks must be reported with page proof, and it must state its undo (rollback, tagged \"tested: <when, how>\" or \"not tested: <docs URL>\"). If it is one, withdraw it and raise it again with goLive true.";
 

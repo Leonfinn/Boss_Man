@@ -103,6 +103,7 @@ async function setup(opts: { token?: string | undefined; support?: boolean } = {
   const { gh, fetchStub } = stub();
   const woken: Array<{ agentId: string; reason: string; note: string }> = [];
   const logs: string[] = [];
+  const changes: Array<{ companyId: string; change: string; alert: string }> = [];
   const svc = githubWatchService(t.db, {
     fetch: fetchStub,
     now: () => new Date(clock),
@@ -113,10 +114,11 @@ async function setup(opts: { token?: string | undefined; support?: boolean } = {
     clearCard: (key, summary) => clearOwnerTodo(t!.db, key, summary),
     createTicket: (projectId, input) => t!.work.createTicket(projectId, input),
     closeTicket: (ticketId, note) => t!.work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
+    alertChanged: async (companyId, i) => void changes.push({ companyId, ...i }),
     log: (m) => logs.push(m),
   });
   await svc.save(project.id, company.id, { enabled: true, repo: REPO });
-  return { req, company, project, support, ceo, svc, gh, woken, logs, advance: (ms: number) => (clock += ms), now: () => clock };
+  return { req, company, project, support, ceo, svc, gh, woken, logs, changes, advance: (ms: number) => (clock += ms), now: () => clock };
 }
 
 const notes = async (companyId: string) => (await t!.db.select().from(feedbackNotes).where(eq(feedbackNotes.companyId, companyId))).sort((a, b) => a.externalId!.localeCompare(b.externalId!));
@@ -384,10 +386,15 @@ describe("security alerts (BOS-1929)", () => {
     expect(rows.find((r) => r.title.includes("tiny-lib"))!.risk).toBe("low");
     expect(c.woken.some((w) => w.reason === "github secret alert")).toBe(true);
 
+    // BOS-2085: each new alert row tells the go-live re-check once; a repeat pass tells nothing more.
+    expect(c.changes.filter((x) => x.change === "opened")).toHaveLength(3);
+    expect(c.changes.every((x) => x.companyId === c.company.id)).toBe(true);
+
     // A later pass sees the same alerts: no second ticket.
     c.advance(61 * MIN);
     await c.svc.runOne(c.project.id);
     expect(await allTickets(c.company.id)).toHaveLength(3);
+    expect(c.changes).toHaveLength(3);
 
     // GitHub closes the secret alert and one Dependabot alert: those tickets close, the open one stays.
     c.gh.secrets[0]!.state = "resolved";
@@ -397,6 +404,7 @@ describe("security alerts (BOS-1929)", () => {
     const after = await allTickets(c.company.id);
     expect(after.filter((r) => r.systemState === "done").map((r) => r.title).sort()).toEqual([leak.title, rows.find((r) => r.title.includes("tiny-lib"))!.title].sort());
     expect(after.find((r) => r.id === high.id)!.systemState).toBe("ready");
+    expect(c.changes.filter((x) => x.change === "closed")).toHaveLength(2);
     // Reopened later: still no second ticket for it.
     c.gh.secrets[0]!.state = "open";
     c.advance(61 * MIN);

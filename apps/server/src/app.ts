@@ -52,7 +52,7 @@ import { releaseLogService } from "./services/release-log.js";
 import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
-import { recheckDeadlines, runnerRebuilt, ticketStateChanged } from "./services/stale-requests.js";
+import { recheckDeadlines, runnerRebuilt, securityAlertChanged, ticketStateChanged } from "./services/stale-requests.js";
 import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
@@ -1026,6 +1026,8 @@ export async function buildApp(opts: AppOptions) {
     clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     closeTicket: (ticketId, note) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
+    // BOS-2085 (R54): a security alert opening or closing sends the company's open go-live cards back for a re-check.
+    alertChanged: (companyId, input) => securityAlertChanged(db, { companyId, ...input, wake: (w) => scheduler.notify(w.agentId, w as { ticketId: string; reason: string; note: string; priority?: number }), now: opts.now?.() }),
     log: (m) => app.log.warn(m),
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
