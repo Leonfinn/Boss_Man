@@ -9,7 +9,8 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, OWNER_MESSAGE_MAX, RISK_TIERS, SYSTEM_STATES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { projects } from "../db/schema.js";
+import { companies, projects } from "../db/schema.js";
+import { record } from "../services/activity.js";
 import { FeedbackError, type feedbackService } from "../services/feedback.js";
 import { logoType } from "../services/image-type.js";
 import type { workService } from "../services/work.js";
@@ -59,10 +60,21 @@ export function featureRoutes(
     const s = await feedback.settings(id);
     return { ...s, portalUrl: portalUrl?.replace(/\/+$/, "") || null, emailReady: !!mailer && (await mailer.isConfigured()), drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
   });
-  owner.patch("/api/companies/:id/feedback-settings", async (req) => {
+  owner.patch("/api/companies/:id/feedback-settings", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const b = z.object({ demandWeight: z.number().int().min(0).max(10), ceoTriage: z.boolean() }).partial().parse(req.body);
-    return feedback.setSettings(id, b);
+    const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!company) return reply.code(404).send({ error: "not_found" });
+    const before = await feedback.settings(id);
+    const saved = await feedback.setSettings(id, b);
+    // One plain line per value that really changed, so the owner can see who moved the ranking or triage and when.
+    if (b.demandWeight !== undefined && b.demandWeight !== before.demandWeight) {
+      await record(db, { companyId: id, kind: "settings", summary: `Owner changed demand weight from ${before.demandWeight} to ${b.demandWeight}` });
+    }
+    if (b.ceoTriage !== undefined && b.ceoTriage !== before.ceoTriage) {
+      await record(db, { companyId: id, kind: "settings", summary: `Owner turned CEO triage ${b.ceoTriage ? "on" : "off"}` });
+    }
+    return saved;
   });
   owner.post("/api/companies/:id/feature-drivers", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
