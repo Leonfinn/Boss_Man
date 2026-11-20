@@ -417,7 +417,8 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(await wording(3, 0)).toBe("All 3 slots are free.");
     expect(await wording(3, 2)).toBe("1 of 3 slots are free.");
     expect(await wording(3, 1)).toBe("2 of 3 slots are free.");
-    expect(await wording(3, 3)).toBe("No slot is free.");
+    expect(await wording(3, 3)).toBe("Merge checks are using all 3 slots.");
+    expect(await wording(1, 1)).toBe("A merge check is using the slot.");
     expect(await wording(1, 0)).toBe("The slot is free.");
   });
 
