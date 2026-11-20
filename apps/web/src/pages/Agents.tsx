@@ -184,9 +184,9 @@ function ThinkingField({ id, value, onChange }: { id: string; value: string; onC
   );
 }
 
-export function StarButton({ agent, onToggle, where = "Chat" }: { agent: { name: string; starred: boolean }; onToggle: () => void; where?: string }) {
+export function StarButton({ agent, onToggle, where = "Chat", disabled }: { agent: { name: string; starred: boolean }; onToggle: () => void; where?: string; disabled?: boolean }) {
   return (
-    <button type="button" className="btn star" aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? `Starred: shown under ${where}` : `Star to show under ${where}`} onClick={onToggle}>
+    <button type="button" className="btn star" disabled={disabled} aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? `Starred: shown under ${where}` : `Star to show under ${where}`} onClick={onToggle}>
       <Star size={16} aria-hidden="true" fill={agent.starred ? "currentColor" : "none"} />
     </button>
   );

@@ -114,30 +114,37 @@ function ImportancePicker({ value, onChange, name }: { value: Importance; onChan
 }
 
 /** Pick (or create) a feature and link the selected passage to it. */
-function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHighlight }: { companyId: string; noteId: string; highlight: string; features: Feature[]; onLinked: () => void; onClearHighlight: () => void }) {
+export function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHighlight }: { companyId: string; noteId: string; highlight: string; features: Feature[]; onLinked: () => void; onClearHighlight: () => void }) {
   const [q, setQ] = useState("");
   const [importance, setImportance] = useState<Importance>("important");
   const [error, setError] = useState<string | null>(null);
   const matches = q.trim() ? features.filter((f) => f.title.toLowerCase().includes(q.trim().toLowerCase())).slice(0, 8) : [];
-  const link = async (featureId: string) => {
+  const [busy, setBusy] = useState(false);
+  const post = async (featureId: string) => {
+    await api(`/api/feedback/${noteId}/insights`, { method: "POST", body: { featureId, importance, ...(highlight ? { highlight } : {}) } });
+    setQ("");
+    setError(null);
+    onClearHighlight();
+    onLinked();
+  };
+  // One request at a time: a second click or Enter while one runs is ignored.
+  const guarded = async (fn: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
     try {
-      await api(`/api/feedback/${noteId}/insights`, { method: "POST", body: { featureId, importance, ...(highlight ? { highlight } : {}) } });
-      setQ("");
-      setError(null);
-      onClearHighlight();
-      onLinked();
+      await fn();
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
-  const create = async () => {
-    try {
+  const link = (featureId: string) => guarded(() => post(featureId));
+  const create = () =>
+    guarded(async () => {
       const f = await api<Feature>(`/api/companies/${companyId}/features`, { method: "POST", body: { title: q.trim() } });
-      await link(f.id);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  };
+      await post(f.id);
+    });
   return (
     <div className="link-panel">
       <p className="label">Link {highlight ? "the selected passage" : "this note"} to a feature</p>
@@ -162,7 +169,7 @@ function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHi
         <ul className="pick-list">
           {matches.map((f) => (
             <li key={f.id}>
-              <button type="button" onClick={() => void link(f.id)}>
+              <button type="button" disabled={busy} onClick={() => void link(f.id)}>
                 <span>{f.title}</span>
                 <span className={`tag ${STATUS_TONE[f.status]}`}>{FEATURE_STATUS_LABEL[f.status]}</span>
               </button>
@@ -170,9 +177,10 @@ function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHi
           ))}
           {!features.some((f) => f.title.toLowerCase() === q.trim().toLowerCase()) && (
             <li>
-              <button type="button" onClick={() => void create()}>
+              <button type="button" disabled={busy} onClick={() => void create()}>
                 <span>
-                  Create <b>{q.trim()}</b> and link it
+                  {busy ? "Creating…" : "Create"} <b>{q.trim()}</b>
+                  {busy ? "" : " and link it"}
                 </span>
               </button>
             </li>

@@ -89,17 +89,19 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const status = (c: Company) => {
     const n = waiting(c.id);
     return c.paused ? (["#5e6878", "Paused"] as const) : n ? (["#f0b75c", figureText("decisions.needYou", n)] as const) : (["#7fd3a5", `${c.agents.length} agent${c.agents.length === 1 ? "" : "s"}`] as const);
   };
   const create = (e: FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || creating) return;
+    setCreating(true);
     onCreate(name.trim()).then(
       () => (setName(""), setAdding(false), setOpen(false), setError(null)),
       (err: Error) => setError(err.message),
-    );
+    ).finally(() => setCreating(false));
   };
   if (!current) return null;
   const [colour, note] = status(current);
@@ -138,8 +140,8 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
                 New company name
               </label>
               <input id="new-company" autoFocus maxLength={80} placeholder="Company name" value={name} onChange={(e) => setName(e.target.value)} />
-              <button type="submit" disabled={!name.trim()}>
-                Create
+              <button type="submit" disabled={!name.trim() || creating}>
+                {creating ? "Creating…" : "Create"}
               </button>
               {error && <small role="alert">{error}</small>}
             </form>

@@ -20,7 +20,7 @@ export const OWNER_CONTROLS = {
   "Any screen": [
     "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Plan", "Wiki", "Features", "Feedback",
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
-    "Switch company", "Create", "New company", "Close menu", "Menu …", "Log out",
+    "Switch company", "Create", "Creating", "New company", "Close menu", "Menu …", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The error line a page shows when its first load fails (Features, Chat).
     "Retry",
@@ -37,7 +37,7 @@ export const OWNER_CONTROLS = {
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
-    "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss",
+    "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss", "Saving",
     "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
     // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
     "Save the token", "Start the runner",
@@ -87,7 +87,7 @@ export const OWNER_CONTROLS = {
   // not under Settings.
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   // Each project is a collapsed row; "Edit settings" opens its form and "Hide settings" folds it away (BOS-1876).
-  Projects: ["Open …", "Unarchive", "Re-detect", "Check now", "Edit settings", "Hide settings"],
+  Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry"],
@@ -114,7 +114,7 @@ export const OWNER_CONTROLS = {
     "Tasks", "Less", "How the portal works",
   ],
   Feedback: [
-    "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
+    "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Creating", "Back to the list", "Unlink",
     "Link to …", "Done: mark processed", "Back to unprocessed", "Archive", "Delete", "Copy", "New link", "Remove",
     "Feedback portal", "Search", "Anonymous …", "Save times",
   ],
