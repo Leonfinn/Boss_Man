@@ -2,7 +2,11 @@
 // and what happened to every job. The runner runs the jobs; nothing here touches a lock file or a process.
 //
 // Rules the tests pin down:
-//  - merge jobs go before pre-review jobs; inside a kind, jobs fixing main first, then urgent, then oldest;
+//  - serving order (DR-056, see `serving`): jobs fixing main first, then the merge holding the landing turn, then seated merge
+//    train members (on machines with two or more slots), then the "with the merges" group (every merge job, and any pre-review
+//    job, quick or full, that has waited QUICK_AGE_MS, is urgent or was moved to front), then the other pre-review jobs; inside
+//    a group, moved to front first, then tier (urgent, ordinary, background lane until it ages), then oldest. A merge does not
+//    simply go before every quick check, and a slot is kept for a waiting quick check (`admits`);
 //  - while a project's main is red only jobs fixing main run (merge jobs of other tickets wait, they don't fail); pre-review jobs keep running;
 //  - a passed job on the same tree satisfies a request of equal or narrower scope, so the same tree is never checked twice;
 //  - a job never leaves the queue without a recorded reason (stuck / cancelled / re-queued all carry one).
