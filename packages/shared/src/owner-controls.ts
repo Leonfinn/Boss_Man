@@ -85,7 +85,7 @@ export const OWNER_CONTROLS = {
   // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
   // not under Settings.
-  Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive", "Saving"],
+  Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   // Each project is a collapsed row; "Edit settings" opens its form and "Hide settings" folds it away (BOS-1876).
   Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
