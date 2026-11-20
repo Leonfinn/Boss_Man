@@ -239,10 +239,10 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
         <>
           <DraftTextarea draftKey={draftKey} aria-label="Standing rules" value={shown} onChange={(text) => { setShown(text); setKept(text); }} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-            <button
-              type="button"
-              className="btn"
-              disabled={act.busy}
+            <SaveButton
+              dirty={shown !== rules.text}
+              saved={false}
+              busy={act.busy}
               onClick={() =>
                 void act.run(async () => {
                   const saved = await api<Rules>(url, { method: "PUT", body: { text: shown } });
@@ -255,9 +255,7 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
                   return "Saved.";
                 })
               }
-            >
-              Save
-            </button>
+            />
             <button type="button" className="btn" disabled={act.busy} onClick={cancel}>
               Cancel
             </button>

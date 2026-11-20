@@ -3,6 +3,7 @@ import { WATCHDOG_RULE_LABEL, type WatchdogRule, type WatchdogSettings } from "@
 import { api, type Company } from "../../api";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
+import { SaveButton } from "../../components/SaveButton";
 import { Advanced, PresetCards } from "../../components/PresetCards";
 import { limitsFromDraft, matchPreset, WATCHDOG_PRESETS, type WatchdogLimits } from "../../lib/presets";
 
@@ -43,6 +44,7 @@ export function Watchdog({ company }: { company: Company }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [sm, setSm] = useState("");
   const [bt, setBt] = useState<Backtest | null>(null);
+  const [savedOk, setSavedOk] = useState(false);
   const act = useAction();
   const test = useAction();
   const load = async () => {
@@ -61,8 +63,10 @@ export function Watchdog({ company }: { company: Company }) {
       const limits = Object.fromEntries(WATCHDOG_LIMITS.map((l) => [l.key, Number(draft[l.key])]));
       await api(`/api/companies/${company.id}/watchdog`, { method: "PATCH", body: { ...limits, scrumMasterAgentId: sm || null, ...extra } });
       await load();
+      setSavedOk(true);
       return "Saved.";
     });
+  const dirty = sm !== (status.scrumMaster?.id ?? "") || WATCHDOG_LIMITS.some((l) => (draft[l.key] ?? "") !== String(status.settings[l.key]));
   const preset = matchPreset(limitsFromDraft(draft) as WatchdogLimits, WATCHDOG_PRESETS);
   const on = status.settings.enabled;
   const recordOnly = status.settings.recordOnly;
@@ -123,9 +127,7 @@ export function Watchdog({ company }: { company: Company }) {
         </div>
       </Advanced>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button type="button" className="btn" disabled={act.busy} onClick={() => void save({})}>
-          Save
-        </button>
+        <SaveButton dirty={dirty} saved={savedOk} busy={act.busy} onClick={() => void save({})} />
         <button type="button" className="btn" disabled={act.busy || (!on && !sm)} onClick={() => void save({ enabled: !on })}>
           {on ? "Switch off" : status.trippedAt ? "Switch back on" : "Switch on"}
         </button>

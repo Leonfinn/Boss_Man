@@ -648,10 +648,13 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
   const act = useAction();
   const [edit, setEdit] = useState<{ agent: string; company: string; merges: string; checks: string } | null>(null);
   const [saved, setSaved] = useState(false);
+  // Right after a save, show what was just saved until the refetch brings the same values back (no stale numbers in between).
+  const [last, setLast] = useState<{ agent: string; company: string; merges: string; checks: string } | null>(null);
   const d = view.data;
+  useEffect(() => setLast(null), [d, company?.holdStartsMergesWaiting, company?.holdStartsQuickChecksQueued]);
   if (!d) return null;
   const text = (n: number | null | undefined) => (n == null ? "" : String(n));
-  const base = { agent: text(d.agent), company: text(d.company), merges: text(company?.holdStartsMergesWaiting), checks: text(company?.holdStartsQuickChecksQueued) };
+  const base = last ?? { agent: text(d.agent), company: text(d.company), merges: text(company?.holdStartsMergesWaiting), checks: text(company?.holdStartsQuickChecksQueued) };
   const v = edit ?? base;
   const parse = (s: string) => (s.trim() === "" ? null : Number(s));
   const [a, c, m, q] = [parse(v.agent), parse(v.company), parse(v.merges), parse(v.checks)];
@@ -686,6 +689,7 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
                 await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
                 onChanged?.();
               }
+              setLast(v);
               setEdit(null);
               setSaved(true);
               view.reload();

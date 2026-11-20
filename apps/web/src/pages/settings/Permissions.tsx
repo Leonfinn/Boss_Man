@@ -241,6 +241,7 @@ export function SecondOpinionSetting({ company }: { company: Company }) {
 /** The company's hourly nudge limit (BOS-73). */
 export function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
+  const [saved, setSaved] = useState(false);
   const act = useAction();
   const n = Number(cap);
   const valid = Number.isInteger(n) && n >= 1 && n <= 1000;
@@ -252,20 +253,20 @@ export function NudgeCap({ company, onChanged }: { company: Company; onChanged: 
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="nudge-cap">Nudges per hour</label>
         <input id="nudge-cap" type="number" min={1} max={1000} value={cap} onChange={(e) => setCap(e.target.value)} style={{ width: 80 }} />
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={cap !== String(company.nudgesPerHour ?? 30)}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { nudgesPerHour: n } });
+              setSaved(true);
               onChanged();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
@@ -275,6 +276,7 @@ export function NudgeCap({ company, onChanged }: { company: Company; onChanged: 
 /** The longest one run may go (BOS-846). Empty means no limit. */
 export function RunTimeLimit({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [mins, setMins] = useState(company.maxRunMinutes != null ? String(company.maxRunMinutes) : "");
+  const [saved, setSaved] = useState(false);
   const act = useAction();
   const n = Number(mins);
   const empty = mins.trim() === "";
@@ -287,20 +289,20 @@ export function RunTimeLimit({ company, onChanged }: { company: Company; onChang
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="run-time-limit">Most minutes per run</label>
         <input id="run-time-limit" type="number" min={1} max={10080} step={1} placeholder="No limit" value={mins} onChange={(e) => setMins(e.target.value)} style={{ width: 100 }} />
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={mins.trim() !== (company.maxRunMinutes != null ? String(company.maxRunMinutes) : "")}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { maxRunMinutes: empty ? null : n } });
+              setSaved(true);
               onChanged();
               return empty ? "Saved: no limit." : "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
