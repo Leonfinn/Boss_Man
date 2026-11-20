@@ -136,6 +136,34 @@ describe("Feature page: Priority 1 switch (BOS-2091)", () => {
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Priority 1 on: 2 tasks marked to go first."));
     expect(box.disabled).toBe(false);
   });
+
+  it("unticking sends with no confirm and says the tasks went back to normal order", async () => {
+    row.priorityOne = true;
+    try {
+      const { gate, puts } = setup();
+      const confirm = vi.fn(() => true);
+      vi.stubGlobal("confirm", confirm);
+      fireEvent.click(await screen.findByLabelText(/^Priority 1:/));
+      await waitFor(() => expect(puts).toHaveLength(1));
+      expect(confirm).not.toHaveBeenCalled();
+      expect(puts[0]!.body).toBe(JSON.stringify({ on: false }));
+      await act(async () => gate.release(json({ ok: true, priorityOne: false, tickets: 2 })));
+      await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Priority 1 off: 2 tasks back to normal order."));
+    } finally {
+      row.priorityOne = false;
+    }
+  });
+
+  it("a failed request shows the server's message in the error line and re-enables the box", async () => {
+    const { gate } = setup();
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const box = (await screen.findByLabelText(/^Priority 1:/)) as HTMLInputElement;
+    fireEvent.click(box);
+    await act(async () => gate.release(json({ error: "Nope, try later" }, 500)));
+    await waitFor(() => expect(screen.getByText(/Nope, try later/)).toBeTruthy());
+    expect(box.disabled).toBe(false);
+    expect(box.checked).toBe(false);
+  });
 });
 
 describe("Sidebar: new company", () => {
