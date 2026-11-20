@@ -9,9 +9,6 @@ import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { openHoldingCard } from "./ticket-links.js";
 import { RunnerGone } from "./runners.js";
-
-/** BOS-2089: restart retries not counted while the runner settles after reconnecting (about 10 minutes of pauses and tries). */
-export const SETTLE_FREE_TRIES = 8;
 import { GIT_RETRY_CARD_NOTE, GIT_RETRY_NOTE, isGitTransportFault } from "./git-transport-fault.js";
 import { CI_BRANCH_PREFIX, GitHostError, type CommitChecks } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
@@ -35,6 +32,9 @@ import { CHECK_MERGED_KEY, INFRA_RETRY_ATTEMPTS, INFRA_RETRY_BASE_MS, isSignoffP
 import { reviewContext, type ReviewDeps, type Rest } from "./review-ctx.js";
 import { cancelHold, holdActorCheck, markLive, moveAfterMerge, releaseGoLiveWaiters, releaseHold } from "./review-hold-actions.js";
 import { landOnce, mergePullRequest } from "./merge-attempt.js";
+
+/** BOS-2089: restart retries not counted while the runner settles after reconnecting (about 10 minutes of pauses and tries). */
+export const SETTLE_FREE_TRIES = 8;
 
 /**
  * The assembled review service: the `this` a moved part (review-hold-actions.ts, merge-attempt.ts and later moves) calls other methods on.
