@@ -271,7 +271,9 @@ export function reviewService(
         // "Passed, hold merge": the pass stands, and every path into a merge now waits for the hold to end (BOS-808).
         if (input.hold) await startHold(t, row, input.hold, who);
       } else {
-        await decide(db, row.id, { status: "changes_requested", notes: formatReviewComments(who, input.comments ?? [], diffText, input.summary), comments: input.comments ?? [] });
+        // BOS-1958: keep the head this verdict was given on, so a later move to review can tell whether the code changed since.
+        const askedHead = await this.diff(ticketId).then((x) => x.head || null, () => null);
+        await decide(db, row.id, { status: "changes_requested", notes: formatReviewComments(who, input.comments ?? [], diffText, input.summary), comments: input.comments ?? [], head: askedHead });
       }
       return this.settle(t, { verdict: input.verdict, reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId!, background: input.background, causedByRunId: input.causedByRunId, before: active });
     },
@@ -377,6 +379,28 @@ export function reviewService(
       if (round.escalated) return { verdict: "changes_requested" as const, outcome: "escalated" as const, delivered: `held: the review looks stuck, so the CEO (or the owner, if the CEO can't settle it) decides what happens next (decision ${round.escalated})`, message: o.text, round: round.round };
       const delivered = await this.sendBack(t.id, o.text, o.reviewer, o.causedByRunId);
       return { verdict: "changes_requested" as const, outcome: "sent_back" as const, delivered, message: o.text, round: round.round };
+    },
+
+    /**
+     * BOS-1958: the author moved a ticket that is still in review back to review. Each reviewer in the open round who asked for
+     * changes is asked again when the branch head differs from the one their verdict was given on (a verdict with no recorded
+     * head counts as changed). Approved reviews are left alone. Returns the reviewers' names.
+     */
+    async reAskChangesRequested(ticketId: string, companyId: string, causedByRunId?: string | null): Promise<string[]> {
+      const { t } = await ticketWithRepo(ticketId, companyId);
+      if (t.systemState !== "review") return [];
+      const rows = await latestRows(db, ticketId);
+      const asked = rows.filter((r) => r.status === "changes_requested" && r.reviewerAgentId);
+      if (!asked.length) return [];
+      const head = await this.diff(ticketId).then((x) => x.head || null, () => null);
+      const again = asked.filter((r) => !r.head || !head || r.head !== head);
+      if (!again.length) return [];
+      for (const r of again) await db.update(reviewRequests).set({ status: "pending", head: null, readHead: null, decidedAt: null, notes: null, comments: [] }).where(eq(reviewRequests.id, r.id));
+      const names = await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, again.map((r) => r.reviewerAgentId!)));
+      await record(db, { companyId: t.companyId, ticketId, kind: "review_reopened", summary: `The author moved the ticket to review again, so ${names.map((n) => n.name).join(" and ")} ${names.length > 1 ? "are" : "is"} asked to look again.` });
+      const reopened = await latestRows(db, ticketId);
+      if (reviewState.wake) await wakeReviewers(db, t, activeRows(reopened).filter((r) => again.some((a) => a.id === r.id)), (id, i) => reviewState.wake!(id, i), [], causedByRunId);
+      return names.map((n) => n.name);
     },
 
     /** The CEO sets the order of a ticket's reviews, for when one depends on another. */
