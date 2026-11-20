@@ -8,6 +8,7 @@ import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import type { HostFactsView } from "../../host-facts-display";
 import { workerAddressChoices, workerComposeFile, workerSocketUrl } from "./check-worker-compose";
+import { SaveButton } from "../../components/SaveButton";
 import { useAction } from "./shared";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type MachineTakes, type SlotPolicy } from "./SlotSplit";
 
@@ -33,6 +34,9 @@ export type CheckWorkerView = {
 
 type Draft = { name: string; companyIds: string[]; slots: string; threads: string; memoryGb: string; policy: SlotPolicy };
 const blank: Draft = { name: "", companyIds: [], slots: "1", threads: "", memoryGb: "", policy: DEFAULT_POLICY };
+
+/** The form values a worker has now: the baseline the Save button compares against. */
+const draftOf = (w: CheckWorkerView): Draft => ({ name: w.name, companyIds: w.companies.map((c) => c.id), slots: String(w.slots), threads: w.checkThreads ? String(w.checkThreads) : "", memoryGb: w.checkMemoryMb ? String(w.checkMemoryMb / 1024) : "", policy: { takes: w.takes ?? "both", mergeKept: w.mergeKept ?? 0 } });
 
 const toBody = (d: Draft) => ({
   name: d.name.trim(),
@@ -132,10 +136,11 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
             <>
               <WorkerForm draft={editing.draft} setDraft={(draft) => setEditing({ id: w.id, draft })} companies={list} maxSlots={maxSlots} idPrefix={`cw-${w.id}`} />
               <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={act.busy || !valid(editing.draft, maxSlots)}
+                <SaveButton
+                  dirty={JSON.stringify(editing.draft) !== JSON.stringify(draftOf(w))}
+                  saved={false}
+                  busy={act.busy}
+                  disabled={!valid(editing.draft, maxSlots)}
                   onClick={() =>
                     void act.run(async () => {
                       await api(`/api/settings/check-workers/${w.id}`, { method: "PATCH", body: toBody(editing.draft) });
@@ -144,9 +149,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
                       return "Saved.";
                     })
                   }
-                >
-                  Save
-                </button>
+                />
                 <button type="button" className="btn" onClick={() => setEditing(null)}>
                   Cancel
                 </button>
@@ -157,7 +160,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               <button
                 type="button"
                 className="btn"
-                onClick={() => setEditing({ id: w.id, draft: { name: w.name, companyIds: w.companies.map((c) => c.id), slots: String(w.slots), threads: w.checkThreads ? String(w.checkThreads) : "", memoryGb: w.checkMemoryMb ? String(w.checkMemoryMb / 1024) : "", policy: { takes: w.takes ?? "both", mergeKept: w.mergeKept ?? 0 } } })}
+                onClick={() => setEditing({ id: w.id, draft: draftOf(w) })}
               >
                 Change
               </button>

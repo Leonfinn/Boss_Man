@@ -6,6 +6,7 @@ import { setHold, useHold } from "../../hold";
 import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
+import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
@@ -14,6 +15,8 @@ import { LiveState, atTime, historyTag, historyWhat, inAbout, runnerProgress, up
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
+  const [base, setBase] = useState(gb);
+  const [saved, setSaved] = useState(false);
   const act = useAction();
   const n = Number(gb);
   const valid = Number.isInteger(n) && n >= 1 && n <= 100_000;
@@ -27,20 +30,21 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
           Most disk to use (GB) <code className="mono">workspace disk cap</code>
         </label>
         <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={gb !== base}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { diskCapGb: n } });
+              setBase(gb);
+              setSaved(true);
               onChanged();
               return "Saved. It applies at the next hourly clean-up.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       <p className="muted" style={{ fontSize: 13 }}>
         {company.diskCapBytes != null ? `Currently ${(company.diskCapBytes / 1024 ** 3).toFixed(1)} GB.` : "Currently the server default, 20 GB."}
@@ -547,6 +551,7 @@ export function RunLimits({ updatesHref }: { updatesHref?: string } = {}) {
   );
   const act = useAction();
   const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);
+  const [saved, setSaved] = useState(false);
   const d = view.data;
   if (!d) return null;
   const v = edit ?? { instance: String(d.instance), company: String(d.company), background: String(d.background) };
@@ -589,21 +594,21 @@ export function RunLimits({ updatesHref }: { updatesHref?: string } = {}) {
         Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits. A company's runner is given memory to match: 2 GB, plus 1 GB for each agent it can run at once (one company's number plus the background number), plus 3 GB for each check; a change reaches each runner the next time it restarts.
       </p>
       <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={!!edit && (v.instance !== String(d.instance) || v.company !== String(d.company) || v.background !== String(d.background))}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c, background: g } });
               setEdit(null);
+              setSaved(true);
               view.reload();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
@@ -611,17 +616,11 @@ export function RunLimits({ updatesHref }: { updatesHref?: string } = {}) {
 }
 
 /**
- * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Saved on its
- * own, since the two limits above are for every company and these are this company's.
+ * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Only the
+ * fields: WipLimits saves them together with the in-progress limits (BOS-1944), one Save for the section.
  */
-function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () => void }) {
-  const act = useAction();
-  const text = (n: number | null | undefined) => (n == null ? "" : String(n));
-  const [edit, setEdit] = useState<{ merges: string; checks: string } | null>(null);
-  const v = edit ?? { merges: text(company.holdStartsMergesWaiting), checks: text(company.holdStartsQuickChecksQueued) };
-  const parse = (s: string) => (s.trim() === "" ? null : Number(s));
-  const [m, q] = [parse(v.merges), parse(v.checks)];
-  const ok = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
+function HoldStarts({ v, onChange }: { v: { merges: string; checks: string }; onChange: (next: { merges: string; checks: string }) => void }) {
+  const setEdit = onChange;
   return (
     <>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -636,24 +635,6 @@ function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () =
         <input id="hold-checks" type="number" min={1} max={1000} placeholder="Off" value={v.checks} onChange={(e) => setEdit({ ...v, checks: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. The same hold, for quick checks waiting in the check queue. If both limits are set, either one holds new starts.</p>
       </div>
-      <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !ok(m) || !ok(q)}
-          onClick={() =>
-            void act.run(async () => {
-              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
-              setEdit(null);
-              onChanged?.();
-              return "Saved.";
-            })
-          }
-        >
-          Save
-        </button>
-      </div>
-      {act.view}
     </>
   );
 }
@@ -665,13 +646,21 @@ function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () =
 export function WipLimits({ company, onChanged }: { company?: Company; onChanged?: () => void } = {}) {
   const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
   const act = useAction();
-  const [edit, setEdit] = useState<{ agent: string; company: string } | null>(null);
+  const [edit, setEdit] = useState<{ agent: string; company: string; merges: string; checks: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  // Right after a save, show what was just saved until the refetch brings the same values back (no stale numbers in between).
+  const [last, setLast] = useState<{ agent: string; company: string; merges: string; checks: string } | null>(null);
   const d = view.data;
+  useEffect(() => setLast(null), [d, company?.holdStartsMergesWaiting, company?.holdStartsQuickChecksQueued]);
   if (!d) return null;
-  const v = edit ?? { agent: d.agent == null ? "" : String(d.agent), company: d.company == null ? "" : String(d.company) };
+  const text = (n: number | null | undefined) => (n == null ? "" : String(n));
+  const base = last ?? { agent: text(d.agent), company: text(d.company), merges: text(company?.holdStartsMergesWaiting), checks: text(company?.holdStartsQuickChecksQueued) };
+  const v = edit ?? base;
   const parse = (s: string) => (s.trim() === "" ? null : Number(s));
-  const [a, c] = [parse(v.agent), parse(v.company)];
-  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000));
+  const [a, c, m, q] = [parse(v.agent), parse(v.company), parse(v.merges), parse(v.checks)];
+  const okHold = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
+  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000)) && (!company || (okHold(m) && okHold(q)));
+  const dirty = !!edit && (v.agent !== base.agent || v.company !== base.company || (!!company && (v.merges !== base.merges || v.checks !== base.checks)));
   return (
     <Section id="wip-limits-h" title="Tickets in progress">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -686,23 +675,28 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
         <input id="wip-company" type="number" min={1} max={1000} placeholder="No limit" value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. A ceiling on all in-progress tickets together; new starts wait in Ready the same way.</p>
       </div>
-      {company ? <HoldStarts company={company} onChanged={onChanged} /> : null}
+      {company ? <HoldStarts v={v} onChange={(next) => setEdit({ ...v, ...next })} /> : null}
       <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={dirty}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api("/api/wip-limits", { method: "PUT", body: { agent: a, company: c } });
+              if (company) {
+                await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
+                onChanged?.();
+              }
+              setLast(v);
               setEdit(null);
+              setSaved(true);
               view.reload();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
@@ -804,6 +798,7 @@ export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
   const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy; laneAge: string } | null>(null);
+  const [savedQueue, setSavedQueue] = useState(false);
   const d = view.data;
   if (!d) return null;
   const hasLaneAge = d.laneAgeMinutes !== undefined;
@@ -900,22 +895,22 @@ export function CheckQueueSetting() {
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>
       <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid || !changed}
+        <SaveButton
+          dirty={changed}
+          saved={savedQueue}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train, ...(d.runnerPolicy ? { runnerPolicy: v.policy } : {}), ...(hasLaneAge ? { laneAgeMinutes: lane } : {}) } });
+              setSavedQueue(true);
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
               return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.${applied}` : `Saved.${applied}`;
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
       <WaitForCiSetting />
@@ -963,6 +958,7 @@ export function MergeCarrySetting() {
   const view = usePoll((signal) => api<{ on: boolean; turnMinutes: number; refresh?: boolean }>("/api/settings/merge-carry", { signal }), 60_000, "merge-carry");
   const act = useAction();
   const [minutes, setMinutes] = useState<string | null>(null);
+  const [savedTurn, setSavedTurn] = useState(false);
   const d = view.data;
   if (!d) return null;
   const shown = minutes ?? String(d.turnMinutes);
@@ -1018,19 +1014,22 @@ export function MergeCarrySetting() {
           <span className="muted">A change rebuilt twice because main moved gets a turn: other changes wait to land for up to this many minutes. 0 turns it off.</span>
         </span>
         <input type="number" min={0} max={240} step={5} value={shown} style={{ width: 80 }} disabled={act.busy} onChange={(e) => setMinutes(e.target.value)} aria-label="Landing turn in minutes" />
-        <button
-          disabled={act.busy || minutes === null || !/^\d+$/.test(shown) || Number(shown) > 240}
+        <SaveButton
+          dirty={shown !== String(d.turnMinutes)}
+          ariaLabel="Save landing turn"
+          saved={savedTurn}
+          busy={act.busy}
+          disabled={!/^\d+$/.test(shown) || Number(shown) > 240}
           onClick={() =>
             void act.run(async () => {
               await api("/api/settings/merge-carry", { method: "PUT", body: { turnMinutes: Number(shown) } });
               setMinutes(null);
+              setSavedTurn(true);
               view.reload();
               return Number(shown) === 0 ? "Saved. No landing turns." : `Saved. Landing turns last up to ${shown} minutes.`;
             })
           }
-        >
-          Save landing turn
-        </button>
+        />
       </label>
       {act.view}
     </div>
@@ -1087,10 +1086,13 @@ export function EmailSetting() {
   const testAct = useAction();
   const [edit, setEdit] = useState<{ host: string; port: string; security: "starttls" | "tls" | "none"; username: string; fromAddress: string; fromName: string; password: string } | null>(null);
   const [testTo, setTestTo] = useState("");
+  const [savedEmail, setSavedEmail] = useState(false);
   const d = view.data;
   if (!d) return null;
   const s = d.settings;
-  const v = edit ?? { host: s?.host ?? "", port: String(s?.port ?? 587), security: s?.security ?? "starttls", username: s?.username ?? "", fromAddress: s?.fromAddress ?? "", fromName: s?.fromName ?? "", password: "" };
+  const base = { host: s?.host ?? "", port: String(s?.port ?? 587), security: s?.security ?? "starttls", username: s?.username ?? "", fromAddress: s?.fromAddress ?? "", fromName: s?.fromName ?? "", password: "" };
+  const v = edit ?? base;
+  const dirty = (Object.keys(base) as (keyof typeof base)[]).some((k) => v[k] !== base[k]);
   const set = (patch: Partial<typeof v>) => setEdit({ ...v, ...patch });
   const port = Number(v.port);
   const valid = v.host.trim() !== "" && Number.isInteger(port) && port >= 1 && port <= 65535 && v.fromAddress.includes("@");
@@ -1139,21 +1141,21 @@ export function EmailSetting() {
         The sending domain needs SPF, DKIM and DMARC records, or mail will land in spam. The Writer's guide has the details.
       </p>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={dirty}
+          saved={savedEmail}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api("/api/settings/email", { method: "PUT", body: { host: v.host, port, security: v.security, username: v.username.trim() || null, fromAddress: v.fromAddress, fromName: v.fromName.trim() || null, ...(v.password ? { password: v.password } : {}) } });
               setEdit(null);
+              setSavedEmail(true);
               view.reload();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
         {d.configured && (
           <button
             type="button"

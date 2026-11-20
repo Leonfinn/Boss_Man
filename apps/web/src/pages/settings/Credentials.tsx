@@ -40,9 +40,7 @@ function GrantAgents({ grant, agents, busy, onSave }: { grant: Grant; agents: Ag
           </label>
         ))}
       </fieldset>
-      <button type="button" className="btn small" disabled={busy} onClick={() => onSave(picked)} aria-label={`Save agents for ${grant.envName}`}>
-        Save
-      </button>
+      <SaveButton dirty={[...picked].sort().join() !== [...grant.agentIds].sort().join()} saved={false} busy={busy} onClick={() => onSave(picked)} ariaLabel={`Save agents for ${grant.envName}`} />
     </details>
   );
 }
