@@ -1275,6 +1275,7 @@ export async function buildApp(opts: AppOptions) {
   const ciPreflight = ciPreflightService(db, {
     hosts: gitHosts,
     timing: { ...CI_PUBLISH_TIMING, ...opts.ciTiming },
+    log: (m) => app.log.warn(m),
     wake: (agentId, w) => scheduler.notify(agentId, w),
     context: async (t) => {
       const [p] = await db.select({ repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase, defaultBranch: projects.defaultBranch }).from(projects).where(eq(projects.id, t.projectId));
@@ -1303,9 +1304,9 @@ export async function buildApp(opts: AppOptions) {
   });
   const checkRequests = checkRequestService(db, { preflight: ciPreflight, command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
   // A restart loses the in-memory GitHub-CI pre-flight runs; start those again once runners have had time to reconnect.
-  const preflightRecover = setTimeout(() => void ciPreflight.recover().catch(() => undefined), 60_000);
-  preflightRecover.unref();
-  app.addHook("onClose", async () => clearTimeout(preflightRecover));
+  // Runners may come back later than 60 s after an update, so tickets skipped for want of one are retried every 2 minutes for 30 minutes.
+  const stopPreflightRecover = ciPreflight.recoverRepeatedly({ firstMs: 60_000, everyMs: 120_000, forMs: 30 * 60_000 });
+  app.addHook("onClose", async () => stopPreflightRecover());
   // BOS-1749: bossman-ci/* branches the gate's own cleanup missed (a restart mid-check, a refused delete) are deleted from GitHub.
   // First sweep 5 minutes after start (so old leftovers go without anyone asking), then every 30 minutes; branches under 6 hours old stay.
   const sweepCi = () => void review.sweepCiBranches().catch(() => undefined);
