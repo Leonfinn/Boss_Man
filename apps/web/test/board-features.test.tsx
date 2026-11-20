@@ -105,8 +105,7 @@ describe("feature state toggles", () => {
 
     unmount();
     render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Filter" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
+    // The view is now saved with the other filters, so the Features view is already on after a reload.
     expect(await screen.findByRole("article", { name: "Feature Old idea" })).toBeTruthy();
     expect(screen.queryByRole("article", { name: "Feature Export" })).toBeNull();
   });
