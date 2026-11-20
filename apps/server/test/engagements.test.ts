@@ -17,7 +17,7 @@ async function setup() {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH" | "DELETE", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const mk = async (name: string) => (await req("POST", "/api/companies", { name })).json() as { company: { id: string }; ceo: { id: string } };
   const appCo = await mk("App Co");
   const homelab = await mk("Homelab Co");
@@ -51,6 +51,25 @@ describe("waiting on an engagement twice (BOS-1978)", () => {
     expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, launch.id))).toHaveLength(1);
     const lines = (await ctx.db.select().from(activity).where(eq(activity.ticketId, launch.id))).filter((a) => a.kind === "dependency");
     expect(lines).toHaveLength(1);
+  });
+});
+
+describe("old duplicate engagement waits (BOS-1978)", () => {
+  it("still loads, and either row can be removed", async () => {
+    ctx = await setup();
+    const e = await ctx.request();
+    const launch = (await ctx.req("POST", `/api/projects/${ctx.appProject.id}/tickets`, { title: "Launch beta", state: "blocked", assigneeAgentId: ctx.appCo.ceo.id })).json();
+    const rows = await ctx.db
+      .insert(ticketDependencies)
+      .values([
+        { blockedTicketId: launch.id, blockerEngagementId: e.id },
+        { blockedTicketId: launch.id, blockerEngagementId: e.id },
+      ])
+      .returning();
+    expect((await ctx.req("GET", `/api/tickets/${launch.id}`)).statusCode).toBe(200);
+    expect((await ctx.req("DELETE", `/api/dependencies/${rows[0]!.id}`)).statusCode).toBe(204);
+    expect((await ctx.req("DELETE", `/api/dependencies/${rows[1]!.id}`)).statusCode).toBe(204);
+    expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, launch.id))).toHaveLength(0);
   });
 });
 
