@@ -113,7 +113,7 @@ function ImportancePicker({ value, onChange, name }: { value: Importance; onChan
 }
 
 /** Pick (or create) a feature and link the selected passage to it. */
-function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHighlight }: { companyId: string; noteId: string; highlight: string; features: Feature[]; onLinked: () => void; onClearHighlight: () => void }) {
+export function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHighlight }: { companyId: string; noteId: string; highlight: string; features: Feature[]; onLinked: () => void; onClearHighlight: () => void }) {
   const [q, setQ] = useState("");
   const [importance, setImportance] = useState<Importance>("important");
   const [error, setError] = useState<string | null>(null);
