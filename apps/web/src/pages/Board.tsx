@@ -32,6 +32,13 @@ const PARKED_SHOWN = 4;
 const watchPastEnd = (t: { watchEndsAt?: string | null }) => !!t.watchEndsAt && Date.parse(t.watchEndsAt) < Date.now();
 /** Past the 14-day default with no date from the agent: the amber "No date" tag; whole days since the watch began. */
 const watchNoDateDays = (t: { watchEndsAt?: string | null; watchUntil?: string | null }) => (t.watchEndsAt && !t.watchUntil && watchPastEnd(t) ? 14 + Math.floor((Date.now() - Date.parse(t.watchEndsAt)) / 86_400_000) : null);
+/** "3 days", or hours when it has been less than a day. */
+const stuckFor = (ms: number) => {
+  const days = Math.floor(ms / 86_400_000);
+  if (days >= 1) return `${days} day${days === 1 ? "" : "s"}`;
+  const hours = Math.max(1, Math.floor(ms / 3_600_000));
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
+};
 const PROJECT_TABS = [
   { id: "kanban", label: "Kanban" },
   { id: "budget", label: "Budget" },
@@ -572,7 +579,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
   const hover = (cut: boolean, text: string) => (cut && !open ? text : undefined);
   const first = who ? name.split(" ")[0]! : name;
   return (
-    <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId}>
+    <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId} data-ticket-id={t.id}>
       <div className="top">
         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
         {(t.risk === "high" || t.risk === "critical") && (
@@ -592,6 +599,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
             Next up
           </span>
         )}
+        {t.looksStuck && <span className="tag amber" title="The watchdog has handed this to the Scrum Master.">Looks stuck</span>}
         {t.reviewStage === "checking" && <span className="tag">Being checked</span>}
         {isLiveCheckWait(t) && <span className="tag green">Merged</span>}
         {isLiveCheckWait(t) && watchNoDateDays(t) !== null && <span className="tag amber">No date · {watchNoDateDays(t)} days</span>}
@@ -619,6 +627,12 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
           {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
         </a>
+      )}
+      {t.looksStuck && (
+        <span className="state-line stuck-line" data-testid="board-looks-stuck-note">
+          <span className="ico" aria-hidden="true">⚠</span>
+          <span>No movement for {stuckFor(t.looksStuck.idleMs)}. The Scrum Master has been told.</span>
+        </span>
       )}
       {t.wipExempt && t.wipExempt !== "live" && !isLiveCheckWait(t) && (
         <span className={t.wipExempt === "busy" ? "state-line" : "note"} title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
@@ -866,6 +880,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     beingChecked: lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0,
     watching: lanes.find((l) => l.liveCheck)?.tickets.filter(passes).length ?? 0,
   };
+  // BOS-1910: every shown card the watchdog has handed on, in lane order; the strip links to the first.
+  const stuckCards = lanes.flatMap((l) => l.tickets.filter((t) => t.looksStuck && passes(t)));
   const standingTargets = { inProgress: progressCol ? `lane-${progressCol.id}` : undefined, nextUp: readyCol ? `lane-${readyCol.id}` : undefined, beingChecked: "lane-being-checked", watching: "lane-live-check" };
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
@@ -1132,7 +1148,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           )}
         </div>
       </div>
-      {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} />}
+      {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} stuck={stuckCards.length} stuckTicketId={stuckCards[0]?.id} />}
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
         <div className="segmented state-filter" role="group" aria-label="Show features that are">

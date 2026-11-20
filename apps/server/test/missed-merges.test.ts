@@ -171,6 +171,28 @@ describe("the runner swap waits for a merge being pushed (BOS-1645)", () => {
   });
 });
 
+// BOS-2058 (20 Nov 11:44): a landing record that has stopped beating is not work. The record said "merging since 11:23" while the
+// Merges tab showed nothing running, and it held the runner swap. A wait counts live work only: no heartbeat, no hold.
+describe("a landing that stopped beating doesn't hold the runner swap (BOS-2058)", () => {
+  it("is counted while its ticket beats, and dropped once the ticket has been silent longer than a merge can take", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the orphaned thing");
+    c.setHoldPush(true);
+    await c.review.startLanding(t.id, "Sam", null, { skipChecks: true });
+    await until(() => c.heldPush.length > 0, "the merge push");
+    expect((await c.review.landingMergesByCompany()).get(c.company.id)).toBe(1);
+    expect((await c.review.landingWaitFacts()).ids).toEqual([t.id]);
+    // The record is still "running" and "merging", but nothing has beat for a day.
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 24 * 60 * 60_000) }).where(eq(tickets.id, t.id));
+    expect((await c.review.landingMergesByCompany()).size).toBe(0);
+    expect(await c.review.landingWaitFacts()).toEqual({ since: null, ids: [] });
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.maintenance.step();
+    expect(c.recreated).toEqual(["app-co"]); // the swap does not wait for it
+    c.heldPush.shift()!();
+  });
+});
+
 describe("a merge whose check is still queued doesn't hold the runner swap (BOS-1954)", () => {
   it("the swap goes ahead while the check waits for the hold; a merge past its check is still waited for", async () => {
     const c = (ctx = await setup());

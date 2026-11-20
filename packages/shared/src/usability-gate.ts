@@ -119,3 +119,15 @@ export const USABILITY_ADDED_NOTE = `Usability gate added as its last acceptance
 
 /** The refusal a reviewer sees when approving a gated ticket without a walk-through. */
 export const REAL_USE_REFUSAL = `This ticket must pass the usability gate before it merges. Add to your summary "${REAL_USE_LABEL} ..." (at least ${REAL_USE_MIN_CHARS} characters): ${REAL_USE_ASK} If nothing the owner runs, sees or repeats changes, say that in one line.`;
+
+/** BOS-2074: the ownerSteps value a reviewer gives when every owner setup step is needed and correct. */
+export const OWNER_STEPS_OK = "all needed and correct";
+
+/** One owner setup step a reviewer says is wrong or not needed. */
+export type OwnerStepFlag = { step: string; why: string };
+
+/** The refusal when a code or infra approval of a ticket with owner setup steps carries no verdict on them. */
+export const OWNER_STEPS_MISSING = `This ticket has owner setup steps, so a code or infra approval must give a verdict on them: pass ownerSteps as "${OWNER_STEPS_OK}", or as a list of {step, why} for each step that is wrong, not needed, missing or unclear (then the verdict is changes_requested).`;
+
+/** The refusal when an approval lists steps that are wrong. */
+export const OWNER_STEPS_WRONG = "You listed owner setup steps that are wrong or not needed, so this can't be approved: submit changes_requested (the steps go to the author with your summary), or drop the list if you now think they are fine.";

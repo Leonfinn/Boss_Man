@@ -4,6 +4,8 @@ import { usePoll } from "../../hooks";
 import { inForceHeadline, inForceReason, type LimitInForce } from "../../limit-in-force";
 import { setHold, useHold } from "../../hold";
 import { MoreAbout } from "../../components/MoreAbout";
+import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { SaveButton } from "../../components/SaveButton";
@@ -1042,7 +1044,13 @@ type MainCiView = { on: boolean; projects: Array<{ projectId: string; project: s
 export function MainCiSetting() {  const view = usePoll((signal) => api<MainCiView>("/api/settings/main-ci", { signal }), 60_000, "main-ci");
   const act = useAction();
   const d = view.data;
-  if (!d) return null;
+  if (!d) {
+    return (
+      <Section id="main-ci-h" title="Main's CI">
+        {view.error ? <LoadError what="the Main's CI setting" message={view.error.message} onRetry={view.reload} /> : <Loader label="Loading the Main's CI setting" />}
+      </Section>
+    );
+  }
   return (
     <Section id="main-ci-h" title="Main's CI">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -1088,7 +1096,13 @@ export function EmailSetting() {
   const [testTo, setTestTo] = useState("");
   const [savedEmail, setSavedEmail] = useState(false);
   const d = view.data;
-  if (!d) return null;
+  if (!d) {
+    return (
+      <Section id="email-h" title="Outgoing email">
+        {view.error ? <LoadError what="the email setting" message={view.error.message} onRetry={view.reload} /> : <Loader label="Loading the email setting" />}
+      </Section>
+    );
+  }
   const s = d.settings;
   const base = { host: s?.host ?? "", port: String(s?.port ?? 587), security: s?.security ?? "starttls", username: s?.username ?? "", fromAddress: s?.fromAddress ?? "", fromName: s?.fromName ?? "", password: "" };
   const v = edit ?? base;
@@ -1161,14 +1175,15 @@ export function EmailSetting() {
             type="button"
             className="btn"
             disabled={act.busy}
-            onClick={() =>
+            onClick={() => {
+              if (!window.confirm("Turn off outgoing email? The mail server details and password are deleted, and you would need to enter them again.")) return;
               void act.run(async () => {
                 await api("/api/settings/email", { method: "DELETE" });
                 setEdit(null);
                 view.reload();
                 return "Outgoing email is off and the password is removed.";
-              })
-            }
+              });
+            }}
           >
             Turn off
           </button>

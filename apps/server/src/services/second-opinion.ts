@@ -7,6 +7,7 @@ import { z } from "zod";
 import { SECOND_OPINION_DEADLINE_MS, parseSecondOpinion, redactForModel, secondOpinionSystemPrompt, secondOpinionUserPrompt } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { decisions, settings } from "../db/schema.js";
+import { record } from "./activity.js";
 
 export const SecondOpinionSettings = z.object({
   enabled: z.boolean(),
@@ -181,7 +182,20 @@ export function secondOpinionService(
     async setSettings(companyId: string, s: SecondOpinionSettings): Promise<SecondOpinionSettings> {
       const value = SecondOpinionSettings.parse(s);
       if (value.enabled && (!value.model || !value.baseUrl)) throw new Error("Set the provider address and the model first.");
+      const before = await getSettings(companyId);
       await db.insert(settings).values({ key: key(companyId), value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      // One "settings" line per real change (like permission rules, BOS-1963). Model name, host and on/off only:
+      // never the key, its secret id, or any path or query of the address.
+      const host = (u: string) => { try { return new URL(u).host; } catch { return ""; } };
+      const parts: string[] = [];
+      if (value.enabled !== before.enabled) parts.push(value.enabled ? `turned the second opinion on (model ${value.model})` : "turned the second opinion off");
+      else {
+        const changes: string[] = [];
+        if (value.model !== before.model) changes.push(`model to ${value.model || "none"}`);
+        if (host(value.baseUrl) !== host(before.baseUrl)) changes.push(`provider address to ${host(value.baseUrl) || "none"}`);
+        if (changes.length) parts.push(`changed the second opinion ${changes.join(" and ")}${value.enabled ? "" : " (it stays off)"}`);
+      }
+      if (parts.length) await record(db, { companyId, kind: "settings", summary: `Owner ${parts[0]}`, detail: { change: "second-opinion", enabled: value.enabled, model: value.model, host: host(value.baseUrl) } });
       return value;
     },
 

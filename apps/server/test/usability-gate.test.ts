@@ -227,3 +227,40 @@ describe("plans and review texts carry the gate", () => {
     expect(out.refuse.some((f) => /must repeat/.test(f.problem))).toBe(false);
   });
 });
+
+// BOS-2074: a reviewer who calls an owner step wrong can't approve; an approval carries a verdict on the steps.
+describe("a reviewer's verdict on the owner setup steps", () => {
+  const SETUP = "1. Open Settings → Server and runner → Updates and press Build and update runners.";
+  const go = (c: NonNullable<typeof ctx>, id: string, verdict: "approved" | "changes_requested", ownerSteps?: Parameters<NonNullable<typeof ctx>["review"]["submit"]>[1]["ownerSteps"], summary = `Code is clean.\n${WALK}`) =>
+    c.review.submit(id, { verdict, summary, ownerSteps, reviewer: "Reviewer", reviewerAgentId: c.reviewer.id, background: true });
+
+  it("refuses an approval with no verdict on the steps, takes 'all needed and correct'", async () => {
+    const c = (ctx = await setup());
+    const t = await c.raw({ systemState: "review", ownerSetup: SETUP });
+    await c.slot(t.id);
+    await expect(go(c, t.id, "approved")).rejects.toThrow(/owner setup steps/);
+    await expect(go(c, t.id, "approved", [])).rejects.toThrow(/owner setup steps/);
+    await expect(go(c, t.id, "approved", "all needed and correct")).resolves.toBeTruthy();
+  });
+
+  it("refuses an approval that lists a wrong step, and changes_requested carries the list", async () => {
+    const c = (ctx = await setup());
+    const t = await c.raw({ systemState: "review", ownerSetup: SETUP });
+    await c.slot(t.id);
+    await expect(go(c, t.id, "approved", [{ step: "Step 1", why: "not needed" }])).rejects.toThrow(/wrong or not needed/);
+    await go(c, t.id, "changes_requested", [{ step: "Step 1", why: "not needed" }], "Fix it.");
+    const [row] = await c.db.select().from(reviewRequests).where(eq(reviewRequests.ticketId, t.id));
+    expect(row!.status).toBe("changes_requested");
+    expect(row!.notes).toContain("Step 1: not needed");
+  });
+
+  it("a ticket with no owner setup, or a security review, needs no verdict", async () => {
+    const c = (ctx = await setup());
+    const t = await c.raw({ systemState: "review" });
+    await c.slot(t.id);
+    await expect(go(c, t.id, "approved")).resolves.toBeTruthy();
+    const s = await c.raw({ systemState: "review", ownerSetup: SETUP });
+    await c.slot(s.id, "security");
+    await expect(c.review.submit(s.id, { verdict: "approved", summary: "No findings.", kind: "security", reviewer: "Reviewer", reviewerAgentId: c.reviewer.id, background: true })).resolves.toBeTruthy();
+  });
+});

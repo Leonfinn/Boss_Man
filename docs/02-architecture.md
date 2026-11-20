@@ -179,6 +179,8 @@ One-time setup is fine.
 
 The same applies to a change that touches what the owner installs: compose files, `deploy/`, a Dockerfile, or install and update docs.
 
+**Owner setup steps (BOS-2074).** On a ticket with owner setup steps, a code or infra approval must also pass `ownerSteps`: `"all needed and correct"`, or a list of `{step, why}`. A listed step makes the server refuse `approved`; the review must be `changes_requested`, and the list is added to the summary sent to the author.
+
 **What the owner sees.** Nothing new to do: the owner's own approvals and sign-offs are never refused.
 - The review diff lists any wording in the change or the setup steps that reads as a routine owner duty, such as "after every update" or "until then … idle".
 - The setup-steps check warns on that wording, but doesn't refuse it.

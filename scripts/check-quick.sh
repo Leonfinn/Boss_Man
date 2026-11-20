@@ -119,6 +119,8 @@ if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
     [ "$install_failed" -eq 0 ] || { g_wake=0 g_owner=0 g_screen=0; echo "SKIP  list guards: the install failed"; }
   fi
   [ "$g_wake" -eq 0 ] || step "guard: wake classes (every wake reason has a class)" scripts/check-guards.sh wake-classes
+  # BOS-2058: same trigger (any server source): every update wait has a rule, and no new file reads an update hold.
+  [ "$g_wake" -eq 0 ] || step "guard: update waits (every wait has an end and words)" scripts/check-guards.sh update-waits
   [ "$g_owner" -eq 0 ] || step "guard: owner controls (every button and field is listed)" scripts/check-guards.sh owner-controls
   [ "$g_screen" -eq 0 ] || step "guard: screen inventory (screen-inventory.txt is current)" scripts/check-guards.sh screen-inventory
 fi

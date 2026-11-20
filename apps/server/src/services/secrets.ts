@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { checkSecretFormat, normaliseSecret, secretHint, type SecretKind } from "@boss-man/shared";
 import { decryptSecret, encryptSecret, type MasterKey } from "../crypto.js";
 import type { Db } from "../db/client.js";
+import { record } from "./activity.js";
 import { agents, companies, deploys, deployTargets, fundingSources, runs, secretAccessLog, secretGrantAgents, secretGrants, secrets } from "../db/schema.js";
 
 /** A live check against the provider, e.g. a cheap authenticated call. */
@@ -139,12 +140,20 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       }
       const [row] = await db.insert(secretGrants).values({ secretId, companyId, envName, deployTargetId: deployTargetId ?? null }).returning();
       changed([row!]);
+      // The line names the secret's label and the variable name only, never the value (BOS-2062).
+      const [s] = await db.select({ name: secrets.name }).from(secrets).where(eq(secrets.id, secretId));
+      const [co] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, companyId));
+      await record(db, { companyId, kind: "settings", summary: `Owner gave ${co?.name ?? "the company"} the secret ${s?.name ?? "(unnamed)"} as ${envName}` });
       return row!;
     },
 
     async revoke(grantId: string) {
       const rows = await db.delete(secretGrants).where(eq(secretGrants.id, grantId)).returning({ id: secretGrants.id, companyId: secretGrants.companyId, envName: secretGrants.envName });
       changed(rows);
+      for (const r of rows) {
+        const [co] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, r.companyId));
+        await record(db, { companyId: r.companyId, kind: "settings", summary: `Owner took ${r.envName} away from ${co?.name ?? "the company"}` });
+      }
       return rows.length > 0;
     },
 
@@ -191,7 +200,7 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
 
     /** Limits a grant to these agents of its company; none means every agent. Refuses an unknown grant or an agent from another company. */
     async setGrantAgents(grantId: string, agentIds: string[]): Promise<{ ok: true } | { ok: false; reason: "not_found" | "foreign_agent" }> {
-      const [grant] = await db.select({ companyId: secretGrants.companyId }).from(secretGrants).where(eq(secretGrants.id, grantId));
+      const [grant] = await db.select({ companyId: secretGrants.companyId, envName: secretGrants.envName }).from(secretGrants).where(eq(secretGrants.id, grantId));
       if (!grant) return { ok: false, reason: "not_found" };
       const ids = [...new Set(agentIds)];
       if (ids.length) {
@@ -202,6 +211,7 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
         await tx.delete(secretGrantAgents).where(eq(secretGrantAgents.grantId, grantId));
         if (ids.length) await tx.insert(secretGrantAgents).values(ids.map((agentId) => ({ grantId, agentId })));
       });
+      await record(db, { companyId: grant.companyId, kind: "settings", summary: `Owner limited ${grant.envName} to ${ids.length ? `${ids.length} agent${ids.length === 1 ? "" : "s"}` : "every agent"}` });
       return { ok: true };
     },
 

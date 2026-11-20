@@ -1,7 +1,7 @@
 // A ticket's conversation (R65). The owner writes on a ticket and the agent working it
 // hears: straight into its live run if there is one, otherwise as a new run on the ticket.
 // Agents answer with the ticket_reply tool, and each run's last message lands here too.
-import { and, asc, desc, eq, isNull, ne, or } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, or } from "drizzle-orm";
 import { systemAuthor, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, ownerReplies, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
@@ -65,8 +65,10 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         .leftJoin(agents, eq(agents.id, ticketMessages.agentId))
         .leftJoin(ownerReplies, eq(ownerReplies.messageId, ticketMessages.id))
         .where(eq(ticketMessages.ticketId, ticketId))
-        .orderBy(asc(ticketMessages.createdAt))
+        .orderBy(desc(ticketMessages.createdAt))
         .limit(500);
+      // Newest 500 (BOS-1986); the web wants them oldest first.
+      items.reverse();
       const [live] = await db
         .select({ id: runs.id, agent: agents.name })
         .from(runs)

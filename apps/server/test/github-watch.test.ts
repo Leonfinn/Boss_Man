@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, decisions, feedbackNotes, githubWatches, tickets as ticketsTable } from "../src/db/schema.js";
+import { agents, decisions, feedbackNotes, githubAlertTickets, githubWatches, projects, tickets as ticketsTable } from "../src/db/schema.js";
 import { githubWatchService, looksLikeSecurityReport } from "../src/services/github-watch.js";
 import { clearOwnerTodo } from "../src/services/decisions.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -420,6 +420,149 @@ describe("security alerts (BOS-1929)", () => {
     expect(evil.body).toContain("MALICIOUS");
     expect(rows.find((r) => r.title.includes("bad-crit"))).toMatchObject({ risk: "critical", urgent: true });
     expect(rows.find((r) => r.title.includes("old-lib"))!.risk).toBe("low");
+  });
+
+  it("BOS-2055: two projects watching one repo get one ticket per alert, not one each", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    // Old data: a second row on the same repo (a new save is refused, see below).
+    await t!.db.insert(githubWatches).values({ projectId: second.id, companyId: c.company.id, enabled: true, repo: REPO });
+    c.gh.dependabot = [{ number: 20, state: "open", pkg: "body-parser", severity: "high", summary: "DoS" }];
+    await c.svc.runOne(c.project.id);
+    await c.svc.runOne(second.id);
+    c.advance(61 * MIN);
+    await c.svc.runOne(second.id);
+    await c.svc.runOne(c.project.id);
+    const rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.projectId).toBe([c.project.id, second.id].sort()[0]);
+  });
+
+  it("BOS-2055: a second project can't switch on alert watching for a repo another project watches; the refusal names that project", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await expect(c.svc.save(second.id, c.company.id, { enabled: true, repo: REPO })).rejects.toThrow(/already watched by the project "Site"/);
+    // Another repo is fine, and so is the first project's own save.
+    await c.svc.save(second.id, c.company.id, { enabled: true, repo: "acme/other" });
+    await c.svc.save(c.project.id, c.company.id, { intervalMinutes: 30 });
+    await expect(c.svc.save(second.id, c.company.id, { repo: REPO })).rejects.toThrow(/already watched/);
+  });
+
+  it("BOS-2055: for old data the project whose own code repo it is owns the alerts, even when its id is the higher one", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await t!.db.insert(githubWatches).values({ projectId: second.id, companyId: c.company.id, enabled: true, repo: REPO });
+    const [low, high] = [c.project.id, second.id].sort() as [string, string];
+    await t!.db.update(projects).set({ repoUrl: `https://github.com/${REPO}.git` }).where(eq(projects.id, high));
+    // Both hold an old ticket, so "who holds tickets" can't tell them apart.
+    for (const [pid, key] of [[low, "dependabot:50"], [high, "dependabot:51"]] as const) {
+      const tk = await t!.work.createTicket(pid, { title: `Old ${key}`, body: "x", assigneeAgentId: c.ceo!.id, state: "ready", planFirst: false } as never);
+      await t!.db.insert(githubAlertTickets).values({ projectId: pid, alertKey: key, ticketId: tk.id, repo: REPO });
+    }
+    c.gh.dependabot = [
+      { number: 50, state: "open", pkg: "a-lib", severity: "low", summary: "A" },
+      { number: 51, state: "open", pkg: "b-lib", severity: "low", summary: "B" },
+      { number: 60, state: "open", pkg: "new-lib", severity: "high", summary: "New" },
+    ];
+    await c.svc.runOne(low);
+    await c.svc.runOne(high);
+    const fresh = (await allTickets(c.company.id)).filter((r) => r.title.includes("new-lib"));
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]!.projectId).toBe(high);
+  });
+
+  it("BOS-2055: a project that doesn't own the repo's alerts still closes its own existing tickets", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await t!.db.insert(githubWatches).values({ projectId: second.id, companyId: c.company.id, enabled: true, repo: REPO });
+    const [owner, other] = [c.project.id, second.id].sort() as [string, string];
+    // Both hold an old ticket for the repo; the lower id owns new alerts.
+    const mkLink = async (projectId: string, alertKey: string) => {
+      const tk = await t!.work.createTicket(projectId, { title: `Old ${alertKey}`, body: "x", assigneeAgentId: c.ceo!.id, state: "ready", planFirst: false } as never);
+      await t!.db.insert(githubAlertTickets).values({ projectId, alertKey, ticketId: tk.id, repo: REPO });
+      return tk.id as string;
+    };
+    await mkLink(owner, "dependabot:21");
+    const otherTicket = await mkLink(other, "dependabot:20");
+    c.gh.dependabot = [];
+    await c.svc.runOne(other);
+    expect((await allTickets(c.company.id)).find((r) => r.id === otherTicket)!.systemState).toBe("done");
+  });
+
+  it("BOS-2055: a ticket the CEO closed by hand is not filed again while its alert is still open; the lower id (4… before b…) owns the repo", async () => {
+    const c = await setup();
+    c.gh.dependabot = [
+      { number: 1, state: "open", pkg: "fast-uri", severity: "high", summary: "A" },
+      { number: 2, state: "open", pkg: "body-parser", severity: "low", summary: "B" },
+    ];
+    await c.svc.runOne(c.project.id);
+    const rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(2);
+    for (const r of rows) await t!.db.update(ticketsTable).set({ systemState: "done" } as never).where(eq(ticketsTable.id, r.id));
+    for (let i = 0; i < 2; i++) {
+      c.advance(61 * MIN);
+      await c.svc.runOne(c.project.id);
+    }
+    expect(await allTickets(c.company.id)).toHaveLength(2);
+    // Owner choice is a plain string sort of the project ids: "473754fd…" comes before "ba173d14…".
+    expect(["ba173d14", "473754fd"].sort()[0]).toBe("473754fd");
+  });
+
+  it("BOS-2055: three alerts for one package make one ticket, and a later alert for it joins that ticket", async () => {
+    const c = await setup();
+    c.gh.dependabot = [
+      { number: 1, state: "open", pkg: "fast-uri", severity: "low", summary: "A" },
+      { number: 2, state: "open", pkg: "fast-uri", severity: "high", summary: "B" },
+      { number: 3, state: "open", pkg: "fast-uri", severity: "medium", summary: "C" },
+    ];
+    await c.svc.runOne(c.project.id);
+    let rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ risk: "high", assigneeAgentId: c.ceo!.id });
+    expect(rows[0]!.title).toContain("3 alerts");
+    for (const n of [1, 2, 3]) expect(rows[0]!.body).toContain(`#${n} `);
+    expect(c.woken.filter((w) => w.reason === "github security alert")).toHaveLength(1);
+
+    // A fourth alert for the same package joins; another package gets its own ticket.
+    c.gh.dependabot.push({ number: 4, state: "open", pkg: "fast-uri", severity: "medium", summary: "D" }, { number: 5, state: "open", pkg: "other-lib", severity: "low", summary: "E" });
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(2);
+
+    // The ticket closes only when every alert on it is closed.
+    const group = rows.find((r) => r.title.includes("fast-uri"))!;
+    for (const n of [1, 2, 3]) c.gh.dependabot.find((a) => a.number === n)!.state = "fixed";
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect((await allTickets(c.company.id)).find((r) => r.id === group.id)!.systemState).toBe("ready");
+    c.gh.dependabot.find((a) => a.number === 4)!.state = "fixed";
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect((await allTickets(c.company.id)).find((r) => r.id === group.id)!.systemState).toBe("done");
+  });
+
+  it("BOS-2055: a first sync that finds a backlog opens one summary ticket, then later alerts go back to one ticket per package", async () => {
+    const c = await setup();
+    c.gh.dependabot = Array.from({ length: 30 }, (_, i) => ({ number: i + 1, state: "open" as const, pkg: `lib-${i % 12}`, severity: i === 7 ? "critical" : "medium", summary: "Bad" }));
+    await c.svc.runOne(c.project.id);
+    let rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ risk: "critical", assigneeAgentId: c.ceo!.id, urgent: false });
+    expect(rows[0]!.title).toContain("30 open alerts");
+    expect(rows[0]!.body).toContain("12 packages");
+    expect(c.woken.filter((w) => w.reason === "github security alert")).toHaveLength(1);
+    // The same alerts again: nothing new.
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect(await allTickets(c.company.id)).toHaveLength(1);
+    // A new alert after the first sync: its own ticket.
+    c.gh.dependabot.push({ number: 99, state: "open", pkg: "fresh-lib", severity: "low", summary: "New" });
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.some((r) => r.title.includes("fresh-lib"))).toBe(true);
   });
 
   it("falls back to the CEO for a secret alert when the company has no security reviewer", async () => {
