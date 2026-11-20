@@ -13,7 +13,7 @@ import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 import { untrusted } from "@boss-man/shared";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, type RunnerCheck } from "./runner-busy.js";
-import { STANDALONE_WRAPUP_MS } from "./update-waits.js";
+import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 
@@ -77,6 +77,8 @@ export type Hold = {
   capNotified?: boolean;
   /** BOS-1954: when the CEO was woken because the swap waited past its expected finish (once per hold). */
   ceoWokenAt?: string;
+  /** BOS-2058 (rule b): when the drain reached its own end and went ahead by itself (stopped what was going, then swapped). */
+  wentAheadAt?: string;
   /** slug -> when its runner was recreated; the hold waits for these to reconnect. */
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
@@ -181,13 +183,23 @@ export const holdBlocksStarts = (hold: Hold | null, at: Date): boolean => {
   return at < holdEndsAt(hold);
 };
 /** BOS-1982: how long "Swap as soon as these finish" holds new work, counted from the answer (it used to have no end). */
-export const SWAP_WHEN_DONE_CAP_MINUTES = 60;
+export { SWAP_WHEN_DONE_CAP_MINUTES };
 /** When the hold stops keeping new work out by itself: the cap, or for "swap as soon as these finish" the later of that and its own bound. */
 export const holdEndsAt = (hold: Hold): Date => {
   const cap = holdCapAt(hold);
   if (!hold.swapWhenDone || !hold.swapWhenDoneAt) return cap;
   return new Date(Math.max(cap.getTime(), new Date(hold.swapWhenDoneAt).getTime() + SWAP_WHEN_DONE_CAP_MINUTES * 60_000));
 };
+/**
+ * BOS-2058 (rule b): the drain's own end. Past it, with work still going, the update goes ahead by itself through the
+ * existing stop options: the work runs still going are stopped with the per-run Stop (they were told to wrap up when the
+ * hold began), and the swap no longer waits for runs or checks (`force`, as "Stop the remaining runs and update now";
+ * a runner check cut off goes back in line and starts again). It replaces BOS-1807's "lift at 90 minutes and wait for
+ * luck" (20 Nov 06:23 to 09:03). Counted from the hold's start; an owner's "Wait 10 more minutes" deadline and
+ * "Swap as soon as these finish" bound (BOS-1982) are honoured. A merge being pushed is still waited for (its own end).
+ */
+export const DRAIN_GO_AHEAD_MINUTES = WAIT_RULES["runner-drain"].endMin;
+export const drainGoAheadAt = (hold: Hold): Date => drainEndsAt(hold);
 /** What a wake released after the cap shows in place of "update pending". */
 export const HOLD_RELEASED_REASON = `released: the runner update waited ${HOLD_CAP_MINUTES} minutes with work still going, so new runs are no longer held for it`;
 
@@ -424,7 +436,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     // The swap is expected when the last check ends at its usual length; with runs going it cannot be forecast.
     const lefts = checks.map((c) => (c.usuallyMinutes === null ? null : Math.max(0, c.usuallyMinutes - c.runningForMinutes)));
     const expected = shown.length ? "when the last run ends (agent runs have no fixed length)" : lefts.length && lefts.every((m): m is number => m !== null) ? `about ${fmtTime(new Date(now().getTime() + Math.max(0, ...lefts) * 60_000))} if the checks take their usual time` : "when the last check ends (no usual length is known)";
-    const capAt = holdEndsAt(h);
+    const goAt = drainGoAheadAt(h);
     const swapLine = h.swapWhenDone ? `You chose "${SWAP_WHEN_DONE}", and the work is still going.` : `"${SWAP_WHEN_DONE}" keeps new runs and checks held and swaps by itself, with nothing more to press (for at most ${SWAP_WHEN_DONE_CAP_MINUTES} minutes).`;
     const stopText = [
       shown.length ? ` "Stop these and carry on" stops ${shown.map((r) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})`).join(", ")}: anything they haven't saved is lost, and their tickets wake again after the update. No other run is touched.` : "",
@@ -435,7 +447,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n ? `${n} run${n === 1 ? " is" : "s are"}` : ""}${n && checksN ? " and " : ""}${checksN ? `${checksN} check${checksN === 1 ? " is" : "s are"}` : ""} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}:\n${stillGoing}\nThe swap is expected ${expected}. ${swapLine}${stopText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the work going carries on). Until you answer, new runs and checks stay held; if you don't answer, the hold lifts by itself at ${fmtTime(capAt)} and new work starts again.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n ? `${n} run${n === 1 ? " is" : "s are"}` : ""}${n && checksN ? " and " : ""}${checksN ? `${checksN} check${checksN === 1 ? " is" : "s are"}` : ""} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}:\n${stillGoing}\nThe swap is expected ${expected}. ${swapLine}${stopText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the work going carries on). Until you answer, new runs and checks stay held; if you don't answer, the update goes ahead by itself at ${fmtTime(goAt)}: the runs still going are stopped (their tickets wake again after the update) and any check cut off starts again after the swap.`,
         options,
         recommendedOption: SWAP_WHEN_DONE,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
@@ -451,7 +463,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   async function ceoWakeOptions(h: Hold): Promise<string> {
     const [card] = await db.select({ options: decisions.options }).from(decisions).where(and(eq(decisions.dedupeKey, `maintenance:${h.since}:${h.deadline}`), eq(decisions.status, "open")));
     const buttons = ((card?.options as string[] | undefined) ?? []).filter((o) => o !== WAIT_TEN_MORE);
-    const ends = h.force || h.ignoreChecks || h.wrapSince ? "" : ` New work starts again by itself at ${fmtTime(holdEndsAt(h))}.`;
+    const ends = h.force ? "" : ` If the work is still going at ${fmtTime(drainGoAheadAt(h))}, the update goes ahead by itself then and stops it.`;
     if (buttons.length) return `The owner has a card open in Settings > Server and runner with these options: ${buttons.map((b) => `"${b}"`).join(", ")}.${ends}`;
     return `No question to the owner is open right now; the owner can cancel the update in Settings > Server and runner.${ends}`;
   }
@@ -779,6 +791,34 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       };
       let active = await withChat(waitedOn(first));
       const total = h.ignoreChecks ? first.runsTotal : first.runsTotal + first.checksTotal;
+      // BOS-2058 (rule b): the drain's own end passed with work still going: go ahead through the existing stop options,
+      // never "lift and wait for luck". Every work run still going is stopped with the per-run Stop, then the swap stops
+      // waiting for runs and checks (force); a merge being pushed is still waited for below, on its own 20-minute end.
+      if (!h.force && t >= drainGoAheadAt(h) && (total > 0 || [...active.values()].some((n) => n > 0))) {
+        const going = await liveWorkRuns(db, h.since, { ...h.startTold, ...h.wrapTold, ...startTold });
+        const checksNow = h.ignoreChecks ? [] : await runnerChecks(db, t);
+        const ids = going.map((r) => r.runId);
+        const { stopped } = await self.stopRuns(ids, ids);
+        // The go-ahead wake below is this hold's one CEO note; the "still waiting" wake must not follow it in the same pass.
+        h = { ...h, force: true, wentAheadAt: t.toISOString(), ceoWokenAt: h.ceoWokenAt ?? t.toISOString() };
+        await save(h);
+        await withdrawQuestion();
+        const minutes = Math.round((t.getTime() - new Date(h.since).getTime()) / 60_000);
+        const stoppedSet = new Set(stopped);
+        const runLine = (r: (typeof going)[number]) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})${stoppedSet.has(r.runId) ? "" : " (could not be stopped; it ends with the swap)"}`;
+        const checkLine = (c: (typeof checksNow)[number]) => `${c.kind} check${c.ticket ? ` for ${c.ticket}` : ""} (${c.scope})`;
+        const parts = [going.length ? `stopped ${going.map(runLine).join(", ")}` : "", checksNow.length ? `restarts ${checksNow.map(checkLine).join(", ")} after the swap` : ""].filter(Boolean);
+        await deps.notify({ companyId: null, level: "note", title: "Runner update went ahead by itself", body: `The update waited ${minutes} minutes, its own limit, with work still going, so it went ahead without anyone pressing anything: it ${parts.join(" and ") || "stopped what was still going"}. Stopped tickets wake again after the update.`, link: "#/settings" });
+        if (deps.wakeCeo) {
+          const byCompany = new Map<string, string[]>();
+          const add = (companyId: string, line: string) => byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), line]);
+          for (const r of going) add(r.companyId, `- stopped: ${runLine(r)}`);
+          for (const c of checksNow) add(c.companyId, `- ${checkLine(c)}: cut off by the swap, goes back in line`);
+          for (const [companyId, lines] of byCompany) {
+            await deps.wakeCeo(companyId, `The runner update waited ${minutes} minutes, its own limit, so it went ahead by itself. Of yours:\n${lines.join("\n")}\nStopped tickets wake again after the update; check that their state notes say where they stopped. Boss Man tells you this once per update.`).catch((err) => deps.log?.(`drain: waking the CEO failed: ${(err as Error).message}`));
+          }
+        }
+      }
       // BOS-1982: "Swap as soon as these finish" holds for at most SWAP_WHEN_DONE_CAP_MINUTES; the deadline it set asks once more, with the stop options.
       if (!h.force && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, first.runsTotal, waitedOn(first).size, h.ignoreChecks ? 0 : first.checksTotal);
       // BOS-1807: the hard cap passed with work still going: new work is no longer held; say so once.

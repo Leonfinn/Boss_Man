@@ -91,6 +91,20 @@ export function landingsThatCount(ids: string[], facts: { ciWaiting: (id: string
   });
 }
 
+/** BOS-1982: how long "Swap as soon as these finish" holds, counted from the answer. */
+export const SWAP_WHEN_DONE_CAP_MINUTES = 60;
+/**
+ * When a runner drain goes ahead by itself (maintenance.ts step): its own end from the hold's start, or later if the owner
+ * chose "Wait 10 more minutes" (deadline) or "Swap as soon as these finish" (its own bound). Shared by the drain and the
+ * screen, so what the screen says is when it happens.
+ */
+export function drainEndsAt(hold: { since: string; deadline?: string; swapWhenDone?: boolean; swapWhenDoneAt?: string }): Date {
+  const own = Date.parse(hold.since) + WAIT_RULES["runner-drain"].endMin * 60_000;
+  const deadline = hold.deadline ? Date.parse(hold.deadline) : 0;
+  const swd = hold.swapWhenDone && hold.swapWhenDoneAt ? Date.parse(hold.swapWhenDoneAt) + SWAP_WHEN_DONE_CAP_MINUTES * 60_000 : 0;
+  return new Date(Math.max(own, Number.isFinite(deadline) ? deadline : 0, Number.isFinite(swd) ? swd : 0));
+}
+
 /** A wrap-up with no update behind it lifts by itself after this long. */
 export const STANDALONE_WRAPUP_MS = WAIT_RULES.wrapup.endMin * 60_000;
 
@@ -129,9 +143,9 @@ export type ActiveWait = {
 const plus = (since: string, min: number) => new Date(Date.parse(since) + min * 60_000).toISOString();
 const hhmm = (iso: string) => `${iso.slice(11, 16)} UTC`;
 
-export function describeWait(kind: WaitKind, since: string, detail?: string): ActiveWait {
+export function describeWait(kind: WaitKind, since: string, detail?: string, endsAtOverride?: string): ActiveWait {
   const r = WAIT_RULES[kind];
-  const endsAt = plus(since, r.endMin);
+  const endsAt = endsAtOverride ?? plus(since, r.endMin);
   return {
     kind,
     forUpdate: r.forUpdate,
@@ -146,7 +160,7 @@ export function describeWait(kind: WaitKind, since: string, detail?: string): Ac
 
 /** The shape of the two settings rows this reads; only the fields it needs. */
 type DeployWaitRow = { phase?: string; approvedAt?: string; sentAt?: string; windowUntil?: string; handoverSince?: string; quiet?: { why?: string[] } };
-type HoldRow = { kind?: string; since?: string; force?: boolean; ignoreChecks?: boolean; swapWhenDone?: boolean; wrapSince?: string; forUpdate?: string };
+type HoldRow = { kind?: string; since?: string; deadline?: string; swapWhenDoneAt?: string; force?: boolean; ignoreChecks?: boolean; swapWhenDone?: boolean; wrapSince?: string; forUpdate?: string };
 
 /**
  * Every wait that is on now, from the rows that exist today (`deploy_wait`, `maintenance`) plus the live landing ids
@@ -165,7 +179,13 @@ export async function activeWaits(db: Db, opts: { landingSince?: string | null; 
   }
   if (hold?.since) {
     if (hold.kind === "wrapup" || hold.wrapSince) out.push(describeWait("wrapup", hold.wrapSince ?? hold.since, hold.forUpdate === "none" || !hold.forUpdate ? "no update is waiting, so it lifts by itself" : `for the ${hold.forUpdate} update`));
-    if (hold.kind !== "wrapup") out.push(describeWait(hold.force || hold.ignoreChecks ? "owner-force" : "runner-drain", hold.since));
+    if (hold.kind !== "wrapup") {
+      // The drain goes ahead at drainEndsAt (maintenance.ts step), with checks ignored or not; once forced, only a merge
+      // being pushed is left, on its own end.
+      const goAt = drainEndsAt({ ...hold, since: hold.since }).toISOString();
+      if (hold.force) out.push(describeWait("owner-force", hold.since));
+      else out.push(describeWait(hold.ignoreChecks ? "owner-force" : "runner-drain", hold.since, undefined, goAt));
+    }
   }
   if (opts.landingSince) out.push(describeWait("runner-landing", opts.landingSince, opts.landingNames?.length ? opts.landingNames.join(", ") : undefined));
   return out;

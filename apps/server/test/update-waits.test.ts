@@ -7,7 +7,7 @@ import { openPglite } from "../src/db/client.js";
 import type { Db } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { serverWaitChecks } from "../src/services/runner-busy.js";
-import { activeWaits, blocksClass, describeWait, LANDING_END_MS, landingsThatCount, ruleProblems, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
+import { activeWaits, blocksClass, describeWait, drainEndsAt, LANDING_END_MS, landingsThatCount, ruleProblems, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
 import { duringUpdate, PASSES_UPDATE_HOLD, WAKE_CLASS } from "../src/services/wake-classes.js";
 
 // 20 Nov 11:44: a merge whose check had passed and which was only waiting for GitHub CI on its merge copy (phase "merging",
@@ -119,6 +119,16 @@ describe("activeWaits: one list for every screen", () => {
       expect(Date.parse(w.endsAt)).toBeGreaterThan(Date.parse(w.since));
       expect(Date.parse(w.expectedAt)).toBeLessThan(Date.parse(w.endsAt));
     }
+  });
+
+  it("a runner drain shows when it goes ahead: its own 60 min, or later after 'Wait 10 more' or 'Swap as soon as these finish' (step B)", async () => {
+    const since = "2026-11-20T10:00:00.000Z";
+    await db.insert(settings).values({ key: "maintenance", value: { kind: "update", since, deadline: "2026-11-20T10:30:00.000Z" } });
+    expect((await activeWaits(db))[0]).toMatchObject({ kind: "runner-drain", endsAt: "2026-11-20T11:00:00.000Z", atEnd: "go-ahead" });
+    expect(drainEndsAt({ since, deadline: "2026-11-20T11:10:00.000Z" }).toISOString()).toBe("2026-11-20T11:10:00.000Z");
+    expect(drainEndsAt({ since, deadline: since, swapWhenDone: true, swapWhenDoneAt: "2026-11-20T10:31:00.000Z" }).toISOString()).toBe("2026-11-20T11:31:00.000Z");
+    // An unreadable deadline never makes it end sooner or never.
+    expect(drainEndsAt({ since, deadline: "not a date" }).toISOString()).toBe("2026-11-20T11:00:00.000Z");
   });
 
   it("lists nothing when no update waits", async () => {
