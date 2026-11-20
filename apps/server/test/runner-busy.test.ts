@@ -107,6 +107,24 @@ describe("checkJobsByCompany", () => {
   });
 });
 
+describe("a dead running row on a runner (BOS-1982)", () => {
+  it("is not waited on once its last sign of life is past the stuck window; the server-update wait still counts it", async () => {
+    const a = await seedCompany("Alpha");
+    const at = new Date("2026-11-20T10:00:00Z");
+    const ago = (m: number) => new Date(at.getTime() - m * 60_000);
+    // never printed, started 30 min ago: dead; printed 19 min ago: live; printed 25 min ago: dead.
+    await job(a, "running", { startedAt: ago(30) });
+    const [live] = await db.insert(checkJobs).values({ companyId: a.companyId, projectId: a.projectId, ticketId: a.ticketId, kind: "merge", scope: "full", commit: "c", tree: randomUUID(), state: "running", startedAt: ago(90), lastOutputAt: ago(19) }).returning();
+    await db.insert(checkJobs).values({ companyId: a.companyId, projectId: a.projectId, ticketId: a.ticketId, kind: "merge", scope: "quick", commit: "c", tree: randomUUID(), state: "running", startedAt: ago(90), lastOutputAt: ago(25) });
+    expect((await checkJobsByCompany(db, true, at)).get(a.companyId)).toBe(1);
+    expect((await runnerChecks(db, at)).map((c) => c.scope)).toEqual(["full"]);
+    expect((await runnerBusy(db, true, at)).checksTotal).toBe(1);
+    // Not for the server-update wait (all running rows), and nothing is changed in the rows.
+    expect((await checkJobsByCompany(db, false, at)).get(a.companyId)).toBe(3);
+    expect(live!.state).toBe("running");
+  });
+});
+
 describe("runnerBusy", () => {
   it("adds work runs and running checks per company, with totals, and ignores chat and reply runs", async () => {
     const a = await seedCompany("Alpha");

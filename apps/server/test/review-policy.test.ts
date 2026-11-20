@@ -425,6 +425,18 @@ describe("review policy API", () => {
     );
   });
 
+  it("editing a project's settings writes one settings line naming the fields, not the values, and a refused edit writes none (BOS-1987)", async () => {
+    const c = await setup();
+    const lines = async () => (await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")))).map((a) => a.summary);
+    const before = await lines();
+    expect((await c.req("PATCH", `/api/projects/${randomUUID()}`, { verifyCommand: "make test" })).statusCode).toBe(404);
+    expect((await c.req("PATCH", `/api/projects/${c.project.id}`, { monthlyCapUsd: -1 })).statusCode).toBe(400);
+    expect(await lines()).toEqual(before);
+    const ok = await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "secret-check-cmd", monthlyCapUsd: 12.5 });
+    expect(ok.statusCode).toBe(200);
+    expect((await lines()).filter((s) => !before.includes(s))).toEqual(["Owner changed project Customer app: verifyCommand, monthlyCapUsd"]);
+  });
+
   it("gives a new company a security review on high and critical work, and leaves existing companies alone (BOS-824)", async () => {
     const c = await setup();
     // The column default, not just the constant: a company row made without a policy gets it.
