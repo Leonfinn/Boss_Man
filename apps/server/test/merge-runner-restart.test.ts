@@ -211,6 +211,10 @@ describe("a runner still catching up after a restart (BOS-2089)", () => {
     expect((await c.row(t.id)).systemState).toBe("done");
     expect(c.sent.filter((x) => x.type === "workspace.diff").length).toBeGreaterThanOrEqual(7);
     expect(await cards(c, t.id)).toHaveLength(0);
+    // Each failed try keeps the runner's own reason, so the next one of these can be explained from the records.
+    const fails = (await c.db.query.activity.findMany()).filter((a) => a.ticketId === t.id && (a.detail as { event?: string } | null)?.event === "attempt_failed");
+    expect(fails).toHaveLength(6);
+    for (const f of fails) expect(f.detail).toMatchObject({ reason: "restart", note: expect.stringContaining("Timed out waiting for the lock") });
   });
 
   it("a runner that has been back a while and still fails: the card comes after the usual tries", async () => {
