@@ -37,8 +37,11 @@ async function setup(answer: "free" | "other-branch" | "main") {
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const [p] = await db.insert(projects).values({ companyId: company.id, name: "Customer app", repoUrl: "https://example.com/app.git" }).returning();
   // This ticket and another open ticket both add 0113; the branch under test has one commit.
-  const [mine] = await db.insert(tickets).values({ companyId: company.id, projectId: p!.id, title: "Add a column", branch: "bossman/ticket-under-test", assigneeAgentId: ceo.id }).returning();
-  const [other] = await db.insert(tickets).values({ companyId: company.id, projectId: p!.id, title: "Another migration", branch: "bossman/other", assigneeAgentId: ceo.id }).returning();
+  // The ids are fixed: the reply names the ticket's id, and a random id sometimes contains "0113"
+  // by chance (BOS-2122). The first id deliberately does, so the no-advice assertion below can
+  // never pass just because the id happens to be clear of the number.
+  const [mine] = await db.insert(tickets).values({ id: "ff803000-0113-4a11-8111-000000000000", companyId: company.id, projectId: p!.id, title: "Add a column", branch: "bossman/ticket-under-test", assigneeAgentId: ceo.id }).returning();
+  const [other] = await db.insert(tickets).values({ id: "11111111-2222-4333-8444-555555555555", companyId: company.id, projectId: p!.id, title: "Another migration", branch: "bossman/other", assigneeAgentId: ceo.id }).returning();
   const sent: RunnerCommand[] = [];
   const migrationsRequests: RunnerCommand[] = [];
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
@@ -78,7 +81,10 @@ describe("review-time migration warning (BOS-689)", () => {
     const text = await c.move();
     expect(text).toContain("is now review");
     expect(text).not.toMatch(/Rename it/);
-    expect(text).not.toContain("0113");
+    // Check the advice itself, not the bare number: the reply names the ticket's id, and that can
+    // contain "0113" by chance (BOS-2122).
+    expect(text).not.toContain("0113_");
+    expect(text).not.toContain("already taken on the default branch");
     // The other open branch isn't even compared at review time any more, so a runner that
     // couldn't read it can never advise a rename against it.
     expect(c.migrationsRequests.at(-1)).toMatchObject({ type: "workspace.migrations", others: [] });
