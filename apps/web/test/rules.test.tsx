@@ -27,6 +27,17 @@ describe("decision rules", () => {
     expect((screen.getByLabelText("What should this rule do?") as HTMLTextAreaElement).value).toBe("");
   });
 
+  it("names the agents a rule is for, and falls back for an unknown id", async () => {
+    const agent = (id: string, name: string) => ({ id, companyId: "c1", name, role: "worker" as const, agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null });
+    const co: Company = { ...company, agents: [agent("a1", "Kit"), agent("a2", "Zippy")] };
+    const rule = (id: string, agentIds: string[]) => ({ id, companyId: "c1", name: `Rule ${id}`, match: { agentIds }, outcome: "allow", position: 0 });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ company: [rule("r1", ["a1"]), rule("r2", ["a1", "a2"]), rule("r3", ["zz"])], global: [], defaults: [] }), { status: 200 })));
+    render(<Rules companies={[co]} companyId="c1" go={() => {}} />);
+    expect(await screen.findByText("When the request is from Kit")).toBeTruthy();
+    expect(screen.getByText("When the request is from Kit or Zippy")).toBeTruthy();
+    expect(screen.getByText("When the request is from one named agent")).toBeTruthy();
+  });
+
   // BOS-786: the built-in defaults line must say the CEO is asked first, as the code does.
   it("says an unmatched request goes to the CEO first, and what comes straight to the owner", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("rule-requests") ? { ceo: { name: "Ada" } } : { company: [], global: [], defaults: [] }), { status: 200 })));

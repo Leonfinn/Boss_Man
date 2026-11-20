@@ -49,6 +49,7 @@ function GrantAgents({ grant, agents, busy, onSave }: { grant: Grant; agents: Ag
 
 export function Credentials({ company, onChanged, title = "Credentials" }: { company: Company; onChanged?: () => void; title?: string }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
+  const targets = usePoll((signal) => api<{ id: string; name: string }[]>(`/api/companies/${company.id}/deploy-targets`, { signal }), 30_000, `deploy-targets-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   // No default kind: a value checked as the wrong kind fails confusingly, so the owner always picks.
   const [choice, setChoice] = useState(-1);
@@ -155,7 +156,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                   <td className="mono">{g.envName}</td>
                   <td>{g.secretName}</td>
                   <td className="mono muted">{g.hint ?? ""}</td>
-                  <td>{g.deployTargetId ? "One deploy target" : "Every run"}</td>
+                  <td>{g.deployTargetId ? (targets.data?.find((t) => t.id === g.deployTargetId)?.name ?? "One deploy target") : "Every run"}</td>
                   <td>
                     <GrantAgents key={g.agentIds.join()} grant={g} agents={company.agents} busy={act.busy} onSave={(ids) => setAgents(g, ids)} />
                   </td>
