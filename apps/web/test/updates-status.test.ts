@@ -75,6 +75,10 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(waitingFor({ runs: 2, companies: 1, checks: 1, checksList: [] })).toBe("waiting for 2 runs in 1 company to finish, and for 1 check to finish before swapping the runners");
     expect(waitingFor({ runs: 0, companies: 0, checks: 0 })).toBe("swapping the runners now");
     expect(waitingFor({ runs: 0, companies: 0 })).toBe("swapping the runners now");
+    // BOS-1951: a merge being pushed is named; a wait on nothing known is never a bare "swapping"/"updating".
+    expect(waitingFor({ runs: 0, companies: 0, merges: 1, mergesList: [{ ticket: "BOS-7" }] })).toBe("waiting for 1 merge being pushed to main (BOS-7)");
+    expect(waitingFor({ runs: 1, companies: 1, merges: 2 })).toBe("waiting for 1 run in 1 company to finish, and for 2 merges being pushed to main");
+    expect(waitingFor({ runs: 0, companies: 0, unknownWait: true })).toMatch(/cannot name/);
   });
 
   it("2. Waiting for agents, wrap-up asked, before the deadline: no main button", () => {

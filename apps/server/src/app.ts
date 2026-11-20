@@ -507,6 +507,7 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
+    landingMergeIds: () => review.landingMergeIds(), // `review` is built further down; this only runs during a drain
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
@@ -533,6 +534,7 @@ export async function buildApp(opts: AppOptions) {
     settled: () => scheduler.settled(),
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
+    landingMergeIds: () => review.landingMergeIds(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
