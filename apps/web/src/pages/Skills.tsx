@@ -6,6 +6,7 @@ import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
 import { api, ApiError, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
+import { Loader } from "../components/Loader";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { when } from "./Runs";
@@ -222,7 +223,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   const [editing, setEditing] = useState<{ name: string; description: string; body: string } | null>(null);
   const s = skill.data;
   if (skill.error && !away(skill.error)) return <p className="error" role="alert">{skill.error.message}</p>;
-  if (!s) return null;
+  if (!s) return <Loader label="Loading the skill" size={16} />;
   const chosen = holders ?? s.agents.map((a) => a.id);
   const run = async (f: () => Promise<string>) => {
     try {

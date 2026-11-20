@@ -4,6 +4,7 @@ import { api, type Company, type Plan as PlanData, type PlanNode } from "../api"
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { ageLabel } from "../age";
+import { Loader } from "../components/Loader";
 
 const MIN_W = 230;
 const MAX_W = 360;
@@ -279,7 +280,9 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
           <Causes plan={p} />
           <Graph plan={p} />
         </>
-      ) : null}
+      ) : plan.error && !away(plan.error) ? null : (
+        <Loader label="Loading the plan" />
+      )}
     </div>
   );
 }

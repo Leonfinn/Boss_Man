@@ -605,6 +605,16 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         .from(tickets)
         .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`))
         .groupBy(tickets.assigneeAgentId);
+      // BOS-1909: the groups that count toward no limit, per agent, for "0 of 2 tickets in progress · 2 being checked".
+      const standing = await db
+        .select({
+          agentId: tickets.assigneeAgentId,
+          beingChecked: sql<number>`(count(*) filter (where ${tickets.systemState} = 'review' and ${tickets.checkHoldAt} is not null))::int`,
+          nextUp: sql<number>`(count(*) filter (where ${tickets.systemState} = 'ready' and ${tickets.nextUpAt} is not null))::int`,
+        })
+        .from(tickets)
+        .where(eq(tickets.companyId, companyId))
+        .groupBy(tickets.assigneeAgentId);
       const [pa] = await db
         .select({ total: sql<number>`count(*)::int`, posted: sql<number>`(count(*) filter (where ${paAnswers.outcome} = 'posted'))::int`, wrong: sql<number>`(count(*) filter (where ${paAnswers.verdict} = 'wrong'))::int` })
         .from(paAnswers)
@@ -622,6 +632,8 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
             openTickets: assigned.find((r) => r.agentId === a.id)?.n ?? 0,
             wipCount: wip.find((r) => r.agentId === a.id)?.n ?? 0,
             wipLimit,
+            beingChecked: standing.find((r) => r.agentId === a.id)?.beingChecked ?? 0,
+            nextUp: standing.find((r) => r.agentId === a.id)?.nextUp ?? 0,
             month: {
               costMicros: Number(money.find((m) => m.agentId === a.id)?.micros ?? 0),
               runs: used.find((u) => u.agentId === a.id)?.runs ?? 0,

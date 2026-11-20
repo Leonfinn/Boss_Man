@@ -20,6 +20,28 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 20 November 2026
+
+- A server update now says what it is waiting on and when it is running late, and your CEO chat keeps answering while it waits, instead of a bare "updating".
+- A runner update now finishes by itself, so you no longer press Deploy a second time. This takes effect after you update the runners.
+- On the Merge queue, each running merge check says where it runs ("on this server" or "on the check worker …"). A finished check shows its time per stage and whether it was quick or full, and the Quick checks tab explains what a busy slot means.
+- The Decisions page rolls "Left your list recently" cards up to a few lines, with Show more.
+- A Board search that matches nothing now says so, with a Clear search button.
+- Errors now read as a plain sentence, not codes like "internal_error". A date that does not exist, such as 30 February, gets "Use YYYY-MM-DD." instead of a server error.
+- The Dashboard, Features, Chat and ticket pages and the GitHub watcher settings show a loader, and an error with Retry, instead of a blank space.
+- Create and Save buttons can no longer be clicked twice.
+- Settings has one Save per section, and Save buttons only light up when there is something to save.
+- Permission rules name the agent a rule is for, and saved credentials name the deploy target a secret is limited to.
+- With no company yet, every page links to "Create your first company".
+- Support can now reply to and close GitHub issues and discussions from inside Boss Man. One-time step: give your saved GitHub token "Read and write" for Issues and Discussions.
+- Dependabot and secret-scanning alerts on a repo the GitHub watcher follows now come into Boss Man, and the security reviewer can read and close them there.
+- The next ticket for a busy agent stays in Ready as "Next up" until its run starts.
+- Merged tickets no longer sit in "Merged, watching" for ever after go-live, and never count against your limits.
+- Moving a ticket that is already in review back to review asks the reviewers who asked for changes to look again.
+- A ticket's activity feed shows its newest runs. Changing who reviews, and adding, editing or removing a permission rule, each leave a line in the activity log.
+- In the CEO chat, a reply can add up to 2 short lines saying where you already answered a point it names.
+- The workflow report opens with a "What this shows" card of up to three plain findings, and its column definitions fold behind "What the columns mean".
+
 ## 19 November 2026
 
 - The runs history (for the CEO and Data & Analytics) now shows cached read and write tokens and a cost for each run, so a ticket's spend can be checked by token type.

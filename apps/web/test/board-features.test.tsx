@@ -105,8 +105,7 @@ describe("feature state toggles", () => {
 
     unmount();
     render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Filter" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
+    // The view is now saved with the other filters, so the Features view is already on after a reload.
     expect(await screen.findByRole("article", { name: "Feature Old idea" })).toBeTruthy();
     expect(screen.queryByRole("article", { name: "Feature Export" })).toBeNull();
   });
@@ -209,9 +208,11 @@ describe("board lanes", () => {
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
     const lane = await screen.findByRole("region", { name: "Merged, watching" });
+    // BOS-1909: a parked lane shows 4 cards, then "Show N more" (6 cards here).
+    fireEvent.click(within(lane).getByRole("button", { name: "Show 2 more" }));
     expect(within(lane).getByText("Check ticket")).toBeTruthy();
     expect(within(lane).getByText("Old merged row")).toBeTruthy();
-    expect(within(lane).getByText(/Watching for: a week of real use\. Watch runs to/)).toBeTruthy();
+    expect(within(lane).getByText(/Watching for: a week of real use · until /)).toBeTruthy();
     expect(within(lane).getByText("Waits for server")).toBeTruthy();
     expect(within(lane).getByText("Merged. Waiting to go live: the server update.")).toBeTruthy();
     expect(within(lane).getAllByText(/Waiting for the agent to report the after-merge check/).length).toBeGreaterThan(0);

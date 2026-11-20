@@ -1795,7 +1795,7 @@ export function schedulerService(
         const work = await liveWorkRuns(db);
         // BOS-1877: running checks the swap waits on keep it from landing just as work runs do, so chat goes through
         // for them too (the swap then waits for that chat run). Not for a wrap-up hold, or once checks are not waited on.
-        const checksWaited = hold.kind !== "wrapup" && !hold.force && !hold.ignoreChecks ? [...(await checkJobsByCompany(db, true)).values()].reduce((a, n) => a + n, 0) : 0;
+        const checksWaited = hold.kind !== "wrapup" && !hold.force && !hold.ignoreChecks ? [...(await checkJobsByCompany(db, true, t)).values()].reduce((a, n) => a + n, 0) : 0;
         // While work runs or checks are still going, only chat and reply wakes go on to launch; every other wake is held.
         // BOS-1951: nor is the swap near while a merge is being pushed to main, or while it waits on something Boss Man can't
         // name (the 19 Nov update sat 86 minutes with chat paused): chat pauses only for the swap itself.

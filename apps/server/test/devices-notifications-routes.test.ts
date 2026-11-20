@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { makeApp, signIn } from "./helpers.js";
 import { BUNDLED_NTFY_URL, ntfySetupSaver } from "../src/routes/devices-notifications.js";
 
 let close: (() => Promise<void>) | undefined;
@@ -74,4 +75,49 @@ it("the setup saver keeps the token in the secrets store only, and a repeat chan
   const next = `tk_${"c".repeat(29)}`;
   await save({ token: next, topic: "abc123" });
   expect(await built.secrets.reveal(first!.tokenSecretId!)).toBe(next);
+});
+
+// BOS-1979: the save route itself, with the owner's session.
+it("a bad topic is refused before any token is rotated or created; a good one still rotates", async () => {
+  const t = await makeApp();
+  close = () => t.close();
+  const { cookie } = await signIn(t);
+  const put = (ntfy: object | null, base: object) => t.app.inject({ method: "PUT", url: "/api/notification-settings", headers: { cookie }, payload: { ...base, ntfy } });
+  const tokens = async () => (await t.secrets.list()).filter((s) => s.name === "ntfy access token");
+  const { ntfy: _n, approve: _a, phoneAddress: _p, phoneContainer: _c, phoneTest: _t, phoneLogin: _l, ...base } = (await t.app.inject({ method: "GET", url: "/api/notification-settings", headers: { cookie } })).json();
+  const url = "https://ntfy.example.com";
+  // No token saved: a bad topic with a new token leaves no stray secret.
+  const bad1 = await put({ url, topic: "a b", token: `tk_${"a".repeat(29)}` }, base);
+  expect(bad1.statusCode).toBe(400);
+  expect(JSON.stringify(bad1.json())).toContain("letters, digits");
+  expect(await tokens()).toHaveLength(0);
+  expect((await t.notes.getSettings()).ntfy).toBeNull();
+  // A good save creates the token.
+  const tokenA = `tk_${"b".repeat(29)}`;
+  expect((await put({ url, topic: "good_topic", token: tokenA }, base)).statusCode).toBe(200);
+  const [first] = await tokens();
+  expect(await t.secrets.reveal(first!.id)).toBe(tokenA);
+  // A bad topic with a new token keeps the old token and the old settings.
+  const bad2 = await put({ url, topic: "a b", token: `tk_${"c".repeat(29)}` }, base);
+  expect(bad2.statusCode).toBe(400);
+  expect(await t.secrets.reveal(first!.id)).toBe(tokenA);
+  expect(await tokens()).toHaveLength(1);
+  expect((await t.notes.getSettings()).ntfy?.topic).toBe("good_topic");
+  // A good topic with a new token rotates it in place.
+  const tokenC = `tk_${"d".repeat(29)}`;
+  expect((await put({ url, topic: "other-topic", token: tokenC }, base)).statusCode).toBe(200);
+  expect(await t.secrets.reveal(first!.id)).toBe(tokenC);
+  expect(await tokens()).toHaveLength(1);
+  // The saved settings load as before.
+  const loaded = (await t.app.inject({ method: "GET", url: "/api/notification-settings", headers: { cookie } })).json();
+  expect(loaded.ntfy).toEqual({ url, topic: "other-topic", hasToken: true });
+});
+
+// BOS-1979: the route's schema refuses a bad topic with the same rule the settings use, before any secret is written.
+it("the ntfy topic rule is shared and says what is allowed", async () => {
+  const { NtfyTopic } = await import("../src/services/notifications.js");
+  expect(NtfyTopic.safeParse("abc_DEF-123").success).toBe(true);
+  for (const bad of ["a b", "", "x".repeat(65), "a/b"]) expect(NtfyTopic.safeParse(bad).success).toBe(false);
+  const r = NtfyTopic.safeParse("a b");
+  expect(r.success ? "" : r.error.issues[0]!.message).toContain("letters, digits");
 });
