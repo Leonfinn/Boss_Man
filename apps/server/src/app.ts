@@ -2326,10 +2326,11 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/models/refresh", async (req) => ({ probed: await modelProbe.probe(IdParam.parse(req.params).id, { force: true }) }));
     // What the CEO may change about the team without asking (R62).
     owner.get("/api/companies/:id/agent-approvals", async (req) => ({ approvals: await agentsSvc.approvals(IdParam.parse(req.params).id) }));
-    owner.put("/api/companies/:id/agent-approvals", async (req) => {
+    owner.put("/api/companies/:id/agent-approvals", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { approvals } = z.object({ approvals: z.enum(AGENT_APPROVALS) }).parse(req.body);
-      return { approvals: await agentsSvc.setApprovals(id, approvals) };
+      const saved = await agentsSvc.setApprovals(id, approvals);
+      return saved === null ? reply.code(404).send({ error: "not_found" }) : { approvals: saved };
     });
     owner.get("/api/companies/:id/agents", async (req) => agentsSvc.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/agents", async (req, reply) => {
