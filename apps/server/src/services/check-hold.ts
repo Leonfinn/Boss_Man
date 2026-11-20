@@ -10,6 +10,7 @@ import type { Db } from "../db/client.js";
 import { checkJobs, runs, tickets, workflowColumns } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkQueue, type CheckJob } from "./check-queue.js";
+import { moveTicket } from "./ticket-moves.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 
 export type CheckHoldDeps = {
@@ -103,13 +104,9 @@ export function checkHoldService(db: Db, deps: CheckHoldDeps) {
       // before-merge criterion is taken to be finished; any other stays In progress, so the reviews never open on unfinished code.
       const finished = missingVerdicts(readCriteria(t.acceptanceCriteria), t.stateNote, "before").length === 0;
       if (t.systemState === "in_progress" && job && !own.has(t.id) && finished) {
-        const [col] = await db.select({ id: workflowColumns.id }).from(workflowColumns).where(and(eq(workflowColumns.projectId, t.projectId), eq(workflowColumns.systemState, "review"))).orderBy(asc(workflowColumns.position)).limit(1);
-        if (!col) continue;
-        const [moved] = await db
-          .update(tickets)
-          .set({ systemState: "review", columnId: col.id, checkHoldAt: now(), lastActivityAt: now() })
-          .where(and(eq(tickets.id, t.id), eq(tickets.systemState, "in_progress"), eq(tickets.version, t.version)))
-          .returning();
+        // Through moveTicket (BOS-922): no hooks, so no review round opens and no reviewer is woken until the check passes.
+        const at = now();
+        const moved = await moveTicket(db, t.id, "review", { from: ["in_progress"], expectedVersion: t.version, internal: true, overLimit: true, reviewRound: "keep", note: "Boss Man: only its quick check was left", fields: { checkHoldAt: at }, now: at }).then((r) => r.changed, () => false);
         if (moved) {
           await record(db, { companyId: t.companyId, ticketId: t.id, kind: "check_hold_swept", summary: `Only its quick check of ${head.slice(0, 8)} was left, so it moved to Being checked.` });
           out.held++;
