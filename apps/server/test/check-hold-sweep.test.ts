@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, companies, projects, runners, runs, settings, tickets, workflowColumns } from "../src/db/schema.js";
+import { countInProgress } from "../src/services/agent-wip.js";
 import { checkHoldService } from "../src/services/check-hold.js";
 import { CHECK_QUEUE_MODE_KEY } from "../src/services/check-queue.js";
 import { checkRequestService } from "../src/services/check-request.js";
@@ -42,11 +43,25 @@ async function setup(head: string | null = HEAD) {
 describe("the standing sweep: In progress with only a queued check", () => {
   it("moves a ticket with a live check on its head and no run into Being checked", async () => {
     const s = await setup();
-    const t = await s.ticket("in_progress");
+    const t = await s.ticket("in_progress", { acceptanceCriteria: ["Works"], stateNote: "Done. 1 pass" });
     await s.job(t.id, "queued");
     expect(await s.hold.sweepProgress()).toEqual({ held: 1, returned: 0 });
     expect(await s.state(t.id)).toMatchObject({ systemState: "review" });
     expect((await s.state(t.id)).checkHoldAt).not.toBeNull();
+  });
+
+  it("a mid-work request_check (criteria not all reported) is not swept, opens no reviews on a pass, and still frees the company limit only", async () => {
+    const s = await setup();
+    const t = await s.ticket("in_progress", { acceptanceCriteria: ["Works", "Fast"], stateNote: "Halfway. 1 pass" });
+    await s.job(t.id, "queued");
+    expect(await s.hold.sweepProgress()).toEqual({ held: 0, returned: 0 });
+    expect((await s.state(t.id)).systemState).toBe("in_progress");
+    expect(await countInProgress(s.db, eq(tickets.companyId, s.co), undefined, "company")).toBe(0);
+    expect(await countInProgress(s.db, eq(tickets.companyId, s.co))).toBe(1);
+    await s.db.update(checkJobs).set({ state: "passed" }).where(eq(checkJobs.ticketId, t.id));
+    expect(await s.hold.sweepProgress()).toEqual({ held: 0, returned: 0 });
+    expect(await s.hold.settle(t.id)).toBe("none");
+    expect((await s.state(t.id)).systemState).toBe("in_progress");
   });
 
   it("leaves a ticket with a run of its own, a check on an older commit, a no-code ticket, or no check in In progress", async () => {

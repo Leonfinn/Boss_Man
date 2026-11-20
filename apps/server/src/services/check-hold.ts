@@ -5,7 +5,7 @@
 //    earlier records are not touched (no round was open, and a bounce from the hold never resets one).
 // It runs when a check job ends and again from a sweep, so a restart between a job's end and this step loses nothing.
 import { and, asc, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
-import { fullLogPointer } from "@boss-man/shared";
+import { fullLogPointer, missingVerdicts, readCriteria } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runs, tickets, workflowColumns } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -99,7 +99,10 @@ export function checkHoldService(db: Db, deps: CheckHoldDeps) {
       const head = await deps.branchHead(t.id).catch(() => null);
       if (!head) continue;
       const [job] = await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, t.id), eq(checkJobs.kind, "pre_review"), eq(checkJobs.commit, head), inArray(checkJobs.state, ["queued", "running"]))).limit(1);
-      if (t.systemState === "in_progress" && job && !own.has(t.id)) {
+      // A request_check made mid-work queues the same job as one on finished work. Only a ticket whose agent has reported every
+      // before-merge criterion is taken to be finished; any other stays In progress, so the reviews never open on unfinished code.
+      const finished = missingVerdicts(readCriteria(t.acceptanceCriteria), t.stateNote, "before").length === 0;
+      if (t.systemState === "in_progress" && job && !own.has(t.id) && finished) {
         const [col] = await db.select({ id: workflowColumns.id }).from(workflowColumns).where(and(eq(workflowColumns.projectId, t.projectId), eq(workflowColumns.systemState, "review"))).orderBy(asc(workflowColumns.position)).limit(1);
         if (!col) continue;
         const [moved] = await db
