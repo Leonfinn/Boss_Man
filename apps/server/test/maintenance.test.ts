@@ -1340,7 +1340,8 @@ describe("early building hold (BOS-1955)", () => {
     await c.maintenance.step();
     const h = (await getHold(c.db))!;
     expect(h).toMatchObject({ kind: "update", since: first.since, reason: "runner update" });
-    expect(new Date(h.deadline).getTime() - Date.now()).toBeGreaterThan(20 * MIN); // 30 minutes from the takeover, not from the build start
+    const nowMs = Date.now();
+    expect(new Date(h.deadline).getTime()).toBeGreaterThan(nowMs + 20 * MIN); // 30 minutes from the takeover, not from the build start
     expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);
     expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP}`]); // the update's own message now goes to the run going
   });
