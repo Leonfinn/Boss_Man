@@ -424,6 +424,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
+  - What this shows
   - Workflow report
 reads: 
   - /api/companies/:id/retros/latest
