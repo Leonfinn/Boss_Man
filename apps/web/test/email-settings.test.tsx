@@ -34,6 +34,7 @@ describe("Settings → Email", () => {
     render(<EmailSetting />);
     fireEvent.click(await screen.findByRole("button", { name: "Turn off" }));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("password are deleted"));
+    // test-lines-ok: proving a request is never sent has no event to wait for; the sleep only gives a wrongly sent DELETE time to show, and the confirming test proves one would be seen
     await new Promise((r) => setTimeout(r, 20));
     expect(deletes(calls)).toHaveLength(0);
   });
