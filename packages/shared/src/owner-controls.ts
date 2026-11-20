@@ -64,7 +64,7 @@ export const OWNER_CONTROLS = {
     "Show all done tasks", "Run now", "Discard draft", "Add limit",
     // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
     // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
-    "Filter", "Clear all", "Clear filters",
+    "Filter", "Clear all", "Clear filters", "Clear search",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
