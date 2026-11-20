@@ -455,6 +455,25 @@ describe("security alerts (BOS-1929)", () => {
     expect((await allTickets(c.company.id)).find((r) => r.id === otherTicket)!.systemState).toBe("done");
   });
 
+  it("BOS-2055: a ticket the CEO closed by hand is not filed again while its alert is still open; the lower id (4… before b…) owns the repo", async () => {
+    const c = await setup();
+    c.gh.dependabot = [
+      { number: 1, state: "open", pkg: "fast-uri", severity: "high", summary: "A" },
+      { number: 2, state: "open", pkg: "body-parser", severity: "low", summary: "B" },
+    ];
+    await c.svc.runOne(c.project.id);
+    const rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(2);
+    for (const r of rows) await t!.db.update(ticketsTable).set({ systemState: "done" } as never).where(eq(ticketsTable.id, r.id));
+    for (let i = 0; i < 2; i++) {
+      c.advance(61 * MIN);
+      await c.svc.runOne(c.project.id);
+    }
+    expect(await allTickets(c.company.id)).toHaveLength(2);
+    // Owner choice is a plain string sort of the project ids: "473754fd…" comes before "ba173d14…".
+    expect(["ba173d14", "473754fd"].sort()[0]).toBe("473754fd");
+  });
+
   it("BOS-2055: three alerts for one package make one ticket, and a later alert for it joins that ticket", async () => {
     const c = await setup();
     c.gh.dependabot = [
