@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Sidebar } from "../src/components/Sidebar";
 import { LinkPanel } from "../src/pages/Feedback";
+import { Features } from "../src/pages/Features";
 import { SetupChecklist } from "../src/pages/Setup";
 import { ProjectsPage } from "../src/pages/Settings";
 
@@ -54,6 +55,38 @@ describe("Feedback: create and link", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create\s+Dark mode/ }));
     await waitFor(() => expect(document.body.textContent).toMatch(/wrong|error|failed|try/i));
     expect((screen.getByRole("button", { name: /Create\s+Dark mode\s+and link it/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe("Features: Add criterion and Add area (BOS-2065)", () => {
+  it("submitting twice posts once, and the button reads Adding… meanwhile", async () => {
+    const gate = hold();
+    const posts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push(url);
+          return gate.pending;
+        }
+        if (url.endsWith("/features")) return json({ settings: { demandWeight: 1, ceoTriage: false }, drivers: [], maxDemand: 0, features: [] });
+        return json({ demandWeight: 1, ceoTriage: false, portalEnabled: true, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
+      }),
+    );
+    const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [], projects: [] };
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Criteria and areas" }));
+    fireEvent.change(await screen.findByLabelText("New criterion"), { target: { value: "Revenue" } });
+    const form = screen.getByLabelText("New criterion").closest("form")!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    const btns = (await screen.findAllByRole("button", { name: "Adding…" })) as HTMLButtonElement[];
+    expect(btns).toHaveLength(1);
+    expect(btns[0]!.disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Add" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(posts).toHaveLength(1);
+    await act(async () => gate.release(json({})));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Adding…" })).toBeNull());
   });
 });
 

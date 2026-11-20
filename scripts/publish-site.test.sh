@@ -6,12 +6,28 @@ here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 
-# A tiny checkout with just what the script calls: a git HEAD and the two site scripts it runs.
+# A tiny checkout with just what the script calls: a git HEAD and a script beside it to stand in for the notice's hook.
+# The copies are written out with printf, not "cp": a checkout whose scripts are hard links would make "cp" the
+# ticket's own script, and then the hook below would reach Boss Man for real (BOS-2070).
 repo="$t/repo"; mkdir -p "$repo/scripts" "$repo/apps/site/scripts"
-cp "$here/publish-site.sh" "$repo/scripts/"
+printf '%s\n' "$(cat "$here/publish-site.sh")" >"$repo/scripts/publish-site.sh"
+printf '#!/bin/sh\necho hook-ran\n' >"$repo/scripts/request-ceo-ticket.sh"
+# Check it really is the stub before the test is allowed to use it (see the note above).
+[ "$(tail -n 1 "$repo/scripts/request-ceo-ticket.sh")" = "echo hook-ran" ] || fail "could not write the stub hook into the temp checkout"
+
+chmod +x "$repo/scripts/publish-site.sh" "$repo/scripts/request-ceo-ticket.sh"
 git init -q "$repo"; git -C "$repo" config user.email t@t; git -C "$repo" config user.name t
 touch "$repo/x"; git -C "$repo" add -A; git -C "$repo" commit -qm one
 s="$repo/scripts/publish-site.sh"
+
+# Some sandboxes (this runner's did, BOS-2070) can't run a new file by its own path from inside a script started by
+# another script: "sh: ...: No such file or directory" even though the file is there and runs from a plain shell.
+# The stub hook is run by path because that is what the publish step supplies, so where that can't work the stub's
+# text is read out and run instead. Either way only the stub's text runs, never the real request-ceo-ticket.sh.
+stub="$repo/scripts/request-ceo-ticket.sh"
+hook_stub=0
+# The probe nests the way the fake `node` runs the hook (script -> `sh -c` -> stub), or it proves nothing.
+if [ "$(bash -c 'sh -c "$1"' probe "sh $stub" 2>/dev/null)" != hook-ran ]; then hook_stub=1; fi
 
 # Fake node: the build writes a sitemap into SITE_OUT; --fetch-previous writes a previous sitemap; --previous
 # fails (INDEXNOW_FAIL) or succeeds. Every call is logged so the order can be checked.
@@ -25,7 +41,22 @@ case "$script" in
   *indexnow.mjs)
     case "${1:-}" in
       --fetch-previous) echo '<urlset><url><loc>x/old</loc></url></urlset>' >"$2" ;;
-      --previous) [ -z "${INDEXNOW_FAIL:-}" ] || exit 0 ;; # indexnow.mjs always exits 0, even on failure
+      --previous)
+        # The publish step's INDEXNOW_ON_FAILURE must be set to the CEO-ticket hook (BOS-2070). Record it, then
+        # run it like indexnow.mjs does after a second failure when INDEXNOW_FAIL asks for one. The stub hook only
+        # prints. Where the sandbox can't run a new file by path it is the stub's text that runs instead.
+        echo "on_failure=${INDEXNOW_ON_FAILURE:-}" >>"$FAKE_LOG"
+        if [ -n "${INDEXNOW_FAIL:-}" ]; then
+          INDEXNOW_FAILURE="IndexNow answered HTTP 403"
+          export INDEXNOW_FAILURE
+          if [ -n "${HOOK_STUB:-}" ]; then
+            sh -c '. "$1"' sh "${INDEXNOW_ON_FAILURE#sh }"
+          else
+            sh -c "$INDEXNOW_ON_FAILURE"
+          fi
+          echo "hook-status=$?" >>"$FAKE_LOG"
+        fi
+        exit 0 ;;
     esac ;;
 esac
 FAKE
@@ -38,23 +69,40 @@ FAKE
 chmod +x "$t/bin/node" "$t/bin/wrangler"
 export PATH="$t/bin:$PATH" FAKE_LOG="$t/calls.log"
 
-run() { : >"$FAKE_LOG"; "$s" >"$t/out" 2>&1 || { cat "$t/out" >&2; return 1; }; }
+# Run the publish script. Where the sandbox can't run a new file by path, the fake `node` reads the stub hook's text
+# instead of running the path (HOOK_STUB); the publish script itself always runs by its own path.
+[ "$hook_stub" = 0 ] && run() { : >"$FAKE_LOG"; "$s" >"$t/out" 2>&1 || { cat "$t/out" >&2; return 1; }; }
+[ "$hook_stub" = 1 ] && run() { : >"$FAKE_LOG"; HOOK_STUB=1 "$s" >"$t/out" 2>&1 || { cat "$t/out" >&2; return 1; }; }
+
+# The notice's hook by default: the stub checkout's own request-ceo-ticket.sh, run with `sh` (the publish step's
+# word for it). Where the sandbox can't run a new file by path, the fake `node` runs the stub's text read from disk
+# instead, but the default the publish step supplies is the same two words.
+default_hook="sh $repo/scripts/request-ceo-ticket.sh"
 
 # 1. The happy path: build, fetch previous, deploy, notice — in that order, with the right values.
 CF_PAGES_PROJECT=site INDEXNOW_KEY=k12345678 WRANGLER=wrangler DIST_TMP="$t/run1" SITE_URL="https://example.test/" \
   run || fail "publish should succeed"
-order="$(sed -e 's/ .*//' "$FAKE_LOG" | tr '\n' ' ')"
+order="$(sed -e 's/ .*//' "$FAKE_LOG" | grep -v '^on_failure=' | tr '\n' ' ')"
 [[ "$order" == "node node wrangler node " ]] || fail "wrong call order: $order"
+grep -qxF "on_failure=$default_hook" "$FAKE_LOG" || fail "the notice should run the CEO-ticket hook by default: $(grep on_failure "$FAKE_LOG")"
 grep -q "build.mjs" "$FAKE_LOG" || fail "no build step"
 grep -q "wrangler pages deploy .* --project-name site --branch main" "$FAKE_LOG" || fail "wrangler args wrong: $(grep wrangler "$FAKE_LOG")"
 grep -q -- "--fetch-previous .*previous-sitemap.xml" "$FAKE_LOG" || fail "previous sitemap not saved"
 grep -q -- "--previous .*previous-sitemap.xml" "$FAKE_LOG" || fail "notice did not use the previous sitemap"
 grep -q "SITE_URL=https://example.test$\|publish-site: building https://example.test " "$t/out" || fail "trailing slash not trimmed"
 
-# 2. A failed notice does not fail the publish: same as case 1, with the notice failing, still exits 0.
+# 2. A failed notice does not fail the publish: same as case 1, with the notice failing, still exits 0. The token and
+# address are blanked so the hook only proves it ran: with a real run token it would open a ticket on the live server.
 INDEXNOW_FAIL=1 CF_PAGES_PROJECT=site INDEXNOW_KEY=k12345678 WRANGLER=wrangler DIST_TMP="$t/run2" SITE_URL="https://example.test" \
+  BOSSMAN_TOKEN='' BOSSMAN_API_URL='' \
   run || fail "a failed notice must not fail the publish"
 grep -q "Deployment complete" "$t/out" || fail "deploy output missing on notice failure"
+# ..., and when it really fails twice it runs the hook, which gets the reason and exits cleanly.
+grep -q "hook-ran" "$t/out" || fail "the CEO-ticket hook did not run after a failed notice: $(cat "$t/out")"
+hook_status="$(sed -n 's/^hook-status=//p' "$FAKE_LOG")"
+[[ "$hook_status" == "0" ]] || fail "the default hook should not fail: status '$hook_status'"
+# The real hook is written for `sh` (no bash-only syntax), so the shell the publish step supplies must run it cleanly.
+sh -n "$here/request-ceo-ticket.sh" || fail "request-ceo-ticket.sh is not a clean POSIX sh script"
 
 # 3. A failed deploy DOES fail the publish (nothing to notice after).
 if DEPLOY_FAIL=1 CF_PAGES_PROJECT=site WRANGLER=wrangler DIST_TMP="$t/run3" SITE_URL="https://example.test" "$s" >"$t/out" 2>&1; then

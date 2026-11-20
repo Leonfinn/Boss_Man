@@ -71,6 +71,32 @@ export function pageShotRefusal(criteria: readonly Criterion[], images: Readonly
     : null;
 }
 
+/** An after-merge criterion that is about what a service outside Boss Man shows (BOS-2076): a search engine, a payment or code host. */
+const OUTSIDE_SERVICE = /\b(google|bing|search console|webmaster tools?|indexnow|sitemap|stripe|paypal|cloudflare|github|npm|docker hub|ghcr|sendgrid|mailgun|twilio|telegram|slack|ntfy)\b/i;
+export const namesOutsideService = (text: string): boolean => OUTSIDE_SERVICE.test(text);
+
+/**
+ * BOS-2076: the refusal for a done move whose "pass" on an outside-service criterion carries no evidence, or null.
+ * Evidence is a link, a screenshot of this ticket attached since go-live (its id in the note) or a quoted reading
+ * ("..." with at least 6 characters). Criteria with a page or host-fact clause have their own gates. Like R37, one
+ * piece of evidence in the note covers it: the reviewer reads it against the criterion.
+ */
+export function outsideServiceEvidenceRefusal(criteria: readonly Criterion[], images: ReadonlyArray<{ id: string; createdAt: Date }>, liveSince: Date | null, note: string): string | null {
+  const verdicts = readVerdicts(criteria, note);
+  const lower = note.toLowerCase();
+  const hasLink = /https?:\/\/\S{4,}/i.test(note);
+  const hasQuote = /["“][^"”]{6,}["”]/.test(note);
+  const hasShot = images.some((img) => (!liveSince || img.createdAt.getTime() >= liveSince.getTime()) && (lower.includes(img.id.toLowerCase()) || lower.includes(img.id.slice(0, 8).toLowerCase())));
+  if (hasLink || hasQuote || hasShot) return null;
+  const lines = criteria.flatMap((c, i) => {
+    const text = criterionText(c);
+    return isAfterMerge(c) && verdicts[i]?.verdict === "pass" && namesOutsideService(text) && !pageClauses(text).length && !factClauses(text).length ? [`"${text}"`] : [];
+  });
+  return lines.length
+    ? `A pass on a check about an outside service needs evidence: ${lines.join(", ")}. Add a link to what you looked at, a screenshot (attach_image, put its id in the note) or the reading quoted in double quotes, e.g. "Sitemap read, 12 pages discovered". If the service doesn't show it yet, report the criterion as fail: the ticket still closes and Boss Man opens the follow-up.`
+    : null;
+}
+
 /** An id of an open card counts as cited when the note holds the whole id or its first 8 characters. */
 export function citedOpenCard(note: string, openCardIds: readonly string[]): string | null {
   const lower = note.toLowerCase();

@@ -10,7 +10,8 @@ case "$guard" in
   wake-classes) pkg=@boss-man/server file=test/wake-classes.test.ts ;;
   owner-controls) pkg=@boss-man/server file=test/owner-control-list.test.ts ;;
   screen-inventory) pkg=@boss-man/web file=test/screen-inventory.test.ts ;;
-  *) echo "usage: scripts/check-guards.sh wake-classes|owner-controls|screen-inventory" >&2; exit 2 ;;
+  update-waits) pkg=@boss-man/server file=test/update-waits-guard.test.ts ;;
+  *) echo "usage: scripts/check-guards.sh wake-classes|owner-controls|screen-inventory|update-waits" >&2; exit 2 ;;
 esac
 rc=0
 pnpm --filter "$pkg" exec vitest run "$file" || rc=$?
@@ -29,5 +30,9 @@ case "$guard" in
     echo "       pnpm --filter @boss-man/web exec vitest run test/screen-inventory.test.ts -u" >&2
     echo "       then read the diff of screen-inventory.txt: a removed line is a dropped section or read. A new redirect in settingsRedirect" >&2
     echo "       (apps/web/src/pages/Settings.tsx) also needs a line in REDIRECTS in apps/web/test/screen-inventory.test.ts." >&2 ;;
+  update-waits)
+    echo "guard: an update wait has no rule, or a new file reads an update hold (BOS-2058). Every wait needs a kind in WAIT_RULES" >&2
+    echo "       (apps/server/src/services/update-waits.ts) with its own end, CEO wake and screen words; the failure above names the file." >&2
+    echo "       Only then add that file to READERS in apps/server/test/update-waits-guard.test.ts." >&2 ;;
 esac
 exit "$rc"

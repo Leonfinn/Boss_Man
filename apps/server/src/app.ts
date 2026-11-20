@@ -30,7 +30,8 @@ import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListen
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
-import { runnerBusy } from "./services/runner-busy.js";
+import { serverWaitChecks } from "./services/runner-busy.js";
+import { activeWaits } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
@@ -106,7 +107,7 @@ import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { ownerAnswerEmbedLoop } from "./services/owner-answers.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
-import { CEO_REPLY_REASON, DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
+import { UPDATE_ALERT_REASON, DEFAULT_LIMITS, OWNER_OVERRIDE_PRIORITY, schedulerService, type Limits } from "./services/scheduler.js";
 import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -535,6 +536,8 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
     landingMergeIds: () => review.landingMergeIds(),
+    // BOS-2058: the owner's wrap-up pressed while a server update waits for a quiet machine belongs to it and lifts with it.
+    serverUpdateWaiting: async () => (await deployWait.get())?.phase === "waiting", // `deployWait` is built further down; this only runs on a pass
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
@@ -562,7 +565,7 @@ export async function buildApp(opts: AppOptions) {
     // company's own work, through the reply lane (the only wake a drain lets through while work is going); the owner is not asked.
     wakeCeo: async (companyId, note) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-      if (ceo) await scheduler.notify(ceo.id, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note });
+      if (ceo) await scheduler.notify(ceo.id, { reason: UPDATE_ALERT_REASON, ticketId: null, priority: 4, note });
     },
     // `sweeps` is built further down; this only runs when a hold lifts.
     afterHold: (since) => sweeps.resumeAfterUpdate(since),
@@ -628,6 +631,7 @@ export async function buildApp(opts: AppOptions) {
     return netguardAllowReport({ launcher, env, ...(await launch.ownAllows()) });
   };
   const serverStatus = serverStatusService(db, {
+    updateWaits: () => currentUpdateWaits(),
     memory,
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
@@ -1176,12 +1180,18 @@ export async function buildApp(opts: AppOptions) {
       .where(and(eq(checkJobs.state, "queued"), eq(checkJobs.companyId, companyId), eq(checkJobs.scope, "quick"), ne(checkJobs.kind, "merge")));
     return { merges: await mergeQueue.waitingCount(companyId), quickChecks: q?.n ?? 0 };
   });
+  // BOS-2058: every update wait that is on, for the owner's screens and the CEO's server_status (one list, update-waits.ts).
+  const currentUpdateWaits = async () => {
+    const landing = await review.landingWaitFacts().catch(() => ({ since: null, ids: [] as string[] }));
+    return activeWaits(db, { landingSince: landing.since, landingNames: landing.ids.map((id) => id.slice(0, 8)) });
+  };
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
   // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
   const deployWait = deployWaitService(db, {
     headroom: () => selfDeploy.headroom(),
     checksRunning: async () => {
-      return review.gateState().running + (await runnerBusy(db)).checksTotal; // the same busy count the runner drain waits on (BOS-1471)
+      // BOS-2058: only checks the hold itself stops from starting (not a worker's quick checks, which it lets through).
+      return review.gateState().running + (await serverWaitChecks(db));
     },
     openRuns: async () => {
       const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`))) as [{ n: number }];
@@ -1197,6 +1207,13 @@ export async function buildApp(opts: AppOptions) {
     drainOn: async () => !!(await getHold(db)),
     notify: (n) => notes.notify(n),
     tellCeo: (note) => selfDeploy.tellCeo(note),
+    // BOS-2058: through the CEO's reply lane, which an update's hold never holds and no wait counts (wake-classes.ts PASSES_UPDATE_HOLD).
+    wakeCeo: async (note) => {
+      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+      if (!home) return;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, home.id), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: UPDATE_ALERT_REASON, ticketId: null, priority: 4, note });
+    },
     released: async () => {
       await review.gatePump();
       await checks.sweep();
@@ -2403,7 +2420,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId) });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits() });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());

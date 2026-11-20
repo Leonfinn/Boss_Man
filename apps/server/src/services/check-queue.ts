@@ -14,6 +14,7 @@ import { record } from "./activity.js";
 import { checkFailureFacts, firstFailingLine, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 import { stageLine } from "./check-stage-line.js";
 import { softHold } from "./deploy-wait-hold.js";
+import { blocksClass } from "./update-waits.js";
 import { agedTier, retierWaiting, setTrainLaneAge, trainView } from "./merge-train.js";
 import { landingTurns } from "./landing-turn.js";
 
@@ -516,7 +517,8 @@ export function checkQueue(db: Db) {
     const policy = opts.policy ?? DEFAULT_SLOT_POLICY;
     const no = (declined: CheckDecline | null): ClaimResult => ({ jobs: [], declined: opts.dedicatedOnly ? null : declined });
     const ofCompany = (await servable(now, limit >= 2)).filter((j) => !companyId || j.companyId === companyId);
-    if (held && !worker) return no(ofCompany[0] ? declineOf(ofCompany[0], "update_hold", "new checks are paused for a server update", true) : null);
+    // BOS-2058: what the hold stops is the table's `blocks` for the server wait, the same list its quiet test counts.
+    if (held && (!worker || blocksClass("server-quiet", "quick-check-worker"))) return no(ofCompany[0] ? declineOf(ofCompany[0], "update_hold", "new checks are paused for a server update", true) : null);
     // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
     const candidates = ofCompany.filter((j) => !skip?.(j.id)).filter((j) => !held || !isLong(j));
     if (candidates.length === 0) {

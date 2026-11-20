@@ -207,6 +207,49 @@ export function missingVerdicts(criteria: readonly Criterion[], note: string | n
     .map((r) => r.criterion);
 }
 
+/** What replaces a pass that was given before the work was live (BOS-2076). It holds no pass or fail word. */
+export const NOT_YET_CHECKED = "not yet checked";
+
+const PASS_WORDS = /\b(pass|passed|passes|passing|ok|done|yes|green)\b|[✓✔]/gi;
+
+/**
+ * BOS-2076: an after-merge criterion can only be checked once the work is live, so a "pass" on one given earlier
+ * (BOS-1737 criterion 5 passed at review while Google knew none of the pages) is rewritten in the note to
+ * "not yet checked". Only the pass words of the segments that carry an after-merge pass are touched, and a
+ * rewrite is kept only when it leaves every other criterion's verdict as it was. A fail is never changed.
+ * `held` lists the criteria whose pass was taken out; `note` is the note to store.
+ */
+export function holdEarlyAfterMergePasses(criteria: readonly Criterion[], note: string): { note: string; held: string[] } {
+  const passing = (n: string) => readVerdicts(criteria, n).map((r) => r.verdict === "pass");
+  const before = passing(note);
+  const wanted = before.map((p, i) => p && isAfterMerge(criteria[i]!));
+  if (!wanted.some(Boolean)) return { note, held: [] };
+  const verdictsOf = (n: string) => readVerdicts(criteria, n).map((r) => r.verdict);
+  const original = verdictsOf(note);
+  let current = note;
+  // Finest cut first (a comma piece, so "1 pass, 5 pass" only loses the 5), then the whole sentence.
+  for (const cut of [/([.;\n,])/, /([.;\n])/]) {
+    const pieces = current.split(cut);
+    for (let p = 0; p < pieces.length; p += 2) {
+      const piece = pieces[p]!;
+      if (piece.search(PASS_WORDS) < 0 || CARD_LINE.test(piece.trim())) continue;
+      const trial = [...pieces];
+      trial[p] = piece.replace(PASS_WORDS, NOT_YET_CHECKED);
+      const next = trial.join("");
+      const v = verdictsOf(next);
+      // Keep it when it takes out an after-merge pass and changes nothing else.
+      const ok = v.every((x, i) => x === original[i] || (wanted[i] && x === null));
+      const fewer = v.filter((x, i) => x === "pass" && wanted[i]).length < verdictsOf(current).filter((x, i) => x === "pass" && wanted[i]).length;
+      if (ok && fewer) {
+        current = next;
+        pieces.splice(0, pieces.length, ...current.split(cut));
+      }
+    }
+  }
+  const after = verdictsOf(current);
+  return { note: current, held: criteria.flatMap((c, i) => (wanted[i] && after[i] !== "pass" ? [criterionText(c)] : [])) };
+}
+
 /** The after-merge criteria with no verdict yet: what keeps a merged ticket open. */
 export const unreportedAfterMerge = (criteria: readonly Criterion[], note: string | null | undefined): string[] => missingVerdicts(criteria, note, "after");
 

@@ -15,7 +15,18 @@ export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; fa
  * id (so its annotations can be asked for). `step`: the step that failed. `unstarted`: the job failed without running a
  * step or getting a runner, which is how GitHub's jobs data shows a job it refused to start (BOS-1630).
  */
-export type CiRun = { id: number; name: string; url: string; step?: string; unstarted?: boolean; /** BOS-1733: the workflow run the job is in, for a re-run of its failed jobs. */ runId?: number };
+export type CiRun = {
+  id: number;
+  name: string;
+  url: string;
+  step?: string;
+  unstarted?: boolean;
+  /** BOS-1733: the workflow run the job is in, for a re-run of its failed jobs. */
+  runId?: number;
+  /** BOS-2082: the workflow the run belongs to, and how long the failed step ran, for the slow-machine row. */
+  workflowId?: number;
+  stepSeconds?: number;
+};
 /**
  * What the merge gate reads before it merges (BOS-1070). `waiting`: jobs not finished yet. `billing`: a job didn't start
  * because of the account's spending limit or payments, which isn't the agent's to fix.
@@ -29,6 +40,30 @@ const BILLING_TEXT = /spending limit|billing|account payments|payment (?:has )?f
  * a failing test that merely mentions billing is still the agent's to fix, not an owner card.
  */
 const billingRefusal = (text: string) => /\bjob was not started\b/i.test(text) && BILLING_TEXT.test(text);
+/** BOS-2082: at most this many green runs' jobs are read for a step's usual time. */
+const BASELINE_READS = 12;
+/** BOS-2082: a test failure that ran out of time (vitest "Test timed out in 15000ms", Playwright "Timeout 30000ms exceeded"). */
+const TIMEOUT_MESSAGE = /timed? ?out|timeout/i;
+/** A summary annotation this long may have had its last entry cut by its writer's cap (ci.yml's web-browser job: 1500). */
+const SUMMARY_CUT_AT = 1400;
+/**
+ * BOS-2082: whether one failure annotation's message says only timeouts. A job may write one summary annotation for all its
+ * failures, entries joined by " | " (ci.yml's web-browser job: `file: test: first line`, at most 12, cut at 1500 characters,
+ * with no file, so it names no test file): each entry must be a timeout on its own. Only a last entry of a message long
+ * enough to have been cut may lack the word.
+ */
+export function allTimeouts(message: string): boolean {
+  const parts = message.split(" | ").filter((p) => p.trim());
+  if (!parts.length) return false;
+  const cut = parts.length > 1 && message.length >= SUMMARY_CUT_AT;
+  return parts.every((p, i) => TIMEOUT_MESSAGE.test(p) || (cut && i === parts.length - 1));
+}
+/** Seconds between two GitHub timestamps, or null when either is missing or they make no sense. */
+export function stepSeconds(start: unknown, end: unknown): number | null {
+  if (typeof start !== "string" || typeof end !== "string") return null;
+  const ms = Date.parse(end) - Date.parse(start);
+  return Number.isFinite(ms) && ms >= 0 ? ms / 1000 : null;
+}
 /** One GitHub Actions run on a branch (BOS-1072): enough to name the run and tell whether it failed. */
 export type WorkflowRun = {
   id: number;
@@ -45,7 +80,8 @@ export type WorkflowRun = {
   createdAt: string;
   updatedAt: string;
 };
-export type WorkflowStep = { number: number; name: string; status: string; conclusion: string | null };
+/** `seconds` (BOS-2082): how long the step ran, from GitHub's started_at and completed_at; null while unknown. */
+export type WorkflowStep = { number: number; name: string; status: string; conclusion: string | null; seconds?: number | null };
 /** `runner`: the runner that took the job, null while none has (BOS-1630). */
 export type WorkflowJob = { id: number; name: string; status: string; conclusion: string | null; url: string; runner?: string | null; steps: WorkflowStep[] };
 /** The error annotations a failed check run published, grouped under the check's (the job's) name. */
@@ -269,7 +305,17 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         if (!bad.length) failed.push({ id: 0, name: nameOf(r), url: String(r.html_url ?? ""), runId: Number(r.id) });
         for (const j of bad) {
           const step = j.steps.find((s) => FAILED_CONCLUSIONS.includes(String(s.conclusion)));
-          failed.push({ id: j.id, name: j.name, url: j.url, runId: Number(r.id), ...(step ? { step: step.name } : {}), ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}) });
+          const workflowId = Number(r.workflow_id);
+          failed.push({
+            id: j.id,
+            name: j.name,
+            url: j.url,
+            runId: Number(r.id),
+            ...(step ? { step: step.name } : {}),
+            ...(typeof step?.seconds === "number" ? { stepSeconds: step.seconds } : {}),
+            ...(Number.isFinite(workflowId) && workflowId > 0 ? { workflowId } : {}),
+            ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}),
+          });
         }
       }
       const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : cancelled.length ? "cancelled" : "passed";
@@ -323,9 +369,9 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
      * Annotations sit behind the Checks permission, so they are optional (BOS-1630): a refused read gives the failed step
      * instead, and a job GitHub never started is taken as its billing refusal, the one reason that leaves no step and no runner.
      */
-    async failures(cfg: GitHostConfig, token: string, runs: CiRun[], per = 10): Promise<Array<{ run: CiRun; lines: string[]; billing: boolean; paths: string[] | null }>> {
+    async failures(cfg: GitHostConfig, token: string, runs: CiRun[], per = 10): Promise<Array<{ run: CiRun; lines: string[]; billing: boolean; paths: string[] | null; timeoutsOnly?: boolean }>> {
       if (cfg.kind !== "github") return [];
-      const out: Array<{ run: CiRun; lines: string[]; billing: boolean; paths: string[] | null }> = [];
+      const out: Array<{ run: CiRun; lines: string[]; billing: boolean; paths: string[] | null; timeoutsOnly?: boolean }> = [];
       for (const run of runs.slice(0, 5)) {
         let res = run.id ? await call(cfg, token, "GET", `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null) : null;
         // BOS-1733: a fine-grained token has no Checks permission (BOS-1630), but a public repo's annotations need no token at
@@ -349,7 +395,10 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
             return `${where}${title}${String(a.message ?? "").split("\n")[0]}`.slice(0, 300);
           })
           .slice(0, per);
-        out.push({ run, lines, billing, paths });
+        // BOS-2082: every test failure ran out of time (judged on the message, not the test's title, which may say "timeout").
+        const tests = failing.filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? "")));
+        const timeoutsOnly = tests.length > 0 && tests.every((a) => allTimeouts(String(a.message ?? "")));
+        out.push({ run, lines, billing, paths, timeoutsOnly });
       }
       return out;
     },
@@ -439,8 +488,29 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           name: String(s.name ?? "step"),
           status: String(s.status ?? ""),
           conclusion: typeof s.conclusion === "string" ? s.conclusion : null,
+          seconds: stepSeconds(s.started_at, s.completed_at),
         })),
       }));
+    },
+
+    /**
+     * BOS-2082: how long one job's step usually runs: its times in up to `want` recent green runs of the same workflow (the
+     * merge gate's CI branches and main alike), newest first, skipping run `exceptRunId`. Reads at most BASELINE_READS runs'
+     * jobs. GitHub only; [] elsewhere or when nothing can be read, which the slow-machine row reads as "no baseline".
+     */
+    async stepTimes(cfg: GitHostConfig, token: string, q: { workflowId: number; job: string; step: string; exceptRunId?: number; want: number }): Promise<number[]> {
+      if (cfg.kind !== "github") return [];
+      const res = await call(cfg, token, "GET", `/actions/workflows/${q.workflowId}/runs?status=success&per_page=20`);
+      const rows = (res.json && !Array.isArray(res.json) ? res.json.workflow_runs : null) as Array<Record<string, unknown>> | null;
+      if (!res.ok || !Array.isArray(rows)) return [];
+      const out: number[] = [];
+      for (const r of rows.filter((x) => Number(x.id) !== q.exceptRunId).slice(0, BASELINE_READS)) {
+        if (out.length >= q.want) break;
+        const jobs = await this.runJobs(cfg, token, Number(r.id)).catch(() => [] as WorkflowJob[]);
+        const s = jobs.find((j) => j.name === q.job && j.conclusion === "success")?.steps.find((x) => x.name === q.step && x.conclusion === "success");
+        if (typeof s?.seconds === "number") out.push(s.seconds);
+      }
+      return out;
     },
 
     /**

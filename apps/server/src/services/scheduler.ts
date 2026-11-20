@@ -43,7 +43,7 @@ import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { agedRank, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { agedRank, duringUpdate, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -97,6 +97,15 @@ export const WATCH_REASON = "ticket watch";
  * agent outside the work limits, with the CEO's run tools, and ends after the answer.
  */
 export const CEO_REPLY_REASON = "ceo reply";
+/**
+ * BOS-2058: a CEO wake that reports on an update itself ("the update is late", "the swap is overdue"). It runs in the
+ * reply lane exactly like CEO_REPLY_REASON, but is its own reason so that it alone passes the update's hold
+ * (wake-classes.ts PASSES_UPDATE_HOLD): routine reply wakes stay held while the swap may happen at any moment (DR-048 A).
+ */
+export const UPDATE_ALERT_REASON = "update alert";
+/** Wakes that start a short reply-lane run (purpose "reply"). */
+export const REPLY_LANE_REASONS: readonly string[] = [CEO_REPLY_REASON, UPDATE_ALERT_REASON];
+export const isReplyLane = (reason: string) => REPLY_LANE_REASONS.includes(reason);
 export const REPLY_PURPOSE = "reply";
 /** BOS-1082: said to a run that starts with no ticket checkout, so the agent doesn't take its folder for a lost one. */
 export const noCheckoutNote = (folder: string) =>
@@ -858,6 +867,11 @@ export function schedulerService(
       const copy = await reviewCopy(w);
       if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included, with its packages installed from the shared store. Read the code around the change and run one related test with \`pnpm vitest run <path/to/that.test.ts>\` there (no permission card) before you give your verdict; nothing you change there reaches the ticket. If the install didn't happen (node_modules is missing or the test command can't find vitest), run \`pnpm install --frozen-lockfile --prefer-offline --store-dir "$(pnpm store path)"\` in that folder first, then run the test. For any other ticket listed, use the review tool's diff and tickets read.`);
     }
+    if (w.reason === UPDATE_ALERT_REASON)
+      lines.push(
+        "",
+        "This is a short run about an update that is waiting (it started while the update holds other work, so keep it short: the swap may happen while you work). Read server_status's updateWaits, decide whether anything needs doing (cancel or go ahead with the update, tell the owner, or nothing), do it, and stop. Don't start other work, edit files or run long commands.",
+      );
     if (w.reason === CEO_REPLY_REASON)
       lines.push(
         "",
@@ -1063,7 +1077,7 @@ export function schedulerService(
     const runTicketId = onTicket ?? w.ticketId;
     // Starting work is for a wake with a ticket of its own; a reviewer was handed a ticket in
     // review, so neither starting nor the start check applies to it.
-    const reply = w.reason === CEO_REPLY_REASON;
+    const reply = isReplyLane(w.reason);
     const startsTicket = !!w.ticketId && w.reason !== WATCH_REASON && !reply;
     const startedIt = startsTicket ? await startTicket(w.ticketId!) : false;
     const wipRefused = startsTicket && !startedIt ? await wipHeldRefusal(w.ticketId!) : null;
@@ -1271,7 +1285,7 @@ export function schedulerService(
             or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)), sql`coalesce(${wakes.statusReason}, '') not like ${QUOTA_HOLD_LIKE}`)),
             sql`coalesce(${wakes.statusReason}, '') <> 'agent paused'`,
             ne(wakes.reason, CHAT_REASON),
-            ne(wakes.reason, CEO_REPLY_REASON),
+            notInArray(wakes.reason, [...REPLY_LANE_REASONS]),
           ),
         );
       // A wake for an Infinite-mode agent waits for a background slot (BOS-279), like its live runs above,
@@ -1520,7 +1534,7 @@ export function schedulerService(
       const priority = input.priority ?? 2;
       const t = now();
       // Chat runs have their own tools, and a watch report, a tree-stopped brief or a retro (its duty lines go in the prompt) is built from its wake, so none takes a steer.
-      if (note && input.reason !== CHAT_REASON && input.reason !== CEO_REPLY_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
+      if (note && input.reason !== CHAT_REASON && !isReplyLane(input.reason) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
         const [live] = await db
           .select({ id: runs.id })
           .from(runs)
@@ -1796,9 +1810,17 @@ export function schedulerService(
         // name (the 19 Nov update sat 86 minutes with chat paused): chat pauses only for the swap itself.
         const merging = hold.kind !== "wrapup" && work === 0 && checksWaited === 0 && deps.landingMergeIds ? (await deps.landingMergeIds().catch(() => [] as string[])).length : 0;
         const mystery = work === 0 && checksWaited === 0 && merging === 0 && unknownWait(hold, t);
-        // Only the owner's chat passes for the two new cases: the CEO's one-off replies (such as BOS-1954's late-swap wake)
-        // stay held there, so a run that ends is not followed by a reply run the swap would then wait for.
-        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : merging > 0 || mystery ? queue.filter((w) => w.reason === CHAT_REASON) : [];
+        // BOS-2058: a wake that reports on the update itself (wake-classes.ts PASSES_UPDATE_HOLD: UPDATE_ALERT_REASON, which
+        // carries every "update is late" note) is never held by it. On 20 Nov at 11:48 the CEO's late-swap wake sat "update
+        // pending" because a landing and then nothing nameable was what the swap waited on. Its run is a short reply-lane
+        // run. Routine CEO replies stay held once nothing else runs (DR-048 A): the swap may happen at any moment.
+        const busy = work > 0 || checksWaited > 0;
+        const passes = (w: (typeof queue)[number]) => {
+          if (duringUpdate(w.reason) === "passes") return true;
+          if (w.reason === CHAT_REASON) return busy || merging > 0 || mystery;
+          return busy && w.reason === CEO_REPLY_REASON;
+        };
+        const through = queue.filter(passes);
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
         const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
@@ -1872,7 +1894,7 @@ export function schedulerService(
 
       // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
       // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
-      for (const w of fairOrder(pass, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
+      for (const w of fairOrder(pass, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || isReplyLane(x.reason))) {
         const defer = async (reason: string, notBefore: Date | null) => {
           // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
           if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {
@@ -1938,7 +1960,7 @@ export function schedulerService(
           continue;
         }
         const isChat = w.reason === CHAT_REASON;
-        const isReply = w.reason === CEO_REPLY_REASON;
+        const isReply = isReplyLane(w.reason);
         // An Infinite-mode agent (BOS-279) takes a background slot instead of the instance and company ones, and
         // no card slot is kept among the background ones: they are slow and low-priority by design.
         const [waker] = isChat || isReply ? [] : await db.select({ model: agents.model }).from(agents).where(eq(agents.id, w.agentId));
