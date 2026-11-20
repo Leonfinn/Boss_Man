@@ -1012,6 +1012,7 @@ export function MergeCarrySetting() {
         <input type="number" min={0} max={240} step={5} value={shown} style={{ width: 80 }} disabled={act.busy} onChange={(e) => setMinutes(e.target.value)} aria-label="Landing turn in minutes" />
         <SaveButton
           dirty={shown !== String(d.turnMinutes)}
+          ariaLabel="Save landing turn"
           saved={savedTurn}
           busy={act.busy}
           disabled={!/^\d+$/.test(shown) || Number(shown) > 240}

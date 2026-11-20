@@ -160,8 +160,6 @@ export const OWNER_CONTROLS = {
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
     // BOS-1550: copy the ready-filled compose file shown after adding.
     "Copy compose file",
-    // Checks → the landing turn's own save (BOS-1762).
-    "Save landing turn",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": [
@@ -170,7 +168,7 @@ export const OWNER_CONTROLS = {
     "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
-  Reviews: ["Reset to defaults", "Save"],
+  Reviews: ["Reset to defaults"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
   "Team and CEO": ["Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Save", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.

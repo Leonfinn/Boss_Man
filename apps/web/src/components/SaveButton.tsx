@@ -32,12 +32,12 @@ export function useSaveState<T extends object>(form: T | null) {
  * save until a field changes. A failed save leaves the form dirty, so the button stays primary (the error text is the
  * caller's own note).
  */
-export function SaveButton({ dirty, saved, busy, disabled, style, onClick }: { dirty: boolean; saved: boolean; busy?: boolean; disabled?: boolean; style?: React.CSSProperties; onClick?: () => void }) {
+export function SaveButton({ dirty, saved, busy, disabled, style, onClick, ariaLabel }: { dirty: boolean; saved: boolean; busy?: boolean; disabled?: boolean; style?: React.CSSProperties; onClick?: () => void; ariaLabel?: string }) {
   const clean = !dirty;
   const hint = dirty && !busy;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", ...style }}>
-      <button type={onClick ? "button" : "submit"} onClick={onClick} className={clean || busy ? "btn" : "btn primary"} disabled={busy || clean || disabled}>
+      <button type={onClick ? "button" : "submit"} onClick={onClick} aria-label={ariaLabel} className={clean || busy ? "btn" : "btn primary"} disabled={busy || clean || disabled}>
         {busy ? "Saving…" : clean && saved ? "Saved ✓" : "Save"}
       </button>
       {hint ? (
