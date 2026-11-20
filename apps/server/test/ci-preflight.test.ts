@@ -133,10 +133,50 @@ describe("GitHub CI before review (BOS-1664)", () => {
     // The state a restart leaves: a started row, no result row, nothing in memory.
     await s.db.insert(checkResults).values({ companyId: s.co, ticketId: s.ticket, sha: "headcommit1", kind: "ci_preflight_started", passed: false, detail: s.agent });
     const fresh = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, wake: (_a, w) => void s.wakes.push(w), context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
-    expect(await fresh.recover()).toBe(1);
+    expect(await fresh.recover()).toMatchObject({ launched: 1, skipped: 0 });
     await settled(s);
     expect(s.wakes[0]!.note).toMatch(/passed/);
-    expect(await fresh.recover()).toBe(0);
+    expect(await fresh.recover()).toMatchObject({ launched: 0, skipped: 0 });
+  });
+
+  it("a run whose runner isn't connected yet is skipped, logged, and retried until it is (once per head)", async () => {
+    const s = await setup({ files: [wf], ci: "passed" });
+    await s.db.insert(checkResults).values({ companyId: s.co, ticketId: s.ticket, sha: "headcommit1", kind: "ci_preflight_started", passed: false, detail: s.agent });
+    let connected = false;
+    const logs: string[] = [];
+    const ctx = { target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }) as MergeResult, publish: s.publish, unpublish: s.unpublish };
+    const fresh = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, log: (l) => void logs.push(l), wake: (_a, w) => void s.wakes.push(w), context: async () => (connected ? ctx : null) });
+    expect(await fresh.recover()).toMatchObject({ launched: 0, skipped: 1 });
+    expect(logs.at(-1)).toMatch(/0 relaunched, 1 skipped/);
+    const stop = fresh.recoverRepeatedly({ firstMs: 1, everyMs: 5, forMs: 10_000 });
+    connected = true;
+    await settled(s);
+    stop();
+    expect(s.wakes).toHaveLength(1);
+    expect(logs.some((l) => /1 relaunched, 0 skipped/.test(l))).toBe(true);
+    expect(await fresh.recover()).toMatchObject({ launched: 0, skipped: 0 });
+  });
+
+  it("retries stop at the limit with a log line naming the tickets still skipped", async () => {
+    const s = await setup({ files: [wf] });
+    await s.db.insert(checkResults).values({ companyId: s.co, ticketId: s.ticket, sha: "headcommit1", kind: "ci_preflight_started", passed: false, detail: s.agent });
+    const logs: string[] = [];
+    const fresh = ciPreflightService(s.db, { hosts: {} as never, log: (l) => void logs.push(l), context: async () => null });
+    // forMs < everyMs: the first try is the only one, then it gives up
+    const stop = fresh.recoverRepeatedly({ firstMs: 1, everyMs: 60_000, forMs: 1_000 });
+    await vi.waitFor(() => expect(logs.some((l) => /giving up/.test(l) && l.includes(s.ticket.slice(0, 8)))).toBe(true), { timeout: 5000 });
+    stop();
+  });
+
+  it("an error while setting up a skipped run is logged", async () => {
+    const s = await setup({ files: [wf] });
+    await s.db.insert(checkResults).values({ companyId: s.co, ticketId: s.ticket, sha: "headcommit1", kind: "ci_preflight_started", passed: false, detail: s.agent });
+    const logs: string[] = [];
+    const fresh = ciPreflightService(s.db, { hosts: {} as never, log: (l) => void logs.push(l), context: async () => Promise.reject(new Error("runner lookup broke")) });
+    const r = await fresh.recover();
+    expect(r.launched).toBe(0);
+    expect(r.skippedIds).toContain(s.ticket);
+    expect(logs.some((l) => /runner lookup broke/.test(l))).toBe(true);
   });
 
   it("the pushed branch is removed even when the run throws after publishing", async () => {

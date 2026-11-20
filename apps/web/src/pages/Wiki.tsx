@@ -2,6 +2,7 @@
 // ticket link back to it, and every save is kept, so an older version can be put back.
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Menu as MenuIcon } from "lucide-react";
+import { NoCompany } from "../components/NoCompany";
 import { api, type Company } from "../api";
 import { useFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -560,7 +561,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
         </p>
       )}
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <div className="wiki">
           {narrow && (

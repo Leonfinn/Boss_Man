@@ -135,7 +135,7 @@ import { skillRoutes } from "./routes/skills.js";
 import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
-import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
@@ -507,6 +507,7 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
+    landingMergeIds: () => review.landingMergeIds(), // `review` is built further down; this only runs during a drain
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
@@ -534,6 +535,7 @@ export async function buildApp(opts: AppOptions) {
     passInfo: () => scheduler.passInfo(),
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
+    landingMergeIds: () => review.landingMergeIds(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
     // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
@@ -1299,6 +1301,7 @@ export async function buildApp(opts: AppOptions) {
   const ciPreflight = ciPreflightService(db, {
     hosts: gitHosts,
     timing: { ...CI_PUBLISH_TIMING, ...opts.ciTiming },
+    log: (m) => app.log.warn(m),
     wake: (agentId, w) => scheduler.notify(agentId, w),
     context: async (t) => {
       const [p] = await db.select({ repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase, defaultBranch: projects.defaultBranch }).from(projects).where(eq(projects.id, t.projectId));
@@ -1327,9 +1330,9 @@ export async function buildApp(opts: AppOptions) {
   });
   const checkRequests = checkRequestService(db, { preflight: ciPreflight, command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
   // A restart loses the in-memory GitHub-CI pre-flight runs; start those again once runners have had time to reconnect.
-  const preflightRecover = setTimeout(() => void ciPreflight.recover().catch(() => undefined), 60_000);
-  preflightRecover.unref();
-  app.addHook("onClose", async () => clearTimeout(preflightRecover));
+  // Runners may come back later than 60 s after an update, so tickets skipped for want of one are retried every 2 minutes for 30 minutes.
+  const stopPreflightRecover = ciPreflight.recoverRepeatedly({ firstMs: 60_000, everyMs: 120_000, forMs: 30 * 60_000 });
+  app.addHook("onClose", async () => stopPreflightRecover());
   // BOS-1749: bossman-ci/* branches the gate's own cleanup missed (a restart mid-check, a refused delete) are deleted from GitHub.
   // First sweep 5 minutes after start (so old leftovers go without anyone asking), then every 30 minutes; branches under 6 hours old stay.
   const sweepCi = () => void review.sweepCiBranches().catch(() => undefined);
@@ -1886,7 +1889,6 @@ export async function buildApp(opts: AppOptions) {
 
     // Work: projects, boards, tickets, dependencies, objectives (R16–R18, R25).
     const State = z.enum(SYSTEM_STATES);
-    const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
     const TicketFields = z.object({
       title: z.string().trim().min(1).max(200),
       // The description is an owner message box too: a pasted log goes in whole (BOS-502).
@@ -2018,16 +2020,17 @@ export async function buildApp(opts: AppOptions) {
     // The reviews a ticket needs, every round, newest first (review kinds).
     owner.get("/api/tickets/:id/reviews", async (req) => listReviews(db, IdParam.parse(req.params).id));
 
-    // The runs on a ticket, oldest first, for its activity feed (R76).
+    // The newest 200 runs on a ticket, oldest first, for its activity feed (R76).
     owner.get("/api/tickets/:id/runs", async (req) => {
       const { id } = IdParam.parse(req.params);
-      return db
+      const newest = await db
         .select({ id: runsTable.id, agent: agents.name, agentId: runsTable.agentId, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, purpose: runsTable.purpose })
         .from(runsTable)
         .leftJoin(agents, eq(agents.id, runsTable.agentId))
         .where(eq(runsTable.ticketId, id))
-        .orderBy(asc(runsTable.startedAt))
+        .orderBy(desc(runsTable.startedAt))
         .limit(200);
+      return newest.reverse();
     });
 
     // A ticket's conversation with the agents working it (R65).

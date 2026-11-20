@@ -2,6 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, type Agent, type Company, type Project } from "../../api";
 import { usePoll } from "../../hooks";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
+import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 import { ProjectReviews } from "../../components/ReviewPolicy";
 import { QuickAdd } from "../Board";
 import { StarButton } from "../Agents";
@@ -214,8 +216,14 @@ export function GithubWatch({ projectId }: { projectId: string }) {
     setForm(f);
     sv.reset(f);
   };
-  useEffect(() => void api<GithubWatchView>(url).then(load).catch(() => {}), [projectId]);
-  if (!w || !form) return null;
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const fetchWatch = () => {
+    setLoadError(null);
+    api<GithubWatchView>(url).then(load).catch((e: Error) => setLoadError(e.message));
+  };
+  useEffect(fetchWatch, [projectId]);
+  if (loadError && !w) return <LoadError what="the GitHub feedback watcher" message={loadError} onRetry={fetchWatch} />;
+  if (!w || !form) return <Loader label="Loading the GitHub feedback watcher" />;
   const save = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
@@ -238,7 +246,7 @@ export function GithubWatch({ projectId }: { projectId: string }) {
     <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "start", paddingTop: 12, borderTop: "1px solid var(--line)" }}>
       <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>GitHub feedback watcher</p>
       <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
-        Files new issues, discussions and comments from a GitHub repo into the feedback inbox for Support to triage. Off until you switch it on. It never replies or labels anything on GitHub; the one thing it can change is a security alert, which the security reviewer closes after checking it. The token is a fine-grained token (Issues, Discussions and Metadata: read; Secret scanning alerts and Dependabot alerts: read and write), saved in Secrets and granted to the company as <span className="mono">{w.tokenName}</span>. {w.hasToken ? "A token is granted." : "No token is granted yet."}
+        Files new issues, discussions and comments from a GitHub repo into the feedback inbox for Support to triage. Off until you switch it on. It changes only two things on GitHub: Support's replies on issues and discussions (and closing them once the outcome is known), and a security alert the security reviewer closes after checking it. It never labels or edits anything. The token is a fine-grained token (Metadata: read; Issues, Discussions, Secret scanning alerts and Dependabot alerts: read and write), saved in Secrets and granted to the company as <span className="mono">{w.tokenName}</span>. {w.hasToken ? "A token is granted." : "No token is granted yet."}
       </p>
       <div className="field" style={{ gridColumn: "1 / -1" }}>
         <label>
@@ -327,14 +335,14 @@ export function ProjectBrief({ p }: { p: Project }) {
  * One project as a collapsed row: name, star, Kanban button and a one-line summary. "Edit settings" opens the form.
  * The form stays mounted while collapsed (just hidden), so unsaved edits are never lost by collapsing.
  */
-function ProjectCard({ p, go, agents, onStar, onChanged }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; onChanged: () => void }) {
+function ProjectCard({ p, go, agents, onStar, starBusy, onChanged }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; starBusy?: boolean; onChanged: () => void }) {
   const [open, setOpen] = useState(false);
   const summary = `${p.repoUrl ? "Repo set" : "No repo"} · ${p.landing === "pull_request" ? "opens pull requests" : "merges into the default branch"}`;
   return (
     <div style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
         <a href={`#/board/${p.id}`} style={{ fontWeight: 600 }}>{p.name}</a>
-        <StarButton agent={p} where="Projects" onToggle={onStar} />
+        <StarButton agent={p} where="Projects" onToggle={onStar} disabled={starBusy} />
         <button type="button" className="btn small" onClick={() => go(`board/${p.id}`)}>
           Open {p.name}'s Kanban
         </button>
@@ -355,6 +363,13 @@ function ProjectCard({ p, go, agents, onStar, onChanged }: { p: Project; go: (to
 export function ProjectsPage({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged?: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const projects = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([])), 60_000, `projects-${company?.id ?? "none"}`);
+  const act = useAction();
+  const patch = (id: string, body: Record<string, boolean>) =>
+    void act.run(async () => {
+      await api(`/api/projects/${id}`, { method: "PATCH", body });
+      projects.reload();
+      onChanged?.();
+    });
   return (
     <>
       <header className="page-head">
@@ -381,17 +396,18 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
             </p>
             {projects.data?.length
               ? projects.data.filter((p) => !p.archivedAt).map((p) => (
-                  <ProjectCard key={p.id} p={p} go={go} agents={company.agents} onStar={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { starred: !p.starred } }).then(() => { projects.reload(); onChanged?.(); })} onChanged={() => { projects.reload(); onChanged?.(); }} />
+                  <ProjectCard key={p.id} p={p} go={go} agents={company.agents} onStar={() => patch(p.id, { starred: !p.starred })} starBusy={act.busy} onChanged={() => { projects.reload(); onChanged?.(); }} />
                 ))
               : projects.data && <p>No projects yet.</p>}
+            {act.view}
             {projects.data?.some((p) => p.archivedAt) && (
               <details>
                 <summary>Archived ({projects.data.filter((p) => p.archivedAt).length})</summary>
                 {projects.data.filter((p) => p.archivedAt).map((p) => (
                   <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
                     <a href={`#/board/${p.id}`}>{p.name}</a>
-                    <button type="button" className="btn small" onClick={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { archived: false } }).then(() => { projects.reload(); onChanged?.(); })}>
-                      Unarchive
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => patch(p.id, { archived: false })}>
+                      {act.busy ? "Saving…" : "Unarchive"}
                     </button>
                   </div>
                 ))}

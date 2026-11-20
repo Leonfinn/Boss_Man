@@ -16,9 +16,10 @@ export const REAL_USE_LABEL = "Real use:";
 /** A walk-through shorter than this ("Real use: fine") says nothing. */
 export const REAL_USE_MIN_CHARS = 40;
 
-/** What the walk-through covers, worded once for the refusals, the wake and the tool texts. */
+/** What the walk-through covers, worded once for the refusals, the wake and the tool texts. The "comes in from
+ * outside" clause is BOS-1933 (R53); the list that enforces it is apps/server/src/services/inbound-sources.ts. */
 export const REAL_USE_ASK =
-  'walk the owner\'s life with it: day 1, after the next "Build and update runners" or server update, after a restart, a week on, and the owner away. Name every step the owner repeats and how often. A step they must repeat routinely, or one that only works while someone watches it, fails: request changes.';
+  'walk the owner\'s life with it: day 1, after the next "Build and update runners" or server update, after a restart, a week on, and the owner away. Name every step the owner repeats and how often. For anything that comes in from outside (an alert, an issue, a message), say who reads it, who acts and who closes it where it came from. A step they must repeat routinely, or one that only works while someone watches it, fails: request changes.';
 
 /** The criteria cap (acceptanceCriteriaSchema). */
 const MAX_CRITERIA = 10;

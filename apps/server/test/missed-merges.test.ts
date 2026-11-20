@@ -61,7 +61,9 @@ async function setup() {
     return json(404, { error: "unknown" });
   }) as typeof globalThis.fetch;
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch, deployerDir: dir, launcher: { url: "http://launcher:3105", keyFile: path.join(dir, "key") } });
+  // An injected clock (BOS-1951): a test moves it forward instead of waiting.
+  let offset = 0;
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => new Date(Date.now() + offset), fetch, deployerDir: dir, launcher: { url: "http://launcher:3105", keyFile: path.join(dir, "key") } });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -79,10 +81,12 @@ async function setup() {
   /** When set, the runner holds its answer to the merge push until released (a push in flight). */
   let holdPush = false;
   const heldPush: Array<() => void> = [];
+  const starts: Array<Extract<RunnerCommand, { type: "run.start" }>> = [];
   built.runners.connect(
     reg.runnerId,
     (c) => {
       const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
+      if (c.type === "run.start") starts.push(c);
       if (c.type === "workspace.diff") ok(DIFF);
       if (c.type === "workspace.carried") ok({ carried: [] });
       if (c.type === "workspace.migrations") ok({ needed: false, reason: "free" });
@@ -108,7 +112,7 @@ async function setup() {
     return row(t.id);
   };
   const wakesOf = (agentId: string, reason: string) => db.select().from(wakes).where(and(eq(wakes.agentId, agentId), eq(wakes.reason, reason)));
-  return { ...built, db, close, dir, req, company, ceo, worker, project, row, ticket, main, mainLogAsks, recreated, wakesOf, setHoldPush: (v: boolean) => (holdPush = v), heldPush };
+  return { ...built, db, close, dir, req, company, ceo, worker, project, row, ticket, main, mainLogAsks, recreated, wakesOf, setHoldPush: (v: boolean) => (holdPush = v), heldPush, starts, advance: (ms: number) => (offset += ms) };
 }
 
 describe("reading a gate merge message (BOS-1645)", () => {
@@ -186,6 +190,51 @@ describe("a merge whose check is still queued doesn't hold the runner swap (BOS-
     expect((await c.review.landingMergesByCompany()).get(c.company.id)).toBe(1);
     c.heldPush.shift()!();
     await until(async () => !(await c.review.landingMergesByCompany()).size, "the landing to end");
+  });
+});
+
+// BOS-1951: on 19 Nov the banner said only "runner updating" and the owner's CEO chat was paused for the whole wait, because
+// the banner and the chat allowance counted agent runs and checks but not the merges being pushed (or anything else).
+describe("what holds the swap is named, and chat keeps answering until the swap itself (BOS-1951)", () => {
+  type Status = { phase: string; overdue: boolean; chatOpen: boolean; merges: number; mergesList: Array<{ ticket: string | null }>; unknownWait: boolean; expectedFinishAt: string | null };
+  /** Owner chat message, then one scheduling pass: how many new runs it started. */
+  async function chatStarts(c: Awaited<ReturnType<typeof setup>>) {
+    const before = c.starts.length;
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Are you there?" });
+    await c.scheduler.tick();
+    return c.starts.length - before;
+  }
+
+  it("a merge being pushed is named in the status, the swap waits, and chat is answered meanwhile", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the thing");
+    c.setHoldPush(true);
+    await c.review.startLanding(t.id, "Sam", null, { skipChecks: true });
+    await until(() => c.heldPush.length > 0, "the merge push");
+    await c.req("POST", "/api/maintenance/start", {});
+    const st = (await c.req("GET", "/api/maintenance")).json() as Status;
+    expect(st).toMatchObject({ phase: "waiting", merges: 1, chatOpen: true, unknownWait: false, expectedFinishAt: null, overdue: false });
+    expect(st.mergesList).toHaveLength(1);
+    expect(st.mergesList[0]!.ticket).toMatch(/-\d+$/); // named by its ticket reference
+    // Chat is answered although no agent run or check is going: the old code held it (wake stayed queued "update pending").
+    expect(await chatStarts(c)).toBe(1);
+    // Past the hold's deadline it is running late, still named, still answering.
+    c.advance(31 * 60_000);
+    expect(((await c.req("GET", "/api/maintenance")).json() as Status)).toMatchObject({ merges: 1, overdue: true, chatOpen: true });
+    c.heldPush.shift()!();
+    await until(async () => !(await c.review.landingMergesByCompany()).size, "the landing to end");
+  });
+
+  it("held by nothing it can name: a short pause is only the swap itself; after that it says late and chat answers", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", "/api/maintenance/start", {});
+    // The first minute (the swap itself): "swapping", chat is held.
+    expect(((await c.req("GET", "/api/maintenance")).json() as Status)).toMatchObject({ phase: "swapping", unknownWait: false, chatOpen: false });
+    expect(await chatStarts(c)).toBe(0);
+    // Nothing swapped it by 3 minutes: late, said so, chat is open (the 19 Nov wait was 86 minutes of this).
+    c.advance(3 * 60_000);
+    expect(((await c.req("GET", "/api/maintenance")).json() as Status)).toMatchObject({ phase: "waiting", overdue: true, unknownWait: true, chatOpen: true, expectedFinishAt: null });
+    expect(await chatStarts(c)).toBe(1);
   });
 });
 

@@ -22,7 +22,7 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 /** The card a waiting merge is held by (BOS-1078): named, with who raised it and a link straight to it. */
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; ranOn?: string | null; statusLine?: StatusLine };
-type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
+type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string; stageLine?: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" };
@@ -90,6 +90,15 @@ export function freeSlotsText(free: number, slots: number): string {
   if (free >= slots) return slots === 1 ? "The slot is free." : slots === 2 ? "Both slots are free." : `All ${slots} slots are free.`;
   if (free === 0) return slots === 1 ? "The slot is busy." : "No slot is free.";
   return `${free} of ${slots} slots are free.`;
+}
+
+/**
+ * BOS-1896: the empty Quick checks tab lists no checks, so a busy slot is a merge check's (the queue
+ * counts merge checks in `running` too). Name it rather than leave "the slot is busy" unexplained.
+ */
+export function emptyQuickChecksSlotText(free: number, slots: number): string {
+  if (free === 0) return slots === 1 ? "A merge check is using the slot." : `Merge checks are using all ${slots} slots.`;
+  return freeSlotsText(free, slots);
 }
 
 /** The Needs you button for a row, by the kind of card behind it. Null when there is no card to open. */
@@ -312,7 +321,7 @@ export function Waiting({ rows, companyId, onMoved, serverHost }: { rows: Waitin
 
 const RECENT_SHOWN = 3;
 
-function Recent({ rows }: { rows: RecentRow[] }) {
+export function Recent({ rows }: { rows: RecentRow[] }) {
   const [all, setAll] = useState(false);
   const shown = all ? rows : rows.slice(0, RECENT_SHOWN);
   const more = rows.length - shown.length;
@@ -332,6 +341,7 @@ function Recent({ rows }: { rows: RecentRow[] }) {
               <p className="mq-line">
                 {r.detail} · {ago(r.at)}
               </p>
+              {r.stageLine ? <p className="mq-line muted" data-stage-line="">{r.stageLine}</p> : null}
             </article>
           ))}
           {more > 0 && (
@@ -347,7 +357,8 @@ function Recent({ rows }: { rows: RecentRow[] }) {
 
 type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null; seatPlace?: number | null; lane?: string | null };
 type IdleSlotRow = { machine: string; line: string; expected: boolean };
-type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; serverHost?: string | null; rows: CheckRow[]; idleSlots?: IdleSlotRow[] };
+type FinishedCheck = { id: string; ticketId: string; ref: string | null; title: string; passed: boolean; at: string; stageLine: string | null };
+type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; serverHost?: string | null; rows: CheckRow[]; idleSlots?: IdleSlotRow[]; finished?: FinishedCheck[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
 /** The one "main is red" banner (BOS-1207): said once, naming the ticket that fixes main when one is queued. */
@@ -409,7 +420,7 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
       {!rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
           <strong>No quick checks queued.</strong> When an agent asks for a quick check, it shows here until it finishes. Merge checks are on the Merges tab.{" "}
-          {freeSlotsText(free, data.slots)}
+          {emptyQuickChecksSlotText(free, data.slots)}
         </div>
       ) : (
         <div className="mq-list" data-checks-list="true">
@@ -439,6 +450,24 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
           ))}
         </div>
       )}
+      {/* BOS-1938: the last finished quick and full checks, each with its stage line when step times were kept. */}
+      {data.finished?.length ? (
+        <>
+          <SectionHead title="Recently finished" fact="" />
+          <div className="mq-list" data-checks-finished="true">
+            {data.finished.map((f) => (
+              <article key={f.id} className="card mq-item">
+                <div className="mq-head">
+                  <TicketLink id={f.ticketId} ref={f.ref} title={f.title} />
+                  <span className={`tag ${f.passed ? "green" : "red"}`}>{f.passed ? "passed" : "failed"}</span>
+                </div>
+                <p className="mq-line">{ago(f.at)}</p>
+                {f.stageLine ? <p className="mq-line muted" data-stage-line="">{f.stageLine}</p> : null}
+              </article>
+            ))}
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }

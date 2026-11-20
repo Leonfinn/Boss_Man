@@ -106,10 +106,12 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
   // assigned, with a note saying why. Boss Man's own moves are held too; only the owner's override (overLimit, not internal) skips it.
   let held: string | null = null;
   let urgentOver = false;
+  let nextUp = false;
   if (target === "in_progress" && (t.systemState === "backlog" || t.systemState === "ready") && !(opts.overLimit && !opts.internal) && !opts.projectId) {
-    const r = await agentWipHold(db, t);
+    const r = await agentWipHold(db, t, { by: opts.by });
     urgentOver = r.urgentOver;
     if (r.hold) {
+      nextUp = r.hold.scope === "next_up" && !r.hold.second;
       const ready = t.systemState === "ready" ? { id: t.columnId } : (await db.select().from(workflowColumns).where(and(eq(workflowColumns.projectId, boardId), eq(workflowColumns.systemState, "ready"))).orderBy(asc(workflowColumns.position)))[0];
       if (!ready) throw new WorkError(422, "That column isn't on this project's board.");
       held = r.hold.reason;
@@ -134,6 +136,9 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
   // The hold is a field, so a later state note can't erase it (BOS-1180): set when held, kept while the ticket stays in Ready, cleared on leaving it.
   if (held) fields.wipHeldAt = t.systemState === "ready" && t.wipHeldAt ? t.wipHeldAt : at; // the first hold's time, so "held for 30 minutes" isn't reset by each refusal
   else if (target !== "ready") fields.wipHeldAt = null;
+  // "Next up" (BOS-1908): the one marked hold. A ticket that stays in Ready keeps it; a second hold (waiting behind the Next up) is not marked.
+  if (nextUp) fields.nextUpAt = t.systemState === "ready" && t.nextUpAt ? t.nextUpAt : at;
+  else if (target !== "ready" || held) fields.nextUpAt = null;
   // "Being checked" (BOS-1906) is a mark on a ticket in review; any move out of review ends it.
   if (target !== "review" && t.checkHoldAt && fields.checkHoldAt === undefined) fields.checkHoldAt = null;
   if (t.noCode && t.mergeCommit && !opts.internal && fields.noCode === undefined && changed && REOPEN_STATES.has(target)) fields.noCode = false;

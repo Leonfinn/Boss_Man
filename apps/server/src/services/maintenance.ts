@@ -133,14 +133,31 @@ export const holdCapAt = (hold: Hold): Date => new Date(Math.max(new Date(hold.s
  * (a run has no usual time) and every check has a usual time. `overdue`: a check ran longer than usual, or the hold's
  * own deadline passed with work still going. Pure, so the status and its tests share it.
  */
-export function drainForecast(input: { runs: number; checks: RunnerCheck[]; deadline: string; now: Date }): { phase: "waiting" | "swapping"; expectedFinishAt: string | null; overdue: boolean } {
+export function drainForecast(input: { runs: number; checks: RunnerCheck[]; deadline: string; now: Date; merges?: number; unknownWait?: boolean }): { phase: "waiting" | "swapping"; expectedFinishAt: string | null; overdue: boolean } {
   const { runs: n, checks, deadline } = input;
-  if (n === 0 && checks.length === 0) return { phase: "swapping", expectedFinishAt: null, overdue: false };
+  const merges = input.merges ?? 0;
+  // BOS-1951: nothing named is left and the swap still has not happened: it is waiting on something Boss Man can't name,
+  // which is "running late" from the first minute, never a quiet "swapping now".
+  if (n === 0 && checks.length === 0 && merges === 0) return input.unknownWait ? { phase: "waiting", expectedFinishAt: null, overdue: true } : { phase: "swapping", expectedFinishAt: null, overdue: false };
   const ends = checks.map((c) => (c.startedAt && c.usuallyMinutes ? new Date(c.startedAt).getTime() + c.usuallyMinutes * 60_000 : null));
   const checkLate = ends.some((e) => e !== null && e < input.now.getTime());
   const overdue = checkLate || input.now >= new Date(deadline);
-  const known = n === 0 && checks.length > 0 && ends.every((e) => e !== null) && !checkLate;
+  // A push to main has no usual length, so a wait that includes one has no forecast (only the hold's own deadline).
+  const known = n === 0 && merges === 0 && checks.length > 0 && ends.every((e) => e !== null) && !checkLate;
   return { phase: "waiting", expectedFinishAt: known ? new Date(Math.max(...(ends as number[]))).toISOString() : null, overdue };
+}
+
+/**
+ * BOS-1951: the swap itself takes seconds, so a hold that still stands this long after it began, with no run, check or
+ * merge going and no runner recently recreated or retrying, is waiting on something Boss Man can't name. Both the
+ * banner (late, with the stop/cancel options) and the scheduler (chat keeps answering) read this one rule.
+ */
+export const UNKNOWN_WAIT_MS = 2 * 60_000;
+export function unknownWait(hold: Hold, at: Date, reconnectMs = SWAP_WINDOW_MS): boolean {
+  if (hold.kind === "wrapup") return false;
+  if (at.getTime() - new Date(hold.since).getTime() < UNKNOWN_WAIT_MS) return false;
+  if (Object.values(hold.tries ?? {}).length) return false; // a failed swap on its retry schedule is a swap, not a mystery
+  return !Object.values(hold.swapped ?? {}).some((s) => at.getTime() - new Date(s).getTime() < reconnectMs); // a runner still dialling in
 }
 
 /** BOS-1954: the longest a drain pass waits for a scheduling pass to end before it tries again on the next pass. */
@@ -185,6 +202,8 @@ export type MaintenanceDeps = {
    * its record, so main had the merge and the ticket said "not merged". The phase ends when the runner answers the push.
    */
   landingMerges?: () => Promise<Map<string, number>>;
+  /** BOS-1951: the same merges as ticket ids, so the banner can name them. */
+  landingMergeIds?: () => Promise<string[]>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
   /** BOS-1954: how long to wait for `settled` (default SETTLE_WAIT_MS); a test makes it short. */
@@ -542,9 +561,22 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // A "stop the checks and update now" answer (force) means nothing is waited for any more.
       const checksList = h.kind === "wrapup" || h.kind === "building" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
       // BOS-1877: the chat stays open while anything the swap waits on is still going (runs, or checks), not only runs.
+      // BOS-1951: merges being pushed to main hold the swap too (BOS-1645), so the banner names them and the chat stays open.
+      // Not for a wrap-up hold: it swaps nothing. The same count the drain waits on, so text and swap never disagree.
+      const mergeIds = h.kind === "wrapup" || h.kind === "building" || !deps.landingMergeIds ? [] : await deps.landingMergeIds().catch(() => [] as string[]);
+      const mergesList = mergeIds.length
+        ? await db
+            .select({ ticket: sql<string | null>`case when ${tickets.number} is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || ${tickets.number}::text end` })
+            .from(tickets)
+            .leftJoin(sql`"companies" c`, sql`c."id" = ${tickets.companyId}`)
+            .where(inArray(tickets.id, mergeIds))
+        : [];
+      const mergesN = Math.max(mergeIds.length, mergesList.length);
+      // Nothing named is going and the swap still has not happened: late and unnamed (see unknownWait).
+      const unknown = h.kind !== "building" && runsTotal === 0 && checksList.length === 0 && mergesN === 0 && unknownWait(h, now(), reconnectMs);
       // BOS-1955: a building hold is never "swapping": nothing is built yet, so chat stays open for the whole build.
-      const forecast = h.kind === "building" ? { phase: "waiting" as const, expectedFinishAt: null, overdue: false } : drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now() });
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: h.kind === "building" || runsTotal > 0 || (h.kind !== "wrapup" && checksList.length > 0), blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, last };
+      const forecast = h.kind === "building" ? { phase: "waiting" as const, expectedFinishAt: null, overdue: false } : drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now(), merges: mergesN, unknownWait: unknown });
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: h.kind === "building" || runsTotal > 0 || (h.kind !== "wrapup" && (checksList.length > 0 || mergesN > 0 || unknown)), blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, unknownWait: unknown, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows

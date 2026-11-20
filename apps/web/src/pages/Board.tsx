@@ -575,6 +575,11 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         )}
         {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
         {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : t.blockedBy.length}</span>}
+        {t.nextUp && t.systemState === "ready" && (
+          <span className="tag blue" title="The agent is busy on another ticket. This one starts by itself when they finish, and counts toward no limit until then.">
+            Next up
+          </span>
+        )}
         {t.hold && (
           <span className="tag amber" title={t.hold.reason}>
             Held: {t.hold.label}
@@ -601,7 +606,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
       )}
       {t.wipExempt && (
         <span className="note" title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
-          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : `waits on ${blockers.map((b) => refOf(b) ?? b.ticketTitle ?? "a task").join(", ")}`}
+          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : t.wipExempt === "busy" ? `Agent busy on ${t.busyOnNumber ? ticketRef(prefix, t.busyOnNumber) : "another ticket"}` : `waits on ${blockers.map((b) => refOf(b) ?? b.ticketTitle ?? "a task").join(", ")}`}
         </span>
       )}
       {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
@@ -1156,7 +1161,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </header>
                 )}
-                {shown.length === 0 && tickets.length > 0 && filterCount > 0 ? (
+                {shown.length === 0 && tickets.length > 0 && words.length > 0 ? (
+                  <p className="lane-empty">
+                    No tasks match "{query.trim()}".{" "}
+                    <button type="button" className="linkish" onClick={() => setQuery("")}>
+                      Clear search
+                    </button>
+                  </p>
+                ) : shown.length === 0 && tickets.length > 0 && filterCount > 0 ? (
                   <p className="lane-empty">
                     No tasks match your filters.{" "}
                     <button type="button" className="linkish" onClick={clearFilters}>

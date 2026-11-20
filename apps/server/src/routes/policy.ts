@@ -43,7 +43,10 @@ export function policyRoutes(
     const p = await checkPolicy(id, req.body);
     if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
     const [c] = await db.update(companies).set({ reviewPolicy: p }).where(eq(companies.id, id)).returning({ policy: companies.reviewPolicy });
-    return c ? c.policy : reply.code(404).send({ error: "not_found" });
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    // A line in the log, so a surprise in who reviewed a ticket can be traced to when the policy changed (BOS-1969).
+    await record(db, { companyId: id, kind: "settings", summary: "Owner changed the review policy" });
+    return c.policy;
   });
   // Owner-tier permission cards by deciding rule, across every company (BOS-1456). Read-only.
   owner.get("/api/permission-report", async (req, reply) => {

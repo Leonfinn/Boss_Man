@@ -231,10 +231,14 @@ You should see `db` and `server` as running (the server `healthy` after a short 
 Check the server answers:
 
 ```sh
-curl -s http://<host-ip>:3100/api/health
+curl -sS http://<host-ip>:<your BOSSMAN_HOST_PORT, 3100 unless you changed it>/api/health
 ```
 
-You should get a short line of JSON. The database tables are created by themselves when the server starts.
+For example, `curl -sS http://192.168.1.50:3100/api/health`.
+
+A good answer is a short line of JSON. The database tables are created by themselves when the server starts.
+
+If you see `Connection refused`, the server has not started yet or the port is wrong. Wait a minute and run the command again, and check that the port matches `BOSSMAN_HOST_PORT` in your `.env`. If it still fails after a few minutes, run `docker compose ps` and `docker compose logs server` to see why the server is not running, and see [docs/29](29-tune-and-troubleshoot.md).
 
 ## 6. Open the web page and make the owner account
 

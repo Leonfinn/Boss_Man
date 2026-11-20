@@ -27,7 +27,7 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts, unknownWait } from "./maintenance.js";
 import { createLaneWatch } from "./lane-watch.js";
 import { limitUnderHold, softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
@@ -126,7 +126,7 @@ export const PLAIN_SUMMARY_RULE =
 export const TWIN_PATHS_GUIDANCE =
   "For a fix to a fault the owner reported, list its twin paths and states, and for each say \"covered by test X\" or \"follow-up BOS-n\": server and runner, chat and ticket run, every company, after a restart or rebuild, every form of that kind, the state the owner presses it in.";
 /** The usability gate for every company (BOS-1571): not only "is it safe, does it work once", but "does it keep delivering with the owner's real life". */
-export const USABILITY_GATE_GUIDANCE = `Usability gate, for every change, fix or feature: walk the owner's life with it, day 1, after the next update or runner rebuild, after a restart, a week on, the owner away. A step the owner must repeat routinely, or a feature that works only while someone watches it, fails: request changes. On a feature ticket, one with owner setup steps or one that changes what the owner installs, your code or infra approval needs a "${REAL_USE_LABEL}" paragraph saying this, or Boss Man refuses it.`;
+export const USABILITY_GATE_GUIDANCE = `Usability gate, for every change, fix or feature: walk the owner's life with it, day 1, after the next update or runner rebuild, after a restart, a week on, the owner away. For anything that comes in from outside (an alert, an issue, a message), who reads it, who acts and who closes it where it came from. A step the owner must repeat routinely, or a feature that works only while someone watches it, fails: request changes. On a feature ticket, one with owner setup steps or one that changes what the owner installs, your code or infra approval needs a "${REAL_USE_LABEL}" paragraph saying this, or Boss Man refuses it.`;
 const WATCH_LINE =/^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
@@ -266,6 +266,8 @@ export function schedulerService(
     onFeature?: (featureId: string) => Promise<unknown>;
     limits?: Partial<Limits>;
     now?: () => Date;
+    /** BOS-1951: tickets whose merge is being pushed to main; a runner swap waits for them, so chat keeps answering meanwhile. */
+    landingMergeIds?: () => Promise<string[]>;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
     quietHours?: () => Promise<QuietHours | null>;
     /** Tells the owner something without needing an answer (quota holds, credits in use). */
@@ -317,6 +319,8 @@ export function schedulerService(
     const [full] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     const hold = full ? (await agentWipHold(db, full)).hold : null;
     if (hold?.scope === "queue") return `${hold.reason.replace(/\. It starts by itself.*$/, "")}, so it stays in Ready and starts by itself when the line is shorter. (Not started.)`;
+    // BOS-1908: waiting behind the agent's own live run on another ticket, not at a limit: it starts by itself when that run ends.
+    if (hold?.scope === "next_up") return `${hold.reason.replace(/^Waiting: /, "")} It stays in Ready and starts by itself then. (Not started.)`;
     const oldest = await oldestMovableInProgress(db, t.agentId);
     if (!oldest) return `a WIP limit holds it in Ready, and it starts when there is room. (Not started.)`;
     const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
@@ -1793,7 +1797,13 @@ export function schedulerService(
         // for them too (the swap then waits for that chat run). Not for a wrap-up hold, or once checks are not waited on.
         const checksWaited = hold.kind !== "wrapup" && !hold.force && !hold.ignoreChecks ? [...(await checkJobsByCompany(db, true)).values()].reduce((a, n) => a + n, 0) : 0;
         // While work runs or checks are still going, only chat and reply wakes go on to launch; every other wake is held.
-        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
+        // BOS-1951: nor is the swap near while a merge is being pushed to main, or while it waits on something Boss Man can't
+        // name (the 19 Nov update sat 86 minutes with chat paused): chat pauses only for the swap itself.
+        const merging = hold.kind !== "wrapup" && work === 0 && checksWaited === 0 && deps.landingMergeIds ? (await deps.landingMergeIds().catch(() => [] as string[])).length : 0;
+        const mystery = work === 0 && checksWaited === 0 && merging === 0 && unknownWait(hold, t);
+        // Only the owner's chat passes for the two new cases: the CEO's one-off replies (such as BOS-1954's late-swap wake)
+        // stay held there, so a run that ends is not followed by a reply run the swap would then wait for.
+        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : merging > 0 || mystery ? queue.filter((w) => w.reason === CHAT_REASON) : [];
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
         const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);

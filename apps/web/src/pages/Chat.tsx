@@ -3,6 +3,7 @@
 // directly. On a phone the list and the conversation take turns.
 import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
+import { NoCompany } from "../components/NoCompany";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
 import { when } from "./Runs";
@@ -20,7 +21,7 @@ import type { TraceBody } from "@boss-man/shared";
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
 type Chat = { agentId: string; items: Message[]; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -92,7 +93,11 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   return (
     <p className="banner" role="status">
       {m.chatOpen
-        ? m.runs === 0
+        ? m.runs === 0 && m.unknownWait
+          ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner to stop waiting or cancel."
+          : m.runs === 0 && (m.merges ?? 0) > 0 && !(m.checks ?? 0)
+            ? `Update waiting for ${m.merges === 1 ? "a merge" : `${m.merges} merges`} being pushed to main${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
+          : m.runs === 0
           ? `Update waiting for running checks to finish${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
           : `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
         : m.phase === "swapping"
@@ -199,7 +204,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
         </div>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <section className="card messenger" data-picked={agentId ? "yes" : "no"} aria-label="Chat">
           <nav className="messenger-list" aria-label="Team">

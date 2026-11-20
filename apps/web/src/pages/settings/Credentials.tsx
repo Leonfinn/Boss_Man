@@ -13,7 +13,7 @@ const CREDENTIALS = [
   { kind: "generic", label: "OpenRouter API key", env: "OPENROUTER_API_KEY", help: "For OpenCode agents. Models are named openrouter/<model>." },
   { kind: "generic", label: "Ollama Cloud API key", env: "OLLAMA_API_KEY", help: "For OpenCode agents. Models are named ollama-cloud/<model>." },
   { kind: "generic", label: "Synthetic API key", env: "SYNTHETIC_API_KEY", help: "For OpenCode agents. Models are named synthetic/<model>, e.g. synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" },
-  { kind: "generic", label: "GitHub watcher token", env: "GITHUB_WATCH_TOKEN", help: "A fine-grained GitHub token for the project's GitHub watcher: Issues, Discussions and Metadata read, plus Secret scanning alerts and Dependabot alerts read and write (write lets the security reviewer close an alert from inside Boss Man; it changes nothing else on GitHub)." },
+  { kind: "generic", label: "GitHub watcher token", env: "GITHUB_WATCH_TOKEN", help: "A fine-grained GitHub token for the project's GitHub watcher: Metadata read, plus Issues, Discussions, Secret scanning alerts and Dependabot alerts read and write (write lets Support answer and close issues and discussions, and the security reviewer close an alert, from inside Boss Man; it changes nothing else on GitHub)." },
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose. The one exception is GITHUB_WATCH_TOKEN, the GitHub watcher's token: only the server reads it and no agent run ever gets it." },
 ] as const;
 
@@ -47,6 +47,7 @@ function GrantAgents({ grant, agents, busy, onSave }: { grant: Grant; agents: Ag
 
 export function Credentials({ company, onChanged, title = "Credentials" }: { company: Company; onChanged?: () => void; title?: string }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
+  const targets = usePoll((signal) => api<{ id: string; name: string }[]>(`/api/companies/${company.id}/deploy-targets`, { signal }), 30_000, `deploy-targets-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   // No default kind: a value checked as the wrong kind fails confusingly, so the owner always picks.
   const [choice, setChoice] = useState(-1);
@@ -153,7 +154,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                   <td className="mono">{g.envName}</td>
                   <td>{g.secretName}</td>
                   <td className="mono muted">{g.hint ?? ""}</td>
-                  <td>{g.deployTargetId ? "One deploy target" : "Every run"}</td>
+                  <td>{g.deployTargetId ? (targets.data?.find((t) => t.id === g.deployTargetId)?.name ?? "One deploy target") : "Every run"}</td>
                   <td>
                     <GrantAgents key={g.agentIds.join()} grant={g} agents={company.agents} busy={act.busy} onSave={(ids) => setAgents(g, ids)} />
                   </td>

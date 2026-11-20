@@ -26,17 +26,17 @@ export function ProjectLimitForm({ project }: { project: Project }) {
   };
   return (
     <form onSubmit={submit} style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12 }}>
-      <label>
-        Spending limit per month (USD)
-        <input type="number" min="0" step="0.01" required value={usdLimit} onChange={(e) => setUsdLimit(e.target.value)} />
-      </label>
-      <label>
-        At the limit
-        <select value={onLimit} onChange={(e) => setOnLimit(e.target.value)}>
+      <div className="field">
+        <label htmlFor={`limit-usd-${project.id}`}>Spending limit per month (USD)</label>
+        <input id={`limit-usd-${project.id}`} type="number" min="0" step="0.01" required value={usdLimit} onChange={(e) => setUsdLimit(e.target.value)} />
+      </div>
+      <div className="field">
+        <label htmlFor={`limit-at-${project.id}`}>At the limit</label>
+        <select id={`limit-at-${project.id}`} value={onLimit} onChange={(e) => setOnLimit(e.target.value)}>
           <option value="ask">Ask me</option>
           <option value="pause">Pause</option>
         </select>
-      </label>
+      </div>
       <button type="submit" disabled={act.busy || usdLimit === ""}>Add limit</button>
       {act.view}
     </form>

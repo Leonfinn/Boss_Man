@@ -401,6 +401,30 @@ describe("review policy API", () => {
     expect((await c.req("GET", `/api/companies/${c.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
   });
 
+  it("writes a settings line in the activity log for each successful change, and none for a refused one (BOS-1969)", async () => {
+    const c = await setup();
+    const lines = async () => (await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")))).map((a) => a.summary);
+    const before = await lines();
+    const rival = (await c.req("POST", "/api/companies", { name: "Rival Co" })).json();
+    const bad = structuredClone(DEFAULT_REVIEW_POLICY);
+    bad.low.reviewer = rival.ceo.id;
+    const missing = randomUUID();
+    // Refused (400) and unknown (404) requests write nothing.
+    expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, bad)).statusCode).toBe(400);
+    expect((await c.req("PUT", `/api/companies/${missing}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(404);
+    expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, bad)).statusCode).toBe(400);
+    expect((await c.req("PUT", `/api/projects/${missing}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(404);
+    expect((await c.req("DELETE", `/api/projects/${missing}/review-policy`)).statusCode).toBe(404);
+    expect(await lines()).toEqual(before);
+    // Each successful change writes its own line.
+    expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(200);
+    expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(200);
+    expect((await c.req("DELETE", `/api/projects/${c.project.id}/review-policy`)).statusCode).toBe(200);
+    expect((await lines()).filter((s) => !before.includes(s)).sort()).toEqual(
+      ["Owner changed the review policy", "Owner changed the review policy for project Customer app", "Owner reset project Customer app to the company review policy"].sort(),
+    );
+  });
+
   it("gives a new company a security review on high and critical work, and leaves existing companies alone (BOS-824)", async () => {
     const c = await setup();
     // The column default, not just the constant: a company row made without a policy gets it.

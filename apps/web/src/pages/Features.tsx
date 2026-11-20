@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { NoCompany } from "../components/NoCompany";
 import { featureHorizon, HORIZONS, portalTitle, type Horizon } from "@boss-man/shared";
 import {
   api,
@@ -625,7 +626,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
         </div>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <>
           <section className="card features-toolbar">
