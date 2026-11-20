@@ -23,7 +23,15 @@ const QUIET: Item[] = [
   { key: "watching", icon: "👁", words: "merged, watching" },
 ];
 
-export function WorkStands({ counts, targets, hrefFor }: { counts: WorkStandsCounts; targets?: WorkStandsTargets; /** Off the Board: where each item goes instead (the Board page). */ hrefFor?: string }) {
+/** Moves the view to a card (BOS-1910) and puts keyboard focus on its title link. */
+export function goToCard(ticketId: string) {
+  const el = document.querySelector<HTMLElement>(`[data-ticket-id="${ticketId}"]`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+  el.querySelector<HTMLElement>("a")?.focus({ preventScroll: true });
+}
+
+export function WorkStands({ counts, targets, hrefFor, stuck = 0, stuckTicketId }: { counts: WorkStandsCounts; targets?: WorkStandsTargets; /** Off the Board: where each item goes instead (the Board page). */ hrefFor?: string; /** BOS-1910: tickets the watchdog has handed to the Scrum Master; hidden at 0. */ stuck?: number; /** The first of them, which the item links to. */ stuckTicketId?: string }) {
   const quiet = QUIET.filter((i) => counts[i.key] > 0);
   const link = (i: Item | "inProgress", text: string, icon: string) => {
     const key = i === "inProgress" ? "inProgress" : i.key;
@@ -39,6 +47,12 @@ export function WorkStands({ counts, targets, hrefFor }: { counts: WorkStandsCou
   return (
     <div className="standing" role="group" aria-label="Where work stands" data-testid="work-stands">
       {link("inProgress", "in progress", "●")}
+      {stuck > 0 && (
+        <a className="standing-item stuck" href={hrefFor ?? "#"} onClick={stuckTicketId && !hrefFor ? (e) => { e.preventDefault(); goToCard(stuckTicketId); } : undefined} data-testid="standing-stuck">
+          <span aria-hidden="true" className="standing-icon">⚠</span>
+          <b>{stuck}</b> looks stuck
+        </a>
+      )}
       {quiet.length > 0 && (
         <div className="standing-quiet" role="group" aria-label="Moving by itself, nothing to do">
           <span className="standing-quiet-title">Moving by itself, nothing to do:</span>

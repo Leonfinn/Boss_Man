@@ -348,6 +348,8 @@ p { margin: 0; }
 .standing { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .standing-item { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 12px; border-radius: 999px; font-size: 13px; color: var(--head); text-decoration: none; }
 .standing-item.inProgress { background: var(--green-soft); color: var(--green-ink); }
+.standing-item.stuck { background: var(--amber-soft); color: var(--amber-ink); }
+.stuck-line { color: var(--amber-ink); }
 .standing-item.inProgress .standing-icon { animation: pulse 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .standing-item.inProgress .standing-icon { animation: none; } }
 .standing-quiet { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 0 6px 0 12px; border: 1px dashed var(--line-strong); border-radius: 999px; }
