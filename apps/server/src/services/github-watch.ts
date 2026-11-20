@@ -27,6 +27,11 @@ export const MIN_INTERVAL_MINUTES = 15;
 export const MAX_INTERVAL_MINUTES = 1440;
 export const DEFAULT_INTERVAL_MINUTES = 60;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** "owner/name" (lower case) from a project's git address (https or ssh form), or null when it isn't a plain two-part GitHub path. */
+function repoOfUrl(url: string | null): string | null {
+  const m = /github\.com[/:]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i.exec((url ?? "").trim());
+  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
+}
 /** The first pass looks back this far, so enabling it on an old repo doesn't file years of history. */
 const FIRST_SYNC_DAYS = 7;
 const MAX_PAGES = 10;
@@ -376,8 +381,11 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
     let ownsRepo = true;
     if (sameRepo.length > 1) {
       const ids = sameRepo.map((w) => w.projectId).sort();
+      // Old data only (a second alert watcher on one repo is refused when it is saved): the project whose own code repo
+      // this is owns the alerts, then the one that already holds alert tickets, then the lowest id.
+      const codeRepo = (await db.select({ id: projects.id, repoUrl: projects.repoUrl }).from(projects).where(inArray(projects.id, ids))).filter((p) => repoOfUrl(p.repoUrl) === repo.toLowerCase()).map((p) => p.id);
       const holders = new Set((await db.select({ projectId: githubAlertTickets.projectId, repo: githubAlertTickets.repo }).from(githubAlertTickets).where(inArray(githubAlertTickets.projectId, ids))).filter((l) => l.repo?.toLowerCase() === repo.toLowerCase()).map((l) => l.projectId));
-      const owner = ids.find((id) => holders.has(id)) ?? ids[0];
+      const owner = ids.find((id) => codeRepo.includes(id)) ?? ids.find((id) => holders.has(id)) ?? ids[0];
       // A project that doesn't own the repo's alerts opens nothing, but still closes its own existing tickets below.
       ownsRepo = owner === row.projectId;
     }
@@ -993,6 +1001,14 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
       if (patch.repo != null && patch.repo !== "" && !REPO_RE.test(patch.repo)) throw new Error("The repository must look like owner/name.");
       const [cur] = await db.select().from(githubWatches).where(eq(githubWatches.projectId, projectId));
       const repo = patch.repo === undefined ? (cur?.repo ?? null) : patch.repo === "" ? null : patch.repo;
+      // BOS-2055: one alert watcher per repo. Refused here, naming the project that has it.
+      // Only when this save turns the watcher on or points it at another repo, so a legacy row can still change its other settings.
+      const turnsOn = (patch.enabled === true && !cur?.enabled) || (patch.repo !== undefined && repo !== (cur?.repo ?? null));
+      if (repo && turnsOn && (patch.enabled ?? cur?.enabled) && (cur?.watchAlerts ?? true)) {
+        const others = await db.select({ projectId: githubWatches.projectId, repo: githubWatches.repo, name: projects.name }).from(githubWatches).innerJoin(projects, eq(projects.id, githubWatches.projectId)).where(and(eq(githubWatches.companyId, companyId), eq(githubWatches.enabled, true), eq(githubWatches.watchAlerts, true), ne(githubWatches.projectId, projectId)));
+        const taken = others.find((w) => w.repo?.toLowerCase() === repo.toLowerCase());
+        if (taken) throw new Error(`${repo} is already watched by the project "${taken.name}", and one project watches a repository's alerts. Turn the watcher off there first.`);
+      }
       const set: Partial<typeof githubWatches.$inferInsert> = {
         ...(patch.enabled !== undefined ? { enabled: patch.enabled && !!repo } : {}),
         ...(patch.repo !== undefined ? { repo } : {}),

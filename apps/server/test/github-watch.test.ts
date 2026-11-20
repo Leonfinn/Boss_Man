@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, decisions, feedbackNotes, githubAlertTickets, githubWatches, tickets as ticketsTable } from "../src/db/schema.js";
+import { agents, decisions, feedbackNotes, githubAlertTickets, githubWatches, projects, tickets as ticketsTable } from "../src/db/schema.js";
 import { githubWatchService, looksLikeSecurityReport } from "../src/services/github-watch.js";
 import { clearOwnerTodo } from "../src/services/decisions.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -425,7 +425,8 @@ describe("security alerts (BOS-1929)", () => {
   it("BOS-2055: two projects watching one repo get one ticket per alert, not one each", async () => {
     const c = await setup();
     const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
-    await c.svc.save(second.id, c.company.id, { enabled: true, repo: REPO });
+    // Old data: a second row on the same repo (a new save is refused, see below).
+    await t!.db.insert(githubWatches).values({ projectId: second.id, companyId: c.company.id, enabled: true, repo: REPO });
     c.gh.dependabot = [{ number: 20, state: "open", pkg: "body-parser", severity: "high", summary: "DoS" }];
     await c.svc.runOne(c.project.id);
     await c.svc.runOne(second.id);
@@ -437,10 +438,43 @@ describe("security alerts (BOS-1929)", () => {
     expect(rows[0]!.projectId).toBe([c.project.id, second.id].sort()[0]);
   });
 
+  it("BOS-2055: a second project can't switch on alert watching for a repo another project watches; the refusal names that project", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await expect(c.svc.save(second.id, c.company.id, { enabled: true, repo: REPO })).rejects.toThrow(/already watched by the project "Site"/);
+    // Another repo is fine, and so is the first project's own save.
+    await c.svc.save(second.id, c.company.id, { enabled: true, repo: "acme/other" });
+    await c.svc.save(c.project.id, c.company.id, { intervalMinutes: 30 });
+    await expect(c.svc.save(second.id, c.company.id, { repo: REPO })).rejects.toThrow(/already watched/);
+  });
+
+  it("BOS-2055: for old data the project whose own code repo it is owns the alerts, even when its id is the higher one", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await t!.db.insert(githubWatches).values({ projectId: second.id, companyId: c.company.id, enabled: true, repo: REPO });
+    const [low, high] = [c.project.id, second.id].sort() as [string, string];
+    await t!.db.update(projects).set({ repoUrl: `https://github.com/${REPO}.git` }).where(eq(projects.id, high));
+    // Both hold an old ticket, so "who holds tickets" can't tell them apart.
+    for (const [pid, key] of [[low, "dependabot:50"], [high, "dependabot:51"]] as const) {
+      const tk = await t!.work.createTicket(pid, { title: `Old ${key}`, body: "x", assigneeAgentId: c.ceo!.id, state: "ready", planFirst: false } as never);
+      await t!.db.insert(githubAlertTickets).values({ projectId: pid, alertKey: key, ticketId: tk.id, repo: REPO });
+    }
+    c.gh.dependabot = [
+      { number: 50, state: "open", pkg: "a-lib", severity: "low", summary: "A" },
+      { number: 51, state: "open", pkg: "b-lib", severity: "low", summary: "B" },
+      { number: 60, state: "open", pkg: "new-lib", severity: "high", summary: "New" },
+    ];
+    await c.svc.runOne(low);
+    await c.svc.runOne(high);
+    const fresh = (await allTickets(c.company.id)).filter((r) => r.title.includes("new-lib"));
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]!.projectId).toBe(high);
+  });
+
   it("BOS-2055: a project that doesn't own the repo's alerts still closes its own existing tickets", async () => {
     const c = await setup();
     const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
-    await c.svc.save(second.id, c.company.id, { enabled: true, repo: REPO });
+    await t!.db.insert(githubWatches).values({ projectId: second.id, companyId: c.company.id, enabled: true, repo: REPO });
     const [owner, other] = [c.project.id, second.id].sort() as [string, string];
     // Both hold an old ticket for the repo; the lower id owns new alerts.
     const mkLink = async (projectId: string, alertKey: string) => {
