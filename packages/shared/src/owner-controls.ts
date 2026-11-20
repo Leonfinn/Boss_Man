@@ -44,7 +44,7 @@ export const OWNER_CONTROLS = {
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
-    "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
+    "Show more", "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
     // The project filter chips (BOS-1744); project names are data, these two are fixed.
     "All projects", "Company-wide",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
