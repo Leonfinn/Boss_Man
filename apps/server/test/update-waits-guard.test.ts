@@ -37,6 +37,7 @@ describe("update waits guard (BOS-2058)", () => {
     "services/deploy-wait.ts",
     "services/maintenance.ts",
     "services/merge-queue.ts",
+    "services/review.ts", // landingMergeIds: the runner-landing row's live count (landingsThatCount)
     "services/runner-report.ts",
     "services/scheduler.ts",
     "services/self-deploy.ts",
@@ -46,13 +47,13 @@ describe("update waits guard (BOS-2058)", () => {
   ];
   it("only the known files read an update hold to hold work back", () => {
     const found = walk(SRC)
-      .filter((f) => /\b(softHold|holdBlocksStarts|getHold)\(/.test(readFileSync(f, "utf8")))
+      .filter((f) => /\b(softHold|holdBlocksStarts|getHold|landingMergeIds)\(/.test(readFileSync(f, "utf8")))
       .map((f) => path.relative(SRC, f).split(path.sep).join("/"))
       .sort();
     const extra = found.filter((f) => !READERS.includes(f));
     expect(
       extra,
-      `${extra.join(", ")} reads an update hold (softHold, holdBlocksStarts or getHold). A wait that holds work back needs a kind in WAIT_RULES (apps/server/src/services/update-waits.ts) with its own end, its CEO wake and its words for the screen. Add the kind, call blocksClass() for what it stops, then add the file to READERS here.`,
+      `${extra.join(", ")} reads an update hold (softHold, holdBlocksStarts, getHold or landingMergeIds). A wait that holds work back needs a kind in WAIT_RULES (apps/server/src/services/update-waits.ts) with its own end, its CEO wake and its words for the screen. Add the kind, call blocksClass() for what it stops, then add the file to READERS here.`,
     ).toEqual([]);
   });
 });
