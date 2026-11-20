@@ -12,13 +12,17 @@ mkdir -p "$t/stg" "$t/bin"
 cat >"$t/server.mjs" <<'JS'
 import http from "node:http";
 import { writeFileSync } from "node:fs";
-const [, , portFile, commit] = process.argv;
+const [, , portFile, commit, mode] = process.argv;
+const fresh = mode === "fresh"; let owner = null; // fresh: an empty staging with no owner yet (first-run setup open)
 const P = "11111111-1111-1111-1111-111111111111", C = "22222222-2222-2222-2222-222222222222", T = "33333333-3333-3333-3333-333333333333";
 const s = http.createServer((req, res) => {
   const send = (code, body, type = "application/json") => { res.writeHead(code, { "content-type": type }); res.end(typeof body === "string" ? body : JSON.stringify(body)); };
   let data = ""; req.on("data", (d) => (data += d)); req.on("end", () => {
     if (req.url === "/api/health") return send(200, { ok: true, commit });
     if (req.url === "/") return send(200, "<html><body>board</body></html>", "text/html");
+    if (req.url === "/api/setup" && req.method === "GET") return send(200, { needsSetup: fresh && !owner });
+    if (req.url === "/api/setup") { if (!fresh || owner) return send(409, { error: "already_set_up" }); owner = JSON.parse(data).password; return send(201, { username: "smoke" }); }
+    if (req.url === "/api/login" && fresh) return JSON.parse(data).password === owner ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
     if (req.url === "/api/login") return ["right", "pa\\ss\"w"].includes(JSON.parse(data).password) ? send(200, { username: "smoke" }) : send(401, { error: "wrong" });
     if (req.url === "/api/companies") return send(200, [{ id: C, projects: [{ id: P, companyId: C, name: "p" }] }]);
     if (req.url === `/api/projects/${P}/tickets`) return send(201, { id: T });
@@ -29,8 +33,8 @@ const s = http.createServer((req, res) => {
 });
 s.listen(0, "127.0.0.1", () => writeFileSync(portFile, String(s.address().port)));
 JS
-start_server() { # commit the server reports
-  rm -f "$t/port"; node "$t/server.mjs" "$t/port" "$1" & SRV_PID=$!
+start_server() { # commit the server reports, then optionally "fresh" (no owner yet)
+  rm -f "$t/port"; node "$t/server.mjs" "$t/port" "$1" "${2:-}" & SRV_PID=$!
   local end=$((SECONDS + 20))
   until [[ -s $t/port ]]; do ((SECONDS < end)) || fail "fake server did not start"; sleep 0.2; done
   printf 'BOSSMAN_BIND=127.0.0.1\nBOSSMAN_HOST_PORT=%s\n' "$(cat "$t/port")" >"$t/stg/.env"
@@ -71,6 +75,20 @@ if out="$(SMOKE_CREDENTIALS="$t/creds-bad" "$here/smoke-staging.sh" "$t/stg" "$s
 # Production containers changed during the deploy: caught through the list the deployer took first.
 if out="$(SMOKE_PRODUCTION_BEFORE="c1,c9" "$here/smoke-staging.sh" "$t/stg" "$sha")"; then fail "changed production should exit 1"; fi
 [[ $(res production) == fail ]] || fail "production change: $out"
+stop_server
+
+# An empty staging (no owner yet): the smoke account is created from the file, then signs in; a second run still signs in,
+# and a file with a different password then fails with the "already has an owner" hint (BOS-2072).
+start_server "$sha" fresh
+printf 'smoke_username=smoke\nsmoke_password=newpass\n' >"$t/creds-new"
+out="$(SMOKE_CREDENTIALS="$t/creds-new" "$here/smoke-staging.sh" "$t/stg" "$sha")" || fail "fresh staging run failed: $out"
+[[ $(res signin) == pass && $(res ticket) == pass ]] || fail "fresh staging should create the smoke account: $out"
+[[ $out == *"first owner"* ]] || fail "fresh run should say it created the account: $out"
+out="$(SMOKE_CREDENTIALS="$t/creds-new" "$here/smoke-staging.sh" "$t/stg" "$sha")" || fail "second run failed: $out"
+[[ $(res signin) == pass && $out != *"first owner"* ]] || fail "second run should just sign in: $out"
+if out="$(SMOKE_CREDENTIALS="$t/creds-bad" "$here/smoke-staging.sh" "$t/stg" "$sha")"; then fail "other password should fail"; fi
+[[ $out == *"already has an owner"* ]] || fail "401 on an existing owner should explain itself: $out"
+[[ $out != *newpass* ]] || fail "the password was printed"
 stop_server
 
 # Wrong commit on staging: version fails.
