@@ -68,7 +68,7 @@ export async function mergedAwaitingChecks(db: Db, ticketId: string): Promise<bo
   return !!t?.mergeCommit && unreportedAfterMerge(t.criteria, t.note).length > 0;
 }
 
-export type BlockedHold = { kind: "date" | "blocker" | "card" | "go_live" };
+export type BlockedHold = { kind: "date" | "blocker" | "card" | "go_live" | "merged_watch" };
 
 /**
  * DR-061 Q2a, the one answer to "is this ticket held in Blocked?" (BOS-1532): what Blocked accepts on the way in
@@ -82,7 +82,7 @@ export type BlockedHold = { kind: "date" | "blocker" | "card" | "go_live" };
  */
 export async function blockedHolds(db: Db, ticketId: string, opts: { now?: Date; blockedUntil?: Date | null } = {}): Promise<BlockedHold[]> {
   const at = opts.now ?? new Date();
-  const [t] = await db.select({ blockedUntil: tickets.blockedUntil, goLiveWait: tickets.goLiveWait }).from(tickets).where(eq(tickets.id, ticketId));
+  const [t] = await db.select({ blockedUntil: tickets.blockedUntil, goLiveWait: tickets.goLiveWait, mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
   const until = opts.blockedUntil !== undefined ? opts.blockedUntil : (t?.blockedUntil ?? null);
   const holds: BlockedHold[] = [];
   if (until && until.getTime() > at.getTime()) holds.push({ kind: "date" });
@@ -91,6 +91,9 @@ export async function blockedHolds(db: Db, ticketId: string, opts: { now?: Date;
   // R36 (BOS-1679): a merged ticket's after-merge checks hold it only until it is live (the go-live wait, which wakes the
   // assignee). After that nothing ends such a hold, so a ticket whose checks need someone must link them or use a date.
   if (t?.goLiveWait) holds.push({ kind: "go_live" });
+  // BOS-1907: BOS-1905 group 2. A merged ticket with after-merge criteria still unreported is held ("Merged, watching"):
+  // it waits for its live check or watch, so Blocked needs no made-up date, link or card for it (R36 no longer refuses it).
+  if (t?.mergeCommit && unreportedAfterMerge(t.criteria, t.note).length > 0) holds.push({ kind: "merged_watch" });
   return holds;
 }
 

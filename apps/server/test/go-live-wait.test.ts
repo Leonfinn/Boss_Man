@@ -136,11 +136,12 @@ describe("after-merge checks wait for go-live", () => {
     await serverRuns(NEW);
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(1);
     expect((await ctx.row(id)).goLiveWait).toBeNull();
-    // Live: the checks are work now, so it leaves Blocked.
-    expect((await ctx.row(id)).systemState).toBe("in_progress");
+    // BOS-1907 (criterion 1): live, the agent is woken but the ticket stays in Blocked ("Merged, watching").
+    expect((await ctx.row(id)).systemState).toBe("blocked");
     const wakeNotes = await afterMergeWakes(id);
     expect(wakeNotes).toHaveLength(1);
     expect(wakeNotes[0]!.note).toContain(LIVE.text);
+    expect(wakeNotes[0]!.note).toContain("watching_for");
     // A second pass doesn't wake again.
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
     expect(await afterMergeWakes(id)).toHaveLength(1);
@@ -324,7 +325,7 @@ describe("go-live for a company that puts its own work live", () => {
     expect(t.goLiveWait).toBeNull();
     expect(t.liveMarkedAt).not.toBeNull();
     expect(t.liveEvidence).toBe(sha);
-    expect(t.systemState).toBe("in_progress");
+    expect(t.systemState).toBe("blocked");
     const wakeNotes = await afterMergeWakes(id);
     expect(wakeNotes).toHaveLength(1);
     expect(wakeNotes[0]!.note).toContain(LIVE.text);

@@ -4,7 +4,7 @@
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { GO_LIVE_WAIT_MAX_MS, currentReportSamples, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+import { GO_LIVE_WAIT_MAX_MS, currentReportSamples, watchEndsAt, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { PREFLIGHT_KIND, PREFLIGHT_STARTED_KIND } from "./ci-preflight.js";
@@ -453,6 +453,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       stateChangedAt: r.stateChangedAt,
       blockedUntil: r.blockedUntil,
       // Waiting for go-live (BOS-1021) is a plan, not a stall; after GO_LIVE_WAIT_MAX_MS nobody may have deployed, so it counts again.
+      // BOS-1907: a merged ticket is quiet until its watch ends (the agent's date, else 14 days after go-live); then the usual hand-offs apply.
+      watching: !!r.mergeCommit && (watchEndsAt(r)?.getTime() ?? 0) > now().getTime(),
       scheduled: !!r.monitorAt || (!!r.goLiveWait && !!r.goLiveWaitSince && Date.now() - r.goLiveWaitSince.getTime() < GO_LIVE_WAIT_MAX_MS) || (!!r.assigneeAgentId && waiting.has(`${r.assigneeAgentId}:${r.id}`)),
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),

@@ -84,4 +84,33 @@ describe("tickets that can't move don't count towards the WIP limit", () => {
     expect(await countInProgress(c.db, eq(tickets.companyId, c.company.id))).toBe(1);
     expect((await c.board()).find((t) => t.id === live.id)?.wipExempt).toBe("live");
   });
+
+  // BOS-1907 criterion 4: a merged ticket counts toward no limit once live too (go-live wait over), per agent and company.
+  it("a merged ticket that is already live doesn't count either, per agent and for the company", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const oldRow = await c.ticket("in_progress", { mergedAt: new Date(Date.now() - 20 * 86_400_000), mergeCommit: "a".repeat(40), goLiveWait: null });
+    await c.ticket("in_progress");
+    expect(await agentWipCount(c.db, c.worker.id)).toBe(1);
+    expect(await countInProgress(c.db, eq(tickets.companyId, c.company.id))).toBe(1);
+    expect(await countInProgress(c.db, eq(tickets.companyId, c.company.id), undefined, "company")).toBe(1);
+    const onBoard = (await c.board()).find((t) => t.id === oldRow.id) as { wipExempt?: string | null; watchEndsAt?: string | null; checksParentMerged?: boolean };
+    expect(onBoard.wipExempt).toBe("live");
+    // Criterion 7: an existing row (no watch recorded, no go-live time) shows the 14-day default from its merge.
+    expect(onBoard.watchEndsAt).toBeTruthy();
+    // test-lines-ok: compares a date to a 1e6 ms tolerance (about 17 minutes), not a speed limit
+    expect(Date.parse(onBoard.watchEndsAt!)).toBeCloseTo(Date.now() - 6 * 86_400_000, -6);
+  });
+
+  // BOS-1907 criterion 5: a split-out check ticket joins the lane through its parent link.
+  it("a split-out check ticket of a merged parent is flagged for the Merged, watching lane", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const parent = await c.ticket("blocked", { mergedAt: new Date(), mergeCommit: "b".repeat(40) });
+    const check = await c.ticket("blocked", { checksTicketId: parent.id, checksCriterion: 2 });
+    const plain = await c.ticket("blocked");
+    const cards = (await c.board()) as Array<{ id: string; checksParentMerged?: boolean }>;
+    expect(cards.find((t) => t.id === check.id)?.checksParentMerged).toBe(true);
+    expect(cards.find((t) => t.id === plain.id)?.checksParentMerged).toBe(false);
+  });
 });

@@ -668,7 +668,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
               Merged and live. Waiting for your answer on a card. <a href={`#/decisions/${t.ownerQuestionId}`}>Open the card</a>
             </>
           ) : (
-            "Merged and live. Waiting for the agent to report the after-merge check. Nothing for you to do."
+            `Merged and live. ${t.watchingFor ? `Watching for: ${t.watchingFor}. ` : "Waiting for the agent to report the after-merge check. "}${t.watchEndsAt ? `${t.watchingFor ? "Watch" : "The check"} runs to ${new Date(t.watchEndsAt).toLocaleDateString()}${t.watchingFor && !t.watchUntil ? " (the 14-day default)" : ""}. ` : ""}Nothing for you to do.`
           )}
         </span>
       )}
@@ -789,10 +789,12 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean; liveCheck?: boolean; checking?: boolean }> => {
     const open = col.tickets.filter((t) => !t.waitingOnOwner);
     // BOS-1636: merged work in Blocked that only waits for its after-merge check is not stuck: its own lane, shown only when there is some.
+    // BOS-1907: the lane is "Merged, watching". A merged ticket still in In progress (merged before the change) shows here too.
     if (col.systemState === "blocked") {
-      const live = open.filter(isLiveCheckWait);
+      const live = [...open.filter(isLiveCheckWait), ...(board.data?.columns ?? []).filter((c) => c.systemState === "in_progress").flatMap((c) => c.tickets.filter((t) => !t.waitingOnOwner && isLiveCheckWait(t)))];
       return [{ col, tickets: open.filter((t) => !isLiveCheckWait(t)), mine: false }, ...(live.length ? [{ col, tickets: live, mine: false, liveCheck: true }] : [])];
     }
+    if (col.systemState === "in_progress") return [{ col, tickets: open.filter((t) => !isLiveCheckWait(t)), mine: false }];
     if (col.systemState !== "review") return [{ col, tickets: open, mine: false }];
     // A reviewer's hold (BOS-808): passed, kept from merging on purpose. Its own lane, shown only when something is held.
     const held = open.filter((t) => t.reviewStage === "held");
@@ -1129,7 +1131,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                 ) : liveCheck ? (
                   <header className="lane-head">
                     <div className="lane-title">
-                      <h2 id="lane-live-check">Merged, waiting for a live check</h2>
+                      <h2 id="lane-live-check">Merged, watching</h2>
                       <span className="mono">{shown.length}</span>
                     </div>
                     <span className="lane-hint">Already merged. Each card says what it waits for. Nothing is stuck and none of these count as blocked.</span>
