@@ -4,10 +4,11 @@
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { addsUsabilityCriterion, holdEarlyAfterMergePasses, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
+import { addsUsabilityCriterion, holdEarlyAfterMergePasses, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
-import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, ticketImages, tickets, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, ticketImages, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
+import { DUPLICATE_HELP, duplicateRefusal, similarTickets } from "./services/duplicate-titles.js";
 import { FIXES_LIVE_MAX, fixesLiveProblem } from "./services/decisions.js";
 import { LINT_OVERRIDE_HELP, type LintOverrideInput, lintOverrideSchema, parseStoredOverride } from "./services/lint-override.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, SETUP_LINE_MAX, ownerSetupFacts, ownerSetupShapeProblem, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
@@ -179,13 +180,23 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         ownerSetupIfSkipped: SETUP_IF_SKIPPED,
         lintOverride: LINT_OVERRIDE,
         fixesLive: z.string().max(FIXES_LIVE_MAX).optional().describe(FIXES_LIVE_HELP),
+        notDuplicateOf: z.string().max(40).optional().describe(DUPLICATE_HELP),
+        notDuplicateReason: z.string().max(240).optional().describe("One line: why this is not a duplicate of the similar tickets create_ticket listed. Kept on the new ticket."),
         checksCriterion: z
           .object({ ticket: z.string().uuid(), criterion: z.number().int().min(1).max(10) })
           .optional()
           .describe("Make this the check for one after-merge criterion of another ticket (its id, and the criterion's number in its list), when that criterion needs a later event. That ticket's assignee, the CEO or a manager may do it. That ticket then waits on this one until done; when this one is done, its pass or fail (fail if any of its own criteria failed, pass if all passed) is written on that criterion and that ticket's assignee is woken. Without acceptanceCriteria this ticket gets that criterion's text as its own."),
       },
     },
-    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn: waitsOnGiven, waitsOnUntil, acceptanceCriteria: criteriaGiven, noCode, ownerSetup, ownerSetupWhy, ownerSetupIfSkipped, lintOverride, fixesLive, checksCriterion, ...rest }) => {
+    async ({ title, body: bodyGiven, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn: waitsOnGiven, waitsOnUntil, acceptanceCriteria: criteriaGiven, noCode, ownerSetup, ownerSetupWhy, ownerSetupIfSkipped, lintOverride, fixesLive, checksCriterion, notDuplicateOf, notDuplicateReason, ...rest }) => {
+      if (notDuplicateOf) {
+        const m = REF.exec(notDuplicateOf.trim());
+        if (!m) return fail(`notDuplicateOf must be a ticket ref like BOS-42; got "${notDuplicateOf}".`);
+        const [existing] = await db.select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(and(eq(tickets.companyId, scope.companyId), eq(tickets.number, Number(m[1]))));
+        if (!existing) return fail(`No ticket ${notDuplicateOf} in your company.`);
+        return text(`No new ticket was created: ${ticketRef(existing.prefix, existing.number) ?? existing.id} (${existing.id}) "${existing.title}" (${existing.state}) already covers this. Work on that ticket instead.`);
+      }
+      const body = notDuplicateReason?.trim() ? `${bodyGiven ? `${bodyGiven}\n\n` : ""}**Not a duplicate (said when created):** ${notDuplicateReason.trim()}` : bodyGiven;
       // BOS-1794: a check split out of a merged ticket's after-merge criterion, linked so it reports back when it closes.
       let checked: { id: string; text: string } | null = null;
       if (checksCriterion) {
@@ -270,6 +281,11 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
             ),
           );
         if (same) return text(`Ticket ${same.id} already exists in ${p.name}; no new ticket was created.`);
+      }
+      // BOS-2115: sub-tasks and check tickets are exempt; anything else with a similar open or recently done ticket is refused once.
+      if (!parentTask && !checked && !notDuplicateReason?.trim()) {
+        const similar = await similarTickets(db, scope.companyId, p.id, title);
+        if (similar.length) return fail(duplicateRefusal(similar));
       }
       // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate without anyone remembering it.
       const gate = { featureId, ownerSetup, noCode };
