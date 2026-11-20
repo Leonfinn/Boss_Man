@@ -128,6 +128,16 @@ export function gitAuthEnv(secrets: Record<string, string | undefined>): Record<
   return env;
 }
 
+/**
+ * BOS-2125: the login for the gate's bossman-ci/* pushes. GitHub emails a failed Actions run to whoever pushed, so with
+ * only GIT_TOKEN every gate failure emails the token's owner. An optional GIT_CI_TOKEN (a second account's token, with
+ * GIT_CI_USERNAME if the host needs one) is used for those two pushes alone; without it GIT_TOKEN is used as before.
+ */
+export function ciPushSecrets(secrets: Record<string, string | undefined>): Record<string, string | undefined> {
+  if (!secrets.GIT_CI_TOKEN) return secrets;
+  return { ...secrets, GIT_TOKEN: secrets.GIT_CI_TOKEN, GIT_USERNAME: secrets.GIT_CI_USERNAME };
+}
+
 export const branchFor = (ticketId: string) => `bossman/${ticketId}`;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2135,7 +2145,7 @@ export class Workspaces {
    * Neither records a refs/remotes/origin ref (unlike pushOrigin): the branch is the host's, not a ticket's.
    */
   private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }, scanList?: string): Promise<MergeResult> {
-    const auth = gitAuthEnv(secrets);
+    const auth = gitAuthEnv(ciPushSecrets(secrets));
     const repo = this.repoDir(spec.projectId);
     const branch = ciBranchFor(spec.ticketId);
     return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
