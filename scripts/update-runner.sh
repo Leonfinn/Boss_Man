@@ -111,12 +111,47 @@ request_drain() {
     printf '{"requestedAt":"%s","by":"update-runner.sh"%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${reason:+,\"reason\":\"$reason\"}" >"$tmp"
     chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
     mv -fT "$tmp" "$d/inbox/drain.json"
+    BUILD_HOLD=0 # the real drain replaced the early hold's file and takes the hold over: nothing left to cancel
     echo "Asked Boss Man to drain: nothing new starts, runs finish, each runner is swapped when its company is idle."
     echo "Boss Man notifies you when it is done. To stop it: Settings > Server and runner > Updates > Cancel the runner update."
   else
     echo "The new image is tagged, and the runners still run the old one. Start the drain in Boss Man:"
     echo "Settings > Server and runner > Updates > Update runners (finish runs first). With the host deployer set up, the button is under \"For a hand-built runner image\". (Or rerun with --now to cut runs off and restart at once.)"
   fi
+}
+
+# BOS-1955: an early "building" hold, written before the first docker build, so a run that starts while the image is built,
+# checked and the launcher rebuilt is not waited on in full afterwards (19 Nov: a run began at 21:18:54, mid-build). It holds
+# new starts and swaps nothing. Same write-then-rename as request_drain. Nothing happens without a deployer folder and a
+# launcher (no drain would follow), so a host without self-deploy behaves as before. Boss Man also drops it by itself after
+# 45 minutes, so a script that is killed without running its trap cannot hold work for long.
+BUILD_HOLD=0
+write_inbox_file() { # name, json: the root-only state folder, then renamed into inbox
+  local d="$BOSSMAN_DEPLOYER" tmp
+  mkdir -p "$d/state" && chmod 700 "$d/state"
+  tmp="$(mktemp "$d/state/$1.XXXXXX")"
+  printf '%s\n' "$2" >"$tmp"
+  chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
+  mv -fT "$tmp" "$d/inbox/$1"
+}
+request_build_hold() {
+  ((NOW)) && return 0 # --now cuts runs off and recreates at once: there is nothing to hold for
+  [[ -n ${BOSSMAN_DEPLOYER:-} && -d $BOSSMAN_DEPLOYER/inbox && -n "$(launcher_id)" ]] || return 0
+  if write_inbox_file drain.json "$(printf '{"requestedAt":"%s","by":"update-runner.sh","reason":"building"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"; then
+    BUILD_HOLD=1
+    echo "Asked Boss Man to hold new work while the image is built (it lifts by itself if the build fails)."
+  else
+    echo "WARNING: could not ask Boss Man to hold new work during the build; the update goes ahead without the early hold." >&2
+  fi
+}
+# Runs on every exit. A build hold still asked for (the drain was never requested) is cancelled, so new work starts again.
+end_build_hold() {
+  local rc=$?
+  if ((BUILD_HOLD)); then
+    write_inbox_file drain-cancel.json "$(printf '{"requestedAt":"%s","by":"update-runner.sh"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" \
+      || echo "WARNING: could not cancel the build hold; Boss Man lifts it by itself after 45 minutes." >&2
+  fi
+  return "$rc"
 }
 
 move_runners() {
@@ -194,6 +229,8 @@ NETGUARD_PREV="$(docker image inspect --format '{{.Id}}' boss-man-netguard:curre
 # Hold the old guard under a name of its own while the new one is built: rebuilding :current untags it, and on a host whose image
 # store drops untagged images the bare id is gone by the time the canary has passed (BOS-1417: "No such image", exit 1).
 if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:pending-previous || NETGUARD_PREV=; fi
+request_build_hold
+trap end_build_hold EXIT
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 lap "network guard build"
 

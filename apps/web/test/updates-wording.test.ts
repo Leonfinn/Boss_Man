@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { atTime, checkSentence, drainTiming, deployerLine, inAbout, runsSentence, waitLine, type DeployWaitView, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
+import { atTime, checkSentence, drainTiming, deployerLine, historyWhat, inAbout, isReplaced, runsSentence, waitCancelLabel, waitLine, type DeployWaitView, type HistoryRow, type RunnerCheckView, type SelfDeployView, type WrapUpRun } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // BOS-1846: the sentences the owner reads in Settings → Updates, pinned with a fixed clock. Clock times are built
@@ -102,5 +102,51 @@ describe("deployerLine", () => {
   });
   it("on time", () => {
     expect(deployerLine(v({ reportedAt: iso(-1), late: false }))).toBe(`The host deployer last reported ${when(iso(-1))}. It is reading main again and shows what is waiting within a few minutes.`);
+  });
+});
+
+// BOS-1985: the labels on the waiting-update button, the "replaced" check, and the Recent updates line.
+
+describe("waitCancelLabel", () => {
+  const w = (over: Partial<Extract<DeployWaitView, { on: true }>> = {}) => ({ on: true as const, phase: "waiting" as const, origin: "approve" as const, commit: "0123456789abcdef", deadline: iso(30), ...over });
+  it("by hand while making room says Stop making room", () => {
+    expect(waitCancelLabel(w({ origin: "hand" }))).toBe("Stop making room");
+  });
+  it("an approved update waiting, or one already sent, says Cancel the update", () => {
+    expect(waitCancelLabel(w())).toBe("Cancel the update");
+    expect(waitCancelLabel(w({ phase: "sent" }))).toBe("Cancel the update");
+  });
+  it("an update that is live in its window or handover says Lift the hold now", () => {
+    expect(waitCancelLabel(w({ phase: "window" }))).toBe("Lift the hold now");
+    expect(waitCancelLabel(w({ phase: "handover" }))).toBe("Lift the hold now");
+  });
+});
+
+describe("isReplaced", () => {
+  it("matches the stale-on-main message, whatever its case", () => {
+    expect(isReplaced("Commit abc123 is not on main any more")).toBe(true);
+    expect(isReplaced("COMMIT ABC123 IS NOT ON MAIN ANY MORE")).toBe(true);
+  });
+  it("is false for another message, null and undefined", () => {
+    expect(isReplaced("the build failed")).toBe(false);
+    expect(isReplaced(null)).toBe(false);
+    expect(isReplaced(undefined)).toBe(false);
+  });
+});
+
+describe("historyWhat", () => {
+  const row = (over: Partial<HistoryRow> = {}): HistoryRow => ({ id: "h", target: "server", commit: "0123456789abcdef", changes: 0, result: "deployed", message: null, at: iso(0), ...over });
+  it("a runner row names every company", () => {
+    expect(historyWhat(row({ target: "runner" }))).toBe("Runners, all companies");
+  });
+  it("a rejected server row replaced by a newer update says it was not sent", () => {
+    expect(historyWhat(row({ result: "rejected", message: "Commit abc123 is not on main any more" }))).toBe("Server: not sent, a newer update replaced it");
+  });
+  it("a server row counts its changes, singular and plural", () => {
+    expect(historyWhat(row({ changes: 1 }))).toBe("Server, 1 change");
+    expect(historyWhat(row({ changes: 3 }))).toBe("Server, 3 changes");
+  });
+  it("a server row with no changes is just Server", () => {
+    expect(historyWhat(row({ changes: 0 }))).toBe("Server");
   });
 });

@@ -37,6 +37,7 @@ describe("update waits guard (BOS-2058)", () => {
     "services/deploy-wait.ts",
     "services/maintenance.ts",
     "services/merge-queue.ts",
+    "services/merge-status.ts", // landingMergeIds (moved out of review.ts, BOS-1904): the runner-landing row's live count
     "services/review.ts", // landingMergeIds: the runner-landing row's live count (landingsThatCount)
     "services/runner-report.ts",
     "services/scheduler.ts",

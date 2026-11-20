@@ -170,4 +170,22 @@ describe("urgent and moved-to-front quick checks (BOS-1519)", () => {
     expect(run!.id).toBe(q1.jobId);
     expect(await s.q.moveToFront(s.co.id, q1.ticketId, "Sam")).toBeNull();
   });
+
+  // BOS-2105: a full pre-review check (request_check scope full) was never in the with-merges group, so it waited behind every
+  // merge and aged quick check however long it had waited, and urgency did nothing. It now ages and ranks like a quick check.
+  it("a full pre-review check ages into the merge line, and an urgent one joins it at once", async () => {
+    const s = await setup();
+    const merge = await s.merge({ minutesAgo: 20 });
+    const agedQuick = await quick(s, { minutesAgo: 15 });
+    const full = await quick(s, { minutesAgo: 30, scope: "full" });
+    const fresh = await quick(s, { minutesAgo: 1 });
+    // Waited 30 minutes: it sorts by queue time with the merges, ahead of the newer merge and aged quick check.
+    expect(await s.order()).toEqual([full.ticketId, merge.ticketId, agedQuick.ticketId, fresh.ticketId]);
+    // Queued just now and not urgent: it waits below the aged group, as a fresh quick check does.
+    await s.db.update(checkJobs).set({ queuedAt: new Date(Date.now() - 60_000) }).where(eq(checkJobs.id, full.jobId));
+    expect((await s.order()).slice(0, 2)).toEqual([merge.ticketId, agedQuick.ticketId]);
+    // Urgent: top tier in the with-merges group from the moment it is queued.
+    await s.db.update(tickets).set({ urgent: true }).where(eq(tickets.id, full.ticketId));
+    expect(await s.order()).toEqual([full.ticketId, merge.ticketId, agedQuick.ticketId, fresh.ticketId]);
+  });
 });

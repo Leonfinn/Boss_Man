@@ -121,7 +121,8 @@ services:
     command: ["node", "dist/migrate.js"]
 
   proxy:
-    image: caddy:2.11.7
+    # Change version and digest together (the digest is the multi-arch index of the tag).
+    image: caddy:2.11.7@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
     restart: unless-stopped
     networks:
       default:

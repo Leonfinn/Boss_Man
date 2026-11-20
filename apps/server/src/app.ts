@@ -53,7 +53,7 @@ import { releaseLogService } from "./services/release-log.js";
 import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
-import { recheckDeadlines, runnerRebuilt, ticketStateChanged } from "./services/stale-requests.js";
+import { recheckDeadlines, runnerRebuilt, securityAlertChanged, ticketStateChanged } from "./services/stale-requests.js";
 import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
@@ -533,6 +533,7 @@ export async function buildApp(opts: AppOptions) {
       return !!r && runners.isConnected(r.id);
     },
     settled: () => scheduler.settled(),
+    passInfo: () => scheduler.passInfo(),
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
     landingMergeIds: () => review.landingMergeIds(),
@@ -1030,6 +1031,8 @@ export async function buildApp(opts: AppOptions) {
     clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     closeTicket: (ticketId, note) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
+    // BOS-2085 (R54): a security alert opening or closing sends the company's open go-live cards back for a re-check.
+    alertChanged: (companyId, input) => securityAlertChanged(db, { companyId, ...input, wake: (w) => scheduler.notify(w.agentId, w as { ticketId: string; reason: string; note: string; priority?: number }), now: opts.now?.() }),
     log: (m) => app.log.warn(m),
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
@@ -2244,7 +2247,7 @@ export async function buildApp(opts: AppOptions) {
     owner.put("/api/features/:id/priority-one", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { on } = z.object({ on: z.boolean() }).parse(req.body);
-      const [f] = await db.select({ id: featuresTable.id }).from(featuresTable).where(eq(featuresTable.id, id));
+      const [f] = await db.select({ id: featuresTable.id, companyId: featuresTable.companyId, title: featuresTable.title }).from(featuresTable).where(eq(featuresTable.id, id));
       if (!f) return reply.code(404).send({ error: "not_found" });
       await db.update(featuresTable).set({ priorityOne: on }).where(eq(featuresTable.id, id));
       const open = and(eq(tickets.featureId, id), ne(tickets.systemState, "done"));
@@ -2252,6 +2255,10 @@ export async function buildApp(opts: AppOptions) {
         ? await db.update(tickets).set({ urgent: true, urgentByOwner: true, version: sql`${tickets.version} + 1` }).where(and(open, or(eq(tickets.urgent, false), eq(tickets.urgentByOwner, false)))).returning({ id: tickets.id, projectId: tickets.projectId })
         : await db.update(tickets).set({ urgent: false, urgentByOwner: false, version: sql`${tickets.version} + 1` }).where(and(open, eq(tickets.urgentByOwner, true))).returning({ id: tickets.id, projectId: tickets.projectId });
       if (on) for (const c of changed) retierWaiting(c.projectId, c.id, 0);
+      // BOS-2090: urgent tasks get past the usage hold, so each task the switch changed leaves a line saying when and why.
+      const at = new Date();
+      const summary = on ? `Owner turned on Priority 1 for feature "${f.title}": this task now goes first` : `Owner turned off Priority 1 for feature "${f.title}"`;
+      for (const c of changed) await record(db, { companyId: f.companyId, ticketId: c.id, kind: "quota", summary, at });
       return { ok: true, priorityOne: on, tickets: changed.length };
     });
 

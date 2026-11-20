@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { Loader } from "../components/Loader";
 
 type Importance = "nice_to_have" | "important" | "critical";
 const LEVELS: Array<{ id: Importance; label: string }> = [
@@ -254,7 +255,12 @@ export function PortalApp() {
         </p>
       </main>
     );
-  if (!data) return null;
+  if (!data)
+    return (
+      <main className="portal">
+        <Loader label="Loading the feedback page" />
+      </main>
+    );
   const shown = data.features.filter((f) => f.stage === stage);
   const ask: Ask = { required: !!data.confirmByEmail, remembered: data.rememberedEmail ?? null };
   // BOS-967: when the owner sets a website address, the page gains a bar at the top and a link at the

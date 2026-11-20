@@ -1244,6 +1244,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                       </div>
                     )}
                     {d.context?.keptOpen && <p className="muted" style={{ fontSize: 13 }}>{d.context.keptOpen.note}</p>}
+                    {d.context?.openAlerts && <p className="muted" style={{ fontSize: 13 }}>{d.context.openAlerts}</p>}
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>

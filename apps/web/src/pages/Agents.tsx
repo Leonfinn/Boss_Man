@@ -6,6 +6,8 @@ import { Star } from "lucide-react";
 import { describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
 import { Avatar } from "../components/Avatar";
+import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { RowMenu } from "../components/RowMenu";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
@@ -339,7 +341,7 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
         <input type="file" accept="image/png,image/jpeg,image/webp" className="sr-only" aria-label={`Picture for ${a.name}`} onChange={(e) => pick(e.target.files?.[0])} />
       </label>
       {a.avatarAt && (
-        <button type="button" className="btn small" onClick={() => void run(() => api(url, { method: "DELETE" }), "Back to the default picture.")}>
+        <button type="button" className="btn small" onClick={() => window.confirm(`Remove ${a.name}'s picture? You would have to upload it again to get it back.`) && void run(() => api(url, { method: "DELETE" }), "Back to the default picture.")}>
           Use the default
         </button>
       )}
@@ -356,6 +358,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
+  const [undoing, setUndoing] = useState(false);
   const run = async (fn: () => Promise<unknown>, done: string) => {
     try {
       await fn();
@@ -459,7 +462,16 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
                   {c.undoneAt && <span className="tag" style={{ marginLeft: 6 }}>Undone</span>}
                 </span>
                 {!c.undoneAt && c.field !== "hired" && c.field !== "rehired" && (
-                  <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} onClick={() => void run(() => api(`/api/agent-changes/${c.id}/undo`, { method: "POST" }), c.field === "retired" ? "Rehired, with their tasks back." : "Undone.")}>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ minHeight: 32, padding: "4px 10px" }}
+                    disabled={undoing}
+                    onClick={() => {
+                      setUndoing(true);
+                      void run(() => api(`/api/agent-changes/${c.id}/undo`, { method: "POST" }), c.field === "retired" ? "Rehired, with their tasks back." : "Undone.").finally(() => setUndoing(false));
+                    }}
+                  >
                     {c.field === "retired" ? "Rehire" : "Undo"}
                   </button>
                 )}
@@ -709,6 +721,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
   const [hiring, setHiring] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   if (!company) return <NoCompany />;
   const refreshModels = async () => {
     const r = await api<{ probed: Record<string, { ok: boolean; error?: string }> }>(`/api/companies/${company!.id}/models/refresh`, { method: "POST" });
@@ -864,8 +877,20 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
         <CeoApprovals companyId={company.id} />
         <p className="muted" style={{ fontSize: 13, margin: 0 }}>
           Model lists come from the runner when agents run{models.data?.api.length ? ", and from your API keys" : ""}.{" "}
-          <button type="button" className="linkish" onClick={() => void api<ModelLists>(`/api/companies/${company.id}/models?refresh=1`).then(() => models.reload())}>
-            Refresh
+          <button
+            type="button"
+            className="linkish"
+            disabled={refreshing}
+            onClick={() => {
+              setRefreshing(true);
+              setNote(null);
+              api<ModelLists>(`/api/companies/${company.id}/models?refresh=1`)
+                .then(() => models.reload())
+                .catch((err) => setNote({ ok: false, text: `Couldn't refresh the model lists: ${(err as Error).message}` }))
+                .finally(() => setRefreshing(false));
+            }}
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
           </button>
         </p>
       </div>
@@ -887,7 +912,9 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           {note.text}
         </p>
       )}
-      <ul className="agent-list">{active.map(row)}</ul>
+      {!list.data && list.error && <LoadError what="agents" message={list.error.message} onRetry={list.reload} />}
+      {!list.data && !list.error && <Loader label="Loading agents" />}
+      {list.data && <ul className="agent-list">{active.map(row)}</ul>}
       {retired.length > 0 && (
         <details>
           <summary className="section-label">Retired ({retired.length})</summary>

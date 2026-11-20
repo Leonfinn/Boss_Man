@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ALERT_KIND_NAMES, ALERT_KINDS, isAlertKind, kindCeiling, kindRow } from "../src/services/alert-kinds.js";
+import { ALERT_KIND_NAMES, ALERT_KINDS, isAlertKind, kindCeiling, kindRow, kindStart } from "../src/services/alert-kinds.js";
+import type { AlertRung } from "../src/services/alert-kinds.js";
 
 const SRC = join(import.meta.dirname, "..", "src");
 
@@ -139,6 +140,13 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
     expect(kindCeiling("owner", undefined)).toBe("owner");
     // A stopped company usually can't run its own CEO either, so this card may reach the owner (BOS-593).
     expect(kindCeiling("no_progress", "ceo")).toBe("owner");
+  });
+
+  it("kindStart starts at the Scrum Master unless the raise says higher, and passes any rung through (BOS-1945)", () => {
+    expect(kindStart(undefined)).toBe("scrum_master");
+    for (const rung of ["scrum_master", "ceo", "owner"] as const) expect(kindStart(rung)).toBe(rung);
+    // The function validates nothing: an unknown rung is passed through as given.
+    expect(kindStart("unknown" as AlertRung)).toBe("unknown");
   });
 
   it("an account limit card is per company and account, and clears when the account has room (BOS-498)", () => {

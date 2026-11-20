@@ -8,7 +8,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
-import { DRAIN_GO_AHEAD_MINUTES, drainForecast, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
+import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
 import { activeWaits, WAIT_RULES } from "../src/services/update-waits.js";
 
@@ -1516,5 +1516,190 @@ describe("Stop N and carry on with the update (BOS-1238)", () => {
     const h = (await c.req("GET", "/api/self-deploy/history?limit=5")).json() as Array<{ target: string; result: string | null; changes: number }>;
     expect(h).toHaveLength(1);
     expect(h[0]).toMatchObject({ target: "server", result: "deployed", changes: 2 });
+  });
+});
+
+describe("early building hold (BOS-1955)", () => {
+  const drainFile = (dir: string, reason?: string) => writeFile(path.join(dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh", ...(reason ? { reason } : {}) }));
+  const cancelFile = (dir: string) => writeFile(path.join(dir, "inbox", "drain-cancel.json"), "{}");
+  const gone = (p: string) => stat(p).then(() => false, () => true);
+
+  it("a building request holds new starts, swaps nothing and asks nobody to stop", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "building" });
+    expect(await gone(path.join(c.dir, "inbox", "drain.json"))).toBe(true);
+    // A new wake waits; the run going carries on and was not told to wrap up; no runner is touched.
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0 });
+    expect(c.commands).toHaveLength(1);
+    expect(c.messages).toHaveLength(0);
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);
+    expect(await c.maint()).toMatchObject({ on: true, kind: "building", blocking: true, phase: "waiting", chatOpen: true });
+    expect(await c.titles()).toContain("note: Runner update building: new work held");
+  });
+
+  it("the real drain takes the hold over and keeps its start; its own deadline starts then", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const first = (await getHold(c.db))!;
+    c.advance(6 * MIN);
+    await drainFile(c.dir); // the image is built: a plain drain
+    await c.maintenance.step();
+    const h = await getHold(c.db);
+    // The only runner was idle, so it was swapped by the same pass; the hold is the update's, not the building one.
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(1);
+    expect(h === null || (h.kind === "update" && h.since === first.since)).toBe(true);
+    if (h) expect(new Date(h.deadline).getTime()).toBeGreaterThan(new Date(first.deadline).getTime() - 40 * MIN);
+  });
+
+  it("keeps since when the drain waits for a busy company", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const first = (await getHold(c.db))!;
+    c.advance(6 * MIN);
+    await drainFile(c.dir);
+    await c.maintenance.step();
+    const h = (await getHold(c.db))!;
+    expect(h).toMatchObject({ kind: "update", since: first.since, reason: "runner update" });
+    const nowMs = Date.now();
+    expect(new Date(h.deadline).getTime()).toBeGreaterThan(nowMs + 20 * MIN); // 30 minutes from the takeover, not from the build start
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP}`]); // the update's own message now goes to the run going
+  });
+
+  it("a cancel file ends a building hold, and never a real update", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await gone(path.join(c.dir, "inbox", "drain-cancel.json"))).toBe(true);
+    expect((await c.maint()).last).toMatchObject({ ok: true, title: "Runner update build stopped" });
+    // New work starts again.
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+    // A real update under way is not touched by a stale cancel file.
+    await c.finish(a);
+    await c.maintenance.start({ kind: "update" });
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull(); // swapped and finished on its own pass, not cancelled
+    expect((await c.titles()).filter((t) => t.includes("build stopped"))).toHaveLength(1);
+  });
+
+  it("a real update asked together with a cancel is not cancelled", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    await drainFile(c.dir);
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+  });
+
+  it("a building request and a cancel in the same pass start no hold (a build that failed fast)", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await gone(path.join(c.dir, "inbox", "drain.json"))).toBe(true);
+    expect(await gone(path.join(c.dir, "inbox", "drain-cancel.json"))).toBe(true);
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("a building request while an old building hold is on pushes its deadline out and keeps since", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const first = await getHold(c.db);
+    c.advance((BUILD_HOLD_MAX_MINUTES - 5) * MIN);
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const again = await getHold(c.db);
+    expect(again).toMatchObject({ kind: "building", since: first!.since });
+    expect(new Date(again!.deadline).getTime()).toBeGreaterThan(new Date(first!.deadline).getTime());
+    c.advance(10 * MIN); // past the first deadline, inside the refreshed one
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "building" });
+  });
+
+  it("ends by itself at BUILD_HOLD_MAX_MINUTES, on the injected clock", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    c.advance((BUILD_HOLD_MAX_MINUTES - 1) * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "building" });
+    expect(await c.maint()).toMatchObject({ blocking: true });
+    c.advance(2 * MIN);
+    // Even before the drain pass has run, the hold no longer blocks starts at its limit.
+    expect(await c.maint()).toMatchObject({ blocking: false });
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last).toMatchObject({ ok: true, title: "Runner update build hold ended" });
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("is not offered the owner's deadline question or 'update now', and Cancel lifts it", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect((await c.req("POST", "/api/maintenance/update-now", {})).json()).toMatchObject({ error: "no_update" });
+    await c.maintenance.answered("Wait 10 more minutes");
+    expect(await c.open()).toHaveLength(0);
+    expect((await c.req("POST", "/api/maintenance/cancel", {})).statusCode).toBe(200);
+    expect(await getHold(c.db)).toBeNull();
+  });
+
+  it("a building request while another hold is on changes nothing", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ kind: "update" });
+    const before = await getHold(c.db);
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update", since: before!.since });
+  });
+
+  it("a failed swap is tried again inside the same hold: no lift and no page until the last try fails", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.failTimes.set("app-co", 1);
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update", tries: { "app-co": { n: 1 } } });
+    expect((await c.titles()).some((t) => t.startsWith("page:"))).toBe(false);
+    c.advance(MIN);
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(2);
+    expect(c.fake.rolledBack).toEqual([]);
   });
 });
