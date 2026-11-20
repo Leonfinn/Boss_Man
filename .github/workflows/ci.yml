@@ -26,9 +26,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/bossman') }}
 
+# Every job has a timeout-minutes (BOS-2097): without one a hung step runs for GitHub's 6-hour default, and the merge gate
+# reports "still running" after its own 90 minutes instead of a red run. Each limit is about 1.5x the job's longest green
+# run in recent history, rounded up to 5 minutes, at least 10. The longest chain of limits along `needs` stays under the
+# gate's 90 minutes (CI_TIMING.ceilingMs in apps/server/src/services/ci-publish.ts). apps/server/test/ci-workflow-timeouts.test.ts
+# checks both.
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # longest green run 0.2 min
     outputs:
       check: ${{ steps.f.outputs.check }}
       images: ${{ steps.f.outputs.images }}
@@ -142,6 +148,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.check == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 35 # longest green run 22.0 min (20 Nov 2026)
     # A real Postgres for the leader-lock, migrate-lock and db-restart tests (PGlite cannot share locks across connections).
     # Same image as docker-compose.yml: the migrations need pgvector (0036_semantic_wiki.sql).
     services:
@@ -221,6 +228,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20 # longest green run 10.1 min (amd64; arm64 2.8 min), no build cache
     steps:
       - uses: actions/checkout@v7
       - name: Build the server image
@@ -388,7 +396,7 @@ jobs:
     needs: changes
     if: ${{ !startsWith(github.ref, 'refs/heads/bossman/') && needs.changes.outputs.images == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 45 # longest green run 27.9 min (20 Nov 2026); was 90, which the gate gives up at
     steps:
       - uses: actions/checkout@v7
       - name: Build the check worker image (no Claude Code, no OpenCode)
@@ -440,6 +448,7 @@ jobs:
     needs: images
     name: images (join amd64 + arm64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10 # longest green run 1.1 min
     services:
       registry:
         image: registry:2
