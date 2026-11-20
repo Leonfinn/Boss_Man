@@ -8,6 +8,7 @@ import { usePoll } from "../hooks";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { Credentials } from "./settings/Credentials";
+import { useAction } from "./settings/shared";
 import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, RunnerStep } from "./SetupClaude";
@@ -289,6 +290,7 @@ export function SetupChecklist({ companyId, go, folded = false }: { companyId: s
   const progress = usePoll((signal) => api<Progress>("/api/setup-progress", { signal }), 60_000, "setup-progress");
   const list = usePoll((signal) => (companyId ? api<ChecklistItem[]>(`/api/companies/${companyId}/setup-checklist`, { signal }) : Promise.resolve([])), 30_000, `setup-checklist-${companyId ?? "none"}`);
   const items = list.data ?? [];
+  const act = useAction();
   if (!companyId || !progress.data || progress.data.dismissed || !items.length || items.every((i) => i.done)) return null;
   const doneCount = items.filter((i) => i.done).length;
   const Wrap = folded ? "details" : "section";
@@ -309,11 +311,22 @@ export function SetupChecklist({ companyId, go, folded = false }: { companyId: s
           <button type="button" className="btn primary" onClick={() => go("setup")}>
             Continue
           </button>
-          <button type="button" className="btn" onClick={() => void api("/api/setup-progress", { method: "PUT", body: { dismissed: true } }).then(progress.reload)}>
-            Dismiss
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              void act.run(async () => {
+                await api("/api/setup-progress", { method: "PUT", body: { dismissed: true } });
+                progress.reload();
+              })
+            }
+          >
+            {act.busy ? "Saving…" : "Dismiss"}
           </button>
         </span>
       </div>
+      {act.view}
       <ul className="checklist">
         {items.map((i) => (
           <li key={i.id} className={i.done ? "done" : ""}>
