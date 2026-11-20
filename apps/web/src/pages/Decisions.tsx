@@ -5,7 +5,7 @@ import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
-import { ageLabel, raisedAgo } from "../age";
+import { ageLabel, dayLabel, raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
@@ -944,7 +944,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                       <span className="pills">
                         {d.parts.liveRun > 0 && <span className="tag amber pill">{d.agentName ?? "An agent"} is waiting on you</span>}
                         {d.blocks.length > 0 && <span className="tag blue pill">Holds up {d.blocks[0]!.ref ?? d.blocks[0]!.title}{d.blocks.length > 1 ? ` +${d.blocks.length - 1} more` : ""}</span>}
-                        {d.dueDate && <span className="tag pill">Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
+                        {d.dueDate && <span className="tag pill">Due {dayLabel(d.dueDate)}</span>}
                       </span>
                     </div>
                     {d.doAfter?.length ? (
