@@ -2,7 +2,7 @@
 // never a "pass" in the note or an owner card answer. These tests pin the gate's pure helpers.
 import { describe, expect, it } from "vitest";
 import type { Criterion } from "@boss-man/shared";
-import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, outsideServiceEvidenceRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
 import type { HostFact } from "../src/services/host-facts.js";
 
 const after = (text: string): Criterion => ({ text, after: "merge" });
@@ -162,5 +162,28 @@ describe("CARD_CITE_REFUSAL", () => {
     expect(out).toContain("its id, in the note");
     expect(out).toContain("raise_decision blocksTicketId");
     expect(out).toContain("counts as a fail");
+  });
+});
+
+// BOS-2076: BOS-1737 criterion 5 was passed at review while Google knew none of the pages.
+describe("outsideServiceEvidenceRefusal", () => {
+  const G = after("After the next publish, Bing shows the submitted URLs and Google shows the sitemap read with no errors");
+  const crit = [after("The panel loads"), G];
+  const img = { id: "abcd1234-0000-0000-0000-000000000000", createdAt: new Date("2026-11-16T12:00:00.000Z") };
+  it("refuses a bare pass on an outside-service criterion", () => {
+    const out = outsideServiceEvidenceRefusal(crit, [], LIVE, "1 pass; 2 pass");
+    expect(out).toContain("needs evidence");
+    expect(out).toContain("Google shows the sitemap");
+  });
+  it("accepts a link, a quoted reading or a fresh screenshot", () => {
+    expect(outsideServiceEvidenceRefusal(crit, [], LIVE, "1 pass; 2 pass: https://example.com/search-console-proof")).toBeNull();
+    expect(outsideServiceEvidenceRefusal(crit, [], LIVE, '1 pass; 2 pass, it reads "Sitemap read, 12 pages discovered"')).toBeNull();
+    expect(outsideServiceEvidenceRefusal(crit, [img], LIVE, "1 pass; 2 pass, shot abcd1234")).toBeNull();
+  });
+  it("does not count a screenshot from before go-live; leaves a fail and unrelated criteria alone", () => {
+    const old = { ...img, createdAt: new Date("2026-11-16T09:00:00.000Z") };
+    expect(outsideServiceEvidenceRefusal(crit, [old], LIVE, "1 pass; 2 pass, shot abcd1234")).not.toBeNull();
+    expect(outsideServiceEvidenceRefusal(crit, [], LIVE, "1 pass; 2 fail: Google knows no pages")).toBeNull();
+    expect(outsideServiceEvidenceRefusal([after("The panel loads")], [], LIVE, "1 pass")).toBeNull();
   });
 });

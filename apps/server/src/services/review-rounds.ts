@@ -4,7 +4,7 @@
 // moved out whole: it takes the service as `this` (so calls to other methods go through the assembled object, where tests
 // spy on them) and the shared context as `ctx`. review.ts keeps one delegate line per method.
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
-import { realUseWalkthrough, REAL_USE_REFUSAL, touchesInstallSurface, usabilityGated } from "@boss-man/shared";
+import { OWNER_STEPS_MISSING, OWNER_STEPS_OK, OWNER_STEPS_WRONG, realUseWalkthrough, type OwnerStepFlag, REAL_USE_REFUSAL, touchesInstallSurface, usabilityGated } from "@boss-man/shared";
 import { formatReviewComments, REVIEW_KINDS, riskOf, ruleFor, slotRef, type MigrationsResult, type ReviewComment, type ReviewSlot, type WorkspaceDiff } from "@boss-man/shared";
 import { agents, decisions, reviewRequests, runners, tickets } from "../db/schema.js";
 import { openHoldingCard } from "./ticket-links.js";
@@ -127,7 +127,7 @@ export async function submit(
   this: ReviewSelf,
   ctx: ReviewCtx,
   ticketId: string,
-  input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; /** Optional one-line lesson learned, when sending it back (R-review-lessons); the owner decides. */ lesson?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean; /** "Passed, hold merge" (BOS-808): an approval that does not merge until the hold ends. */ hold?: HoldInput },
+  input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; /** BOS-2074: the reviewer's verdict on the owner setup steps: OWNER_STEPS_OK, or the steps that are wrong. */ ownerSteps?: typeof OWNER_STEPS_OK | OwnerStepFlag[]; /** Optional one-line lesson learned, when sending it back (R-review-lessons); the owner decides. */ lesson?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean; /** "Passed, hold merge" (BOS-808): an approval that does not merge until the hold ends. */ hold?: HoldInput },
 ) {
   // `reviewState`, not `state`: as in review.ts, the ctx's state keeps the name it had there.
   const { db, state: reviewState, landings, ticketWithRepo, landingStale, checkHoldInput, startHold } = ctx;
@@ -147,6 +147,19 @@ export async function submit(
   if (input.lesson?.trim() && !lesson) throw new ReviewError(422, "A lesson is one line, up to 240 characters.");
   const rows = input.reviewerAgentId ? await latestRows(db, ticketId) : [];
   if (input.verdict === "changes_requested" && !input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
+  // BOS-2074: a reviewer who says an owner step is wrong can't approve; a code or infra approval of a ticket with owner setup steps must give a verdict on them.
+  if (input.reviewerAgentId) {
+    const flagged = Array.isArray(input.ownerSteps) ? input.ownerSteps.filter((s) => s.step.trim()) : [];
+    if (input.verdict === "approved") {
+      if (flagged.length) throw new ReviewError(422, OWNER_STEPS_WRONG);
+      if (t.ownerSetup?.trim() && input.ownerSteps !== OWNER_STEPS_OK) {
+        const openKinds = rows.filter((r) => r.reviewerAgentId === input.reviewerAgentId && r.status === "pending" && (!input.kind || r.kind === input.kind)).map((r) => r.kind);
+        if (!rows.length || openKinds.some((k) => k === "code" || k === "infra")) throw new ReviewError(422, OWNER_STEPS_MISSING);
+      }
+    } else if (flagged.length) {
+      input = { ...input, summary: `${input.summary?.trim() ? `${input.summary.trim()}\n\n` : ""}Owner setup steps that are wrong or not needed:\n${flagged.map((s) => `- ${s.step.trim()}: ${s.why.trim()}`).join("\n")}` };
+    }
+  }
   // BOS-1571 usability gate: an agent's approval of a feature, of work with owner setup steps, or of a change to what the
   // owner installs carries a written "Real use:" walk-through. The code and infra reviews (and the CEO approving a
   // ticket with no review rows) carry it; security and adversarial keep their own focus; the owner is never asked.

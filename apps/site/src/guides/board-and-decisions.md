@@ -23,6 +23,10 @@ Open **Projects** and choose a project. Tickets sit in six columns:
 
 You can rename a column with its pencil. Agents still see the fixed state, shown under the name as "Agents see:".
 
+### Looks stuck
+
+When the watchdog sees that a ticket has not moved for too long, it hands the ticket to the Scrum Master. The ticket's card then shows an amber **Looks stuck** tag and a line such as "No movement for 2 days. The Scrum Master has been told." The count above the board says how many look stuck; choose it to jump to the first one. You do not need to do anything. If the Scrum Master cannot sort it out, a card comes to you on Decisions. Tickets being checked, waiting their turn behind a busy agent, or merged and still being watched never show the tag.
+
 ## What Blocked means
 
 Blocked holds every ticket that is only waiting. A ticket can be Blocked when:

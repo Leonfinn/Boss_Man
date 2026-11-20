@@ -4,7 +4,7 @@
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { addsUsabilityCriterion, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
+import { addsUsabilityCriterion, holdEarlyAfterMergePasses, WATCH_DEFAULT_DAYS, WATCH_MAX_DAYS, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, criterionText, pageClauseRefusal, pageClauses, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, readCriteria, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, ticketImages, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -23,7 +23,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { checkTicketDoneRefusal } from "./services/after-merge-check-tickets.js";
-import { CARD_CITE_REFUSAL, hostFactRefusal, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, outsideServiceEvidenceRefusal, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
 import { noteBlockedPark, refusalForNamedAgent } from "./services/blocked-who-acts.js";
 import { githubOnlyMarkWarning } from "./services/line-holder.js";
@@ -656,6 +656,18 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const again = steps.length ? ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride: parseStoredOverride(stored?.override), byCeo: true, strict: false }) : null;
         if (again && again.error !== null) return fail(`${again.error}\nFix them with set_ticket_state ownerSetup, then move to review again.`);
       }
+      // BOS-2076: an after-merge criterion can't be checked before the work is live, so a pass on one given now is
+      // stored as "not yet checked" and the reply says so. A done move needs the ticket live already (checked above).
+      let heldEarly: string[] = [];
+      if (summary && state !== "done" && withCriteria.criteria.some(isAfterMerge)) {
+        const [lv] = await db.select({ liveAt: tickets.liveAt, liveMarkedAt: tickets.liveMarkedAt, mergedAt: tickets.mergedAt, wait: tickets.goLiveWait }).from(tickets).where(eq(tickets.id, ticketId));
+        const isLive = !!(lv?.liveAt || lv?.liveMarkedAt || (lv?.mergedAt && !lv.wait));
+        if (!isLive) {
+          const held = holdEarlyAfterMergePasses(withCriteria.criteria, summary);
+          heldEarly = held.held;
+          summary = held.note;
+        }
+      }
       const note = summary ?? withCriteria.current;
       // The done gate also reads the state note already on the ticket: the owner's answer on a linked card
       // records its pass or fail there (DR-024 #5), so a short closing summary mustn't hide it.
@@ -679,6 +691,12 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           if (withCriteria.criteria.some((c) => isAfterMerge(c) && pageClauses(criterionText(c)).length)) {
             const shots = await db.select({ id: ticketImages.id, createdAt: ticketImages.createdAt }).from(ticketImages).where(eq(ticketImages.ticketId, ticketId));
             const refusal = pageShotRefusal(withCriteria.criteria, shots, live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? null, reported ?? "");
+            if (refusal) return fail(refusal);
+          }
+          // BOS-2076: a pass on an outside-service criterion (Google, Bing, a sitemap...) must carry a link, a screenshot or a quoted reading.
+          if (withCriteria.criteria.some((c) => isAfterMerge(c) && namesOutsideService(criterionText(c)))) {
+            const shots = await db.select({ id: ticketImages.id, createdAt: ticketImages.createdAt }).from(ticketImages).where(eq(ticketImages.ticketId, ticketId));
+            const refusal = outsideServiceEvidenceRefusal(withCriteria.criteria, shots, live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? null, reported ?? "");
             if (refusal) return fail(refusal);
           }
           // BOS-1867: a check ticket's result reaches its parent only through numbered verdicts on its own criteria.
@@ -828,7 +846,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, !byCeo);
         if (state === "blocked" && withCriteria.prev === "in_progress" && waitsOnMergeOnly && (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId)).limit(1)).length) planNote += `\n\n${IN_PROGRESS_BLOCKED_WARNING}`;
       }
-      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? (reAsked.length ? ` It was already in review, so the note changed and no new round opened. ${reAsked.join(" and ")} asked for changes on earlier code and ${reAsked.length > 1 ? "were" : "was"} asked to review again; reviewers who approved were not asked.` : " It was already there, so only the note changed and no reviews were re-requested (no reviewer who asked for changes needed to look again).") : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
+      const heldNote = heldEarly.length ? `\n\nNot counted yet: ${heldEarly.map((h) => `"${h}"`).join(", ")} ${heldEarly.length > 1 ? "are checks" : "is a check"} for after the work is live, so the pass was stored as "not yet checked". Report it once the ticket is live.` : "";
+      return text(`Ticket ${ticketId} is now ${state}.${heldNote}${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${beingChecked.held ? ` Boss Man queued its quick check (${beingChecked.where}), so it waits in Review as "Being checked" and no reviewer is woken until the check passes. A pass opens the reviews by itself; you are woken only if it fails. End your turn; don't call request_check or poll.` : ""}${sameState ? (reAsked.length ? ` It was already in review, so the note changed and no new round opened. ${reAsked.join(" and ")} asked for changes on earlier code and ${reAsked.length > 1 ? "were" : "was"} asked to review again; reviewers who approved were not asked.` : " It was already there, so only the note changed and no reviews were re-requested (no reviewer who asked for changes needed to look again).") : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
     },
   );
 }

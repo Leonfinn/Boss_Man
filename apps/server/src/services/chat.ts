@@ -13,7 +13,12 @@ import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
 import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
-import { namedThingsSection, youSaidLines, type NamedSources } from "./named-things.js";
+import { namedThingsSection, type NamedSources } from "./named-things.js";
+
+/** Drops the "You said "X" on card Y, 2026-11-01, about Z, ..." footer lines that BOS-1855 saved under older CEO replies. */
+export function stripYouSaidLines(text: string): string {
+  return text.replace(/(?:\n+|^)You said "[^\n]*?, \d{4}-\d{2}-\d{2}, about [^\n]*/g, "").trimEnd();
+}
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
 import { reportBackSection, settleReports } from "./chat-report-back.js";
@@ -126,20 +131,6 @@ export function chatService(
     const [a] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, agentId));
     return a?.role === "ceo";
   }
-  /** The "you said" lines under a CEO reply (DR-069 D3); empty on any failure. */
-  async function youSaid(companyId: string, agentId: string, text: string): Promise<string[]> {
-    try {
-      const owner = await db
-        .select({ text: ownerChatMessages.text })
-        .from(ownerChatMessages)
-        .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId), eq(ownerChatMessages.role, "owner")))
-        .orderBy(desc(ownerChatMessages.createdAt))
-        .limit(HISTORY);
-      return await youSaidLines(db, companyId, text, owner.map((m) => m.text), deps.named);
-    } catch {
-      return [];
-    }
-  }
   async function agentOf(companyId: string, agentId: string): Promise<Agent> {
     const [a] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, agentId)));
     if (!a) throw new ChatError(404, "No such agent in this company.");
@@ -222,7 +213,9 @@ export function chatService(
       const live = running ? (deps.trace?.live(running.id) ?? null) : null;
       const withTrace = ordered.map((m) => {
         const trace = byMessage.get(m.id);
-        return trace ? { ...m, trace } : m;
+        // Replies saved before BOS-2087 carry "You said ..." footer lines (BOS-1855); the owner no longer sees them.
+        const shown = m.role === "assistant" ? { ...m, text: stripYouSaidLines(m.text) } : m;
+        return trace ? { ...shown, trace } : shown;
       });
       return { agentId: agent.id, items: withTrace, state: await state(companyId, agent.id), live };
     },
@@ -322,9 +315,7 @@ export function chatService(
       const links = await missingPageNote(db, r.companyId, text);
       // What the run actually changed is checked against its claims, in code (BOS-758).
       const done = await doneInThisReply(db, runId, text, changesAtReply.get(runId));
-      // DR-069 D3: up to two "you said X on card Y" lines for things this CEO reply names first; never holds or rewrites the reply.
-      const said = r.duty !== "assistant" && r.agentId && (await isCeo(r.agentId)) ? await youSaid(r.companyId, r.agentId, text) : [];
-      const notes = [links, done, said.length ? said.join("\n") : null].filter(Boolean);
+      const notes = [links, done].filter(Boolean);
       const saved = notes.length ? `${text}\n\n${notes.join("\n\n")}` : text;
       // The Thinking trace so far is saved with the reply (BOS-1368), so a reload shows it; a reply
       // with no steps saves nothing, so it shows no trace. Taken before the insert can fail, so its

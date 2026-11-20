@@ -137,28 +137,23 @@ describe("owner chat", () => {
     expect(await namedThingLines(c.db, c.company.id, [{ kind: "Worker", name: "Unknown", needles: ["Unknown"], record: null }])).toEqual([]);
   });
 
-  it("DR-069 D3: a CEO reply that names something first gets up to 2 'You said' lines; a thing the owner named, or with no owner answer, gets none; the reply is saved as written", async () => {
+  it("BOS-2087: a CEO reply naming a worker the owner answered a card about gets no 'You said' footer; old saved footers are hidden", async () => {
     const c = await setup();
-    const { youSaidLines } = await import("../src/services/named-things.js");
+    await c.db.delete(wakes);
     await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
-    await c.db.insert(checkWorkers).values({ name: "Quietbox", tokenHash: randomUUID(), companyIds: [c.company.id] });
-    const [card] = await c.db
-      .insert(decisions)
-      .values({ companyId: c.company.id, kind: "question", question: "Keep Truenas off?", options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer: "Done: Truenas stays off", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } })
-      .returning({ id: decisions.id });
-    const reply = "I'd move merges to Truenas and Quietbox.";
-    const lines = await youSaidLines(c.db, c.company.id, reply, ["What should we do about merges?"]);
-    expect(lines).toHaveLength(1); // Quietbox: the owner never said anything about it
-    expect(lines[0], lines[0]).toContain(`on card ${card!.id.slice(0, 8)}`);
-    expect(lines[0]).toContain("Truenas stays off");
-    // the owner named it first: nothing to say
-    expect(await youSaidLines(c.db, c.company.id, reply, ["Can Truenas take merges?"])).toEqual([]);
-    // at most 2
-    for (const n of ["Aa1", "Bb2", "Cc3"]) {
-      await c.db.insert(checkWorkers).values({ name: n, tokenHash: randomUUID(), companyIds: [c.company.id] });
-      await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: `Use ${n}?`, options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer: `Done: ${n} fine`, answeredAt: new Date(), context: { type: "question" } });
-    }
-    expect((await youSaidLines(c.db, c.company.id, "Try Aa1, Bb2 and Cc3.", ["hi"])).length).toBe(2);
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Keep Truenas off?", options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer: "Done: Truenas stays off", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What should we do about merges?" });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "I'd move merges to Truenas." } });
+    await c.settle();
+    const { ownerChatMessages } = await import("../src/db/schema.js");
+    await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.ceo.id, role: "assistant", text: 'Old reply.\n\nYou said "Done: Truenas stays off" on card abcd1234, 2026-11-19, about Truenas, which your messages here didn\'t name.\nYou said "x" in chat, 2026-11-18, about Foo, which your messages here didn\'t name.' });
+    const items = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items as Array<{ role: string; text: string }>;
+    const replies = items.filter((m) => m.role === "assistant").map((m) => m.text);
+    expect(replies.some((t) => t.startsWith("I'd move merges to Truenas."))).toBe(true);
+    expect(replies).toContain("Old reply.");
+    expect(items.some((m) => m.text.includes("You said"))).toBe(false);
   });
 
   it("BOS-1870: a Settings path through Limits shows the saved and in-force values; other paths and a failing source say nothing", async () => {

@@ -187,28 +187,3 @@ export async function namedThingsSection(db: Db, companyId: string, texts: Array
   const lines = (await namedThingLines(db, companyId, things, sources.now?.() ?? new Date(), new Set(texts.filter((t): t is string => !!t).map((t) => t.trim())))).slice(0, NAMED_MAX_LINES);
   return lines.length ? ["", `## ${TITLE}`, ...lines] : [];
 }
-
-export const YOU_SAID_MAX = 2;
-
-/**
- * After a CEO reply (DR-069 D3, BOS-1855): for things the reply names that the owner's messages never did, up to two lines
- * "You said ... on card ...", so advice that brings up something new is shown next to what the owner last said about it.
- * Like missingPageNote it only adds lines under the saved reply; it never holds or rewrites the reply. Each line needs an
- * owner answer (a thing with only a record line is not an owner's word), and a failed lookup says nothing.
- */
-export async function youSaidLines(db: Db, companyId: string, reply: string, ownerTexts: string[], sources: NamedSources = {}): Promise<string[]> {
-  const ownerLower = ownerTexts.join("\n").toLowerCase();
-  const now = sources.now?.() ?? new Date();
-  const first = (await findNamedThings(db, companyId, [reply], sources)).filter((t) => !t.needles.some((n) => has(ownerLower, n)));
-  const lines: string[] = [];
-  const seen: string[] = [];
-  for (const t of first) {
-    if (lines.length >= YOU_SAID_MAX) break;
-    const hit = (t.own ?? (await ownersLastWord(db, companyId, t, now, new Set(ownerTexts.map((x) => x.trim()))))).find((h) => !seen.includes(`${h.kind}:${h.sourceId}`));
-    if (!hit) continue;
-    seen.push(`${hit.kind}:${hit.sourceId}`);
-    const where = hit.kind === "card" ? `on card ${hit.sourceId.slice(0, 8)}${hit.ticketRef ? ` (${hit.ticketRef})` : ""}` : hit.kind === "chat" ? "in chat" : hit.kind === "note" ? "in a note" : `on ${hit.ticketRef ?? "a ticket"}`;
-    lines.push(clip(`You said "${clip(hit.answer, 100)}" ${where}, ${day(hit.at).slice(0, 10)}, about ${t.name}, which your messages here didn't name.`, NAMED_LINE_MAX));
-  }
-  return lines;
-}

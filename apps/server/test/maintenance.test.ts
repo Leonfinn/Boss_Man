@@ -107,7 +107,23 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number; settleMs?
   let seq = 0;
   /** A company with its runner (connected unless said otherwise) and a launcher slug. */
   const company = async (name: string, slug: string, connect = true) => {
+    const callsBefore = fake.calls.length;
     const { company: c, ceo } = (await req("POST", "/api/companies", { name })).json() as { company: { id: string }; ceo: { id: string } };
+    // POST /api/companies starts the company's runner in the background (`void launch.start`), which later writes the restart
+    // reason "owner restart". Wait for its last call (the allow-list PUT, after the token PUT) so that write can't land after
+    // a later reason such as "setting change" (BOS-1986 flake).
+    if (opts.launcher !== false) {
+      const started = () => {
+        const mine = fake.calls.slice(callsBefore);
+        const token = mine.findIndex((x) => /^PUT \/runners\/[^/]+$/.test(x));
+        return token >= 0 && mine.slice(token + 1).some((x) => /^PUT \/runners\/[^/]+\/allow$/.test(x));
+      };
+      const deadline = Date.now() + 30_000;
+      while (!started()) {
+        if (Date.now() > deadline) throw new Error("the new company's background runner start never finished");
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    }
     const reg = (await req("POST", `/api/companies/${c.id}/runner`)).json() as { runnerId: string };
     const [row] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
     if (connect)

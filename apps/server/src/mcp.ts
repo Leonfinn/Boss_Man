@@ -9,7 +9,7 @@ import { FULL_LOG_RETENTION_DAYS, PLAN_REAL_USE_REFUSAL, realUseWalkthrough, usa
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { ticketHasOpenCard } from "./services/owner-todo.js";
+import { OTHER_CARD_HELD, otherTicketCardsNamed, ticketHasOpenCard } from "./services/owner-todo.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -331,6 +331,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (factHold) return fail(factHold);
       // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
       // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
+      // R53 (BOS-2084): a reply that names another ticket's open owner card is held for every agent, notAnAsk or not.
+      if (scope.agentId && (await otherTicketCardsNamed(db, scope.companyId, ticketId, body)).length) return fail(OTHER_CARD_HELD);
       let hint: { uncovered: boolean; message: string } | null = null;
       if (scope.agentId && !notAnAsk) {
         hint = await ownerActionHint(db, scope, ticketId, body);

@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, runs as runsTable, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
+import { decisions, runners, runs as runsTable, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -218,6 +218,61 @@ describe("ticket conversation (R65)", () => {
     // Steps for after go-live in ownerSetup cover it.
     await c.db.update(tickets).set({ ownerSetup: "Settings → Funding → Add funding source" }).where(eq(tickets.id, t.id));
     expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("holds a reply that names another ticket's open owner card by full id or 8+ char prefix, but not this ticket's own card (R53, BOS-2084)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the header", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const raise = async (blocksTicketId: string, question: string) => {
+      await client.callTool({ name: "raise_decision", arguments: { question, options: ["Yes", "No"], recommended: "Yes", blocksTicketId, triedFirst: "I tried everything from here, but the host refuses the step." } });
+    };
+    await raise(other.id, "Release the header change now?");
+    await raise(t.id, "Release the footer change now?");
+    const open = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    const cardOf = (id: string) => open.find((d) => (d.context as { ticketId?: string }).ticketId === id)!.id;
+    const posted = async () => (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length;
+    const foreign = cardOf(other.id);
+    // A team question still sits at the CEO's tier, off the owner's queue: naming it holds nothing. Once it reaches the owner it does.
+    expect(open.find((d) => d.id === foreign)!.tier).toBe("ceo");
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `Team question ${foreign.slice(0, 8)} is with the CEO.` } }))).toBe("Posted on the ticket's conversation.");
+    await c.db.update(decisions).set({ tier: "owner" }).where(eq(decisions.id, foreign));
+    // Full id, 8-char prefix, upper case, and with notAnAsk: all held, nothing stored.
+    for (const text of [`Go ahead on card ${foreign}.`, `Card order: ${foreign.slice(0, 8)} first.`, `Go ahead on ${foreign.slice(0, 8).toUpperCase()}`]) {
+      const r = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text, notAnAsk: true } });
+      expect(r).toMatchObject({ isError: true });
+      expect(textOf(r)).toContain("belongs in chat");
+    }
+    expect(await posted()).toBe(1); // only the CEO-tier mention above
+    // A 7-character prefix is not an id reference; this ticket's own card is fine.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `Status: ${foreign.slice(0, 7)} is nothing.` } }))).toBe("Posted on the ticket's conversation.");
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `My card is ${cardOf(t.id).slice(0, 8)}.`, notAnAsk: true } }))).toBe("Posted on the ticket's conversation.");
+    // Once the other card is answered it is no longer open, so naming it is fine.
+    await c.db.update(decisions).set({ status: "answered" }).where(eq(decisions.id, foreign));
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `Card ${foreign.slice(0, 8)} is settled.` } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("holds a card-order reply shaped like the 19 Nov BOS-974 one: one own card, three other tickets' cards, a go-ahead on one of them (R53)", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id })).json() as { id: string };
+    const t = await mk("Image install");
+    const others = [await mk("Server update"), await mk("Release"), await mk("Runner update")];
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    for (const [i, id] of [t.id, ...others.map((o) => o.id)].entries()) {
+      await client.callTool({ name: "raise_decision", arguments: { question: `Owner card number ${i + 1}?`, options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, triedFirst: "I tried everything from here, but the host refuses the step." } });
+    }
+    await c.db.update(decisions).set({ tier: "owner" }).where(eq(decisions.status, "open"));
+    const ids = (await c.db.select().from(decisions).where(eq(decisions.status, "open"))).map((d) => d.id.slice(0, 8));
+    const text = `Your cards, in order:\n1. ${ids[1]}: server update. Choose "Not now".\n2. ${ids[2]}: Release. Go ahead, press it.\n3. ${ids[3]}: runner update.\n4. ${ids[0]}: this ticket's card.\nNothing else needs you right now.`;
+    const r = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text } });
+    expect(r).toMatchObject({ isError: true });
+    expect(textOf(r)).toContain("belongs in chat");
+    expect((await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length).toBe(0);
     await client.close();
   });
 

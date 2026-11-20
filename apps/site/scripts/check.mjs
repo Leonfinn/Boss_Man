@@ -27,6 +27,39 @@ function checkRobots(dist, problems, siteUrl) {
   if (siteUrl && !text.includes(`Sitemap: ${siteUrl}/sitemap.xml`)) problems.push(`robots.txt: expected "Sitemap: ${siteUrl}/sitemap.xml"`);
 }
 
+/** A small well-formedness test for the feed: tags nest and close, no bare `<` or `&` in text. Returns a problem or "". */
+export function xmlProblem(text) {
+  const body = text.replace(/^<\?xml[^>]*\?>\s*/, "");
+  const stack = [];
+  let last = 0;
+  const badText = (s) => (/</.test(s) ? "a stray <" : /&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);)/i.test(s) ? "a bare &" : "");
+  for (const m of body.matchAll(/<(\/?)([A-Za-z][\w:.-]*)((?:\s+[\w:.-]+="[^"<]*")*)\s*(\/?)>/g)) {
+    const bad = badText(body.slice(last, m.index));
+    if (bad) return `${bad} in the text`;
+    last = m.index + m[0].length;
+    if (m[1]) {
+      if (stack.pop() !== m[2]) return `</${m[2]}> closes the wrong tag`;
+    } else if (!m[4]) stack.push(m[2]);
+    if (!stack.length && last < body.length && body.slice(last).trim()) return "content after the closing tag";
+  }
+  const tail = badText(body.slice(last));
+  if (tail) return `${tail} in the text`;
+  if (stack.length) return `<${stack.at(-1)}> is never closed`;
+  return last === 0 ? "no tags" : "";
+}
+
+// With SITE_URL the build writes whats-new.xml, so it must be there, well-formed and a feed with at least one entry.
+function checkFeed(dist, problems, siteUrl) {
+  if (!siteUrl) return;
+  const file = path.join(dist, "whats-new.xml");
+  if (!existsSync(file)) return problems.push("whats-new.xml is missing");
+  const text = readFileSync(file, "utf8");
+  const bad = xmlProblem(text);
+  if (bad) return problems.push(`whats-new.xml is not well-formed XML: ${bad}`);
+  if (!/^<feed xmlns="http:\/\/www\.w3\.org\/2005\/Atom"/m.test(text)) problems.push("whats-new.xml is not an Atom feed");
+  if (!text.includes("<entry>")) problems.push("whats-new.xml has no entries");
+}
+
 /** `umami` ({ scriptUrl, origin, websiteId }, from checkUmami in build.mjs) makes every page need the Umami script and the policy allow it. */
 export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
   const problems = [];
@@ -41,6 +74,7 @@ export function checkSite(dist, { siteUrl = "", umami = null } = {}) {
   };
 
   checkRobots(dist, problems, siteUrl);
+  checkFeed(dist, problems, siteUrl);
   const titles = new Map();
   const descriptions = new Map();
   for (const page of pages) {
