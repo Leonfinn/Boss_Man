@@ -1,6 +1,7 @@
 // The Dashboard's two lead panels (BOS-1507, design BOS-1490): "Needs you" (what is waiting for the owner,
 // with a button to each item) and "Right now" (four fixed health lines). Every state has a symbol and words,
 // never colour alone, and a line that couldn't be read says "not known" instead of turning green.
+import { useState } from "react";
 import type { Decision, DecisionTally } from "../api";
 import { raisedAgo } from "../age";
 import type { MergeHealthView, SlowSummary, StuckSummary } from "./MergesStuckBanner";
@@ -93,7 +94,9 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   return [runner, mergesLine, usage, update];
 }
 
-export function RightNow({ lines, paused, companyId, loading }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean }) {
+export function RightNow({ lines, paused, companyId, loading, onResume }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean; /** Resumes this company; the notice shows a Resume button when given. */ onResume?: () => Promise<void> }) {
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   return (
     <section className="card dash-panel dash-right" aria-labelledby="dash-right">
       <h2 id="dash-right" className="dash-panel-head">
@@ -103,7 +106,24 @@ export function RightNow({ lines, paused, companyId, loading }: { lines: HealthL
       {paused && (
         <p className="dash-line tone-warn">
           <span className="dash-sym" aria-hidden="true">‖</span>
-          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/system`}>Settings</a></span>
+          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/team`}>Settings</a></span>
+          {onResume && (
+            <button
+              type="button"
+              className="btn"
+              disabled={resuming}
+              onClick={() => {
+                setResuming(true);
+                setResumeError(null);
+                onResume()
+                  .catch((e: unknown) => setResumeError(e instanceof Error ? e.message : "Could not resume."))
+                  .finally(() => setResuming(false));
+              }}
+            >
+              {resuming ? "Resuming…" : "Resume"}
+            </button>
+          )}
+          {resumeError && <span role="alert" className="muted"> {resumeError}</span>}
         </p>
       )}
       <ul className="dash-lines">

@@ -63,6 +63,37 @@ export function TicketPrefix({ company, onChanged }: { company: Company; onChang
   );
 }
 
+/** Pauses or resumes this one company (the server's POST /api/companies/:id/pause); other companies keep working. */
+export async function setCompanyPause(companyId: string, paused: boolean): Promise<void> {
+  await api(`/api/companies/${companyId}/pause`, { method: "POST", body: { paused } });
+}
+
+export function CompanyPause({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  return (
+    <Section id="company-pause-h" title="Pause this company">
+      <p className="muted" style={{ fontSize: 14 }}>
+        {company.paused ? "This company is paused: nothing new starts until you resume it." : "Pausing stops this company from starting new runs. Runs already going finish by themselves, and other companies keep working."}
+      </p>
+      <button
+        type="button"
+        className="btn"
+        disabled={act.busy}
+        onClick={() =>
+          void act.run(async () => {
+            await setCompanyPause(company.id, !company.paused);
+            onChanged();
+            return company.paused ? "Resumed." : "Paused.";
+          })
+        }
+      >
+        {company.paused ? "Resume company" : "Pause company"}
+      </button>
+      {act.view}
+    </Section>
+  );
+}
+
 /** CEO continuity: the CEO's current chapter, and the handoffs between chapters. */
 export function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [days, setDays] = useState(String(company.goalCheckDays ?? 14));
