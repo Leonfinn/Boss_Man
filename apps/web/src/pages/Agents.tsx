@@ -1,6 +1,7 @@
 // Agents (R62): who works for the company, what each is doing and has used this month, and
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
+import { NoCompany } from "../components/NoCompany";
 import { Star } from "lucide-react";
 import { describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
@@ -705,7 +706,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
   const [hiring, setHiring] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  if (!company) return <p>Create a company on the Kanban first.</p>;
+  if (!company) return <NoCompany />;
   const refreshModels = async () => {
     const r = await api<{ probed: Record<string, { ok: boolean; error?: string }> }>(`/api/companies/${company!.id}/models/refresh`, { method: "POST" });
     models.reload();

@@ -1,6 +1,7 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
 import { api, type Company, type Decision, type DecisionTally, type RunRow } from "../api";
+import { NoCompany } from "../components/NoCompany";
 import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
@@ -119,7 +120,7 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
   // The Merges line and the banner share one read of the Merge queue; a failed read leaves the line "couldn't check".
   const merges = usePoll((signal) => (company ? api<MergeHealthView>(`/api/companies/${company.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)), 20_000, `dash-merges-${company?.id ?? "none"}`);
-  if (!company) return <p>Create a company on the Kanban first.</p>;
+  if (!company) return <NoCompany />;
   if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
