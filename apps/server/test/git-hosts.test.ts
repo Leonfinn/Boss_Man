@@ -70,8 +70,53 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     const { host } = github([run(9, "completed", "failure")], {
       9: [job(5, "check", "failure", [{ number: 1, name: "Set up job", status: "completed", conclusion: "success" }, { number: 2, name: "Run tests", status: "completed", conclusion: "failure" }]), job(6, "images (amd64)", "success")],
     });
-    expect(await host.ciStatus(cfg("github"), "t", SHA)).toEqual({ state: "failed", failed: [{ id: 5, name: "check", url: "https://github.com/leon/site/actions/runs/9/job/5", step: "Run tests", runId: 9 }], waiting: [], billing: false });
+    expect(await host.ciStatus(cfg("github"), "t", SHA)).toEqual({ state: "failed", failed: [{ id: 5, name: "check", url: "https://github.com/leon/site/actions/runs/9/job/5", step: "Run tests", runId: 9, workflowId: 1 }], waiting: [], billing: false });
     expect((await github([]).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("none");
+  });
+
+  it("BOS-2082: gives the failed step's time, and a job's usual step time from the workflow's green runs", async () => {
+    const step = (name: string, conclusion: string, seconds?: number) => ({ number: 2, name, status: "completed", conclusion, ...(seconds !== undefined ? { started_at: "2026-11-20T11:00:00Z", completed_at: new Date(Date.parse("2026-11-20T11:00:00Z") + seconds * 1000).toISOString() } : {}) });
+    const web = (id: number, conclusion: string, seconds?: number, stepName = "Web tests") => ({ id, name: "web-browser", status: "completed", conclusion, runner_name: "GitHub Actions 2", html_url: "", steps: [step(stepName, conclusion, seconds)] });
+    const urls: string[] = [];
+    const runs: Record<number, unknown[]> = {
+      9: [web(5, "failure", 698)],
+      // Green runs: two usable, one where the job failed, one with another step name, one with no times, then a usable one.
+      21: [web(31, "success", 211)],
+      22: [web(32, "success", 343)],
+      23: [web(33, "failure", 900)],
+      24: [web(34, "success", 250, "Other step")],
+      25: [web(35, "success")],
+      26: [web(36, "success", 260)],
+    };
+    const host = gitHostService({
+      fetch: (async (u: string) => {
+        urls.push(u);
+        if (/\/actions\/runs\?head_sha=/.test(u)) return json(200, { workflow_runs: [run(9, "completed", "failure", { workflow_id: 77 })] });
+        if (/\/actions\/workflows\/77\/runs\?status=success/.test(u)) return json(200, { workflow_runs: [9, 21, 22, 23, 24, 25, 26].map((id) => ({ id })) });
+        const j = /\/actions\/runs\/(\d+)\/jobs/.exec(u);
+        if (j) return json(200, { jobs: runs[Number(j[1])] ?? [] });
+        return json(404, {});
+      }) as unknown as typeof fetch,
+    });
+    const s = await host.ciStatus(cfg("github"), "t", SHA);
+    expect(s.failed).toEqual([{ id: 5, name: "web-browser", url: "", step: "Web tests", runId: 9, workflowId: 77, stepSeconds: 698 }]);
+    expect(await host.stepTimes(cfg("github"), "t", { workflowId: 77, job: "web-browser", step: "Web tests", exceptRunId: 9, want: 8 })).toEqual([211, 343, 260]);
+    // It stops reading once it has enough, and the failing run itself is never read as a baseline.
+    urls.length = 0;
+    expect(await host.stepTimes(cfg("github"), "t", { workflowId: 77, job: "web-browser", step: "Web tests", exceptRunId: 9, want: 2 })).toEqual([211, 343]);
+    expect(urls.filter((u) => /\/runs\/\d+\/jobs/.test(u)).map((u) => /runs\/(\d+)\/jobs/.exec(u)![1])).toEqual(["21", "22"]);
+    expect(await host.stepTimes(cfg("gitea"), "t", { workflowId: 77, job: "web-browser", step: "Web tests", want: 8 })).toEqual([]);
+  });
+
+  it("BOS-2082: says whether every test failure was a timeout, judged on the message, not the test's title", async () => {
+    const notes = (rows: unknown[]) => github([], {}, { 5: rows }).host.failures(cfg("github"), "t", [{ id: 5, name: "web-browser", url: "" }]);
+    const exit = { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." };
+    const timedOut = { annotation_level: "failure", path: "apps/web/test/a.test.ts", title: "a > renders", message: "Error: Test timed out in 15000ms." };
+    const playwright = { annotation_level: "failure", path: "apps/web/test/b.test.ts", title: "b", message: "TimeoutError: page.waitForSelector: Timeout 30000ms exceeded." };
+    const assertion = { annotation_level: "failure", path: "apps/web/test/c.test.ts", title: "c > handles a timeout", message: "AssertionError: expected 1 to be 2" };
+    expect((await notes([timedOut, playwright, exit]))[0]!.timeoutsOnly).toBe(true);
+    expect((await notes([timedOut, assertion, exit]))[0]!.timeoutsOnly).toBe(false);
+    expect((await notes([exit]))[0]!.timeoutsOnly).toBe(false);
   });
 
   it("a cancelled run is no failure: its own state, unless a job in it really failed", async () => {
@@ -143,7 +188,7 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
         { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
       ],
     });
-    expect(await host.failures(cfg("github"), "t", [{ id: 5, name: "web-browser", url: "" }])).toEqual([{ run: { id: 5, name: "web-browser", url: "" }, lines: ["apps/web/test/a.test.ts:3: a > renders: expected 1 to be 2"], billing: false, paths: ["apps/web/test/a.test.ts"] }]);
+    expect(await host.failures(cfg("github"), "t", [{ id: 5, name: "web-browser", url: "" }])).toEqual([{ run: { id: 5, name: "web-browser", url: "" }, lines: ["apps/web/test/a.test.ts:3: a > renders: expected 1 to be 2"], billing: false, paths: ["apps/web/test/a.test.ts"], timeoutsOnly: false }]);
   });
 
   it("a token refused the annotations asks once more without it (a public repo's need none), and a private repo stays refused (BOS-1733)", async () => {
@@ -157,7 +202,7 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
           return publicRepo ? json(200, [{ annotation_level: "failure", path: "apps/x.test.ts", start_line: 1, message: "boom" }]) : json(404, { message: "Not Found" });
         }) as unknown as typeof fetch,
       });
-    expect(await host(true).failures(cfg("github"), "t", [{ id: 5, name: "check", url: "" }])).toEqual([{ run: { id: 5, name: "check", url: "" }, lines: ["apps/x.test.ts:1: boom"], billing: false, paths: ["apps/x.test.ts"] }]);
+    expect(await host(true).failures(cfg("github"), "t", [{ id: 5, name: "check", url: "" }])).toEqual([{ run: { id: 5, name: "check", url: "" }, lines: ["apps/x.test.ts:1: boom"], billing: false, paths: ["apps/x.test.ts"], timeoutsOnly: false }]);
     expect(seen.map((s) => s.auth)).toEqual([true, false]);
     expect((await host(false).failures(cfg("github"), "t", [{ id: 5, name: "check", url: "", step: "Run tests" }]))[0]).toMatchObject({ lines: ['failed at step "Run tests"'], paths: null });
   });

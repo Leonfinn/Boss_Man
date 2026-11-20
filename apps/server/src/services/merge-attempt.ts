@@ -9,8 +9,8 @@ import { agents, checkJobs, checkResults, checkWorkers, companies, projects, run
 import { RunnerGone } from "./runners.js";
 import { DIFFERENT_APPROACH } from "./loop-guards.js";
 import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop, type FlakeAnswer } from "./ci-publish.js";
-import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts } from "./ci-flake.js";
-import { GitHostError, type CiStatus, type GitHostConfig } from "./git-hosts.js";
+import { BASELINE_RUNS, CANT_RERUN_EXIT, describeSlow, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts, SLOW_RETRIES_PER_WEEK, SLOW_ROW_PREFIX, slowJobs, slowRetryCounts, type SlowEvidence, type SlowJob } from "./ci-flake.js";
+import { GitHostError, type CiRun, type CiStatus, type GitHostConfig } from "./git-hosts.js";
 import { latestRows } from "./review-kinds.js";
 import { CHECK_AGAIN, clearMergeCards, supersedeSignoffs } from "./decisions.js";
 import { ticketCheckPriority } from "./check-gate.js";
@@ -366,7 +366,7 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
         },
         touch,
         // BOS-1733: only in server check-queue mode, where the gate can queue a job on the exact merge commit.
-        ...(serverChecks && deps.cancelCheck ? { flakeRetry: (s: CiStatus, st: CiStop) => flakeRetry(prep, s, st), announceFlakeRetry: (files: string[], accepted: boolean) => announceFlakeRetry(prep, files, accepted) } : {}),
+        ...(serverChecks && deps.cancelCheck ? { flakeRetry: (s: CiStatus, st: CiStop) => flakeRetry(prep, s, st), announceFlakeRetry: (a: { files: string[]; slow?: SlowJob[] }, accepted: boolean) => announceFlakeRetry(prep, a, accepted) } : {}),
       },
       prep,
       stop,
@@ -464,6 +464,22 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
   };
   // not state: one landing attempt's flake counts, dropped when it returns.
   let flakeCounts = new Map<string, number>();
+  // not state: one landing attempt's slow-machine retry counts per job (BOS-2082), dropped when it returns.
+  let slowCounts = new Map<string, number>();
+  /**
+   * BOS-2082: the failed jobs, when every one ran on a slow GitHub machine (ci-flake.ts slowJobs). GitHub's history is only
+   * read when each failed job could qualify: its failures are all timeouts, and its failed step, time and workflow are known.
+   */
+  const slowFacts = async (s: CiStatus, found: Array<{ run: CiRun; timeoutsOnly?: boolean }>): Promise<SlowJob[] | null> => {
+    const jobs = s.failed.map((run) => ({ run, timeoutsOnly: !!found.find((f) => f.run === run)?.timeoutsOnly }));
+    if (!jobs.length || jobs.some((j) => !j.timeoutsOnly || !j.run.step || j.run.stepSeconds === undefined || !j.run.workflowId)) return null;
+    const ev: SlowEvidence[] = [];
+    for (const { run, timeoutsOnly } of jobs) {
+      const baseline = await deps.gitHosts!.stepTimes(ci!.cfg, ci!.token, { workflowId: run.workflowId!, job: run.name, step: run.step!, ...(run.runId ? { exceptRunId: run.runId } : {}), want: BASELINE_RUNS }).catch(() => [] as number[]);
+      ev.push({ job: run.name, step: run.step!, seconds: run.stepSeconds!, baseline, timeoutsOnly });
+    }
+    return slowJobs(ev);
+  };
   const flakeRetry = async (prep: { commit: string; tree: string }, s: CiStatus, stop: CiStop): Promise<FlakeAnswer> => {
     // BOS-1752: a copy that handed over queues no re-run and asks GitHub for no retry; ciVerdict then ends it quietly.
     if (deps.isLeader && !deps.isLeader()) return { retry: false, why: HANDED_OVER_WHY };
@@ -476,8 +492,11 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
     const since = new Date(Date.now() - RETRY_WINDOW_MS);
     const rows = await db.select({ sha: checkResults.sha, detail: checkResults.detail }).from(checkResults).where(and(eq(checkResults.companyId, t.companyId), eq(checkResults.kind, FLAKE_RETRY_KIND), gt(checkResults.at, since)));
     flakeCounts = retryCounts(rows.map((r) => r.detail));
+    slowCounts = slowRetryCounts(rows.map((r) => r.detail));
     const d = flakeDecision({
       billing: !!s.billing || found.some((f) => f.billing),
+      slow: await slowFacts(s, found),
+      slowRecent: slowCounts,
       named,
       changed: diff ? diff.files.map((f) => f.path) : null,
       mainRed: proj?.s === "red",
@@ -485,6 +504,8 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
       recent: flakeCounts,
     });
     if (d.act === "bounce") return { retry: false, why: d.why };
+    // BOS-2082: a slow GitHub machine: nothing to re-run here; GitHub's retry of the failed jobs gets a fresh machine.
+    if (d.act === "retry_slow") return { retry: true, files: [], slow: d.jobs };
     const files = d.files;
     await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI failed in ${files.join(", ")}, which this branch doesn't change. Boss Man is running ${files.length > 1 ? "them" : "it"} once more on the same merge commit (${prep.commit.slice(0, 12)}) before deciding. Nothing to do.` });
     const { job } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "quick", commit: prep.commit, tree: prep.tree, command: gateRerunCommand(files), priority: checkPrio, requestedBy: null });
@@ -513,7 +534,18 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
     return { retry: false, why: `Boss Man couldn't re-run ${files.length > 1 ? "them" : "it"} at its gate (${(cur.state === "failed" && cur.exitCode === CANT_RERUN_EXIT && said ? said : cur.reason ?? cur.state).slice(0, 200)})` };
   };
   // The one retry is recorded only once GitHub accepted it: the record is what the per-commit and per-week limits count.
-  const announceFlakeRetry = async (prep: { commit: string }, files: string[], accepted: boolean) => {
+  const announceFlakeRetry = async (prep: { commit: string }, { files, slow }: { files: string[]; slow?: SlowJob[] }, accepted: boolean) => {
+    if (slow?.length) {
+      const what = `GitHub CI failed with timeouts on a slow GitHub machine: ${describeSlow(slow)}`;
+      if (!accepted) {
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${what}. GitHub refused to re-run the failed jobs (the git token needs Actions: Read and write), so the ticket goes back as before.` });
+        return;
+      }
+      await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: FLAKE_RETRY_KIND, passed: true, detail: slow.map((j) => `${SLOW_ROW_PREFIX}${j.job}`).join("\n") });
+      const counts = slow.map((j) => `${j.job}: slow-machine retry ${(slowCounts.get(j.job) ?? 0) + 1} of ${SLOW_RETRIES_PER_WEEK} this week`).join("; ");
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${what}. Boss Man asked GitHub to re-run the failed jobs once on a fresh machine (${counts}). Nothing to do.` });
+      return;
+    }
     if (!accepted) {
       await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"}, but GitHub refused to re-run the failed jobs (the git token needs Actions: Read and write), so the ticket goes back as before.` });
       return;
@@ -562,6 +594,7 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
           if (ciPassedTrees.size > 500) ciPassedTrees.delete(ciPassedTrees.values().next().value!);
           await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: true, detail: null });
         }
+        if (o.slow?.length) await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI passed on its one retry on a fresh machine, so the timeouts came from a slow GitHub machine, not this branch. Nothing to do.` });
         if (o.flaky?.length) {
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI passed on its one retry, so ${o.flaky.join(", ")} failed only once; Boss Man told the CEO about the flaky test. Nothing to do.` });
           await reportFlaky(o.flaky, o.retryRunUrl, prep.commit).catch(() => undefined);

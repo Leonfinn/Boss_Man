@@ -6,7 +6,25 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { CANT_RERUN_EXIT, flakeDecision, gateRerunCommand, GATE_RERUN_MARK, MAX_FLAKY_FILES, namedTestFiles, repoRelative, RETRIES_PER_WEEK, retryCounts, SAFE_TEST_PATH, type FlakeFacts } from "../src/services/ci-flake.js";
+import {
+  CANT_RERUN_EXIT,
+  flakeDecision,
+  gateRerunCommand,
+  GATE_RERUN_MARK,
+  MAX_FLAKY_FILES,
+  MIN_BASELINE_RUNS,
+  namedTestFiles,
+  repoRelative,
+  RETRIES_PER_WEEK,
+  retryCounts,
+  SAFE_TEST_PATH,
+  SLOW_RETRIES_PER_WEEK,
+  slowJobs,
+  slowRetryCounts,
+  type FlakeFacts,
+  type SlowEvidence,
+} from "../src/services/ci-flake.js";
+import { GATE_RERUN_COLOURED, JSON_PASSED, OLD_PASS_GREP } from "./fixtures/vitest-gate-output.js";
 
 describe("namedTestFiles", () => {
   it("takes repo-relative test paths from the failure annotations, sorted and unique", () => {
@@ -89,21 +107,83 @@ describe("flakeDecision: the ordered table, first refusal wins", () => {
   });
 });
 
+describe("BOS-2082: a slow GitHub machine gets one retry, whatever the file count", () => {
+  // BOS-2066's run 44731483832: the web-browser step took 698 s; the other runs that day took 209 to 343 s.
+  const TODAY = [211, 343, 209, 260, 298, 275, 240, 330];
+  const web = (over: Partial<SlowEvidence> = {}): SlowEvidence => ({ job: "web-browser", step: "Web tests in a real browser", seconds: 698, baseline: TODAY, timeoutsOnly: true, ...over });
+  const fourFiles = { files: ["a.test.ts", "b.test.ts", "c.test.ts", "d.test.ts"], unnamed: [], unsafe: [] };
+  const facts = (slow: ReturnType<typeof slowJobs>, over: Partial<FlakeFacts> = {}): FlakeFacts => ({ billing: false, slow, slowRecent: new Map(), named: fourFiles, changed: ["docs/x.md"], mainRed: false, retriedThisCommit: false, recent: new Map(), ...over });
+
+  it("698 s against 209-343 s, all timeouts, 4 files: retried once on GitHub, with why", () => {
+    const slow = slowJobs([web()]);
+    expect(slow).toEqual([{ job: "web-browser", step: "Web tests in a real browser", seconds: 698, median: 268, runs: 8 }]);
+    expect(flakeDecision(facts(slow))).toEqual({ act: "retry_slow", jobs: slow });
+    // Without the slow row the same failure bounces as "more than a one-off", as it did on 20 Nov.
+    expect(flakeDecision(facts(null))).toMatchObject({ act: "bounce", why: "4 test files failed, more than a one-off" });
+  });
+
+  it.each([
+    ["a normal time (300 s) with 4 timeouts", web({ seconds: 300 })],
+    ["a failure that isn't a timeout", web({ timeoutsOnly: false })],
+    ["too few green runs to know the usual time", web({ baseline: TODAY.slice(0, MIN_BASELINE_RUNS - 1) })],
+    ["no step time from GitHub", web({ seconds: null })],
+    ["no failed step named", web({ step: null })],
+  ])("not a slow machine: %s", (_name, ev) => {
+    expect(slowJobs([ev])).toBeNull();
+    expect(flakeDecision(facts(slowJobs([ev]))).act).toBe("bounce");
+  });
+
+  it("every failed job must be slow: one normal job beside a slow one is no slow machine", () => {
+    expect(slowJobs([web(), web({ job: "check", step: "Tests", seconds: 1000, baseline: [906, 1100, 1447] })])).toBeNull();
+    expect(slowJobs([])).toBeNull();
+  });
+
+  it.each([
+    ["main is red", { mainRed: true }, /main is red/],
+    ["this commit already had its retry", { retriedThisCommit: true }, /already had its one GitHub retry/],
+    ["the job's weekly slow-machine budget is spent", { slowRecent: new Map([["web-browser", SLOW_RETRIES_PER_WEEK]]) }, /has had 5 slow-machine retries in 7 days/],
+    ["billing (outranks the slow row)", { billing: true }, /billing/],
+  ] as const)("a slow machine still bounces when %s", (_name, over, why) => {
+    const d = flakeDecision(facts(slowJobs([web()]), over as Partial<FlakeFacts>));
+    expect(d).toMatchObject({ act: "bounce", why: expect.stringMatching(why) });
+  });
+
+  it("slowRetryCounts counts slow-machine rows per job and leaves file rows to retryCounts", () => {
+    const rows = ["slow machine: web-browser", "slow machine: web-browser\nslow machine: check", "apps/server/test/a.test.ts", null];
+    expect([...slowRetryCounts(rows).entries()].sort()).toEqual([["check", 1], ["web-browser", 2]]);
+    expect([...retryCounts(rows).entries()]).toEqual([["apps/server/test/a.test.ts", 1]]);
+  });
+});
+
 describe("gateRerunCommand, run by a real sh", () => {
   const root = mkdtempSync(path.join(tmpdir(), "bos1733-"));
   afterAll(() => rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, "stub-bin");
   mkdirSync(bin);
-  // A pnpm that installs nothing; a vitest that answers from the test file's text, printing where it ran.
+  // A pnpm that installs nothing; a vitest that answers from the test file's text, printing where it ran. BOS-2082: on a pass
+  // it prints the real coloured output of BOS-1986's gate re-run and writes vitest's real JSON report where it was asked to.
   writeFileSync(path.join(bin, "pnpm"), "#!/bin/sh\necho stub pnpm \"$@\"\n");
   chmodSync(path.join(bin, "pnpm"), 0o755);
+  const fix = path.join(root, "fixtures");
+  mkdirSync(fix);
+  writeFileSync(path.join(fix, "coloured.txt"), GATE_RERUN_COLOURED);
+  writeFileSync(path.join(fix, "pass.json"), JSON.stringify(JSON_PASSED));
+  writeFileSync(path.join(fix, "skip.json"), JSON.stringify({ ...JSON_PASSED, numPassedTests: 0, numPendingTests: 3, numTotalTests: 3 }));
+  writeFileSync(path.join(fix, "fail.json"), JSON.stringify({ ...JSON_PASSED, numPassedTests: 2, numFailedTests: 1, success: false }));
+  // Passed per vitest's exit code, but the report says a test failed: never a pass.
+  writeFileSync(path.join(fix, "liar.json"), JSON.stringify({ ...JSON_PASSED, numFailedTests: 1, success: false }));
   const vitest = [
     "#!/bin/sh",
-    'echo "vitest ran in $PWD on $2"',
+    'echo "vitest ran in $PWD on $2 NO_COLOR=${NO_COLOR:-unset}"',
+    'json=""; for a in "$@"; do case "$a" in --outputFile.json=*) json=${a#--outputFile.json=};; esac; done',
     'if [ ! -f "$2" ]; then echo "No test files found, exiting with code 1"; exit 1; fi',
-    'if grep -q FAIL "$2"; then echo " Tests  1 failed | 2 passed (3)"; exit 1; fi',
-    'if grep -q SKIP "$2"; then echo " Tests  3 skipped (3)"; exit 0; fi',
-    'echo " Tests  3 passed (3)"',
+    `if grep -q FAIL "$2"; then echo " Tests  1 failed | 2 passed (3)"; cp '${fix}/fail.json' "$json"; exit 1; fi`,
+    `if grep -q SKIP "$2"; then echo " Tests  3 skipped (3)"; cp '${fix}/skip.json' "$json"; exit 0; fi`,
+    `cat '${fix}/coloured.txt'`,
+    'if grep -q NOJSON "$2"; then exit 0; fi',
+    `if grep -q BADJSON "$2"; then echo "{not json" > "$json"; exit 0; fi`,
+    `if grep -q LIAR "$2"; then cp '${fix}/liar.json' "$json"; exit 0; fi`,
+    `cp '${fix}/pass.json' "$json"`,
   ].join("\n");
 
   let n = 0;
@@ -138,6 +218,24 @@ describe("gateRerunCommand, run by a real sh", () => {
     expect(r.out).toContain("boss-man re-run: passed");
   });
 
+  it("BOS-2082: vitest's real coloured output (BOS-1986's 59 passed) with its JSON report is a pass, read from the JSON", () => {
+    // The fixture really is the line BOS-1733's grep missed: it misses it coloured and finds it once the colour is gone.
+    expect(GATE_RERUN_COLOURED).toContain("\x1b[");
+    expect(OLD_PASS_GREP.test(GATE_RERUN_COLOURED)).toBe(false);
+    expect(OLD_PASS_GREP.test(GATE_RERUN_COLOURED.replace(/\x1b\[[0-9;]*m/g, ""))).toBe(true);
+    const r = sh(repo({ "apps/server/test/a.test.ts": "ok" }), ["apps/server/test/a.test.ts"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("NO_COLOR=1");
+    expect(r.out).toContain("boss-man re-run: apps/server/test/a.test.ts: 23 passed (vitest JSON result)");
+    expect(r.out).toContain("boss-man re-run: passed");
+  });
+
+  it("BOS-2082: the JSON result decides, never the terminal text: a report saying a test failed is no pass", () => {
+    const r = sh(repo({ "apps/server/test/a.test.ts": "LIAR" }), ["apps/server/test/a.test.ts"]);
+    expect(r.code).toBe(CANT_RERUN_EXIT);
+    expect(r.out).toMatch(/no test in .* passed/);
+  });
+
   it("a failing test is exit 1 (a real failure), never 78", () => {
     const r = sh(repo({ "apps/server/test/a.test.ts": "FAIL" }), ["apps/server/test/a.test.ts"]);
     expect(r.code).toBe(1);
@@ -149,6 +247,8 @@ describe("gateRerunCommand, run by a real sh", () => {
     ["there is no vitest", { "apps/server/test/a.test.ts": "ok" }, { vitest: false }, /no vitest for/],
     ["there is no lockfile", { "apps/server/test/a.test.ts": "ok" }, { lock: false }, /no pnpm-lock\.yaml or package-lock\.json/],
     ["every test was skipped (no browser here, say)", { "apps/server/test/a.test.ts": "SKIP" }, {}, /no test in .* passed/],
+    ["vitest wrote no JSON report (BOS-2082)", { "apps/server/test/a.test.ts": "NOJSON" }, {}, /vitest wrote no JSON result/],
+    ["vitest's JSON report is unreadable (BOS-2082)", { "apps/server/test/a.test.ts": "BADJSON" }, {}, /JSON result for .* is unreadable/],
   ] as const)("can't re-run (exit 78) when %s: never read as a pass", (_name, files, opts, said) => {
     const r = sh(repo(files as Record<string, string>, opts), ["apps/server/test/a.test.ts"]);
     expect(r.code).toBe(CANT_RERUN_EXIT);
