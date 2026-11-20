@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { SessionManager } from "../src/session-manager.js";
 
 const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-claude-acp.mjs");
-const TOKEN = "bm_run_secret-token-for-test-0001";
+const TOKEN = ["bm_run", "secret-token-for-test-0001"].join("_"); // joined: no key-shaped line for the secret scans (BOS-1932)
 const EXTRA = "extra-server-secret-0002";
 
 async function run(over: Record<string, unknown> = {}) {

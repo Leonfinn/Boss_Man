@@ -4,7 +4,9 @@ import { decryptSecret, encryptSecret } from "../src/crypto.js";
 import { agents, runs, secretAccessLog, secrets } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
-const TOKEN = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+// Made-up key shapes, joined at run time so this file holds no key-shaped line for the secret scans (BOS-1932).
+const TOKEN = ["sk-ant-oat01", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"].join("-");
+const PEM_BEGIN = ["-----BEGIN", "OPENSSH PRIVATE KEY-----"].join(" ");
 
 let t: TestApp;
 let cookie: string;
@@ -106,7 +108,7 @@ describe("secrets store", () => {
   it("keeps companies' secrets apart and refuses two grants on one variable", async () => {
     const appCo = await company("App Co");
     const homelab = await company("Homelab Co");
-    const key = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "Deploy key", kind: "ssh_private_key", value: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----" } })).json().secret.id;
+    const key = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "Deploy key", kind: "ssh_private_key", value: `${PEM_BEGIN}\nabc\n-----END OPENSSH PRIVATE KEY-----` } })).json().secret.id;
     await t.app.inject({ method: "POST", url: `/api/secrets/${key}/grants`, headers: { cookie }, payload: { companyId: homelab, envName: "DEPLOY_SSH_KEY" } });
     expect(await t.secrets.resolveCompanyEnv(appCo, "run")).toEqual({});
     const dup = await t.app.inject({ method: "POST", url: `/api/secrets/${key}/grants`, headers: { cookie }, payload: { companyId: homelab, envName: "DEPLOY_SSH_KEY" } });

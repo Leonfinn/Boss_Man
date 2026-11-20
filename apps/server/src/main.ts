@@ -37,7 +37,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, mailer, mainCi, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, mailer, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -108,6 +108,8 @@ const bg = createBackground(
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
     // Main's GitHub CI (BOS-1072): one ticket per distinct failing step, later runs added to it, a note when green again. Quiet where there is no GitHub CI. // leader-only
     { name: "main CI watch", everyMs: Number(env.BOSSMAN_MAIN_CI_MS ?? 10 * 60_000), run: async () => { await mainCi.run(); } },
+    // The whole-repo secrets pass (BOS-1932): each project's main once a day (the pass itself skips a project scanned in the last 20 h, so restarts don't repeat it); the first tick soon after start is the one-off pass after an update. Tickets go to the security reviewer. // leader-only
+    { name: "secret scan", everyMs: Number(env.BOSSMAN_SECRET_SCAN_MS ?? 60 * 60_000), firstAfterMs: Number(env.BOSSMAN_SECRET_SCAN_FIRST_MS ?? 10 * 60_000), run: async () => { await secretScan.run(); } },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).
     { name: "pull request sync", everyMs: Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000), run: () => review.syncPullRequests() },
     // Merges on main the gate never recorded (BOS-1645): a runner swap between push and record. Recorded within minutes.

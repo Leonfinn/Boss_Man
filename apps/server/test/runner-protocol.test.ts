@@ -244,7 +244,8 @@ describe("runner env endpoint", () => {
 
     const runId = randomUUID();
     const ok = await ctx.app.inject({ method: "GET", url: `/api/runner/env?runId=${runId}`, headers: { authorization: `Bearer ${ctx.reg.token}` } });
-    expect(ok.json()).toEqual({ env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-abcdefghijklmnop" } });
+    // Joined: no key-shaped line for the secret scans (BOS-1932).
+    expect(ok.json()).toEqual({ env: { CLAUDE_CODE_OAUTH_TOKEN: ["sk-ant-oat01", "abcdefghijklmnop"].join("-") } });
     expect(ok.headers["cache-control"]).toBe("no-store");
     const denied = await ctx.app.inject({ method: "GET", url: "/api/runner/env", headers: { authorization: "Bearer wrong" } });
     expect(denied.statusCode).toBe(401);

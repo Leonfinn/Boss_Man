@@ -24,8 +24,8 @@ Paperclip's `cancelled` has no Boss Man state, so those tickets arrive as done w
 2. **Export the issues** with the read-only query below. Paperclip's built-in database listens on `127.0.0.1:54329` (user and password `paperclip`, database `paperclip`), so run it wherever `psql` can reach that address, usually inside the Paperclip container. Change `'HOL'` to your company's issue prefix. `default_transaction_read_only=on` makes the session refuse any write.
 
 ```sh
-PGOPTIONS='-c default_transaction_read_only=on' psql -At -v ON_ERROR_STOP=1 \
-  "postgres://paperclip:paperclip@127.0.0.1:54329/paperclip" \
+PGPASSWORD=paperclip PGOPTIONS='-c default_transaction_read_only=on' psql -At -v ON_ERROR_STOP=1 \
+  "postgres://paperclip@127.0.0.1:54329/paperclip" \
   -f paperclip-issues.sql > paperclip-issues.json
 ```
 

@@ -89,6 +89,7 @@ import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
 import { checkHoldService } from "./services/check-hold.js";
 import { mainCiService } from "./services/main-ci.js";
+import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
@@ -1069,6 +1070,14 @@ export async function buildApp(opts: AppOptions) {
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     notify: (agentId, input) => scheduler.notify(agentId, input),
+    log: (m) => app.log.warn(m),
+  });
+  // The nightly whole-repo secrets pass (BOS-1932): one ticket per key-shaped match on main, for the security reviewer.
+  const secretScan = secretScanService(db, {
+    runners,
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    now: opts.now,
     log: (m) => app.log.warn(m),
   });
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
@@ -2604,5 +2613,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

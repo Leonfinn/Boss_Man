@@ -399,7 +399,7 @@ describe("company import (docs/11, step 2)", () => {
     expect((await send({ "manifest.json": '{"format":"agent-companies/1"}', "company.json": '{"name":"X"}' })).json().message).toContain("isn't a Boss Man company package");
     const ok = { "manifest.json": '{"format":"bossman-company/1"}', "company.json": '{"name":"X"}' };
     expect((await send({ ...ok, "../escape.txt": "x" })).json().message).toContain("isn't a safe path");
-    expect((await send({ ...ok, "projects/p/project.json": JSON.stringify({ name: "P", repoUrl: "https://user:ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/a/b.git", columns: [{ name: "To do", systemState: "backlog" }] }) })).statusCode).toBe(400);
+    expect((await send({ ...ok, "projects/p/project.json": JSON.stringify({ name: "P", repoUrl: `https://user:${"ghp_"}abcdefghijklmnopqrstuvwxyz0123456789@github.com/a/b.git` /* joined: no key-shaped line for the secret scans (BOS-1932) */, columns: [{ name: "To do", systemState: "backlog" }] }) })).statusCode).toBe(400);
     expect((await send(ok)).statusCode).toBe(200);
   });
 
