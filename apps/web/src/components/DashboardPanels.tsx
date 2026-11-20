@@ -43,7 +43,7 @@ const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)
 export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
   const { health, merges, stuck, slow, running, companyId } = input;
   const now = input.now ?? Date.now();
-  const system = `#/settings/${companyId}/system`;
+  const system = `#/settings/${companyId}/runner`;
 
   let runner: HealthLine;
   const r = health?.runner;
@@ -103,7 +103,7 @@ export function RightNow({ lines, paused, companyId, loading }: { lines: HealthL
       {paused && (
         <p className="dash-line tone-warn">
           <span className="dash-sym" aria-hidden="true">‖</span>
-          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/system`}>Settings</a></span>
+          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/team`}>Settings</a></span>
         </p>
       )}
       <ul className="dash-lines">
