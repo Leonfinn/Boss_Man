@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { evaluatePermission } from "../src/policy.js";
-import { alwaysChoices, explainCommand, explainPermission, ownerWhy, readPush } from "../src/explain.js";
+import { alwaysChoices, explainCommand, explainPermission, ownerWhy, readPush, removesReservedTmpEntry } from "../src/explain.js";
 
 describe("ownerWhy (BOS-793)", () => {
   it("names the part the destructive-command guard caught", () => {
@@ -290,6 +290,66 @@ describe("work only in a temporary folder", () => {
     expect(scratch("node build.js")).toBeUndefined();
     // Only reading isn't the case this line is for.
     expect(scratch("cat /tmp/x")).toBeUndefined();
+  });
+});
+
+describe("removesReservedTmpEntry (BOS-1948)", () => {
+  const removes = (c: string) => removesReservedTmpEntry(c);
+
+  it("matches a plain remove of a reserved /tmp entry, whatever the flags or quoting", () => {
+    for (const c of [
+      "rm /tmp/bossman-check-all.slot.1",
+      "rm -rf /tmp/bossman-x",
+      "rm -f -- /tmp/bossman-x",
+      "rm -f '/tmp/bm-tmp'",
+      'rm "/tmp/claude-0"',
+      "/bin/rm -rf /tmp/guard-123",
+      "rmdir /tmp/tmp.abc123",
+      "unlink /tmp/.X11-unix",
+      "rm -rf /tmp/BOSSMAN-x",
+      "rm -rf $TMPDIR/bossman-x",
+    ]) {
+      expect(removes(c), c).toBe(true);
+    }
+  });
+
+  it("still matches a bare reserved name after cd or pushd into /tmp", () => {
+    expect(removes("cd /tmp && rm -rf bossman-x")).toBe(true);
+    expect(removes("pushd /tmp; rm bossman-x")).toBe(true);
+  });
+
+  it("does not match an ordinary remove of a path that is not reserved", () => {
+    for (const c of [
+      "rm -rf dist",
+      "rm /tmp/report.log",
+      "rm -rf /tmp/boss-man",
+      "rm -rf /tmp/my-bossman-notes",
+      "rmdir /tmp/scratch-dir",
+      "unlink /tmp/socket.sock",
+      "cd /tmp && rm -rf report.log",
+      "find /tmp/report -type f | xargs rm",
+    ]) {
+      expect(removes(c), c).toBe(false);
+    }
+  });
+
+  it("does not match a read-only command that only mentions a reserved path", () => {
+    for (const c of ["ls -la /tmp/bossman-x", "cat /tmp/claude-0/log", "grep -r foo /tmp/bossman-check-all.slot.1", "stat /tmp/bm-tmp"]) {
+      expect(removes(c), c).toBe(false);
+    }
+  });
+
+  it("fails closed on a glob, variable, xargs or bare name that could name a reserved entry", () => {
+    for (const c of [
+      "rm -rf /tmp/boss*",
+      "rm -rf /tmp/$DIR",
+      "find /tmp/bossman-x -type f | xargs rm",
+      "ls /tmp/bossman-x; rm -rf $DIR",
+    ]) {
+      expect(removes(c), c).toBe(true);
+    }
+    // Without a cd into /tmp a bare name is only a name in the current folder.
+    expect(removes("rm bossman-x")).toBe(false);
   });
 });
 
