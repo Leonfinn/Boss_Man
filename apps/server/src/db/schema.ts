@@ -1789,6 +1789,8 @@ export const githubAlertTickets = pgTable(
     ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
     /** The repo the alert number belongs to (BOS-1960). Read/close are refused when the watcher now points elsewhere. Null only for a row with no repo to backfill from. */
     repo: text("repo"),
+    /** BOS-2055: "pkg:<ecosystem>:<name>" for a Dependabot alert grouped by package, "backlog" for a first-sync summary; null for older single-alert tickets. Several rows may share one ticket. */
+    groupKey: text("group_key"),
     /** Set once the alert was seen closed on GitHub and the ticket was closed. */
     closedAt: timestamp("closed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

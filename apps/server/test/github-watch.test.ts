@@ -422,6 +422,78 @@ describe("security alerts (BOS-1929)", () => {
     expect(rows.find((r) => r.title.includes("old-lib"))!.risk).toBe("low");
   });
 
+  it("BOS-2055: two projects watching one repo get one ticket per alert, not one each", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await c.svc.save(second.id, c.company.id, { enabled: true, repo: REPO });
+    c.gh.dependabot = [{ number: 20, state: "open", pkg: "body-parser", severity: "high", summary: "DoS" }];
+    await c.svc.runOne(c.project.id);
+    await c.svc.runOne(second.id);
+    c.advance(61 * MIN);
+    await c.svc.runOne(second.id);
+    await c.svc.runOne(c.project.id);
+    const rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.projectId).toBe([c.project.id, second.id].sort()[0]);
+  });
+
+  it("BOS-2055: three alerts for one package make one ticket, and a later alert for it joins that ticket", async () => {
+    const c = await setup();
+    c.gh.dependabot = [
+      { number: 1, state: "open", pkg: "fast-uri", severity: "low", summary: "A" },
+      { number: 2, state: "open", pkg: "fast-uri", severity: "high", summary: "B" },
+      { number: 3, state: "open", pkg: "fast-uri", severity: "medium", summary: "C" },
+    ];
+    await c.svc.runOne(c.project.id);
+    let rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ risk: "high", assigneeAgentId: c.ceo!.id });
+    expect(rows[0]!.title).toContain("3 alerts");
+    for (const n of [1, 2, 3]) expect(rows[0]!.body).toContain(`#${n} `);
+    expect(c.woken.filter((w) => w.reason === "github security alert")).toHaveLength(1);
+
+    // A fourth alert for the same package joins; another package gets its own ticket.
+    c.gh.dependabot.push({ number: 4, state: "open", pkg: "fast-uri", severity: "medium", summary: "D" }, { number: 5, state: "open", pkg: "other-lib", severity: "low", summary: "E" });
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(2);
+
+    // The ticket closes only when every alert on it is closed.
+    const group = rows.find((r) => r.title.includes("fast-uri"))!;
+    for (const n of [1, 2, 3]) c.gh.dependabot.find((a) => a.number === n)!.state = "fixed";
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect((await allTickets(c.company.id)).find((r) => r.id === group.id)!.systemState).toBe("ready");
+    c.gh.dependabot.find((a) => a.number === 4)!.state = "fixed";
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect((await allTickets(c.company.id)).find((r) => r.id === group.id)!.systemState).toBe("done");
+  });
+
+  it("BOS-2055: a first sync that finds a backlog opens one summary ticket, then later alerts go back to one ticket per package", async () => {
+    const c = await setup();
+    c.gh.dependabot = Array.from({ length: 30 }, (_, i) => ({ number: i + 1, state: "open" as const, pkg: `lib-${i % 12}`, severity: i === 7 ? "critical" : "medium", summary: "Bad" }));
+    await c.svc.runOne(c.project.id);
+    let rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ risk: "critical", assigneeAgentId: c.ceo!.id, urgent: false });
+    expect(rows[0]!.title).toContain("30 open alerts");
+    expect(rows[0]!.body).toContain("12 packages");
+    expect(c.woken.filter((w) => w.reason === "github security alert")).toHaveLength(1);
+    // The same alerts again: nothing new.
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    expect(await allTickets(c.company.id)).toHaveLength(1);
+    // A new alert after the first sync: its own ticket.
+    c.gh.dependabot.push({ number: 99, state: "open", pkg: "fresh-lib", severity: "low", summary: "New" });
+    c.advance(61 * MIN);
+    await c.svc.runOne(c.project.id);
+    rows = await allTickets(c.company.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.some((r) => r.title.includes("fresh-lib"))).toBe(true);
+  });
+
   it("falls back to the CEO for a secret alert when the company has no security reviewer", async () => {
     const c = await setup();
     c.gh.secrets = [{ number: 1, state: "open", type: "Some token", value: secretValue }];
