@@ -41,7 +41,7 @@ Any claim about a video in owner-facing text (a README line, a ticket reply, a r
 
 ## When a ticket names a device
 
-The generic phone size above is not the owner's phone. Each of the owner's browsers is recorded as a device profile (Settings → Server and runner → Your devices) and saved as `apps/web/test/device-profiles/*.json`. So the acceptance line for a UI ticket that names a device is:
+The generic phone size above is not the owner's phone. Each of the owner's browsers is recorded as a device profile (Settings → Server and runner → Devices and privacy, in the "Your devices" section) and saved as `apps/web/test/device-profiles/*.json`. So the acceptance line for a UI ticket that names a device is:
 
 > checked at that device's recorded profile (profile rendering test) as well as the plain-http phone check above
 
