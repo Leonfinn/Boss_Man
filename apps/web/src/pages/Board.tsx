@@ -463,14 +463,20 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
 }
 
 const FILTERS_KEY = "board-filters";
-type SavedFilters = { feature: string; working: boolean };
-/** The feature and "working now" filters, kept for the browser session like the feature states below. */
+type BoardView = "all" | "features" | "tasks";
+type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string };
+/** The view, Assigned to, feature and "working now" filters, kept for the browser session like the feature states below. */
 function readFilters(): SavedFilters {
   try {
     const saved = JSON.parse(sessionStorage.getItem(FILTERS_KEY) ?? "null") as Partial<SavedFilters> | null;
-    return { feature: typeof saved?.feature === "string" ? saved.feature : "any", working: saved?.working === true };
+    return {
+      feature: typeof saved?.feature === "string" ? saved.feature : "any",
+      working: saved?.working === true,
+      view: saved?.view === "features" || saved?.view === "tasks" ? saved.view : "all",
+      assignee: typeof saved?.assignee === "string" && saved.assignee ? saved.assignee : "anyone",
+    };
   } catch {
-    return { feature: "any", working: false };
+    return { feature: "any", working: false, view: "all", assignee: "anyone" };
   }
 }
 
@@ -540,7 +546,7 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
-function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, mergeLine }: { mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine }: { runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -645,11 +651,12 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
       {t.quotaHeldUntil && !t.working?.length && (
         <span className="note" role="status">
           Held by the quota hold{t.quotaHeldReason ? ` (${t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")})` : ""}.{" "}
-          <button type="button" className="linkish" onClick={() => onRunNow(t.id)}>
+          <button type="button" className="linkish" disabled={runState?.busy} onClick={() => onRunNow(t.id)}>
             Run now
           </button>
         </span>
       )}
+      {runState?.error && <span className="note" role="alert">{runState.error}</span>}
       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
       {merging && t.mergeNote && !mergeLine && <span className="note">{t.mergeNote}</span>}
       {t.reviewStage === "checking" && <span className="note" data-testid="board-being-checked-note">Quick check: {t.checkLine ?? "waiting"}.</span>}
@@ -722,11 +729,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const mergeLineOf = (id: string) => [...(mergeLines.data?.running ?? []), ...(mergeLines.data?.waiting ?? [])].find((r) => r.ticketId === id)?.statusLine;
   const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
   const goals = usePoll((signal) => (current ? api<Tree>(`/api/companies/${current.companyId}/objectives`, { signal }) : Promise.resolve(null)), 120_000, `board-goals-${current?.companyId ?? "none"}`);
-  const [view, setView] = useState<"all" | "features" | "tasks">("all");
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [assignee, setAssignee] = useState("anyone");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState(readFilters);
   const setFilter = (change: Partial<SavedFilters>) =>
@@ -739,6 +744,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       }
       return next;
     });
+  const { view, assignee } = filters;
+  const setView = (v: BoardView) => setFilter({ view: v });
+  const setAssignee = (a: string) => setFilter({ assignee: a });
   const [allDone, setAllDone] = useState(false);
   const [shownStates, setShownStates] = useState(readShownStates);
   const toggleState = (st: FeatureStatus) =>
@@ -767,9 +775,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const filterCompany = companies.find((c) => c.id === current?.companyId);
   const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0);
   const clearFilters = () => {
-    setView("all");
-    setAssignee("anyone");
-    setFilter({ feature: "any", working: false });
+    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false });
   };
   const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
   const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
@@ -820,9 +826,26 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
     board.reload();
   };
+  // Per card: "busy" while the request is out (a second click is ignored), or the error text if it failed.
+  const [runState, setRunState] = useState<Record<string, { busy: boolean; error?: string }>>({});
+  const runNowBusy = useRef(new Set<string>());
   const runNow = async (id: string) => {
-    await api(`/api/tickets/${id}/run-now`, { method: "POST" });
-    board.reload();
+    if (runNowBusy.current.has(id)) return;
+    runNowBusy.current.add(id);
+    setRunState((s) => ({ ...s, [id]: { busy: true } }));
+    try {
+      await api(`/api/tickets/${id}/run-now`, { method: "POST" });
+      setRunState((s) => {
+        const { [id]: _done, ...rest } = s;
+        return rest;
+      });
+      board.reload();
+    } catch (e) {
+      const why = e instanceof Error && e.message ? ` (${e.message})` : "";
+      setRunState((s) => ({ ...s, [id]: { busy: false, error: `Couldn't start this now${why}. Try again in a moment.` } }));
+    } finally {
+      runNowBusy.current.delete(id);
+    }
   };
   const openForm = (a: Adding) => setAdding({ ...a, n: (adding?.n ?? 0) + 1 });
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
@@ -1210,6 +1233,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       tiers={tiers}
                       numberOf={(id) => (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === id)?.number}
                       onRunNow={(id) => void runNow(id)}
+                      runState={runState[t.id]}
                       mergeLine={t.reviewStage === "merging" || t.reviewStage === "held" ? mergeLineOf(t.id) : undefined}
                     />
                   ))
