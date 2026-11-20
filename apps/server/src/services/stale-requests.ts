@@ -301,6 +301,19 @@ export async function runnerRebuilt(db: Db, input: { companyId: string; wake?: W
 }
 
 /**
+ * BOS-2085 (R54): a repo security alert opened or closed, so every open go-live card in the company may no longer be safe
+ * to approve (a release tagged before a high alert opened, or one an alert's closing now unblocks). Each goes into the
+ * re-check at the author stage with the alert named in the reason; a card already in re-check is left alone, so one alert is one wake.
+ */
+export async function securityAlertChanged(db: Db, input: { companyId: string; change: "opened" | "closed"; alert: string; wake?: WakeFn | null; now?: Date }) {
+  const open = await db
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, recheckedAt: decisions.recheckedAt, recheckCount: decisions.recheckCount })
+    .from(decisions)
+    .where(and(agentCardFilter(input.companyId), sql`(${decisions.context} ->> 'goLive') = 'true'`));
+  return flagCards(db, { cards: open, reason: `a repo security alert ${input.change} (${input.alert.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 120)})`, wake: input.wake, now: input.now ?? new Date(), companyId: input.companyId });
+}
+
+/**
  * A card's own ticket changed state well after the card was raised (BOS-1161): the work went on without the answer, or
  * someone moved it. Compared to the card's age plus a grace period, because raising a card that blocks its ticket moves
  * the ticket too. Run from the sweep, since ticket state moves from many places (a database trigger stamps each one).

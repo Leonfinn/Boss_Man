@@ -102,6 +102,8 @@ export type GithubWatchDeps = {
   alert: (input: AlertInput) => Promise<unknown>;
   /** Closes the card with that dedupe key once a pass works again. */
   clearCard: (dedupeKey: string, summary: string) => Promise<unknown>;
+  /** BOS-2085 (R54): a security alert row was inserted or closed; the company's open go-live cards go back for a re-check. Failures are logged, never block the pass. */
+  alertChanged?: (companyId: string, input: { change: "opened" | "closed"; alert: string }) => Promise<unknown>;
   log?: (m: string) => void;
 };
 
@@ -123,6 +125,8 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
   const http = deps.fetch ?? fetch;
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? (() => {});
+  const alertChanged = (companyId: string, change: "opened" | "closed", alert: string) =>
+    Promise.resolve(deps.alertChanged?.(companyId, { change, alert })).catch((e) => log(`github watch: go-live re-check after alert ${change} failed: ${redact(e instanceof Error ? e.message : String(e))}`));
 
   const clampInterval = (n: number) => Math.min(MAX_INTERVAL_MINUTES, Math.max(MIN_INTERVAL_MINUTES, Math.round(n)));
 
@@ -420,7 +424,11 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
         fresh.push({ n, key, name, eco, risk, malware, line });
       }
       const top = (xs: Fresh[]): Risk => xs.reduce<Risk>((m, x) => (RISK_ORDER.indexOf(x.risk) > RISK_ORDER.indexOf(m) ? x.risk : m), "low");
-      const link = (xs: Fresh[], ticketId: string, groupKey: string) => db.insert(githubAlertTickets).values(xs.map((x) => ({ projectId: row.projectId, alertKey: x.key, ticketId, repo, groupKey }))).onConflictDoNothing();
+      const link = async (xs: Fresh[], ticketId: string, groupKey: string) => {
+        await db.insert(githubAlertTickets).values(xs.map((x) => ({ projectId: row.projectId, alertKey: x.key, ticketId, repo, groupKey }))).onConflictDoNothing();
+        const worst = top(xs);
+        await alertChanged(row.companyId, "opened", `Dependabot ${worst} alert${xs.length === 1 ? ` #${xs[0]!.n}` : "s"} on ${repo}, ${xs.length === 1 ? xs[0]!.name : `${xs.length} alerts`}`);
+      };
 
       if (firstSync && fresh.length > BACKLOG_OVER) {
         // A backlog found on the first look: one summary ticket for the CEO, not one ticket per alert.
@@ -498,6 +506,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
         ].join("\n");
         const t = await deps.createTicket(row.projectId, { title: `Leaked secret: ${type} in ${repo}`.slice(0, 160), body, assigneeAgentId: reviewer?.id ?? null, urgent: true, risk: "high", state: "ready", planFirst: false });
         await db.insert(githubAlertTickets).values({ projectId: row.projectId, alertKey: key, ticketId: t.id, repo }).onConflictDoNothing();
+        await alertChanged(row.companyId, "opened", `secret scanning alert #${n} on ${repo}`);
         if (reviewer) await deps.notify(reviewer.id, { ticketId: t.id, reason: "github secret alert", priority: 3, note: `GitHub secret scanning found ${type} in ${repo} (alert #${n}). Ticket made, urgent: start with rotating the secret. The value is not in the ticket and must not be copied anywhere.` }).catch(() => undefined);
       }
     }
@@ -518,6 +527,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
           if (t && t.state !== "done") await deps.closeTicket(ticketId, "The alert was closed on GitHub, so Boss Man closed this ticket.");
         }
         await db.update(githubAlertTickets).set({ closedAt: now() }).where(and(eq(githubAlertTickets.projectId, row.projectId), eq(githubAlertTickets.ticketId, ticketId), inArray(githubAlertTickets.alertKey, keys)));
+        await alertChanged(row.companyId, "closed", `${keys.length === 1 ? `${keys[0]!.startsWith("secret:") ? "secret scanning" : "Dependabot"} alert #${keys[0]!.split(":")[1]}` : `${keys.length} alerts`} on ${repo}`);
       } catch (e) {
         log(`github watch ${row.projectId}: couldn't close the ticket for ${keys.join(", ")}: ${redact(e instanceof Error ? e.message : String(e))}`);
       }
