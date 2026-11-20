@@ -10,7 +10,8 @@ import { decisions, runners } from "../src/db/schema.js";
 // in the Authorization header.
 
 // The rules judge allows this (it stays in its own folder); the older text rule says Deny.
-const JUDGE_ALLOWS = 'rm -rf shots && git status --porcelain && echo "done" # token sk-or-v1-0123456789abcdef0123456789';
+// Made-up keys are joined at run time so this file holds no key-shaped line for the secret scans (BOS-1932).
+const JUDGE_ALLOWS = 'rm -rf shots && git status --porcelain && echo "done" # token ' + ["sk-or-v1", "0123456789abcdef0123456789"].join("-");
 // The rules judge denies this (prints environment values).
 const JUDGE_DENIES = "rm -rf dist && env";
 
@@ -88,7 +89,7 @@ describe("model second opinion (BOS-338)", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     ctx = await setup(async () => (await gate, answer('{"verdict":"allow","reason":"ok"}')()));
-    const key = "sk-or-v1-SECRETKEY0123456789abcdefABCDEF";
+    const key = ["sk-or-v1", "SECRETKEY0123456789abcdefABCDEF"].join("-");
     const secret = (await ctx.req("POST", "/api/secrets", { name: "router key", kind: "generic", value: key })).json() as { secret: { id: string } };
     await ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { permissionJudge: "advise" });
     await ctx.turnOn({ secretId: secret.secret.id });
@@ -249,7 +250,7 @@ describe("model second opinion (BOS-338)", () => {
   });
 
   it("the key never shows in the message, even if the provider echoes it; a 200 with only an error is read too", async () => {
-    const key = "sk-or-v1-ECHOEDKEY0123456789abcdefABCDEF";
+    const key = ["sk-or-v1", "ECHOEDKEY0123456789abcdefABCDEF"].join("-");
     let n = 0;
     ctx = await setup(async () =>
       ++n === 1

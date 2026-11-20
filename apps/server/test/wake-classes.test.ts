@@ -46,6 +46,9 @@ describe("wake classes: the table", () => {
   const NOT_WAKE_REASONS = new Set([
     "runner offline",
     "not_found",
+    // The nightly secrets pass's ticket-move reasons (BOS-1932, secret-scan.ts), not a wake's reason.
+    "the nightly secrets pass still finds this match on main",
+    "the secrets pass no longer finds this match on main",
     "foreign_agent",
     // The merge line's pause reason (R44, merge-queue.ts), not a wake's reason.
     "a server update",
@@ -376,6 +379,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/merge-stall.ts": NEVER_DROPPED + " (merge line stalled is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/check-idle.ts": NEVER_DROPPED + " (idle check slot is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/watchdog.ts": CHECKS_OUTCOME + " (a dropped wake is reported, not counted as sent)",
+    "services/secret-scan.ts": NEVER_DROPPED + " (secret scan is scheduled; the match's ticket stays assigned, so a missed wake is picked up by the idle sweeps)",
   };
 
   it("lists every file that wakes an agent, so a new caller has to say how it handles a drop", () => {

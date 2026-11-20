@@ -26,7 +26,7 @@ const [obj] = await db.insert(schema.objectives).values({ companyId: co.id, titl
 const [msDocs] = await db.insert(schema.milestones).values({ objectiveId: obj.id, title: "Docs relaunch", targetDate: "2026-12-04" }).returning();
 const [msFast] = await db.insert(schema.milestones).values({ objectiveId: obj.id, title: "Fast on every phone", targetDate: "2027-01-29" }).returning();
 const [drv] = await db.insert(schema.featureDrivers).values({ companyId: co.id, name: "Helps sign-ups", weight: 1 }).returning();
-await db.insert(schema.feedbackSettings).values({ companyId: co.id, demandWeight: 3, portalEnabled: true, portalToken: "fernleafDemoPortalToken779abcdef", portalTitle: "Fernleaf: what's next", portalIntro: "Vote for what you want next, or suggest something new." });
+await db.insert(schema.feedbackSettings).values({ companyId: co.id, demandWeight: 3, portalEnabled: true, portalToken: "fernleaf-demo-portal", portalTitle: "Fernleaf: what's next", portalIntro: "Vote for what you want next, or suggest something new." });
 const F: Record<string, any> = {};
 const feat = async (key: string, title: string, description: string, status: string, effort: number, score: number, extra: any = {}) => {
   F[key] = (await db.insert(schema.features).values({ companyId: co.id, title, description, status: status as any, effort, driverScores: { [drv.id]: score }, ...extra }).returning())[0];

@@ -5,7 +5,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, runners, runs, wakes } from "../src/db/schema.js";
-import { limitRequeue, LIMIT_HELD_PREFIX } from "../src/services/limit-requeue.js";
+import { limitRequeue, limitWindowKey, LIMIT_HELD_PREFIX } from "../src/services/limit-requeue.js";
 
 // BOS-1438: a run the account refuses for a usage limit goes back in the queue as held work, once per
 // limit window, held to the account's real reset (not to BOS-463's made-up one-hour reading).
@@ -145,5 +145,24 @@ describe("a run refused for an account limit (BOS-1438)", () => {
       expect(await c.requeue.afterRun(run.runId), error).toEqual({ outcome: "not_a_limit" });
     }
     expect(await heldWakes(c)).toHaveLength(0);
+  });
+});
+
+describe("limitWindowKey", () => {
+  it("maps the provider's limit wording to the quota readings' window names", () => {
+    // accountOutage hands it the wording as "the <limit>".
+    expect(limitWindowKey("the weekly limit")).toBe("seven_day");
+    expect(limitWindowKey("the 5-hour limit")).toBe("five_hour");
+    expect(limitWindowKey("the five-hour limit")).toBe("five_hour");
+    expect(limitWindowKey("the rate limit")).toBe("rate_limit");
+    expect(limitWindowKey("the usage limit")).toBe("usage_limit");
+    expect(limitWindowKey("the quota")).toBe("quota");
+  });
+
+  it("keeps empty or unknown wording usable as a key", () => {
+    expect(limitWindowKey("")).toBe("");
+    expect(limitWindowKey("the ")).toBe("");
+    expect(limitWindowKey("hourly")).toBe("hourly");
+    expect(limitWindowKey("per   request")).toBe("per_request");
   });
 });

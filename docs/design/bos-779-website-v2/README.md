@@ -37,6 +37,6 @@ With the web app built (`apps/web`: `vite build`) and from `apps/server`:
    - `card-wide.png`: the same with `1100 1000 2`
    - `agents-crop.png`: `CLIP=270,613,1150,430 node shot.cjs "#/agents" agents-crop.png 1440 1000 2`
    - `roadmap-crop.png`: `CLIP=272,222,1130,580 node shot.cjs "#/roadmap" roadmap-crop.png 1440 1000 2`
-   - `portal-phone.png`: `node shot.cjs "portal.html#fernleafDemoPortalToken779abcdef" portal-phone.png 390 844 3` (the made-up portal link the seed sets)
+   - `portal-phone.png`: `node shot.cjs "portal.html#fernleaf-demo-portal" portal-phone.png 390 844 3` (the made-up portal link the seed sets)
 
    The seed prints the company and project ids.

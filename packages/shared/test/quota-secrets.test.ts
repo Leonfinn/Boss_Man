@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { normaliseUtilization, parseAcpUsageCost, parseClaudeRateLimit, parseCodexRateLimits, parseSyntheticQuota } from "../src/quota.js";
 import { checkSecretFormat, findCredential, normaliseSecret, secretHint } from "../src/secrets.js";
 
+// Built at run time so the file holds no key-shaped line for the secret scans (BOS-1932).
+const PEM_BEGIN = ["-----BEGIN", "OPENSSH PRIVATE KEY-----"].join(" ");
+
 describe("parseClaudeRateLimit", () => {
   // Shape copied from spike S2's real run (claude-agent-acp 0.91.0, setup-token).
   const meta = {
@@ -129,8 +132,8 @@ describe("secrets", () => {
     expect(normaliseSecret("claude_oauth_token", pasted)).toBe("sk-ant-oat01-abcdefghi");
   });
   it("keeps newlines inside SSH keys and ends with one", () => {
-    const key = "-----BEGIN OPENSSH PRIVATE KEY-----\r\nabc\r\n-----END OPENSSH PRIVATE KEY-----";
-    expect(normaliseSecret("ssh_private_key", key)).toBe("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n");
+    const key = `${PEM_BEGIN}\r\nabc\r\n-----END OPENSSH PRIVATE KEY-----`;
+    expect(normaliseSecret("ssh_private_key", key)).toBe(`${PEM_BEGIN}\nabc\n-----END OPENSSH PRIVATE KEY-----\n`);
   });
   it("flags wrong prefixes and quotes", () => {
     expect(checkSecretFormat("claude_oauth_token", "sk-ant-oat01-ok").ok).toBe(true);
@@ -148,7 +151,7 @@ describe("findCredential", () => {
   it("spots common secret shapes", () => {
     expect(findCredential("token sk-ant-oat01-abcdefghijklmnop")).toBe("an Anthropic key or token");
     expect(findCredential("use ghp_0123456789abcdefghijABCDEFGHIJ")).toBe("a GitHub token");
-    expect(findCredential("-----BEGIN OPENSSH PRIVATE KEY-----")).toBe("a private key");
+    expect(findCredential(PEM_BEGIN)).toBe("a private key");
     expect(findCredential("postgres://app:hunter2@db:5432/app")).toBe("a password in a URL");
     expect(findCredential("AKIAIOSFODNN7EXAMPLE")).toBe("an AWS access key");
   });

@@ -1114,6 +1114,13 @@
       "when": 1795128526766,
       "tag": "0177_merged_watch",
       "breakpoints": true
+    },
+    {
+      "idx": 178,
+      "version": "7",
+      "when": 1795144467198,
+      "tag": "0178_github_alert_repo",
+      "breakpoints": true
     }
   ]
 }

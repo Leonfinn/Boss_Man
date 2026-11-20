@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { addedLines, scan, format, parseDenylist, parseAllow } from './scan-added-lines.mjs'
+import { addedLines, scan, format, parseDenylist, parseAllow, parseCatFile, parseLsTree } from './scan-added-lines.mjs'
 
 // Fake values are built at run time so this file holds no secret-looking literal of its own.
 const fakeAnthropic = ['sk', 'ant', 'api03'].join('-') + '-' + 'Zq8vK2mXp4Lr7TnB9wYc3HdF6sJg1UaE5oIi'
@@ -118,9 +118,9 @@ test('a "-- " removed line and a "++ /dev/null" added line do not change the fil
 
 // End to end on a real throwaway repo (made-up fake key, built from parts).
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const scanner = fileURLToPath(new URL('./scan-added-lines.mjs', import.meta.url))
@@ -208,4 +208,95 @@ test('e2e: the list can come on stdin (--list-stdin)', () => {
     try { out = execFileSync('node', [scanner, 'main', '--list-stdin'], { cwd: dir, encoding: 'utf8', input: `ip\t${listedIp}\n` }) } catch (e) { code = e.status; out = String(e.stdout) }
     assert.equal(code, 1); assert.match(out, /BLOCKED a listed private detail was found in this change/); assert.ok(!out.includes(listedIp)); assert.ok(!out.includes('b.txt'))
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// ---- BOS-1932: provider rules GitHub knows, and the whole-tree pass ----
+
+test('provider keys GitHub secret scanning knows are blocked: Tailscale placeholders too', () => {
+  const shapes = {
+    'tailscale-key': ['tskey', 'auth', 'PASTE-YOUR-KEY'].join('-'),
+    'gitlab-token': 'glpat' + '-' + 'aB3dE5gH7jK9mN1pQ3sT',
+    'docker-hub-token': 'dckr' + '_pat_' + 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ',
+    'huggingface-token': 'hf' + '_' + 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3h',
+    'ntfy-token': 'tk' + '_' + 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o',
+    'google-oauth-secret': 'GOCSPX' + '-' + 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ9b',
+    'atlassian-token': 'ATBB' + 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5',
+    'slack-webhook': 'https://hooks.slack' + '.com/services/T0123ABCD/B0123ABCD/aB3dE5gH7jK9mN1pQ3sT5vW7',
+    'cloudflare-tunnel-token': 'eyJhIjoi' + 'YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODkiLCJ0IjoiMDEyMzQ1NjctODlhYi1jZGVmLTAxMjMtNDU2Nzg5YWJjZGVmIiwicyI6Ik1USXpORFUyTnpnNU1BPT0ifQ==',
+  }
+  for (const [kind, v] of Object.entries(shapes)) {
+    const r = run([`x = ${v}`])
+    assert.ok(r.blocked.some((b) => b.kind === kind), `${kind} not found: ${JSON.stringify(r.blocked)}`)
+    assert.ok(!format(r).includes(v))
+  }
+  // Prose and short ids stay quiet.
+  assert.deepEqual(run(['the ntfy topic tk_short', 'hf_ is the prefix', 'TS_AUTHKEY=PASTE-THE-KEY-FROM-STEP-2']).blocked, [])
+})
+
+function treeRepo(files) {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-tree-'))
+  const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' } })
+  g('init', '-q', '-b', 'main')
+  for (const [name, text] of Object.entries(files)) { mkdirSync(dirname(join(dir, name)), { recursive: true }); writeFileSync(join(dir, name), text) }
+  g('add', '-A'); g('commit', '-qm', 'old')
+  return { dir, g }
+}
+const treeScan = (dir, ...extra) => {
+  try { return { code: 0, out: execFileSync('node', [scanner, '--tree', 'main', ...extra], { cwd: dir, encoding: 'utf8' }) } } catch (e) { return { code: e.status, out: String(e.stdout) + String(e.stderr) } }
+}
+
+test('e2e --tree: finds a key that was on main before any merge-line scan, with file, line and the commit; never the value', () => {
+  const { dir, g } = treeRepo({ 'docs/guide.md': 'intro\n\n', 'src/ok.ts': 'export const a = 1\n' })
+  try {
+    const first = g('rev-parse', 'HEAD').trim()
+    // A later commit adds the key: blame must name that one, not the first.
+    writeFileSync(join(dir, 'docs/guide.md'), `intro\n\nkey: ${fakeGithub}\n`); g('commit', '-qam', 'add key')
+    const added = g('rev-parse', 'HEAD').trim()
+    // A .env committed long ago is a finding by its name alone.
+    writeFileSync(join(dir, '.env'), 'X=1\n'); g('add', '.env'); g('commit', '-qm', 'env')
+    const r = treeScan(dir, '--json')
+    assert.equal(r.code, 0, r.out)
+    assert.ok(!r.out.includes(fakeGithub))
+    const j = JSON.parse(r.out)
+    assert.equal(j.commit, g('rev-parse', 'HEAD').trim())
+    assert.equal(j.files, 3)
+    const key = j.findings.find((f) => f.kind === 'github-token')
+    assert.deepEqual({ file: key.file, line: key.line, commit: key.commit, length: key.length }, { file: 'docs/guide.md', line: 3, commit: added, length: fakeGithub.length })
+    assert.match(key.fingerprint, /^[0-9a-f]{12}$/)
+    assert.notEqual(key.commit, first)
+    const env = j.findings.find((f) => f.kind === 'secret-file-name')
+    assert.equal(env.file, '.env'); assert.equal(env.line, null); assert.equal(env.fingerprint, null)
+    // Human output exits 1 and still holds no value.
+    const h = treeScan(dir)
+    assert.equal(h.code, 1); assert.match(h.out, /FOUND github-token at docs\/guide\.md:3/); assert.ok(!h.out.includes(fakeGithub))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('e2e --tree: scan-allow.txt does not hide a key on main, and a clean tree reports nothing', () => {
+  const { dir } = treeRepo({ 'a.ts': `const k = "${fakeAnthropic}"\n`, 'scripts/scan-allow.txt': `a.ts\tanthropic-key\t${createHash('sha256').update(fakeAnthropic).digest('hex').slice(0, 12)}\treviewed\n` })
+  try {
+    const j = JSON.parse(treeScan(dir, '--json').out)
+    assert.deepEqual(j.findings.map((f) => f.kind), ['anthropic-key'])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+  const clean = treeRepo({ 'a.ts': 'const k = process.env.KEY\n', 'img.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 1]) })
+  try {
+    const j = JSON.parse(treeScan(clean.dir, '--json').out)
+    assert.deepEqual(j.findings, []); assert.deepEqual(j.skipped, []); assert.equal(j.files, 2)
+  } finally { rmSync(clean.dir, { recursive: true, force: true }) }
+})
+
+test('e2e --tree: a key in a binary-named file next to NUL bytes is still found', () => {
+  const { dir } = treeRepo({ 'x.png': Buffer.concat([Buffer.from([0x89, 0x50, 0, 0x20]), Buffer.from(fakeGithub), Buffer.from([0, 0xff, 10])]) })
+  try {
+    const j = JSON.parse(treeScan(dir, '--json').out)
+    assert.deepEqual(j.findings.map((f) => [f.kind, f.file, f.line]), [['github-token', 'x.png', 1]])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('parseCatFile reads back-to-back blobs, including one holding newlines and a missing object', () => {
+  const a = Buffer.from('one\ntwo\n'), b = Buffer.from('three')
+  const buf = Buffer.concat([Buffer.from(`aaa blob ${a.length}\n`), a, Buffer.from('\n'), Buffer.from('zzz missing\n'), Buffer.from(`bbb blob ${b.length}\n`), b, Buffer.from('\n')])
+  const m = parseCatFile(buf)
+  assert.equal(m.get('aaa').toString(), 'one\ntwo\n'); assert.equal(m.get('bbb').toString(), 'three'); assert.equal(m.has('zzz'), false)
+  assert.deepEqual(parseLsTree('100644 blob abc     12\tdir/a b.txt\x00160000 commit def       -\tsub\x00').map((f) => [f.path, f.sha, f.size]), [['dir/a b.txt', 'abc', 12]])
 })

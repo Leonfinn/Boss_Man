@@ -28,7 +28,7 @@
   "sessions": [
     {
       "index": 0,
-      "token": "bm_sess_e179eedc-0614-4369-8e61-6f2beea4c32d",
+      "token": "bm_sess_(session-0)",
       "cwd": "/tmp/bm-s2-claude-TmykQy/ws-0",
       "configOptions": [
         {
@@ -206,7 +206,7 @@
     },
     {
       "index": 1,
-      "token": "bm_sess_80d9e3f9-0c9c-4b3f-b5d2-42c03b4d026a",
+      "token": "bm_sess_(session-1)",
       "cwd": "/tmp/bm-s2-claude-TmykQy/ws-1",
       "configOptions": [
         {
@@ -380,7 +380,7 @@
     },
     {
       "index": 2,
-      "token": "bm_sess_73e2462b-5635-4fa4-bab2-b09970b330c3",
+      "token": "bm_sess_(session-2)",
       "cwd": "/tmp/bm-s2-claude-TmykQy/ws-2",
       "configOptions": [
         {
@@ -698,7 +698,7 @@
   "mcpCalls": [
     {
       "tool": "create_ticket",
-      "token": "bm_sess_80d9e3f9-0c9c-4b3f-b5d2-42c03b4d026a",
+      "token": "bm_sess_(session-1)",
       "args": {
         "title": "Spike S2 ticket",
         "body": "Created through ACP MCP passthrough"
@@ -706,7 +706,7 @@
     },
     {
       "tool": "create_ticket",
-      "token": "bm_sess_e179eedc-0614-4369-8e61-6f2beea4c32d",
+      "token": "bm_sess_(session-0)",
       "args": {
         "title": "Spike S2 ticket",
         "body": "Created through ACP MCP passthrough"
@@ -714,7 +714,7 @@
     },
     {
       "tool": "create_ticket",
-      "token": "bm_sess_73e2462b-5635-4fa4-bab2-b09970b330c3",
+      "token": "bm_sess_(session-2)",
       "args": {
         "title": "Spike S2 ticket",
         "body": "Created through ACP MCP passthrough"

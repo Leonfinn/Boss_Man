@@ -32,7 +32,7 @@ async function setup() {
 describe("git workspaces on the server (R38)", () => {
   it("refuses a repo address with a credential in it", async () => {
     const c = (ctx = await setup());
-    expect((await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://bot:ghp_0123456789abcdefghijABCDEFGHIJ@github.com/a/b.git" })).statusCode).toBe(400);
+    expect((await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `https://bot:${"ghp_"}0123456789abcdefghijABCDEFGHIJ@github.com/a/b.git` /* joined: no key-shaped line for the secret scans (BOS-1932) */ })).statusCode).toBe(400);
     expect((await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "ftp://example.com/x" })).statusCode).toBe(400);
     const ok = await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git", defaultBranch: "develop" });
     expect(ok.json()).toMatchObject({ repoUrl: "https://github.com/Leonfinn/customer-app.git", defaultBranch: "develop" });

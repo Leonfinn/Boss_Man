@@ -255,9 +255,12 @@ export function Workflow({ company }: { company: Company | undefined }) {
           <Findings d={d} companyId={company.id} setDays={setDays} />
           <section id="roles">
             <h2 tabIndex={-1}>Roles</h2>
+            <details>
+            <summary>What the columns mean</summary>
             <p className="muted" style={{ fontSize: 14 }}>
               <strong>Done</strong> is tickets finished in this period. <strong>Right first time</strong> is the share of reviewed tickets that were never sent back. <strong>Rework rounds</strong> is how many times a ticket was sent back, on average. <strong>Time to finish</strong> is the middle time from first starting a ticket to finishing it. <strong>Own cost</strong> is what this role's own runs on those tickets cost, per ticket. <strong>Ticket cost</strong> is every run on them, per ticket: reviews, the CEO and rework included, so a ticket sent back often costs more. {d.costBasis === "billed" ? "Costs are what the provider billed." : "Costs are estimates at list price from the tokens used, not what a subscription actually charges you."} <strong>Watchdog flags</strong> counts tickets the watchdog raised. <strong>Answers changed</strong> is how often the answer to a decision this role raised was not the one it recommended.
             </p>
+            </details>
             {d.byRole.length ? (
               <>
                 <label className="muted" style={{ fontSize: 14 }}>

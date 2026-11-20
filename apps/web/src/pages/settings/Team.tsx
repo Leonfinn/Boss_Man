@@ -7,6 +7,7 @@ import { DraftTextarea } from "../../components/DraftTextarea";
 import { ReadOnlyText } from "../../components/ReadOnlyText";
 import { Section, useAction } from "./shared";
 import { Loader } from "../../components/Loader";
+import { SaveButton } from "../../components/SaveButton";
 
 type Chapter = {
   id: string;
@@ -30,6 +31,7 @@ const ENDED: Record<string, string> = { context: "when its context was 70% full"
 /** The prefix in ticket references (HOL-12). Changing it renames every reference; the numbers stay. */
 export function TicketPrefix({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [prefix, setPrefix] = useState(company.ticketPrefix ?? "");
+  const [saved, setSaved] = useState(false);
   const act = useAction();
   const value = prefix.trim().toUpperCase();
   const valid = /^[A-Z0-9]{1,10}$/.test(value);
@@ -41,20 +43,20 @@ export function TicketPrefix({ company, onChanged }: { company: Company; onChang
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="ticket-prefix">Prefix</label>
         <input id="ticket-prefix" className="mono" maxLength={10} value={prefix} onChange={(e) => setPrefix(e.target.value)} style={{ width: 120, textTransform: "uppercase" }} />
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid || value === company.ticketPrefix}
+        <SaveButton
+          dirty={value !== (company.ticketPrefix ?? "")}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { ticketPrefix: value } });
+              setSaved(true);
               onChanged();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
@@ -64,6 +66,7 @@ export function TicketPrefix({ company, onChanged }: { company: Company; onChang
 /** CEO continuity: the CEO's current chapter, and the handoffs between chapters. */
 export function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [days, setDays] = useState(String(company.goalCheckDays ?? 14));
+  const [saved, setSaved] = useState(false);
   const act = useAction();
   const n = Number(days);
   const valid = Number.isInteger(n) && n >= 1 && n <= 365;
@@ -75,20 +78,20 @@ export function GoalCheck({ company, onChanged }: { company: Company; onChanged:
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="goal-days">Ask after (days)</label>
         <input id="goal-days" type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} style={{ width: 80 }} />
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={days !== String(company.goalCheckDays ?? 14)}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { goalCheckDays: n } });
+              setSaved(true);
               onChanged();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
@@ -162,6 +165,7 @@ export function WorkflowRetros({ company }: { company: Company }) {
 /** How long the CEO has to act on a decision the owner asked for advice on. */
 export function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [minutes, setMinutes] = useState(String(company.adviceTimeoutMinutes ?? 120));
+  const [saved, setSaved] = useState(false);
   const act = useAction();
   const n = Number(minutes);
   const valid = Number.isInteger(n) && n >= 5 && n <= 1440;
@@ -173,20 +177,20 @@ export function AdviceTimeout({ company, onChanged }: { company: Company; onChan
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="advice-timeout">Minutes the CEO has</label>
         <input id="advice-timeout" type="number" min={5} max={1440} value={minutes} onChange={(e) => setMinutes(e.target.value)} style={{ width: 80 }} />
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={minutes !== String(company.adviceTimeoutMinutes ?? 120)}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { adviceTimeoutMinutes: n } });
+              setSaved(true);
               onChanged();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
@@ -235,10 +239,10 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
         <>
           <DraftTextarea draftKey={draftKey} aria-label="Standing rules" value={shown} onChange={(text) => { setShown(text); setKept(text); }} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-            <button
-              type="button"
-              className="btn"
-              disabled={act.busy}
+            <SaveButton
+              dirty={shown !== rules.text}
+              saved={false}
+              busy={act.busy}
               onClick={() =>
                 void act.run(async () => {
                   const saved = await api<Rules>(url, { method: "PUT", body: { text: shown } });
@@ -251,9 +255,7 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
                   return "Saved.";
                 })
               }
-            >
-              Save
-            </button>
+            />
             <button type="button" className="btn" disabled={act.busy} onClick={cancel}>
               Cancel
             </button>
