@@ -136,7 +136,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/maintenance.ts": { counts: { insert: 1 }, why: "kind approval: maintenance" },
   "src/services/policy-rules.ts": { counts: { insert: 1, question: 1 }, why: "type rule_proposal" },
   "src/services/retro.ts": { counts: { insert: 3, question: 1 }, why: "type lesson (and approvals: workflow_change, workflow_check)" },
-  "src/services/review.ts": { counts: { insert: 1, question: 1 }, why: "lesson (tier ceo)" },
+  "src/services/review-rounds.ts": { counts: { insert: 1, question: 1 }, why: "lesson (tier ceo; submit, moved from review.ts, BOS-1904)" },
   "src/services/review-common.ts": { counts: { insert: 1, question: 1 }, why: "check_stuck (no agent; raiseCheckStuck, moved from review.ts, BOS-1901)" },
   "src/services/review-ctx.ts": { counts: { insert: 1, question: 1 }, why: "carried (type carried, ticketId, blocker, one option; refuseCarried, moved from review.ts, BOS-1901)" },
   "src/services/signoff.ts": { counts: { insert: 1 }, why: "kind approval: risk_review (moved here from review.ts)" },
