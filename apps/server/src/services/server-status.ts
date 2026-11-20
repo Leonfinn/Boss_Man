@@ -35,6 +35,8 @@ export type ServerStatusDeps = {
   colours?: () => Promise<BlueGreen>;
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
+  /** BOS-2058: every update wait that is on (update-waits.ts activeWaits). Absent in tests that don't need it. */
+  updateWaits?: () => Promise<unknown[]>;
   /** Whether this company's own runner swap is under way (runner-report swappingFor); absent: any hold counts. */
   swapping?: (companyId: string) => Promise<boolean>;
   errors: ErrorBuffer;
@@ -245,6 +247,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         mergeFailures: deps.mergeFailures ? await deps.mergeFailures(companyId).catch(() => null) : null,
         mergeTrain: deps.mergeTrain ? await deps.mergeTrain(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
+        // BOS-2058: every update wait that is on (what it waits on, since when, when it ends): the owner's screens read the same list.
+        updateWaits: deps.updateWaits ? await deps.updateWaits().catch(() => null) : null,
         // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
         checks: { ...(await checkQueue(db).status(companyId, at)), idleSlots: (await deps.idleCheckSlots?.(companyId)) ?? [] },
         migration: await latestMigration(db),

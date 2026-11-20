@@ -112,6 +112,11 @@ logged "vitest related --run src/b.ts" "server"
 logged "pnpm --filter @boss-man/server exec vitest run test/wake-classes.test.ts" "guard: wake classes for a server change"
 run 1 "wake classes guard fails" env FAIL_ON=wake-classes.test
 grep -qF "WAKE_CLASS in apps/server/src/services/wake-classes.ts" "$t/out" || fail "wake hint names the file: $(cat "$t/out")"
+# BOS-2058: the update-waits guard runs on the same server change, and its failure names the table to edit.
+run 0 "server change runs the update-waits guard" env
+logged "pnpm --filter @boss-man/server exec vitest run test/update-waits-guard.test.ts" "guard: update waits for a server change"
+run 1 "update waits guard fails" env FAIL_ON=update-waits-guard.test
+grep -qF "WAIT_RULES" "$t/out" || fail "update-waits hint names the table: $(cat "$t/out")"
 
 commit scripts/x.sh
 run 0 "shell change" env

@@ -61,6 +61,10 @@ WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SEC
 STAGING_DIR="" STAGING_RATE_LIMIT_SECONDS=300 STAGING_TIMEOUT_SECONDS=1800 # the staging lane (BOS-1472); off while STAGING_DIR is empty
 BG_STOP_SECONDS="${BG_STOP_SECONDS:-60}" # a planned stop's grace before Docker sends SIGKILL (BOS-794); the server's shutdown drains work
 [[ $BG_STOP_SECONDS =~ ^[0-9]{1,4}$ ]] || BG_STOP_SECONDS=60
+# BOS-2058 (rule b): the idle colour's build has an end of its own. A build that hangs is stopped here, the update fails
+# and the live colour stays; the server's "server-build" wait ends at 45 min, so this stays inside it.
+BG_BUILD_SECONDS="${BG_BUILD_SECONDS:-2400}"
+[[ $BG_BUILD_SECONDS =~ ^[0-9]{1,5}$ ]] || BG_BUILD_SECONDS=2400
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
 DEPLOY_MIN_FREE_MB="${DEPLOY_MIN_FREE_MB:-}" DEPLOY_BUILD_MEMORY_MB="${DEPLOY_BUILD_MEMORY_MB:-3072}" DEPLOY_NEW_SERVER_MB="${DEPLOY_NEW_SERVER_MB:-4096}"
 # Where memory is read from (the tests point these at files of their own).
@@ -1331,7 +1335,10 @@ do_deploy_bluegreen() {
   mem_start before-build
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
-  BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
+  local brc=0
+  (cd "$REPO" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT="$COMMIT" timeout -k 30 "$BG_BUILD_SECONDS" docker compose build "server-$BG_IDLE") >>"$LOG" 2>&1 || brc=$?
+  if ((brc == 124 || brc == 137)); then pre_fail "Building $BG_IDLE did not finish within $((BG_BUILD_SECONDS / 60)) minutes, so it was stopped."; return 1; fi
+  ((brc == 0)) || { pre_fail "Building $BG_IDLE failed."; return 1; }
   mem_sample after-build
   # Expand-only migrations: the live colour keeps working on the new schema.
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
