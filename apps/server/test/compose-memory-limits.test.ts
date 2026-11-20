@@ -93,6 +93,17 @@ describe("compose memory limits", () => {
     }
   });
 
+  // BOS-2098: Docker's default 10 s stop cuts the server's shutdown drain short (BOS-794); every server needs at least 60 s.
+  it("the single server and both blue/green colours get at least 60 s to stop", () => {
+    const main = services("docker-compose.yml") as Record<string, Service & { stop_grace_period?: string }>;
+    const bg = services("deploy/truenas-bluegreen.yml") as typeof main;
+    for (const [n, s] of [["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      const m = /^(\d+)s$/.exec(String(s!.stop_grace_period));
+      expect(m, `${n} stop_grace_period`).not.toBeNull();
+      expect(Number(m![1]), n).toBeGreaterThanOrEqual(60);
+    }
+  });
+
   it("tool servers are the first to be killed", () => {
     for (const [name, s] of Object.entries(services("deploy/tool-servers.yml"))) expect(s.oom_score_adj, name).toBeGreaterThan(0);
   });

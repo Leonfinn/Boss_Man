@@ -153,7 +153,14 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
   // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
   // merge, and running the check anyway could send the ticket back for a failure it can't fix.
   // A runner that went away is not "no diff": land() asks again once it is back (BOS-1396). Other failures read as no diff.
-  const readDiff = () => whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, baseRef: defaultBranch }), 60_000)).catch((err: unknown) => { if (err instanceof RunnerGone) throw err; return null; });
+  // BOS-2089: why the last read failed, kept for the "restart" failure's note (20 Nov's seven failures left no reason).
+  let diffError = "";
+  const readDiff = () =>
+    whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, baseRef: defaultBranch }), 60_000)).catch((err: unknown) => {
+      if (err instanceof RunnerGone) throw err;
+      diffError = String((err as Error)?.message ?? err).split("\n")[0]!.slice(0, 150);
+      return null;
+    });
   let changed = await readDiff();
   // A ticket sent back after its merge as no-code, then reopened for real work (BOS-532): a commit on its
   // branch now is that work. Clear the stale no-code mark and read the diff again (a diff read over the
@@ -177,7 +184,7 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
   // A diff that could not be read has an unknown file list, so it must not merge: it might change one of those
   // files. Fail closed the way a runner that went away does: land() asks again, and raises its card only when
   // the retries fail too (BOS-1396).
-  if (!changed && t.branch) throw new RunnerGone("The runner couldn't say which files the ticket changes.");
+  if (!changed && t.branch) throw new RunnerGone(`The runner couldn't say which files the ticket changes${diffError ? ` (${diffError})` : ""}.`);
   // Keep the files it changes, so the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a merge.
   if (changed?.files.length) await db.update(tickets).set({ diffFiles: changed.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
   const ownerFiles = ownerApprovedFiles(changed?.files.map((f) => f.path) ?? []);

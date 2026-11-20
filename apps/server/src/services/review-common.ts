@@ -73,6 +73,8 @@ export const LOCK_RETRY_TEXT = "Merge check waiting for lock, retrying";
  * checkNeverFinished is the one list of such causes; "the runner didn't answer" is added by the caller.
  */
 export const INFRA_RETRY_ATTEMPTS = 3;
+/** BOS-2089: restart retries not counted while the runner settles after reconnecting (about 10 minutes of pauses and tries). */
+export const SETTLE_FREE_TRIES = 8;
 // shortcut: a constant except for tests, which lower it through setInfraRetryBase; no per-request state.
 export let INFRA_RETRY_BASE_MS = 30_000;
 /** For tests. */

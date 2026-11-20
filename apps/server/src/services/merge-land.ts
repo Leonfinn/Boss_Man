@@ -5,7 +5,7 @@
 // context as `ctx`. review.ts keeps one delegate line per method.
 import { and, eq, ne, sql } from "drizzle-orm";
 import { deepChecks, type WorkspaceDiff } from "@boss-man/shared";
-import { agents, tickets } from "../db/schema.js";
+import { agents, runners, tickets } from "../db/schema.js";
 import { RunnerGone } from "./runners.js";
 import { GIT_RETRY_CARD_NOTE, GIT_RETRY_NOTE, isGitTransportFault } from "./git-transport-fault.js";
 import { evaluate, latestRows } from "./review-kinds.js";
@@ -16,7 +16,7 @@ import { recordFailedAttempt } from "./merge-failures.js";
 import { mainMoved } from "./merge-train.js";
 import { openHold, releaseReadyHolds } from "./review-holds.js";
 import { carriedTitles } from "./merge-queue.js";
-import { INFRA_RETRY_ATTEMPTS, INFRA_RETRY_BASE_MS, isSignoffPending, landingText, LOCK_RETRY_ATTEMPTS, LOCK_RETRY_BASE_MS, LOCK_RETRY_TEXT, MERGE_ACTIVITY_MS, ReviewError, ReviewHeldError, type LandingStatus, type LandOptions } from "./review-common.js";
+import { INFRA_RETRY_ATTEMPTS, INFRA_RETRY_BASE_MS, isSignoffPending, landingText, LOCK_RETRY_ATTEMPTS, LOCK_RETRY_BASE_MS, LOCK_RETRY_TEXT, MERGE_ACTIVITY_MS, ReviewError, ReviewHeldError, SETTLE_FREE_TRIES, type LandingStatus, type LandOptions } from "./review-common.js";
 import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
 
@@ -170,6 +170,7 @@ export async function land(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, r
     // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
     // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
     let goneTries = 0;
+    let settleTries = 0;
     for (let attempt = 1; ; attempt++) {
       let r: Awaited<ReturnType<typeof this.landOnce>> | { outcome: "runner_gone"; delivered: null; detail: { message: string } };
       try {
@@ -215,14 +216,20 @@ export async function land(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, r
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: "The merge was cut off by the hand-over; the server now in charge starts it again. Nothing to do." });
           return { outcome: "check_stuck", delivered: null, detail: { note: "Cut off by the hand-over; the server now in charge restarts it." } };
         }
-        goneTries++;
+        // BOS-2089: a runner that has only just come back is still catching up (its repo lock, the work the restart
+        // queued), so a try that fails then is spent waiting, not used up: the card comes only once the runner has
+        // been back RUNNER_SETTLE_MS and the merge still fails. SETTLE_FREE_TRIES caps it for a runner that keeps reconnecting.
+        const [rn] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+        if (rn && deps.runners.isSettling(rn.id) && settleTries < SETTLE_FREE_TRIES) settleTries++;
+        else goneTries++;
         if (goneTries > INFRA_RETRY_ATTEMPTS) {
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The runner kept going away under the merge (${message}); the merge card is with the CEO first.` });
           await checkStuck(t, "the merge", "was cut off because the runner restarted or went away", message);
           return { outcome: "check_stuck", delivered: null, detail: r.detail };
         }
-        const pause = INFRA_RETRY_BASE_MS * 2 ** (goneTries - 1);
-        await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Runner restarted: the merge was cut off (${message}); running it again (try ${goneTries} of ${INFRA_RETRY_ATTEMPTS}, in ${Math.max(1, Math.round(pause / 1000))}s). Nothing to do.` });
+        const pause = INFRA_RETRY_BASE_MS * 2 ** Math.min(goneTries + settleTries - 1, 2);
+        const tryText = goneTries === 0 ? "the runner has only just come back, so this try isn't counted" : `try ${goneTries} of ${INFRA_RETRY_ATTEMPTS}`;
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Runner restarted: the merge was cut off (${message}); running it again (${tryText}, in ${Math.max(1, Math.round(pause / 1000))}s). Nothing to do.` });
         phases.set(ticketId, "waiting_to_retry");
         const beat = setInterval(() => void beatNow(ticketId).catch(() => undefined), MERGE_ACTIVITY_MS);
         beat.unref?.();

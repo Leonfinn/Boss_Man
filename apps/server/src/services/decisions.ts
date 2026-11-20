@@ -509,6 +509,52 @@ export function ceoFirstLadder(ticketId: string, why: string, at = new Date().to
   return { rung: "ceo", since: at, minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId, about: [] as string[], hops: [{ to: "ceo", at, why }] };
 }
 
+/** The wake reason when an owner's note landed on a card nobody is watching (BOS-2077, cock-ups F4). Class "waiting": never dropped. */
+export const OWNER_HAND_BACK = "owner hand-back";
+/** The go-live card's second answer (BOS-2077): the owner did some of it, or can't do it. It wakes the CEO. */
+export const TODO_PARTLY = "Partly done / I need help";
+/** The CEO's two ways to close an owner hand-back card. */
+export const HAND_BACK_TICKETED = "I made a follow-up ticket";
+export const HAND_BACK_NO_TICKET = "No ticket needed: I replied to the owner";
+/** How long the CEO has before the alert ladder hands an unanswered hand-back card to the owner. */
+export const HAND_BACK_MINUTES = 120;
+export const handBackKey = (decisionId: string) => `hand-back:${decisionId}`;
+
+/**
+ * BOS-2077 (cock-ups F4): the owner wrote a note, or chose "Partly done / I need help", on a card nobody is watching
+ * (Boss Man raised it itself, or its ticket is done), so no agent would read it. The CEO gets a CEO-first card and a
+ * wake with the reason "owner hand-back", and must make a follow-up ticket or reply saying why none is needed. The card
+ * sits on the alert ladder with HAND_BACK_MINUTES, so an unanswered one reaches the owner's queue as an alert.
+ * One per answered card (dedupe key). Returns the new card's id, or null when there is no CEO or one is already open.
+ */
+export async function raiseOwnerHandBack(
+  db: Db,
+  input: { companyId: string; decisionId: string; question: string; answer: string; note: string | null; ticketId: string | null; why: string; wake?: ((w: { agentId: string; ticketId: string | null; reason: string; priority?: number; note: string }) => Promise<unknown>) | null; now?: Date },
+) {
+  const at = (input.now ?? new Date()).toISOString();
+  const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, input.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+  if (!ceo) return null;
+  const said = [`Answer: ${input.answer}`, input.note ? `Their note: ${input.note}` : null].filter(Boolean).join("\n");
+  const [row] = await db
+    .insert(decisions)
+    .values({
+      companyId: input.companyId,
+      kind: "question",
+      question: `The owner answered a card ${input.why} and nobody was watching it:\n"${input.question.slice(0, 300)}"\n${said}\nMake a follow-up ticket for what they said, or reply to them on the ticket saying why none is needed, then answer this card. If neither happens within ${HAND_BACK_MINUTES / 60} hours it reaches the owner as an alert.`,
+      options: [HAND_BACK_TICKETED, HAND_BACK_NO_TICKET],
+      recommendedOption: HAND_BACK_TICKETED,
+      tier: "ceo",
+      dedupeKey: handBackKey(input.decisionId),
+      context: { type: "question", ticketId: input.ticketId ?? undefined, triedFirst: "The owner's note went to nobody: the card has no agent behind it.", ladder: { rung: "ceo", since: at, minutes: HAND_BACK_MINUTES, ticketId: input.ticketId, about: [] as string[], hops: [{ to: "ceo", at, why: "the owner's note on a card nobody watches is the CEO's to act on" }] } } as DecisionContext,
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id });
+  if (!row) return null;
+  if (input.ticketId) await record(db, { companyId: input.companyId, ticketId: input.ticketId, kind: "decision_raised", summary: `The owner's note on "${input.question.slice(0, 80)}" went to the CEO to ticket or answer.`, at: input.now ?? new Date() });
+  await input.wake?.({ agentId: ceo.id, ticketId: null, reason: OWNER_HAND_BACK, priority: 3, note: `The owner answered "${input.question.slice(0, 200)}" ${input.why}. ${said}\nNo agent was watching that card. Create a follow-up ticket for what they asked, or ticket_reply to the owner saying why none is needed, then answer card ${row.id} (decisions tool). If you do neither within ${HAND_BACK_MINUTES / 60} hours it reaches the owner as an alert.` });
+  return row.id;
+}
+
 /** The CEO's wake for a CEO-first merge or check card (BOS-1873): which card, and the two answers the CEO may give. */
 export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
   return `"${title}" was approved, but ${what}. This isn't the agent's work. The merge card is yours first: answer "${CHECK_AGAIN}" on card ${cardId} once the cause is gone, or "${CHECK_SEND_BACK}" if the work needs changing. "${CHECK_SKIP}" is the owner's; the card reaches them after ${CEO_QUESTION_HANDOVER_MINUTES} minutes if it is still open.`;
@@ -631,7 +677,7 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
       companyId: t.companyId,
       kind: "question",
       question: `${heading}\n\n${whyLines}${check.where.length ? `\nWhere: ${check.where.join("; ")}` : ""}\n\n${others.length ? "Steps for them all:" : "Steps:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
-      options: [TODO_DONE],
+      options: [TODO_DONE, TODO_PARTLY],
       recommendedOption: TODO_DONE,
       tier: "owner",
       dedupeKey: ownerSetupKey(first.ticketId),
@@ -659,7 +705,7 @@ export const OWNER_SETUP_FIX_PREFIX = "owner-setup-fix:";
 /**
  * DR-052 point 4: a live ticket's setup steps failed the card check, so instead of the owner's card the CEO gets one
  * to fix them. One per ticket (the first of a shared card), never stacked; it closes by itself when the owner's card
- * goes out. While it is open the CEO may change the merged ticket's steps (work.ts `setupFix`).
+ * goes out. While no owner's card is raised the CEO may change the merged ticket's steps (work.ts `setupFrozenRefusal`, BOS-2075).
  */
 async function raiseOwnerSetupFix(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string }[]; findings: LintFinding[]; commit: string }) {
   const first = t.tickets[0]!;
@@ -3502,6 +3548,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const rest = [...new Set(freed.map((f) => f.ticketId))].filter((tid) => !unblocked.some((u) => u.id === tid));
         if (rest.length) kept = await db.select().from(tickets).where(and(inArray(tickets.id, rest), eq(tickets.systemState, "review")));
+      }
+      // BOS-2077 (cock-ups F4): the owner's words on a card nobody watches (Boss Man's own, or its tickets are done) go to the CEO.
+      if (wake && !extra.settledBy && extra.by !== "ceo" && ctx.type !== "permission" && answer !== TODO_FAILED) {
+        try {
+          const ownerNote = extra.note?.trim() || null;
+          if (ownerNote || ownWords || answer === TODO_PARTLY) {
+            const about = await decisionTicketIds(db, d);
+            const states = about.length ? await db.select({ s: tickets.systemState }).from(tickets).where(inArray(tickets.id, about)) : [];
+            // An agent-raised card counts only when every ticket it is about is done: while one is open, its agent is woken as before.
+            const finished = states.length > 0 && states.every((r) => r.s === "done");
+            if (!d.raisedByAgentId || finished) {
+              await raiseOwnerHandBack(db, { companyId: d.companyId, decisionId: id, question: d.question, answer, note: ownerNote, ticketId: about[0] ?? null, why: !d.raisedByAgentId ? "that Boss Man raised itself" : "whose ticket is done", wake, now: now() });
+            }
+          }
+        } catch (err) {
+          log(`answering decision ${id} was saved, but handing the owner's note to the CEO failed: ${(err as Error).message}`);
+        }
       }
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
       // A rule proposal answered with a button needs nothing more from the CEO.

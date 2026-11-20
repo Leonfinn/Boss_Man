@@ -46,6 +46,8 @@ const WAKE_TABLE = {
   "parked by date again and again": "waiting",
   // A split-out after-merge check ticket closed and its result was written on this ticket (BOS-1794). Never dropped.
   "after-merge check reported": "waiting",
+  // The owner's note on a card nobody watches (a Boss Man card, or one whose ticket is done) goes to the CEO (BOS-2077). Never dropped.
+  "owner hand-back": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",
@@ -94,6 +96,8 @@ const WAKE_TABLE = {
   assigned: "agent",
   engagement: "agent",
   "note request": "agent",
+  // A merged ticket's setup steps were corrected before go-live (BOS-2075): each reviewer who approved it is told, on the ticket.
+  "setup steps corrected": "agent",
 } satisfies Record<string, WakeClass>;
 
 export const WAKE_CLASS: Record<string, WakeClass> = WAKE_TABLE;

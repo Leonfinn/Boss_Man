@@ -23,7 +23,8 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 ## 20 November 2026
 
 - A server update now says what it is waiting on and when it is running late, and your CEO chat keeps answering while it waits, instead of a bare "updating".
-- A runner update now finishes by itself, so you no longer press Deploy a second time. This takes effect after you update the runners.
+- An update you approve no longer waits for you to press anything else. Every wait along the way has its own end. A runner update still waiting after an hour goes ahead by itself and stops any agent runs still going. A server update still waiting for a quiet machine after an hour goes ahead too, unless memory really is short: then it gives up, tells you and tells your CEO.
+- "Ask agents to wrap up" now belongs to the update it was pressed for and lifts by itself when that update goes in. With no update waiting, it lifts after an hour.
 - On the Merge queue, each running merge check says where it runs ("on this server" or "on the check worker …"). A finished check shows its time per stage and whether it was quick or full, and the Quick checks tab explains what a busy slot means.
 - The Decisions page rolls "Left your list recently" cards up to a few lines, with Show more.
 - A Board search that matches nothing now says so, with a Clear search button.
@@ -35,6 +36,8 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - With no company yet, every page links to "Create your first company".
 - Support can now reply to and close GitHub issues and discussions from inside Boss Man. One-time step: give your saved GitHub token "Read and write" for Issues and Discussions.
 - Dependabot and secret-scanning alerts on a repo the GitHub watcher follows now come into Boss Man, and the security reviewer can read and close them there.
+- Dependabot alerts open one ticket per package, not one per alert, and a new alert for that package joins its ticket. Each repo's alerts go to one project only, and a first sync that finds many alerts opens one summary ticket for your CEO.
+- Settings → Email: Turn off now asks before it deletes the mail server details and password.
 - The next ticket for a busy agent stays in Ready as "Next up" until its run starts.
 - Merged tickets no longer sit in "Merged, watching" for ever after go-live, and never count against your limits.
 - Moving a ticket that is already in review back to review asks the reviewers who asked for changes to look again.
@@ -42,6 +45,7 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - A ticket's activity feed shows its newest runs. Changing who reviews, and adding, editing or removing a permission rule, each leave a line in the activity log.
 - In the CEO chat, a reply can add up to 2 short lines saying where you already answered a point it names.
 - The workflow report opens with a "What this shows" card of up to three plain findings, and its column definitions fold behind "What the columns mean".
+- The website now serves its search-engine key file after a publish, and tells Bing and other search engines which pages changed each time it is published. If that notice keeps failing, it now reaches your CEO as a ticket instead of being lost.
 
 ## 19 November 2026
 
