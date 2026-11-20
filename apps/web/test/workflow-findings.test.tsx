@@ -142,6 +142,19 @@ describe("What this shows card", () => {
     expect(urls.some((u) => u.includes("days=30"))).toBe(true);
   });
 
+  it("keeps the column definitions under Roles in a fold that starts closed and opens on activation", async () => {
+    stub(() => card({ overall: stats(23, 36 * H), previous: { overall: stats(17, 48 * H), handoffs: [] } }));
+    render(<Workflow company={company} />);
+    const summary = await screen.findByText("What the columns mean");
+    const fold = summary.closest("details")!;
+    expect(summary.tagName).toBe("SUMMARY");
+    expect(fold.open).toBe(false);
+    expect(fold.textContent).toContain("Right first time is the share of reviewed tickets that were never sent back.");
+    fireEvent.click(summary);
+    expect(fold.open).toBe(true);
+    expect(fold.textContent).toContain("Answers changed is how often the answer to a decision this role raised was not the one it recommended.");
+  });
+
   it("shows no card when the server sends no whole-team figures", async () => {
     stub(() => card({}));
     render(<Workflow company={company} />);
