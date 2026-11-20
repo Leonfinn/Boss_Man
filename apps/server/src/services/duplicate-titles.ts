@@ -7,6 +7,7 @@ import { and, eq, gt, ne, or, sql } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, tickets } from "../db/schema.js";
+import { describeMeaningTicket, type MeaningTicket } from "./ticket-meaning.js";
 
 export const DUPLICATE_WINDOW_DAYS = 14;
 const LISTED_MAX = 5;
@@ -45,8 +46,11 @@ export async function similarTickets(db: Db, companyId: string, projectId: strin
   return rows.filter((r) => similarTitles(title, r.title)).map((r) => ({ id: r.id, ref: ticketRef(r.prefix, r.number), title: r.title, state: r.state }));
 }
 
-export function duplicateRefusal(list: SimilarTicket[]): string {
+/** `byMeaning` (BOS-2116): tickets whose meaning is close though the words differ, when the company has meaning search on; each line has its state, merged and live. */
+export function duplicateRefusal(list: SimilarTicket[], byMeaning: MeaningTicket[] = []): string {
   const shown = list.slice(0, LISTED_MAX).map((t) => `- ${t.ref ?? t.id} "${t.title}" (${t.state})`).join("\n");
   const more = list.length > LISTED_MAX ? `\n(and ${list.length - LISTED_MAX} more)` : "";
-  return `Nothing was created: open or recently done tickets in this project have similar titles:\n${shown}${more}\nIf one of them already covers this, call create_ticket again with notDuplicateOf set to its ref (nothing is created and you get that ticket back). If yours is different, call it again with notDuplicateReason (one line saying why); the reason is kept on the new ticket.`;
+  const words = list.length ? `open or recently done tickets in this project have similar titles:\n${shown}${more}` : "";
+  const meaning = byMeaning.length ? `${list.length ? "\nAnd " : ""}tickets that mean the same in other words:\n${byMeaning.map(describeMeaningTicket).join("\n")}` : "";
+  return `Nothing was created: ${words}${meaning}\nIf one of them already covers this, call create_ticket again with notDuplicateOf set to its ref (nothing is created and you get that ticket back). If yours is different, call it again with notDuplicateReason (one line saying why); the reason is kept on the new ticket.`;
 }

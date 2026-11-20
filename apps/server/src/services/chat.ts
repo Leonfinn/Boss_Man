@@ -41,6 +41,16 @@ export function namedTexts(recent: Array<{ role: string; text: string }>): strin
   return [...(lastReply >= 0 ? [recent[lastReply]!.text] : []), ...unanswered.map((m) => m.text)];
 }
 
+/** The owner's messages after the CEO's last reply, joined: what the meaning search reads (BOS-2116). */
+export function unansweredOwnerText(recent: Array<{ role: string; text: string }>): string {
+  const lastReply = recent.map((m) => m.role).lastIndexOf("assistant");
+  return recent
+    .slice(lastReply + 1)
+    .filter((m) => m.role === "owner")
+    .map((m) => m.text)
+    .join("\n");
+}
+
 /**
  * BOS-1300: an ordinary working agent's owner chat has the agent's own working tools (its add-ons and skills, its shell and file
  * tools, and the ticket tools for its own tickets), not just the board. The CEO, the Scrum Master and a personal assistant keep
@@ -121,6 +131,8 @@ export function chatService(
     flag?: (n: { companyId: string; agentId: string; title: string; body: string; link: string }) => Promise<unknown>;
     /** What the named-things lookup may read besides the database (DR-069 D2, BOS-1854). */
     named?: NamedSources;
+    /** Lines of "possible matches by meaning" for the owner's latest message (BOS-2116); absent, or empty when the company has it off. */
+    meaning?: (companyId: string, ownerText: string) => Promise<string[]>;
   },
 ) {
   // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
@@ -268,6 +280,8 @@ export function chatService(
         ...(ceo ? await ownerSetupSection(db, companyId) : []),
         // DR-069 D2: the things the owner's unanswered messages and the CEO's last reply name, with the record and the owner's newest answers on each.
         ...(ceo ? await namedThingsSection(db, companyId, namedTexts(recent), deps.named).catch(() => []) : []),
+        // BOS-2116: the closest tickets, wiki pages and the CEO's own earlier advice by meaning; empty when off, failing or nothing is close.
+        ...(ceo && deps.meaning ? await deps.meaning(companyId, unansweredOwnerText(recent)).catch(() => []) : []),
         "",
         // The same built-in rules as a ticket run (BOS-754); here they mostly guard what goes into tickets and pages.
         ...BUILT_IN_RULES,

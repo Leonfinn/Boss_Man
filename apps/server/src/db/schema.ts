@@ -1870,7 +1870,33 @@ export const wikiSemanticSettings = pgTable("wiki_semantic_settings", {
    * default and ticked apart from the wiki, because it sends the owner's chat and ticket messages to the provider.
    */
   ownerAnswers: boolean("owner_answers").notNull().default(false),
+  /**
+   * Also use the same provider and key for meaning search over tickets and the CEO's earlier advice (BOS-2116).
+   * Off by default and ticked apart from the wiki, because it sends ticket text and the CEO's replies to the provider.
+   */
+  ticketMeaning: boolean("ticket_meaning").notNull().default(false),
 });
+
+/**
+ * Embeddings of tickets (title, body, state note) and of the CEO's earlier advice to the owner (BOS-2116).
+ * kind: ticket, advice_chat (a CEO chat reply) or advice_comment (a CEO ticket comment). textHash makes an
+ * edited ticket re-embed; rows for another model or dims are ignored by search and re-embedded.
+ */
+export const meaningEmbeddings = pgTable(
+  "meaning_embeddings",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    textHash: text("text_hash").notNull(),
+    model: text("model").notNull(),
+    dims: integer("dims").notNull(),
+    embedding: vector("embedding", { dimensions: 768 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("meaning_embeddings_source").on(t.kind, t.sourceId), index("meaning_embeddings_company").on(t.companyId)],
+);
 
 /**
  * One embedding per owner answer (BOS-1593): an answered card, an owner ticket message, an owner chat

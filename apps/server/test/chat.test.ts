@@ -84,6 +84,36 @@ describe("owner chat", () => {
     if (workerStart) expect(workerStart.prompt).not.toContain("## Owner's setup");
   });
 
+  it("BOS-2116: with ticket meaning search on, the CEO's brief lists close tickets for the owner's message; off or failing, it adds nothing", async () => {
+    const c = await setup();
+    const { embedMissingMeaning } = await import("../src/services/ticket-meaning.js");
+    const vec = (s: string) => {
+      const v = new Array(768).fill(0);
+      v[/queue|waiting|checked/i.test(s) ? 1 : 2] = 1;
+      return v;
+    };
+    const e = { model: "m", dims: 768, embed: async (xs: string[]) => xs.map(vec) };
+    await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "Board: Being checked section", systemState: "done", outcome: "completed", stateChangedAt: new Date() });
+    await embedMissingMeaning(c.db, c.company.id, e);
+    const ask = async (text: string) => {
+      await c.req("POST", `/api/companies/${c.company.id}/chat`, { text });
+      await c.scheduler.tick();
+      return c.sent.filter((x): x is Start => x.type === "run.start").filter((x) => x.agentId === c.ceo.id).at(-1)!.prompt;
+    };
+    // Off (the default): the brief has no meaning block.
+    expect(await ask("Add a Waiting label to cards")).not.toContain("Possible matches by meaning");
+    // Provider down: still none, and the message is still answered.
+    (c.semantic as { ticketEmbedder: unknown }).ticketEmbedder = async () => ({ ...e, embed: async () => { throw new Error("down"); } });
+    const { runs: runsTable } = await import("../src/db/schema.js");
+    await c.db.delete(runsTable);
+    expect(await ask("Add a Waiting label for cards, please")).not.toContain("Possible matches by meaning");
+    (c.semantic as { ticketEmbedder: unknown }).ticketEmbedder = async () => e;
+    await c.db.delete(runsTable);
+    const prompt = await ask("Add a Waiting label for cards, thanks");
+    expect(prompt).toContain("## Possible matches by meaning");
+    expect(prompt).toMatch(/- ticket APP-\d+ "Board: Being checked section" \(done\), 100%/);
+  });
+
   it("DR-069 D2: the chat prompt names what the record and the owner say about each thing the owner's message names, newest first; a message naming nothing adds no section", async () => {
     const c = await setup();
     await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
