@@ -433,6 +433,24 @@ describe("check queue", () => {
       await s.close();
     });
 
+    // BOS-1938 (the two tests BOS-1923's review noted as missing): complete() saves the step times, pruneLogs clears them after 14 days.
+    it("saves the step times and whether the full check ran, and pruneLogs clears the times after 14 days", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "st1", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 0, logTail: "", runnerId: null, stages: [{ name: "typecheck", seconds: 90 }, { name: "related tests", seconds: 120 }], ranFull: true }, T(0));
+      const [saved] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, j.id));
+      expect(JSON.parse(saved!.stages!)).toEqual([{ name: "typecheck", seconds: 90 }, { name: "related tests", seconds: 120 }]);
+      expect(saved!.ranFull).toBe(true);
+      await s.q.pruneLogs(new Date(T(0).getTime() + 13 * 86_400_000));
+      expect((await s.db.select().from(checkJobs).where(eq(checkJobs.id, j.id)))[0]!.stages).not.toBeNull();
+      await s.q.pruneLogs(new Date(T(0).getTime() + 15 * 86_400_000));
+      const [pruned] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, j.id));
+      expect(pruned!.stages).toBeNull();
+      expect(pruned!.ranFull).toBe(true);
+      await s.close();
+    });
+
     // BOS-1723: a check that failed before its first step sends no whole log; its tail is kept instead, so it can be read.
     it("keeps the tail as the log when a failed job sends no whole log, and still keeps nothing for a pass", async () => {
       const s = await setup();

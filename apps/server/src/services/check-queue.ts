@@ -12,6 +12,7 @@ import { agents, checkJobLogs, checkJobs, checkWorkers, companies, projects, set
 import { BACKGROUND_LANE_AGE_KEY, checkPriority, isBackgroundLaneTitle, laneAgeMinutes, laneWords, readLaneAgeMinutes } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, firstFailingLine, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
+import { stageLine } from "./check-stage-line.js";
 import { softHold } from "./deploy-wait-hold.js";
 import { agedTier, retierWaiting, setTrainLaneAge, trainView } from "./merge-train.js";
 import { landingTurns } from "./landing-turn.js";
@@ -786,7 +787,24 @@ export function checkQueue(db: Db) {
       ...order.map((j, i) => row(j, i + 1, waitWhy ? waitWhy(j) : full ? `all ${limit} check ${limit === 1 ? "slot is" : "slots are"} busy` : null)),
       ...held.map((j) => row(j, null, served.trainHeld.has(j.id) ? `${TRAIN_HELD}, so this merge check waits until the ticket is seated` : "main is red, so this merge check waits until main is fixed")),
     ];
-    return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
+    // BOS-1938: the last few finished checks that are not merge checks (the Merges tab lists those), with their stage line.
+    const doneRows = await db
+      .select({ job: checkJobs, number: tickets.number, title: tickets.title })
+      .from(checkJobs)
+      .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
+      .where(and(eq(checkJobs.companyId, companyId), sql`${checkJobs.kind} <> 'merge'`, inArray(checkJobs.state, ["passed", "failed"]), isNotNull(checkJobs.endedAt)))
+      .orderBy(desc(checkJobs.endedAt))
+      .limit(10);
+    const finished = doneRows.map((r) => ({
+      id: r.job.id,
+      ticketId: r.job.ticketId,
+      ref: ticketRef(prefix, r.number),
+      title: r.title,
+      passed: r.job.state === "passed",
+      at: r.job.endedAt!.toISOString(),
+      stageLine: stageLine(r.job, limit),
+    }));
+    return { mode: await mode(), slots: limit, running: runningJobs.length, rows, finished };
   }
 
   /**

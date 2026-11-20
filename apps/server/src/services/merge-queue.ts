@@ -6,7 +6,8 @@
 import { and, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { stageLine } from "./check-stage-line.js";
+import { agents, checkJobs, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
 import { softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
@@ -201,6 +202,8 @@ export type RecentRow = {
   /** One line: a failure names the failing step. */
   detail: string;
   at: string;
+  /** BOS-1938: the ticket's last finished merge check, quick or full, per stage; absent when no step times were kept. */
+  stageLine?: string;
 };
 
 export type MergeQueueView = {
@@ -347,6 +350,13 @@ export const mergeQueueQueries = {
       .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), gte(tickets.stateChangedAt, since)))
       .orderBy(desc(tickets.stateChangedAt))
       .limit(RECENT_LIMIT * 2),
+  /** BOS-1938: each ticket's finished merge checks that kept step times, newest first. */
+  finishedMergeChecks: (db: Db, ticketIds: string[]) =>
+    db
+      .select({ ticketId: checkJobs.ticketId, stages: checkJobs.stages, ranFull: checkJobs.ranFull, busyAtStart: checkJobs.busyAtStart, startedAt: checkJobs.startedAt, endedAt: checkJobs.endedAt })
+      .from(checkJobs)
+      .where(and(inArray(checkJobs.ticketId, ticketIds), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["passed", "failed"]), isNotNull(checkJobs.stages)))
+      .orderBy(desc(checkJobs.endedAt)),
   /** When tickets landed (merged) since a cut-off, for the landing rate (R47). */
   landedSince: (db: Db, companyId: string, since: Date) =>
     db
@@ -494,7 +504,14 @@ export function mergeQueueService(
       if (out.some((r) => r.ticketId === f.ticketId)) continue;
       out.push({ ticketId: f.ticketId, ref: ticketRef(prefix, f.number), title: f.title, result: "check_failed", detail: `check failed: ${failingStep(f.detail) ?? "no output recorded"}`, at: f.at.toISOString() });
     }
-    return out.sort((a, b) => b.at.localeCompare(a.at)).slice(0, RECENT_LIMIT);
+    const shown = out.sort((a, b) => b.at.localeCompare(a.at)).slice(0, RECENT_LIMIT);
+    if (!shown.length) return shown;
+    const jobs = await mergeQueueQueries.finishedMergeChecks(db, shown.map((r) => r.ticketId));
+    const slots = await deps.limit();
+    return shown.map((r) => {
+      const line = jobs.filter((j) => j.ticketId === r.ticketId).map((j) => stageLine(j, slots)).find(Boolean);
+      return line ? { ...r, stageLine: line } : r;
+    });
   }
 
   /**
