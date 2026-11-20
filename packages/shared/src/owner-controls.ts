@@ -240,6 +240,7 @@ export const OWNER_FIELDS = {
     // The GitHub feedback watcher panel (BOS-1393).
     "Watch this repo", "GitHub repo (owner/name)", "Check every (minutes, at least 15)", "Issues", "Discussions",
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
+    "Security alerts (this project owns the repo's alerts)",
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work"],
   Wiki: [
