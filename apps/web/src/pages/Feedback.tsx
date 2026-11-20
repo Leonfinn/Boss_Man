@@ -178,7 +178,8 @@ function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHi
             <li>
               <button type="button" disabled={busy} onClick={() => void create()}>
                 <span>
-                  {busy ? "Creating…" : <>Create <b>{q.trim()}</b> and link it</>}
+                  {busy ? "Creating…" : "Create"} <b>{q.trim()}</b>
+                  {busy ? "" : " and link it"}
                 </span>
               </button>
             </li>
