@@ -4,11 +4,11 @@ import { afterAll, describe, expect, it } from "vitest";
 import { API, launch, startVite, stubApi } from "./real-page";
 
 // Real-browser proof shots of the "Looks stuck" tag, line and strip item (BOS-1910) at desktop and 380 px, plus the
-// 0-stuck state (strip item hidden). Without BOSSMAN_SCRATCH, a browser or Vite the file skips.
+// 0-stuck state (strip item hidden). The assertions always run; the screenshots are written only when BOSSMAN_SCRATCH is set.
 
 const browser = await launch();
 const server = browser ? await startVite() : null;
-const can = !!(browser && server && process.env.BOSSMAN_SCRATCH);
+const can = !!(browser && server);
 afterAll(async () => {
   await browser?.close();
   await server?.close();
@@ -46,8 +46,10 @@ describe.skipIf(!can)("Looks stuck shots (BOS-1910)", () => {
         expect(await page.getByTestId("standing-stuck").count()).toBe(withStuck ? 1 : 0);
         expect(await page.getByTestId("board-looks-stuck-note").count()).toBe(withStuck ? 2 : 0);
         if (withStuck) expect(await page.getByTestId("standing-stuck").textContent()).toContain("2 looks stuck");
-        mkdirSync(out!, { recursive: true });
-        await page.screenshot({ path: path.join(out!, `bos1910-${size.name}-${withStuck ? "stuck" : "none"}.png`), fullPage: true });
+        if (out) {
+          mkdirSync(out, { recursive: true });
+          await page.screenshot({ path: path.join(out, `bos1910-${size.name}-${withStuck ? "stuck" : "none"}.png`), fullPage: true });
+        }
         await page.close();
       }, 60_000);
     }

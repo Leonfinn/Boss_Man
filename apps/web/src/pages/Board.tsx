@@ -31,6 +31,7 @@ const PARKED_SHOWN = 4;
 /** A merged ticket whose watch has run past its end date (the agent's date, or the 14-day default): it sorts first in Merged, watching. */
 const watchPastEnd = (t: { watchEndsAt?: string | null }) => !!t.watchEndsAt && Date.parse(t.watchEndsAt) < Date.now();
 /** Past the 14-day default with no date from the agent: the amber "No date" tag; whole days since the watch began. */
+const watchNoDateDays = (t: { watchEndsAt?: string | null; watchUntil?: string | null }) => (t.watchEndsAt && !t.watchUntil && watchPastEnd(t) ? 14 + Math.floor((Date.now() - Date.parse(t.watchEndsAt)) / 86_400_000) : null);
 /** "3 days", or hours when it has been less than a day. */
 const stuckFor = (ms: number) => {
   const days = Math.floor(ms / 86_400_000);
@@ -38,7 +39,6 @@ const stuckFor = (ms: number) => {
   const hours = Math.max(1, Math.floor(ms / 3_600_000));
   return `${hours} hour${hours === 1 ? "" : "s"}`;
 };
-const watchNoDateDays =(t: { watchEndsAt?: string | null; watchUntil?: string | null }) => (t.watchEndsAt && !t.watchUntil && watchPastEnd(t) ? 14 + Math.floor((Date.now() - Date.parse(t.watchEndsAt)) / 86_400_000) : null);
 const PROJECT_TABS = [
   { id: "kanban", label: "Kanban" },
   { id: "budget", label: "Budget" },
