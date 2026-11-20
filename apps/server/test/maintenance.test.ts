@@ -1470,6 +1470,36 @@ describe("early building hold (BOS-1955)", () => {
     expect(await getHold(c.db)).toMatchObject({ kind: "update" });
   });
 
+  it("a building request and a cancel in the same pass start no hold (a build that failed fast)", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await gone(path.join(c.dir, "inbox", "drain.json"))).toBe(true);
+    expect(await gone(path.join(c.dir, "inbox", "drain-cancel.json"))).toBe(true);
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("a building request while an old building hold is on pushes its deadline out and keeps since", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const first = await getHold(c.db);
+    c.advance((BUILD_HOLD_MAX_MINUTES - 5) * MIN);
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const again = await getHold(c.db);
+    expect(again).toMatchObject({ kind: "building", since: first!.since });
+    expect(new Date(again!.deadline).getTime()).toBeGreaterThan(new Date(first!.deadline).getTime());
+    c.advance(10 * MIN); // past the first deadline, inside the refreshed one
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "building" });
+  });
+
   it("ends by itself at BUILD_HOLD_MAX_MINUTES, on the injected clock", async () => {
     const c = (ctx = await setup({ reconnectMs: 1000 }));
     const a = await c.company("App Co", "app-co");

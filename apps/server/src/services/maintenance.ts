@@ -501,7 +501,13 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           return (await getHold(db)) ?? up;
         }
         // A building hold asked for again, or while another hold is on: that one already holds.
-        if (kind === "building") return have;
+        // A re-run's request refreshes the old building hold's deadline (keeps `since`), so it can't lift mid-build.
+        if (kind === "building") {
+          if (have.kind !== "building") return have;
+          const up: Hold = { ...have, deadline: new Date(now().getTime() + have.minutes * 60_000).toISOString() };
+          await save(up);
+          return (await getHold(db)) ?? up;
+        }
         // The owner's wrap-up asked for while an update or setting change is waiting (BOS-988): the update is exactly
         // when they need it, so it joins the hold instead of being refused. The update keeps its own kind, start and
         // deadline, so it still goes ahead by itself when the runs end; the wrap-up adds only its ask, its timeout and
@@ -745,6 +751,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // change and a wrap-up are never ended by this file, so a stale one can't cut off a swap that is under way.
       if (cancelTrigger && (await stat(cancelTrigger).then(() => true, () => false))) {
         await rm(cancelTrigger, { force: true });
+        // Both files in one pass (a build that failed fast): the cancel wins, so no hold starts that nothing would end.
+        if (asked === "building") asked = null;
         if ((await getHold(db))?.kind === "building" && asked !== "update" && asked !== "settings") await end("Runner update build stopped", "note", "The new runner image was not built, so nothing is swapped. New runs have started again.");
       }
       let h = await getHold(db);
@@ -752,7 +760,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // trigger file must end the wrap-up and swap, or new work stays held until the owner cancels by hand.
       // BOS-1955: it takes over a building hold the same way, but keeps that hold's start.
       const takesOver = !!h && (h.kind === "wrapup" || h.kind === "building") && (asked === "update" || asked === "settings");
-      if (asked && (!h || (asked === "settings" && h.kind !== "settings") || takesOver)) {
+      const refreshes = asked === "building" && h?.kind === "building";
+      if (asked && (!h || (asked === "settings" && h.kind !== "settings") || takesOver || refreshes)) {
         await self.start({ kind: asked });
         // Re-read, so the hold carries who its start message already reached (BOS-988): the pass below tells the rest.
         h = await getHold(db);
