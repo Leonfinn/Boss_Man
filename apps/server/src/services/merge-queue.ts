@@ -32,7 +32,7 @@ export async function runningCheckJobs(db: Db, companyId: string) {
 
 /** BOS-1942: where the latest ended merge check of each ticket ran, for a landing that now waits only for GitHub CI. */
 export async function endedMergePlaces(db: Db, companyId: string, ticketIds: string[]): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+  const out = new Map<string, string>(); // lost on restart, harmless because it is a per-call local result, not module state.
   if (!ticketIds.length) return out;
   const rows = await db
     .select({ ticketId: checkJobs.ticketId, workerId: checkJobs.workerId, worker: checkWorkers.name })
