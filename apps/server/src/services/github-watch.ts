@@ -40,7 +40,7 @@ const DAY_MS = 86_400_000;
 const WRITE_ERROR = "write: ";
 const SECRET_REASONS = ["false_positive", "used_in_tests", "revoked", "wont_fix"] as const;
 const DEPENDABOT_REASONS = ["fix_started", "inaccurate", "no_bandwidth", "not_used", "tolerable_risk"] as const;
-export type AlertCloseInput = { reason: string; locationChecked?: string; rotation?: string; note?: string };
+export type AlertCloseInput = { alert?: number; reason: string; locationChecked?: string; rotation?: string; note?: string };
 /** github_reply's close reasons: an issue's state_reason, and the discussion reason each maps to. */
 export const REPLY_CLOSE_REASONS = ["completed", "not_planned"] as const;
 export type ReplyCloseReason = (typeof REPLY_CLOSE_REASONS)[number];
@@ -373,11 +373,13 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
     // BOS-2055: two projects watching one repo must not both open tickets for its alerts. One project owns them:
     // the one that already holds alert tickets for the repo (lowest id first), else the lowest id.
     const sameRepo = (await db.select({ projectId: githubWatches.projectId, repo: githubWatches.repo }).from(githubWatches).where(and(eq(githubWatches.companyId, row.companyId), eq(githubWatches.enabled, true), eq(githubWatches.watchAlerts, true)))).filter((w) => w.repo?.toLowerCase() === repo.toLowerCase());
+    let ownsRepo = true;
     if (sameRepo.length > 1) {
       const ids = sameRepo.map((w) => w.projectId).sort();
       const holders = new Set((await db.select({ projectId: githubAlertTickets.projectId, repo: githubAlertTickets.repo }).from(githubAlertTickets).where(inArray(githubAlertTickets.projectId, ids))).filter((l) => l.repo?.toLowerCase() === repo.toLowerCase()).map((l) => l.projectId));
       const owner = ids.find((id) => holders.has(id)) ?? ids[0];
-      if (owner !== row.projectId) return;
+      // A project that doesn't own the repo's alerts opens nothing, but still closes its own existing tickets below.
+      ownsRepo = owner === row.projectId;
     }
     const existing = new Map((await db.select().from(githubAlertTickets).where(eq(githubAlertTickets.projectId, row.projectId))).map((r) => [r.alertKey, r]));
     const firstSync = existing.size === 0;
@@ -394,7 +396,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
         if (!Number.isInteger(n) || n < 1) continue;
         const key = `dependabot:${n}`;
         seen.set(key, "open");
-        if (existing.has(key)) continue;
+        if (existing.has(key) || !ownsRepo) continue;
         const adv = (a.security_advisory ?? {}) as Json;
         const pkg = (((a.dependency ?? {}) as Json).package ?? {}) as Json;
         const vuln = (a.security_vulnerability ?? {}) as Json;
@@ -473,7 +475,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
         if (!Number.isInteger(n) || n < 1) continue;
         const key = `secret:${n}`;
         seen.set(key, "open");
-        if (existing.has(key)) continue;
+        if (existing.has(key) || !ownsRepo) continue;
         // Only the type, file and commit are read: the alert's `secret` field is never touched, so it can't reach a ticket, a log or a note.
         const type = oneLine(a.secret_type_display_name ?? a.secret_type, 100) || "a secret";
         const where = await secretWhere(ctx, repo, n);
@@ -540,13 +542,18 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
   type AlertTarget = { projectId: string; companyId: string; repo: string; kind: "secret" | "dependabot"; n: number; ticketId: string; ref: string; assigneeAgentId: string | null; hasBranch: boolean; closedAt: Date | null; alertKey: string; others: string[] };
 
   /** The alert behind an alert ticket, found only through the watcher's own link table: a caller can't name a repo or number. */
-  async function targetOf(companyId: string, ticketId: string): Promise<AlertTarget | string> {
+  async function targetOf(companyId: string, ticketId: string, alert?: number, needAlertWhenMany = false): Promise<AlertTarget | string> {
     const [t] = await db.select({ id: tickets.id, number: tickets.number, companyId: tickets.companyId, assignee: tickets.assigneeAgentId, branch: tickets.branch }).from(tickets).where(eq(tickets.id, ticketId));
     if (!t || t.companyId !== companyId) return "No such ticket in your company.";
     // BOS-2055: a grouped ticket covers several alerts: act on the first open one (lowest number); the rest are listed as `others`.
     const links = (await db.select().from(githubAlertTickets).where(eq(githubAlertTickets.ticketId, ticketId))).sort((a, b) => Number(!!a.closedAt) - Number(!!b.closedAt) || Number(a.alertKey.split(":")[1]) - Number(b.alertKey.split(":")[1]));
-    const link = links[0];
-    if (!link) return "This ticket isn't a GitHub security alert ticket (the watcher makes those), so there is no alert to read or close.";
+    if (!links.length) return "This ticket isn't a GitHub security alert ticket (the watcher makes those), so there is no alert to read or close.";
+    const openLinks = links.filter((l) => !l.closedAt);
+    const listOf = (ls: typeof links) => ls.slice(0, 20).map((l) => `#${l.alertKey.split(":")[1]}`).join(", ") + (ls.length > 20 ? ", ..." : "");
+    // The target comes only from this ticket's own links: a named alert must be one of them.
+    if (alert === undefined && needAlertWhenMany && openLinks.length > 1) return `This ticket covers ${openLinks.length} open alerts (${listOf(openLinks)}). Say which one with \`alert\` (its number): a close never picks one for you. Read it first with action read and the same \`alert\`.`;
+    const link = alert === undefined ? links[0]! : links.find((l) => Number(l.alertKey.split(":")[1]) === alert);
+    if (!link) return `Alert #${alert} isn't one of this ticket's alerts. Its alerts: ${listOf(links)}.`;
     const [w] = await db.select().from(githubWatches).where(eq(githubWatches.projectId, link.projectId));
     if (!w || w.companyId !== companyId || !w.repo || !REPO_RE.test(w.repo)) return "This project has no GitHub repository set for the watcher.";
     // BOS-1960: the alert number belongs to the repo it was found in. If the watcher now points elsewhere (or the link has no repo), #n would be a different alert: refuse.
@@ -554,7 +561,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
     const m = /^(secret|dependabot):(\d{1,9})$/.exec(link.alertKey);
     if (!m) return "This ticket's alert reference is not one Boss Man knows.";
     const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
-    return { projectId: link.projectId, companyId, repo: w.repo, kind: m[1] as "secret" | "dependabot", n: Number(m[2]), ticketId, ref: ticketRef(co?.prefix, t.number) ?? "the ticket", assigneeAgentId: t.assignee, hasBranch: !!t.branch, closedAt: link.closedAt, alertKey: link.alertKey, others: links.slice(1).filter((l) => !l.closedAt).map((l) => l.alertKey) };
+    return { projectId: link.projectId, companyId, repo: w.repo, kind: m[1] as "secret" | "dependabot", n: Number(m[2]), ticketId, ref: ticketRef(co?.prefix, t.number) ?? "the ticket", assigneeAgentId: t.assignee, hasBranch: !!t.branch, closedAt: link.closedAt, alertKey: link.alertKey, others: openLinks.filter((l) => l !== link).map((l) => l.alertKey) };
   }
 
   /** Who may use the tool: the CEO or an agent hired from the security-reviewer template. Read from the agent's own row, never from tool input. */
@@ -584,9 +591,9 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
   };
 
   /** One alert's details for the reviewer. Named fields only: the alert's `secret` value is never copied, and every GitHub string is redacted and capped. */
-  async function alertRead(companyId: string, agentId: string | null, ticketId: string): Promise<{ ok: boolean; text: string }> {
+  async function alertRead(companyId: string, agentId: string | null, ticketId: string, alert?: number): Promise<{ ok: boolean; text: string }> {
     if (!(await alertCaller(agentId, companyId))) return { ok: false, text: "Only the security reviewer and the CEO can read GitHub security alerts." };
-    const tg = await targetOf(companyId, ticketId);
+    const tg = await targetOf(companyId, ticketId, alert);
     if (typeof tg === "string") return { ok: false, text: tg };
     const ctx = await tokenCtx(companyId);
     if (!ctx) return { ok: false, text: `No GitHub token is granted to this company as ${WATCH_TOKEN_ENV}.` };
@@ -602,7 +609,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
         const vuln = (a.security_vulnerability ?? {}) as Json;
         const out = {
           alert: `https://github.com/${tg.repo}/security/dependabot/${tg.n}`,
-          ...(tg.others.length ? { alsoOnThisTicket: tg.others.map((k) => `#${k.split(":")[1]}`).slice(0, 60), ticketCovers: "This ticket covers several alerts; this is the first open one. The rest are listed here." } : {}),
+          ...(tg.others.length ? { alsoOnThisTicket: tg.others.map((k) => `#${k.split(":")[1]}`).slice(0, 60), ticketCovers: "This ticket covers several alerts; this is the alert you asked for (or the first open one). The rest are listed here; name one with `alert`." } : {}),
           state: oneLine(a.state, 30),
           package: oneLine(pkg.name, 100),
           ecosystem: oneLine(pkg.ecosystem, 40),
@@ -658,7 +665,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
   async function alertClose(companyId: string, agentId: string | null, ticketId: string, input: AlertCloseInput): Promise<{ ok: boolean; text: string }> {
     const who = await alertCaller(agentId, companyId);
     if (!who) return { ok: false, text: "Only the security reviewer and the CEO can close GitHub security alerts." };
-    const tg = await targetOf(companyId, ticketId);
+    const tg = await targetOf(companyId, ticketId, input.alert, true);
     if (typeof tg === "string") return { ok: false, text: tg };
     if (tg.closedAt) return { ok: true, text: "This alert is already closed." };
     const reasons: readonly string[] = tg.kind === "secret" ? SECRET_REASONS : DEPENDABOT_REASONS;
@@ -704,7 +711,7 @@ export function githubWatchService(db: Db, deps: GithubWatchDeps) {
       await deps.clearCard(alertCardKey(tg.projectId), "Boss Man could close a GitHub security alert, so the token has the permission it needs.");
     }
     // A ticket that covers more alerts stays open until the last one is closed; the next close call takes the next open alert.
-    if (tg.others.length) return { ok: true, text: `Closed alert #${tg.n} on GitHub as ${input.reason}, and recorded it on the ticket. The ticket stays open: ${tg.others.length} more alert${tg.others.length === 1 ? "" : "s"} on it (${tg.others.slice(0, 20).map((k) => `#${k.split(":")[1]}`).join(", ")}${tg.others.length > 20 ? ", ..." : ""}). Read or close again for the next one.` };
+    if (tg.others.length) return { ok: true, text: `Closed alert #${tg.n} on GitHub as ${input.reason}, and recorded it on the ticket. The ticket stays open: ${tg.others.length} more alert${tg.others.length === 1 ? "" : "s"} on it (${tg.others.slice(0, 20).map((k) => `#${k.split(":")[1]}`).join(", ")}${tg.others.length > 20 ? ", ..." : ""}). Read the next one with its \`alert\` number before closing it.` };
     await deps.closeTicket(ticketId, `${who.name} closed the GitHub alert as ${input.reason}. ${proof}`).catch((e) => log(`github alert ${tg.projectId}: couldn't close the ticket: ${redact(e instanceof Error ? e.message : String(e))}`));
     return { ok: true, text: `Closed alert #${tg.n} on GitHub as ${input.reason}, and recorded it on the ticket.` };
   }

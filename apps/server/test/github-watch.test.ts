@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, decisions, feedbackNotes, githubWatches, tickets as ticketsTable } from "../src/db/schema.js";
+import { agents, decisions, feedbackNotes, githubAlertTickets, githubWatches, tickets as ticketsTable } from "../src/db/schema.js";
 import { githubWatchService, looksLikeSecurityReport } from "../src/services/github-watch.js";
 import { clearOwnerTodo } from "../src/services/decisions.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -435,6 +435,24 @@ describe("security alerts (BOS-1929)", () => {
     const rows = await allTickets(c.company.id);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.projectId).toBe([c.project.id, second.id].sort()[0]);
+  });
+
+  it("BOS-2055: a project that doesn't own the repo's alerts still closes its own existing tickets", async () => {
+    const c = await setup();
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Website" })).json();
+    await c.svc.save(second.id, c.company.id, { enabled: true, repo: REPO });
+    const [owner, other] = [c.project.id, second.id].sort() as [string, string];
+    // Both hold an old ticket for the repo; the lower id owns new alerts.
+    const mkLink = async (projectId: string, alertKey: string) => {
+      const tk = await t!.work.createTicket(projectId, { title: `Old ${alertKey}`, body: "x", assigneeAgentId: c.ceo!.id, state: "ready", planFirst: false } as never);
+      await t!.db.insert(githubAlertTickets).values({ projectId, alertKey, ticketId: tk.id, repo: REPO });
+      return tk.id as string;
+    };
+    await mkLink(owner, "dependabot:21");
+    const otherTicket = await mkLink(other, "dependabot:20");
+    c.gh.dependabot = [];
+    await c.svc.runOne(other);
+    expect((await allTickets(c.company.id)).find((r) => r.id === otherTicket)!.systemState).toBe("done");
   });
 
   it("BOS-2055: three alerts for one package make one ticket, and a later alert for it joins that ticket", async () => {
