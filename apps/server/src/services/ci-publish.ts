@@ -2,6 +2,7 @@
 // (services/review.ts, at landing) and the pre-flight run for a branch that changes CI or image files (BOS-1664).
 // Nothing here knows about tickets or the database: callers pass what to ask the runner and where to say what happens.
 import type { MergeResult } from "@boss-man/shared";
+import type { SlowJob } from "./ci-flake.js";
 import { GitHostError, type CiStatus, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 
 /** BOS-1070: how the gate waits for CI. Tests pass shorter ones through deps.ciTiming. */
@@ -19,8 +20,11 @@ export type CiTiming = typeof CI_TIMING;
 
 /** BOS-1070: how a wait for the git host's CI ended. "stopped": the gate's own check failed first, so CI no longer mattered. */
 export type CiOutcome =
-  /** `flaky` (BOS-1733): test files that failed once, passed at the gate and then passed GitHub's one retry. */
-  | { kind: "passed"; reused?: boolean; flaky?: string[]; retryRunUrl?: string }
+  /**
+   * `flaky` (BOS-1733): test files that failed once, passed at the gate and then passed GitHub's one retry. `slow`
+   * (BOS-2082): the jobs that failed on a slow GitHub machine and passed the one retry.
+   */
+  | { kind: "passed"; reused?: boolean; flaky?: string[]; slow?: SlowJob[]; retryRunUrl?: string }
   | { kind: "none" }
   | { kind: "no_workflows" }
   | { kind: "stopped" }
@@ -56,9 +60,11 @@ type Hosts = Pick<ReturnType<typeof gitHostService>, "ciStatus" | "workflowRuns"
 
 /**
  * BOS-1733: what the gate decided about a GitHub failure. `retry`: the named tests passed at the gate, so GitHub may re-run its
- * failed jobs once; `files` are those tests. Otherwise `why` says why not, and `gateOutput` carries the gate's failing re-run.
+ * failed jobs once; `files` are those tests. `slow` (BOS-2082): no gate re-run, the jobs ran on a slow GitHub machine and get
+ * the one retry on a fresh one (`files` is then empty). Otherwise `why` says why not, and `gateOutput` carries the gate's
+ * failing re-run.
  */
-export type FlakeAnswer = { retry: true; files: string[] } | { retry: false; why: string; gateOutput?: string };
+export type FlakeAnswer = { retry: true; files: string[]; slow?: SlowJob[] } | { retry: false; why: string; gateOutput?: string };
 
 /**
  * One read of CI on a commit; a temporary failure (5xx, timeout) is asked again 3 times with a growing pause.
@@ -99,7 +105,7 @@ export type PublishDeps = {
    */
   flakeRetry?: (s: CiStatus, stop: CiStop) => Promise<FlakeAnswer>;
   /** Says in the ticket's activity that GitHub was asked to re-run the failed jobs, or refused. */
-  announceFlakeRetry?: (files: string[], accepted: boolean) => Promise<void>;
+  announceFlakeRetry?: (answer: { files: string[]; slow?: SlowJob[] }, accepted: boolean) => Promise<void>;
 };
 
 /** BOS-1733: the token couldn't re-run the failed jobs. */
@@ -123,13 +129,14 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
   // BOS-1733: the one retry of failed jobs for a flaky test: when it was asked for, and the test files it was for.
   let flakeAt: number | null = null;
   let flaky: string[] | null = null;
+  let slow: SlowJob[] | undefined;
   let retryRunUrl: string | undefined;
   try {
     for (;;) {
       if (stop.stopped) return { kind: "stopped" };
       const s = await readCi(deps.hosts, deps.target, prep.commit, stop, deps.timing);
       if ("kind" in s) return s;
-      if (s.state === "passed") return flaky ? { kind: "passed", flaky, ...(retryRunUrl ? { retryRunUrl } : {}) } : { kind: "passed" };
+      if (s.state === "passed") return flaky ? { kind: "passed", flaky, ...(slow ? { slow } : {}), ...(retryRunUrl ? { retryRunUrl } : {}) } : { kind: "passed" };
       // Right after the retry GitHub may still show the old failed attempt for a moment: read it as pending, as for rerunAt.
       const inGrace = flakeAt !== null && Date.now() - flakeAt < deps.timing.pollMs * 3;
       if (s.state === "failed" && !inGrace) {
@@ -142,9 +149,10 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
         const runIds = [...new Set(s.failed.map((r) => r.runId).filter((id): id is number => !!id))];
         let accepted = runIds.length > 0;
         for (const id of runIds) if (!(await deps.hosts.rerunFailedJobs(deps.target.cfg, deps.target.token, id))) accepted = false;
-        await deps.announceFlakeRetry?.(a.files, accepted);
+        await deps.announceFlakeRetry?.({ files: a.files, ...(a.slow ? { slow: a.slow } : {}) }, accepted);
         if (!accepted) return { kind: "failed", status: s, why: RERUN_REFUSED };
         flaky = a.files;
+        slow = a.slow;
         flakeAt = Date.now();
         retryRunUrl = s.failed[0]?.url || undefined;
       }
