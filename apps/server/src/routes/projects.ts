@@ -182,7 +182,11 @@ export function projectRoutes(
       .returning();
     // A new repo address (or archiving) changes which git host the company's runner may reach.
     if (p && (fields.repoUrl !== undefined || archived !== undefined)) void launch.syncAllow(p.companyId);
-    return p ?? reply.code(404).send({ error: "not_found" });
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    // Names the fields only, never their values: a repo address or command could carry something private (BOS-1987).
+    const changed = Object.keys(b);
+    if (changed.length) await record(db, { companyId: p.companyId, kind: "settings", summary: `Owner changed project ${p.name}: ${changed.join(", ")}` });
+    return p;
   });
 
   // What a project has cost (money only, as on the dashboard: subscription use is excluded). "This month" is the UTC calendar month.
