@@ -75,4 +75,37 @@ describe("feature roadmap", () => {
     expect((await c.req("PATCH", `/api/features/${f.id}`, { showPublicly: false })).json().showPublicly).toBe(false);
     expect((await c.req("PATCH", `/api/features/${f.id}`, { publicSummary: null })).json().publicSummary).toBeNull();
   });
+
+  // The YYYY-MM-DD pattern let 2026-02-30 through to Postgres, which refused it with a 500 (BOS-1968).
+  it("refuses a date that doesn't exist with a plain 400, and still takes a real one like 29 February in a leap year", async () => {
+    const c = await setup();
+    const goal = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Launch", priority: 1 })).json();
+    const plain = "That date doesn't exist. Use YYYY-MM-DD.";
+    const refused = async (res: Promise<{ statusCode: number; json: () => { error: string; message: string } }>) => {
+      const r = await res;
+      expect(r.statusCode).toBe(400);
+      expect(r.json().message).toContain(plain);
+    };
+
+    await refused(c.req("POST", `/api/objectives/${goal.id}/milestones`, { title: "Beta", targetDate: "2026-02-30" }));
+    await refused(c.req("POST", `/api/objectives/${goal.id}/milestones`, { title: "Beta", targetDate: "2026-13-01" }));
+    const beta = (await c.req("POST", `/api/objectives/${goal.id}/milestones`, { title: "Beta", targetDate: "2028-02-29" })).json();
+    expect(beta.targetDate).toBe("2028-02-29");
+    await refused(c.req("PATCH", `/api/milestones/${beta.id}`, { targetDate: "2027-02-29" }));
+    await refused(c.req("GET", "/api/roadmap?today=2026-04-31"));
+
+    await refused(c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Due never", dueDate: "2026-02-30" }));
+    const tk = await c.ticket({ dueDate: "2026-02-28" });
+    expect(tk.dueDate).toBe("2026-02-28");
+    await refused(c.req("PATCH", `/api/tickets/${tk.id}`, { dueDate: "2026-06-31" }));
+    const leap = await c.req("PATCH", `/api/tickets/${tk.id}`, { dueDate: "2028-02-29" });
+    expect(leap.statusCode).toBe(200);
+    expect(leap.json().dueDate).toBe("2028-02-29");
+
+    // A wrong shape still gets the format hint, not the "doesn't exist" one.
+    const shape = await c.req("PATCH", `/api/tickets/${tk.id}`, { dueDate: "30/02/2026" });
+    expect(shape.statusCode).toBe(400);
+    expect(shape.json().message).toContain("Use YYYY-MM-DD");
+    expect(shape.json().message).not.toContain("doesn't exist");
+  });
 });
