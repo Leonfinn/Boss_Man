@@ -10,6 +10,7 @@ import { agents, companies, milestones, objectives, projects, tickets } from "./
 import { record } from "./services/activity.js";
 import { WorkError } from "./services/work.js";
 import { ageText, describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
+import { DateStr } from "./routes/roadmap.js";
 import { fail, planningIn, refsOf, text, withNote, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
 
@@ -26,7 +27,7 @@ export function registerRoadmap(server: McpServer, db: Db, work: Services["work"
         priority: z.number().int().min(1).max(5).optional(),
         project: z.string().min(1).optional(),
         objectiveId: z.string().uuid().optional(),
-        targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD").optional(),
+        targetDate: DateStr.optional(),
         horizon: z.enum(HORIZONS).optional(),
         ticketId: z.string().uuid().optional(),
         milestoneId: z.string().uuid().nullable().optional(),

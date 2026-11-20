@@ -15,7 +15,19 @@ import type { workService } from "../services/work.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
-const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
+/**
+ * A calendar day written YYYY-MM-DD. The pattern alone lets 2026-02-30 through, and Postgres
+ * then refuses it with a 500, so the day must also survive a round trip through Date (BOS-1968).
+ * Used for ticket due dates and milestone target dates (app.ts, mcp-board.ts).
+ */
+export const DateStr = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD")
+  .refine((d) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return true; // the regex above already reported it
+    const t = new Date(`${d}T00:00:00Z`); // month 13 gives an Invalid Date, and toISOString would throw
+    return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d;
+  }, "That date doesn't exist. Use YYYY-MM-DD.");
 
 /** Creating objectives, key results and milestones, and the tree the Plan page reads. */
 export function objectiveRoutes(

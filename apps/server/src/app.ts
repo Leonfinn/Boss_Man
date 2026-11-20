@@ -135,7 +135,7 @@ import { skillRoutes } from "./routes/skills.js";
 import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
-import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
@@ -1876,7 +1876,6 @@ export async function buildApp(opts: AppOptions) {
 
     // Work: projects, boards, tickets, dependencies, objectives (R16–R18, R25).
     const State = z.enum(SYSTEM_STATES);
-    const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
     const TicketFields = z.object({
       title: z.string().trim().min(1).max(200),
       // The description is an owner message box too: a pasted log goes in whole (BOS-502).
