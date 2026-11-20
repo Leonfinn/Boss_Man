@@ -134,7 +134,9 @@ scripts/update-runner.sh
 `update-runner.sh` builds the runner image, runs a safety check on it with networking off, and then starts everything. On a first install it says no launcher is running. That is expected.
 
 :::worked
-`docker compose ps` shows `db`, `server` and `launcher` running, and `curl -s http://<host-ip>:3100/api/health` prints a short line of JSON.
+`docker compose ps` shows `db`, `server` and `launcher` running, and `curl -sS http://<host-ip>:<your BOSSMAN_HOST_PORT, 3100 unless you changed it>/api/health` prints a short line of JSON. For example, `curl -sS http://192.168.1.50:3100/api/health`.
+
+If you see `Connection refused`, the server has not started yet or the port is wrong. Wait a minute and run the command again, and check that the port matches `BOSSMAN_HOST_PORT` in your `.env`. If it still fails after a few minutes, run `docker compose ps` and `docker compose logs server` to see why the server is not running.
 :::
 
 ## 6. Make the owner account
