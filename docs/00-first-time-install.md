@@ -296,6 +296,13 @@ Paste it and save. Then choose **Check the token against <project>**.
 
 Check it worked: the message says "The token can read and push to the repo." If it says it can read but not push, add write permission to the token.
 
+**Optional: a second account for the merge gate's CI branches.** GitHub emails the account that pushed a branch whenever a GitHub Actions run on it fails. Boss Man's merge gate pushes a `bossman-ci/<ticket>` branch for every merge, so with one token a failed run there emails the token's owner. To send those emails elsewhere, use a second (bot) account:
+1. Create the account (or use a teammate's) and add it as a collaborator with write access to the repo.
+2. As that account, create a fine-grained token with Contents read and write (and Workflows read and write if the repo's workflows change).
+3. In Boss Man, add a secret named `GIT_CI_TOKEN` with that token and grant it to the company. Add `GIT_CI_USERNAME` only if your git host needs a user name (GitHub does not).
+
+Only the two pushes to `bossman-ci/*` use it; everything else keeps `GIT_TOKEN`. Without it nothing changes: the pushes use `GIT_TOKEN` and its owner gets the emails. Agents never see either token. The other way is to mute those emails on the owner's account: GitHub, Settings > Notifications > System > Actions, choose "Don't notify". That also mutes real failures of the owner's own pushes.
+
 ## 10. Wizard steps "Checks before merging" and "What pays for the CEO"
 
 **Checks before merging.** Boss Man looks at the repo through the runner and proposes what runs before work merges. Under **Before merging, Boss Man will**, choose one. If the list is the standard one, choose **Re-detect** now that the runner and git token work.

@@ -4,7 +4,7 @@ import { isDaemonOnlySecret } from "../src/secrets.js";
 
 describe("isDaemonOnlySecret", () => {
   it("matches git's own credential names and the config variables that build a header", () => {
-    for (const n of ["GIT_TOKEN", "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_12"]) {
+    for (const n of ["GIT_TOKEN", "GIT_USERNAME", "GIT_CI_TOKEN", "GIT_CI_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_SSH","GIT_SSH_COMMAND", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_12"]) {
       expect(isDaemonOnlySecret(n), n).toBe(true);
     }
   });
