@@ -11,7 +11,7 @@ import { HOST_NAME, OWNER_CONTROLS, parseStep, recurringDutyHits, strayFence, ty
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
 import { type ComposeFacts, type ComposeStep, composeFindings } from "./compose-steps.js";
 import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
-import { hasWalkingSettingsPath, norm, screenFindings, type Pressed } from "./owner-screens.js";
+import { hasWalkingSettingsPath, walkingMenuRoot, norm, screenFindings, type Pressed } from "./owner-screens.js";
 import { WHEN_MARKER } from "./owner-setup-when.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
@@ -451,6 +451,7 @@ const HOST_ACTION = /\b(?:re-?start|stop|start|re-?create|pull|edit)\s+(?:[\w.-]
 const HOST_REMOVE = /\b(?:delete|remove)\b[^.;\n]{1,80}?\bfrom\s+(?:[\w-]+\s+){0,3}?(?:\.env(?![\w.-])|(?:docker-)?compose[\w.-]*\.ya?ml|host\.json|containers?|add-?ons?|services?|stacks?|files?)\b/i;
 /** A Boss Man button path: the owner does it in the app, so no command is needed. */
 const SETTINGS_PATH = /\bSettings\s*(?:→|->)\s*\S/;
+const ARROW_PATH = /(?:→|->)\s*\S/;
 /** The pointer the go-live card writes in place of a host fact Boss Man hasn't been told yet (DR-052 point 5). */
 export const THIS_HOST_POINTER = "Settings → Server and runner → This server";
 
@@ -819,6 +820,9 @@ export function stepPlace(text: string, serverHost?: string | null): string | nu
   const key = outsideSiteKeys(prose, serverHost)[0];
   if (key) return `${capital(key)}, in your browser`;
   if (SETTINGS_PATH.test(prose)) return "Boss Man, in Settings";
+  // BOS-2117: any owner-menu path the screen walker follows ("Wiki → tick …"), not only Settings →.
+  const menu = ARROW_PATH.test(prose) ? walkingMenuRoot(prose) : null;
+  if (menu) return menu === "Settings" ? "Boss Man, in Settings" : `Boss Man, in ${menu}`;
   if (/https?:\/\//i.test(prose)) return "Boss Man, in your browser";
   return null;
 }
