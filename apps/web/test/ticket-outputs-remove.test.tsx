@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TicketOutputs, type Artifact } from "../src/components/TicketOutputs";
-import { healthLines } from "../src/components/DashboardPanels";
+import { RightNow, healthLines } from "../src/components/DashboardPanels";
 
 const apiMock = vi.hoisted(() => vi.fn());
 vi.mock("../src/api", () => ({ api: apiMock }));
@@ -46,5 +46,18 @@ describe("dashboard runner links", () => {
       const line = healthLines({ health: runner ? { runner } : {}, merges: null, stuck: null, running: 0, companyId: "c1" }).find((l) => l.key === "runner")!;
       expect(line.href).toBe("#/settings/c1/runner");
     }
+  });
+
+  it("keeps the Updates lines on the Updates page", () => {
+    for (const update of [null, { waiting: true, phase: null, deadline: null }, { waiting: false, phase: null, deadline: null }]) {
+      const line = healthLines({ health: update ? { update } : {}, merges: null, stuck: null, running: 0, companyId: "c1" }).find((l) => l.key === "update")!;
+      expect(line.href).toBe("#/settings/c1/updates");
+    }
+  });
+
+  it("shows the paused notice without a link to a page that has no resume control", () => {
+    render(<RightNow lines={[]} paused={true} companyId="c1" />);
+    expect(screen.getByText("Company paused")).toBeTruthy();
+    expect(document.querySelector("a[href*='/team']")).toBeNull();
   });
 });
