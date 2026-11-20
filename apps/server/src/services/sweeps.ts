@@ -1518,7 +1518,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       for (const { ticket, prefix, owner } of heldRows) {
         const scope = (await agentWipHold(db, ticket)).hold?.scope;
         const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.ticketId, ticket.id), eq(wakes.status, "queued"), eq(wakes.statusReason, HELD_AGENT))).limit(1);
-        const why = busyWake && !scope ? `its wake waits behind ${owner}'s live run` : scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : scope === "next_up" ? `next up behind ${owner}'s current run` : "held by a WIP limit";
+        const why = busyWake && (!scope || scope === "next_up") ? `its wake waits behind ${owner}'s live run` : scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : scope === "next_up" ? `next up behind ${owner}'s current run` : "held by a WIP limit";
         heldLines.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, ${why}${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
       }
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.
