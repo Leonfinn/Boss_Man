@@ -133,7 +133,8 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
      * After a server restart: a run that started (row) but has no result (row) lost its in-memory run, and the author was told
      * to wait for a wake that would never come. Start those again. Safe to call twice: a run in memory is skipped.
      */
-    async recover(): Promise<{ launched: number; skipped: number }> {
+    async recover(): Promise<{ launched: number; skipped: number; skippedIds: string[] }> {
+      const skippedIds: string[] = [];
       const started = await db.select().from(checkResults).where(eq(checkResults.kind, PREFLIGHT_STARTED_KIND)).orderBy(desc(checkResults.at)).limit(200);
       let n = 0;
       let skipped = 0;
@@ -150,14 +151,15 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
           return null;
         });
         if (!ctx) {
-          skipped++; // no runner connected yet (or GitHub CI can't be used): a later try may find one
+          skipped++;
+          skippedIds.push(t.id); // no runner connected yet (or GitHub CI can't be used): a later try may find one
           continue;
         }
         launch(t, s.detail, s.sha, ctx);
         n++;
       }
       deps.log?.(`GitHub CI pre-check recovery: ${n} relaunched, ${skipped} skipped (no runner connected yet)`);
-      return { launched: n, skipped };
+      return { launched: n, skipped, skippedIds };
     },
 
     /**
@@ -170,13 +172,20 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       let stopped = false;
       const tick = async () => {
         let again = false;
+        let pending: string[] = [];
         try {
-          again = (await this.recover()).skipped > 0;
+          const r = await this.recover();
+          pending = r.skippedIds;
+          again = r.skipped > 0;
         } catch (err) {
           deps.log?.(`GitHub CI pre-check recovery failed: ${err instanceof Error ? err.message : String(err)}`);
           again = true;
         }
-        if (stopped || !again || Date.now() - startedAt + o.everyMs > o.forMs) return;
+        if (stopped || !again) return;
+        if (Date.now() - startedAt + o.everyMs > o.forMs) {
+          deps.log?.(`GitHub CI pre-check recovery: giving up after ${Math.round(o.forMs / 60000)} min; still skipped: ${pending.map(short).join(", ") || "none named (setup failed)"}`);
+          return;
+        }
         timer = setTimeout(() => void tick(), o.everyMs);
         timer.unref();
       };
