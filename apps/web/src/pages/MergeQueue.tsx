@@ -307,7 +307,7 @@ export function Waiting({ rows, companyId, onMoved }: { rows: WaitingRow[]; comp
 
 const RECENT_SHOWN = 3;
 
-function Recent({ rows }: { rows: RecentRow[] }) {
+export function Recent({ rows }: { rows: RecentRow[] }) {
   const [all, setAll] = useState(false);
   const shown = all ? rows : rows.slice(0, RECENT_SHOWN);
   const more = rows.length - shown.length;
@@ -458,7 +458,7 @@ export function QueuedChecks({ data, heldBehind, paused }: { data: CheckQueueDat
   );
 }
 
-type Tab ="merges" | "checks";
+type Tab = "merges" | "checks";
 const TABS: Tab[] = ["merges", "checks"];
 
 export function MergeQueue({ companies, companyId }: { companies: Company[]; companyId: string | undefined }) {
