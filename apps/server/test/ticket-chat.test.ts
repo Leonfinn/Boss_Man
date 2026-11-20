@@ -256,6 +256,26 @@ describe("ticket conversation (R65)", () => {
     await client.close();
   });
 
+  it("holds a card-order reply shaped like the 19 Nov BOS-974 one: one own card, three other tickets' cards, a go-ahead on one of them (R53)", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id })).json() as { id: string };
+    const t = await mk("Image install");
+    const others = [await mk("Server update"), await mk("Release"), await mk("Runner update")];
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    for (const [i, id] of [t.id, ...others.map((o) => o.id)].entries()) {
+      await client.callTool({ name: "raise_decision", arguments: { question: `Owner card number ${i + 1}?`, options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, triedFirst: "I tried everything from here, but the host refuses the step." } });
+    }
+    await c.db.update(decisions).set({ tier: "owner" }).where(eq(decisions.status, "open"));
+    const ids = (await c.db.select().from(decisions).where(eq(decisions.status, "open"))).map((d) => d.id.slice(0, 8));
+    const text = `Your cards, in order:\n1. ${ids[1]}: server update. Choose "Not now".\n2. ${ids[2]}: Release. Go ahead, press it.\n3. ${ids[3]}: runner update.\n4. ${ids[0]}: this ticket's card.\nNothing else needs you right now.`;
+    const r = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text } });
+    expect(r).toMatchObject({ isError: true });
+    expect(textOf(r)).toContain("belongs in chat");
+    expect((await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length).toBe(0);
+    await client.close();
+  });
+
   it("refuses a state note that says the ticket waits on the owner when no card is open, in any state (BOS-1576)", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
