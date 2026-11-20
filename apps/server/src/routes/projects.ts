@@ -11,6 +11,7 @@ import { agents, companies, costEvents, fundingSources, projects, runners as run
 import type { gitHostService } from "../services/git-hosts.js";
 import { DEFAULT_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, WATCH_TOKEN_ENV, type githubWatchService } from "../services/github-watch.js";
 import type { launcherService } from "../services/launcher.js";
+import { record } from "../services/activity.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
 import { summarizeCostChecks } from "../services/cost-check.js";
 import { monthStartUtc, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
@@ -52,16 +53,20 @@ export function projectRoutes(
   });
   owner.put("/api/projects/:id/review-policy", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
-    const [proj] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, id));
+    const [proj] = await db.select({ companyId: projects.companyId, name: projects.name }).from(projects).where(eq(projects.id, id));
     if (!proj) return reply.code(404).send({ error: "not_found" });
     const p = await checkPolicy(proj.companyId, req.body);
     if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
     await db.update(projects).set({ reviewPolicy: p }).where(eq(projects.id, id));
+    // Logged like the company's policy (routes/policy.ts), so a change in who reviews can be traced (BOS-1969).
+    await record(db, { companyId: proj.companyId, kind: "settings", summary: `Owner changed the review policy for project ${proj.name}` });
     return { policy: p };
   });
   owner.delete("/api/projects/:id/review-policy", async (req, reply) => {
-    const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ id: projects.id });
-    return p ? { policy: null } : reply.code(404).send({ error: "not_found" });
+    const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ companyId: projects.companyId, name: projects.name });
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    await record(db, { companyId: p.companyId, kind: "settings", summary: `Owner reset project ${p.name} to the company review policy` });
+    return { policy: null };
   });
 
   // The GitHub watcher's setting (BOS-1393): owner only, never an agent tool. The token is a company secret
