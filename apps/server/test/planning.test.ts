@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { decisions, features, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, decisions, features, ticketDependencies, tickets } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp | undefined;
@@ -102,6 +102,8 @@ describe("plan", () => {
     expect((await c.req("DELETE", `/api/dependencies/${decisionDep.dependencyId}`)).statusCode).toBe(422);
 
     expect((await c.req("DELETE", `/api/dependencies/${dep1.id}`)).statusCode).toBe(204);
+    const lines = (await c.db.select().from(activity).where(eq(activity.ticketId, api.id))).filter((a) => a.kind === "dependency");
+    expect(lines.map((l) => l.summary)).toContainEqual(expect.stringMatching(/^The owner removed the wait on APP-\d+ Design the API$/));
     expect((await c.db.select().from(tickets).where(eq(tickets.id, api.id)))[0]!.systemState).toBe("ready");
     expect((await c.req("GET", `/api/companies/${c.company.id}/open-tickets`)).json()).toHaveLength(4);
   });

@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, decisions, engagements, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, costEvents, decisions, ticketDependencies, engagements, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 afterEach(async () => {
@@ -39,6 +39,20 @@ async function setup() {
   const status = async (id: string) => (await db.select().from(engagements).where(eq(engagements.id, id)))[0]!.status;
   return { ...built, db, close, req, appCo, homelab, appProject, opsProject, request, act, status };
 }
+
+describe("waiting on an engagement twice (BOS-1978)", () => {
+  it("returns the existing wait: one row, one activity line", async () => {
+    ctx = await setup();
+    const e = await ctx.request();
+    const launch = (await ctx.req("POST", `/api/projects/${ctx.appProject.id}/tickets`, { title: "Launch beta", state: "blocked", assigneeAgentId: ctx.appCo.ceo.id })).json();
+    const first = (await ctx.req("POST", `/api/tickets/${launch.id}/dependencies`, { engagementId: e.id })).json();
+    const second = (await ctx.req("POST", `/api/tickets/${launch.id}/dependencies`, { engagementId: e.id })).json();
+    expect(second.id).toBe(first.id);
+    expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, launch.id))).toHaveLength(1);
+    const lines = (await ctx.db.select().from(activity).where(eq(activity.ticketId, launch.id))).filter((a) => a.kind === "dependency");
+    expect(lines).toHaveLength(1);
+  });
+});
 
 describe("engagement lifecycle (R23)", () => {
   it("runs from request to sign-off, freeing the requester's waiting ticket", async () => {
