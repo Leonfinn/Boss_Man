@@ -3,6 +3,7 @@ import { NoCompany } from "../components/NoCompany";
 import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type MilestoneStatus, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
 import { usePoll } from "../hooks";
 import { STATUS_TONE } from "./Features";
+import { dayOf, short } from "../short-date";
 
 export const STATUS: Record<MilestoneStatus, { label: string; tone: string; colour: string }> = {
   done: { label: "Done", tone: "green", colour: "var(--green-ink)" },
@@ -14,8 +15,6 @@ export const STATUS: Record<MilestoneStatus, { label: string; tone: string; colo
 };
 
 const DAY = 86_400_000;
-const dayOf = (d: string) => Date.parse(`${d}T00:00:00Z`);
-const short = (d: string) => new Date(dayOf(d)).toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" });
 
 /** The date range every timeline on the page shares, so objectives line up. */
 function windowOf(companies: RoadmapCompany[], now: string): { start: number; end: number } {
