@@ -17,7 +17,7 @@ import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
-import { agentWipHold, busyAgentIds, canStartNow, cantMoveFor, cantMoveSql, nothingToDoFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { agentWipHold, busyAgentIds, canStartNow, NEXT_UP_STALE_MS, cantMoveFor, cantMoveSql, nothingToDoFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { blockedHolds, openBlockers, ticketBlockerFinished, ticketBlockerOpenSql } from "./ticket-links.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
@@ -1274,8 +1274,47 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       return room.get(companyId) ?? 0;
     };
     const ready = await readySlots(t, busy, roomIn, (companyId) => room.set(companyId, (room.get(companyId) ?? 0) - 1));
-    const asked = await askCeoForWork(t, busy, roomIn);
+    const asked = (await askCeoForWork(t, busy, roomIn)) + (await askCeoAboutStaleNextUp(t));
     return { ...result, ready, asked };
+  }
+
+  /**
+   * BOS-1908: a "Next up" (a start held only because its agent is running another ticket) that has waited over a day
+   * means that run is not ending, or the agent is stuck on it. The CEO gets the existing idle-agents wake with the list,
+   * once per company per `idleAskEveryMs`, and the same list isn't sent twice within `missedEveryMs`. Returns the wakes sent.
+   */
+  async function askCeoAboutStaleNextUp(t: Date): Promise<number> {
+    const stale = await db
+      .select({ ticket: tickets, prefix: companies.ticketPrefix, owner: agents.name })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(eq(tickets.systemState, "ready"), isNotNull(tickets.nextUpAt), lte(tickets.nextUpAt, new Date(t.getTime() - NEXT_UP_STALE_MS)), eq(companies.paused, false)))
+      .orderBy(asc(tickets.nextUpAt));
+    const byCompany = new Map<string, typeof stale>();
+    for (const r of stale) byCompany.set(r.ticket.companyId, [...(byCompany.get(r.ticket.companyId) ?? []), r]);
+    let asked = 0;
+    for (const [companyId, rows] of byCompany) {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), eq(agents.paused, false), isNull(agents.retiredAt)));
+      if (!ceo) continue;
+      const [last] = await db
+        .select({ note: wakes.note, createdAt: wakes.createdAt })
+        .from(wakes)
+        .where(and(eq(wakes.companyId, companyId), eq(wakes.reason, IDLE_AGENTS_REASON), gt(wakes.createdAt, new Date(t.getTime() - limits.missedEveryMs))))
+        .orderBy(desc(wakes.createdAt))
+        .limit(1);
+      if (last && t.getTime() - last.createdAt.getTime() < limits.idleAskEveryMs) continue;
+      const body = [
+        `Next up for over a day (each waits in Ready for its agent to finish the ticket it is running; Boss Man starts it by itself then):`,
+        ...rows.map(({ ticket, prefix, owner }) => `- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (next up for ${owner}, waiting ${ageWords(t.getTime() - ticket.nextUpAt!.getTime())})`),
+        ``,
+        `Check whether ${rows.length === 1 ? "that agent's" : "those agents'"} current run is stuck or too long, or move the ticket to an agent who is free with assign_ticket. You are asked again only when this list changes.`,
+      ].join("\n");
+      if (last?.note?.endsWith(`\n${body}`)) continue;
+      await opts.wake({ agentId: ceo.id, reason: IDLE_AGENTS_REASON, priority: 1, note: `${rows.length === 1 ? "A ticket has" : `${rows.length} tickets have`} been Next up for over a day.\n${body}` });
+      asked++;
+    }
+    return asked;
   }
 
   /**
@@ -1479,7 +1518,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       for (const { ticket, prefix, owner } of heldRows) {
         const scope = (await agentWipHold(db, ticket)).hold?.scope;
         const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.ticketId, ticket.id), eq(wakes.status, "queued"), eq(wakes.statusReason, HELD_AGENT))).limit(1);
-        const why = busyWake && !scope ? `its wake waits behind ${owner}'s live run` : scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
+        const why = busyWake && (!scope || scope === "next_up") ? `its wake waits behind ${owner}'s live run` : scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : scope === "next_up" ? `next up behind ${owner}'s current run` : "held by a WIP limit";
         heldLines.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, ${why}${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
       }
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.

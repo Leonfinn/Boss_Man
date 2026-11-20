@@ -316,6 +316,8 @@ export function schedulerService(
     const [full] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     const hold = full ? (await agentWipHold(db, full)).hold : null;
     if (hold?.scope === "queue") return `${hold.reason.replace(/\. It starts by itself.*$/, "")}, so it stays in Ready and starts by itself when the line is shorter. (Not started.)`;
+    // BOS-1908: waiting behind the agent's own live run on another ticket, not at a limit: it starts by itself when that run ends.
+    if (hold?.scope === "next_up") return `${hold.reason.replace(/^Waiting: /, "")} It stays in Ready and starts by itself then. (Not started.)`;
     const oldest = await oldestMovableInProgress(db, t.agentId);
     if (!oldest) return `a WIP limit holds it in Ready, and it starts when there is room. (Not started.)`;
     const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
