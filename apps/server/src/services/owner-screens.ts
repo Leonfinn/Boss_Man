@@ -216,14 +216,26 @@ function walk(parts: string[], problems: string[]): Place | null | undefined {
 
 /** Whether the text has a "Settings → …" path that walks to a real page, tab or heading (R17 counts only such a path as a how-to, BOS-1649). */
 export function hasWalkingSettingsPath(prose: string): boolean {
+  return walkingMenuRoot(prose, "settings") !== null;
+}
+
+/**
+ * The owner-menu entry (as the menu writes it, e.g. "Wiki") that the first path in the text starts from, when that path
+ * walks to a real page, tab, heading, button or field (R21, BOS-2117). `only` limits it to one entry (lower-case).
+ * A path that doesn't start at the menu, or that the walker refuses, gives null.
+ */
+export function walkingMenuRoot(prose: string, only?: string): string | null {
   for (const s of sentences(prose)) {
     for (const chain of chainsIn(s.text)) {
-      if (norm(chain.parts[0]!) !== "settings") continue;
+      const root = norm(chain.parts[0]!);
+      if (only && root !== only) continue;
+      const entry = OWNER_MENU.find((m) => norm(m) === root);
+      if (!entry) continue;
       const problems: string[] = [];
-      if (walk(chain.parts, problems) !== undefined && !problems.length) return true;
+      if (walk(chain.parts, problems) !== undefined && !problems.length) return entry;
     }
   }
-  return false;
+  return null;
 }
 
 /** A place named without an arrow: "Open Settings and…", "on the Secrets page", "under Config". */

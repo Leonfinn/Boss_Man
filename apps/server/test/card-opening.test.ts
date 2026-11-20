@@ -94,6 +94,13 @@ describe("the opening of a card with steps (BOS-1660 B)", () => {
     expect(stepPlace("Undo it afterwards.", SERVER)).toBeNull();
   });
 
+  it("BOS-2117: accepts a walking owner-menu path that isn't under Settings, refuses one the walker can't follow", () => {
+    expect(stepPlace("Open Wiki → tick \"Also search your past answers by meaning\".", SERVER)).toBe("Boss Man, in Wiki");
+    expect(stepPlace("Open Wiki → Runs → tick the thing.", SERVER)).toBeNull();
+    expect(stepPlace("Open Gadgets → Fizz.", SERVER)).toBeNull();
+    expect(stepPlace("Open Settings → Server and runner → This host.", SERVER)).toBe("Boss Man, in Settings");
+  });
+
   it("keeps the lint's own refusal first, before the opening", () => {
     const r = checkAsk({ triedFirst: TRIED, steps: ["Follow docs/06 for the folder."] });
     expect(r.error).toMatch(/R1|document|docs/i);
