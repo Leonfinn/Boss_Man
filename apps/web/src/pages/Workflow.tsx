@@ -3,6 +3,70 @@ import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
+import { findings, type Part } from "../workflow-findings";
+
+const PERIODS = [7, 14, 30, 90];
+
+function Words({ parts }: { parts: Part[] }) {
+  return (
+    <>
+      {parts.map((p, i) =>
+        typeof p === "string" ? (
+          <span key={i}>{p}</span>
+        ) : (
+          <a key={i} href={p.href} title={p.title}>
+            {p.text}
+          </a>
+        ),
+      )}
+    </>
+  );
+}
+
+/** Move focus to a section's heading, so the next Tab carries on from there. */
+function jump(e: React.MouseEvent, id: string) {
+  const h = document.getElementById(id)?.querySelector("h2");
+  if (!h) return;
+  e.preventDefault();
+  h.focus();
+  h.scrollIntoView?.({ block: "start" });
+}
+
+/** "What this shows": up to three plain sentences above the tables. */
+function Findings({ d, companyId, setDays }: { d: Scorecard; companyId: string; setDays: (n: number) => void }) {
+  const f = findings(d, companyId);
+  if (!f) return null;
+  return (
+    <section className="card findings" aria-labelledby="findings-h">
+      <h2 id="findings-h">What this shows</h2>
+      <p className="muted scope">{f.scope}</p>
+      {f.sparse ? (
+        <>
+          <p>{f.sparse.text}</p>
+          {f.sparse.nextDays !== null && PERIODS.includes(f.sparse.nextDays) && (
+            <button type="button" className="btn" onClick={() => setDays(f.sparse!.nextDays as number)}>
+              Show the last {f.sparse.nextDays} days
+            </button>
+          )}
+        </>
+      ) : (
+        <ul>
+          {f.items.map((it, i) => (
+            <li key={i}>
+              <strong>
+                <Words parts={it.lead} />
+              </strong>{" "}
+              <Words parts={it.detail} />{" "}
+              <a className="see" href={`#${it.target}`} onClick={(e) => jump(e, it.target)}>
+                {it.seeLabel}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; ownCostPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
 type Role = Stats & { role: string; agents: number };
@@ -25,7 +89,7 @@ type RetroInfo = { retro: { id: string; startedAt: string; since: string; until:
 type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[]; reason: string | null; reasonLink: string | null; decidedBy: "ceo" | "owner" | null };
 type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
 type SizeNote = { role: string; size: number; likeSize: number };
-type Scorecard = { days: number; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
+type Scorecard = { days: number; overall?: Stats; previous?: { overall: Stats; handoffs: Handoff[] } | null; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
 export function span(ms: number | null) {
@@ -175,7 +239,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
           <p className="sub">How work moves through the team, and where it waits. Times only count tickets that moved after this page was released.</p>
         </div>
         <select aria-label="Period" value={days} onChange={(e) => setDays(Number(e.target.value))}>
-          {[7, 14, 30, 90].map((n) => (
+          {PERIODS.map((n) => (
             <option key={n} value={n}>
               Last {n} days
             </option>
@@ -188,8 +252,9 @@ export function Workflow({ company }: { company: Company | undefined }) {
         <Loader label="Loading the workflow" />
       ) : (
         <>
-          <section>
-            <h2>Roles</h2>
+          <Findings d={d} companyId={company.id} setDays={setDays} />
+          <section id="roles">
+            <h2 tabIndex={-1}>Roles</h2>
             <p className="muted" style={{ fontSize: 14 }}>
               <strong>Done</strong> is tickets finished in this period. <strong>Right first time</strong> is the share of reviewed tickets that were never sent back. <strong>Rework rounds</strong> is how many times a ticket was sent back, on average. <strong>Time to finish</strong> is the middle time from first starting a ticket to finishing it. <strong>Own cost</strong> is what this role's own runs on those tickets cost, per ticket. <strong>Ticket cost</strong> is every run on them, per ticket: reviews, the CEO and rework included, so a ticket sent back often costs more. {d.costBasis === "billed" ? "Costs are what the provider billed." : "Costs are estimates at list price from the tokens used, not what a subscription actually charges you."} <strong>Watchdog flags</strong> counts tickets the watchdog raised. <strong>Answers changed</strong> is how often the answer to a decision this role raised was not the one it recommended.
             </p>
@@ -235,8 +300,8 @@ export function Workflow({ company }: { company: Company | undefined }) {
             )}
           </section>
 
-          <section>
-            <h2>Handoffs</h2>
+          <section id="handoffs">
+            <h2 tabIndex={-1}>Handoffs</h2>
             <p className="muted" style={{ fontSize: 14 }}>
               Where work passes from one role to another. <strong>Wait</strong> is the middle time before the next role picked it up (an assignment) or gave its verdict (a review). <strong>Sent back</strong> is the share of reviews that asked for changes. Assignments by the owner or Boss Man show as "owner".
             </p>
@@ -272,8 +337,8 @@ export function Workflow({ company }: { company: Company | undefined }) {
             )}
           </section>
 
-          <section>
-            <h2>Features</h2>
+          <section id="features">
+            <h2 tabIndex={-1}>Features</h2>
             <p className="muted" style={{ fontSize: 14 }}>
               The <strong>tail</strong> is the tasks still open once three quarters of a feature is done. It is flagged when one has been open for more than twice the usual time to finish. The <strong>critical path</strong> is the longest chain of tasks that wait on each other, with a likely time range (typical to slow) from past tickets. A task on it is flagged when nobody has it, it is blocked, or it is older than a slow ticket for its role. After release, <strong>tail lag</strong> is how long the last quarter of tasks took.
             </p>
@@ -328,8 +393,8 @@ export function Workflow({ company }: { company: Company | undefined }) {
             )}
           </section>
 
-          <section>
-            <h2>Sizes</h2>
+          <section id="sizes">
+            <h2 tabIndex={-1}>Sizes</h2>
             <p className="muted" style={{ fontSize: 14 }}>
               Each task has a size (1, 2, 3, 5 or 8) set by whoever made it. This shows what finished tasks of each size really took over the last 90 days, whatever period is chosen above. The critical path uses these times once a role and size has 10 finished tasks.
             </p>
