@@ -21,7 +21,7 @@ import { record } from "./services/activity.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
-import { GO_LIVE_UNMARKED, goLiveProofRefusal, rollbackLine, rollbackRefusal, sayGoLive } from "./services/go-live-card.js";
+import { GO_LIVE_UNMARKED, goLiveProofRefusal, releasedCommitOf, rollbackLine, rollbackRefusal, sayGoLive } from "./services/go-live-card.js";
 import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
@@ -561,7 +561,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question: [recordLine, question, notLiveLine].filter(Boolean).join("\n\n"), recordSays: !!recordAnswer, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), ...(steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(goLive ? { goLive: true, releasesCommit: releasedCommitOf(question, ...(steps ?? [])) } : {}), ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;

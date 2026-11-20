@@ -111,6 +111,9 @@ export const STANDALONE_WRAPUP_MS = WAIT_RULES.wrapup.endMin * 60_000;
 /** Does this wait's hold stop `cls` from starting? Gates call this instead of keeping their own list. */
 export const blocksClass = (kind: WaitKind, cls: WorkClass): boolean => WAIT_RULES[kind].blocks.includes(cls);
 
+/** The wait a runner hold (not a wrap-up) is: the owner's stop-and-update choice, or the plain drain. The screen and the check dispatcher (BOS-2108) both read it here. */
+export const runnerHoldWait = (hold: { force?: boolean; ignoreChecks?: boolean }): "owner-force" | "runner-drain" => (hold.force || hold.ignoreChecks ? "owner-force" : "runner-drain");
+
 /** Is `cls` one the server update's quiet wait counts? Same list as what its hold blocks, by the invariant above. */
 export const serverQuietCounts = (cls: WorkClass): boolean => WAIT_RULES["server-quiet"].waitsFor.includes(cls);
 
@@ -183,8 +186,8 @@ export async function activeWaits(db: Db, opts: { landingSince?: string | null; 
       // The drain goes ahead at drainEndsAt (maintenance.ts step), with checks ignored or not; once forced, only a merge
       // being pushed is left, on its own end.
       const goAt = drainEndsAt({ ...hold, since: hold.since }).toISOString();
-      if (hold.force) out.push(describeWait("owner-force", hold.since));
-      else out.push(describeWait(hold.ignoreChecks ? "owner-force" : "runner-drain", hold.since, undefined, goAt));
+      const kind = runnerHoldWait(hold);
+      out.push(kind === "owner-force" && hold.force ? describeWait(kind, hold.since) : describeWait(kind, hold.since, undefined, goAt));
       if (hold.settleSince) out.push(describeWait("runner-settle", hold.settleSince));
       if (hold.launcherDownSince) out.push(describeWait("runner-launcher", hold.launcherDownSince));
     }

@@ -300,6 +300,7 @@ sections:
   - Asking the CEO for advice
   - CEO chapters
   - Nudges
+  - Pause this company
   - Run time limit
   - Standing rules
   - Ticket references

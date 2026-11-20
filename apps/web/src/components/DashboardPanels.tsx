@@ -1,6 +1,7 @@
 // The Dashboard's two lead panels (BOS-1507, design BOS-1490): "Needs you" (what is waiting for the owner,
 // with a button to each item) and "Right now" (four fixed health lines). Every state has a symbol and words,
 // never colour alone, and a line that couldn't be read says "not known" instead of turning green.
+import { useState } from "react";
 import type { Decision, DecisionTally } from "../api";
 import { raisedAgo } from "../age";
 import type { MergeHealthView, SlowSummary, StuckSummary } from "./MergesStuckBanner";
@@ -43,16 +44,17 @@ const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)
 export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
   const { health, merges, stuck, slow, running, companyId } = input;
   const now = input.now ?? Date.now();
-  const system = `#/settings/${companyId}/system`;
+  const system = `#/settings/${companyId}/updates`;
+  const runnerHref = `#/settings/${companyId}/runner`;
 
   let runner: HealthLine;
   const r = health?.runner;
-  if (r == null) runner = { key: "runner", tone: "unknown", symbol: "?", state: "Runner: not known", pill: "Runner not known", text: "Couldn't check. Trying again in 10 s.", href: system, linkText: "Runner settings" };
-  else if (!r.registered) runner = { key: "runner", tone: "warn", symbol: "‖", state: "No runner set up", pill: "No runner set up", text: "Nothing can run until a runner connects.", href: system, linkText: "Runner settings" };
+  if (r == null) runner = { key: "runner", tone: "unknown", symbol: "?", state: "Runner: not known", pill: "Runner not known", text: "Couldn't check. Trying again in 10 s.", href: runnerHref, linkText: "Runner settings" };
+  else if (!r.registered) runner = { key: "runner", tone: "warn", symbol: "‖", state: "No runner set up", pill: "No runner set up", text: "Nothing can run until a runner connects.", href: runnerHref, linkText: "Runner settings" };
   else if (!r.connected) {
     const since = r.lastSeenAt ? `Since ${clock(r.lastSeenAt)} (${hoursText(now - new Date(r.lastSeenAt).getTime())}). ` : "";
-    runner = { key: "runner", tone: "bad", symbol: "✕", state: "Runner offline", pill: "Runner offline", text: `${since}Runs and checks can't start.`, href: system, linkText: "Runner settings" };
-  } else runner = { key: "runner", tone: "ok", symbol: "✓", state: "Runner connected", pill: "Runner connected", text: `${figureText("runs.running", running)}.`, href: system, linkText: "Runner settings" };
+    runner = { key: "runner", tone: "bad", symbol: "✕", state: "Runner offline", pill: "Runner offline", text: `${since}Runs and checks can't start.`, href: runnerHref, linkText: "Runner settings" };
+  } else runner = { key: "runner", tone: "ok", symbol: "✓", state: "Runner connected", pill: "Runner connected", text: `${figureText("runs.running", running)}.`, href: runnerHref, linkText: "Runner settings" };
 
   let mergesLine: HealthLine;
   if (!merges) mergesLine = { key: "merges", tone: "unknown", symbol: "?", state: "Merges: couldn't check", pill: "Merges not known", text: "The server didn't answer. Trying again in 20 s.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
@@ -93,7 +95,9 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   return [runner, mergesLine, usage, update];
 }
 
-export function RightNow({ lines, paused, companyId, loading }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean }) {
+export function RightNow({ lines, paused, companyId, loading, onResume }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean; /** Resumes this company; the notice shows a Resume button when given. */ onResume?: () => Promise<void> }) {
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   return (
     <section className="card dash-panel dash-right" aria-labelledby="dash-right">
       <h2 id="dash-right" className="dash-panel-head">
@@ -103,7 +107,24 @@ export function RightNow({ lines, paused, companyId, loading }: { lines: HealthL
       {paused && (
         <p className="dash-line tone-warn">
           <span className="dash-sym" aria-hidden="true">‖</span>
-          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/system`}>Settings</a></span>
+          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/team`}>Settings</a></span>
+          {onResume && (
+            <button
+              type="button"
+              className="btn"
+              disabled={resuming}
+              onClick={() => {
+                setResuming(true);
+                setResumeError(null);
+                onResume()
+                  .catch((e: unknown) => setResumeError(e instanceof Error ? e.message : "Could not resume."))
+                  .finally(() => setResuming(false));
+              }}
+            >
+              {resuming ? "Resuming…" : "Resume"}
+            </button>
+          )}
+          {resumeError && <span role="alert" className="muted"> {resumeError}</span>}
         </p>
       )}
       <ul className="dash-lines">

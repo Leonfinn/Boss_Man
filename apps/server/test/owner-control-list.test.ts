@@ -81,6 +81,8 @@ describe("R7: a card names a button that doesn't exist", () => {
 const FILE_SCREEN: Record<string, OwnerScreen> = {
   "App.tsx": "Any screen",
   "components/ImageAttach.tsx": "Any screen",
+  // The Dashboard's "Company paused" notice has a Resume button: the same "Resume" the stop-all banner lists.
+  "components/DashboardPanels.tsx": "Any screen",
   // Opened from a picture in any Markdown text.
   "components/Lightbox.tsx": "Any screen",
   "components/LoadError.tsx": "Any screen",
@@ -107,6 +109,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // A project's Budget tab (also shown on Settings → Funding).
   "pages/ProjectBudget.tsx": "Board",
   "pages/Chat.tsx": "Chat",
+  "pages/Dashboard.tsx": "Any screen",
   "pages/Decisions.tsx": "Decisions",
   "pages/Features.tsx": "Features",
   "pages/Feedback.tsx": "Feedback",
@@ -187,6 +190,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>CompanyReviews": "Reviews",
   "pages/Settings.tsx>TicketPrefix": "Team and CEO",
   "pages/Settings.tsx>GoalCheck": "Reviews",
+  "pages/Settings.tsx>CompanyPause": "Team and CEO",
   "pages/Settings.tsx>NudgeCap": "Team and CEO",
   "pages/Settings.tsx>RunTimeLimit": "Team and CEO",
   "pages/Settings.tsx>WorkspaceDisk": "Server and runner",

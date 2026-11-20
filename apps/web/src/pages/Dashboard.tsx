@@ -1,5 +1,6 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
+import { setCompanyPause } from "./settings/Team";
 import { api, type Company, type Decision, type DecisionTally, type RunRow } from "../api";
 import { NoCompany } from "../components/NoCompany";
 import { raisedAgo } from "../age";
@@ -118,7 +119,7 @@ function SuccessChart({ days }: { days: Day[] }) {
   );
 }
 
-export function Dashboard({ company, decisions = null, tally = null }: { company: Company | undefined; /** The owner's open items for this company (null until loaded). */ decisions?: Decision[] | null; tally?: DecisionTally | null }) {
+export function Dashboard({ company, decisions = null, tally = null, onChanged }: { company: Company | undefined; /** Reloads the company list after a Resume. */ onChanged?: () => void; /** The owner's open items for this company (null until loaded). */ decisions?: Decision[] | null; tally?: DecisionTally | null }) {
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
   // The Merges line and the banner share one read of the Merge queue; a failed read leaves the line "couldn't check".
   const merges = usePoll((signal) => (company ? api<MergeHealthView>(`/api/companies/${company.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)), 20_000, `dash-merges-${company?.id ?? "none"}`);
@@ -148,7 +149,7 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
       {s.inProgressCounted != null && <WorkStands counts={{ inProgress: s.inProgressCounted, nextUp: s.nextUp ?? 0, beingChecked: s.beingChecked ?? 0, watching: s.watching ?? 0 }} hrefFor="#/board" />}
 
       <div className="dash-lead">
-        <RightNow lines={lines} paused={company.paused} companyId={company.id} />
+        <RightNow lines={lines} paused={company.paused} companyId={company.id} onResume={onChanged ? async () => { await setCompanyPause(company.id, false); onChanged(); } : undefined} />
         <NeedsYou decisions={decisions} tally={tally} />
       </div>
 

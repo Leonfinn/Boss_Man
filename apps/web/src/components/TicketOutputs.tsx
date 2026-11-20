@@ -1,4 +1,5 @@
 // What a ticket produced (R69): wiki pages, repo files and links its agents attached.
+import { useState } from "react";
 import { ticketRef } from "@boss-man/shared";
 import { api } from "../api";
 import { wikiHref } from "../links";
@@ -7,10 +8,20 @@ import { when } from "../pages/Runs";
 export type Artifact = { ticketId?: string; fromTitle?: string; fromNumber?: number | null; id: string; kind: "wiki_page" | "repo_file" | "url"; title: string; slug: string | null; path: string | null; ref: string | null; url: string | null; agent: string | null; runId: string | null; createdAt: string };
 
 export function TicketOutputs({ items, companyId, onChanged, code, ticketId, prefix }: { items: Artifact[]; companyId: string; onChanged: () => void; code?: { merged: string } | { branch: string } | null; ticketId?: string; prefix?: string | null }) {
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [failed, setFailed] = useState<{ id: string; message: string } | null>(null);
   const remove = async (a: Artifact) => {
     if (!window.confirm(`Take "${a.title}" off this task? ${a.kind === "wiki_page" ? "The wiki page itself stays." : ""}`)) return;
-    await api(`/api/artifacts/${a.id}`, { method: "DELETE" });
-    onChanged();
+    setRemoving(a.id);
+    setFailed(null);
+    try {
+      await api(`/api/artifacts/${a.id}`, { method: "DELETE" });
+      onChanged();
+    } catch (e) {
+      setFailed({ id: a.id, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setRemoving(null);
+    }
   };
   const codeLine = code && (
     <p className="muted">
@@ -64,9 +75,14 @@ export function TicketOutputs({ items, companyId, onChanged, code, ticketId, pre
             )}
           </small>
           {(!ticketId || !a.ticketId || a.ticketId === ticketId) && (
-            <button type="button" className="link" onClick={() => void remove(a)} aria-label={`Take ${a.title} off this task`}>
-              Remove
+            <button type="button" className="link" disabled={removing === a.id} onClick={() => void remove(a)} aria-label={`Take ${a.title} off this task`}>
+              {removing === a.id ? "Removing…" : "Remove"}
             </button>
+          )}
+          {failed?.id === a.id && (
+            <span role="alert" className="muted" style={{ color: "var(--bad, #c0392b)" }}>
+              Couldn't remove it: {failed.message}
+            </span>
           )}
         </li>
       ))}

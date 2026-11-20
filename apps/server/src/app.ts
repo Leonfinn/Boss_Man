@@ -31,7 +31,7 @@ import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js"
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
 import { serverWaitChecks, updateWaitCountsRun } from "./services/runner-busy.js";
-import { activeWaits } from "./services/update-waits.js";
+import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
@@ -53,7 +53,7 @@ import { releaseLogService } from "./services/release-log.js";
 import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
-import { recheckDeadlines, runnerRebuilt, ticketStateChanged } from "./services/stale-requests.js";
+import { recheckDeadlines, runnerRebuilt, securityAlertChanged, ticketStateChanged } from "./services/stale-requests.js";
 import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
@@ -377,9 +377,10 @@ export async function buildApp(opts: AppOptions) {
   bundleStore.clear();
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
+    // BOS-2108: which wait it is, so the dispatcher stops only what that wait's WAIT_RULES row blocks (a worker keeps its quick checks).
     drainPending: async () => {
       const h = runnerCardHold(await getHold(db));
-      return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
+      return h && holdBlocksStarts(h, opts.now?.() ?? new Date()) ? runnerHoldWait(h) : null;
     },
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
@@ -1032,6 +1033,8 @@ export async function buildApp(opts: AppOptions) {
     clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     closeTicket: (ticketId, note) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote: note }),
+    // BOS-2085 (R54): a security alert opening or closing sends the company's open go-live cards back for a re-check.
+    alertChanged: (companyId, input) => securityAlertChanged(db, { companyId, ...input, wake: (w) => scheduler.notify(w.agentId, w as { ticketId: string; reason: string; note: string; priority?: number }), now: opts.now?.() }),
     log: (m) => app.log.warn(m),
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
