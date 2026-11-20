@@ -20,6 +20,25 @@ describe("Resume a paused company", () => {
     await waitFor(() => expect(onResume).toHaveBeenCalledTimes(1));
   });
 
+  it("the Dashboard notice shows the failure message and the button works again", async () => {
+    const onResume = vi.fn(async () => {
+      throw new Error("The server could not resume.");
+    });
+    render(<RightNow lines={[]} paused companyId="c1" onResume={onResume} />);
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("The server could not resume.");
+    expect((screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("the Team control shows the failure message when the server refuses", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "internal_error" }), { status: 500, headers: { "content-type": "application/json" } })));
+    const onChanged = vi.fn();
+    render(<CompanyPause company={{ id: "c1", name: "Co", mission: null, paused: true, agents: [] } as Company} onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole("button", { name: "Resume company" }));
+    expect((await screen.findByRole("alert")).textContent).not.toBe("");
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
   it("the Team control posts paused:false to the company's pause endpoint", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ paused: false }), { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
