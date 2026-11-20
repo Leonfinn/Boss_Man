@@ -98,6 +98,9 @@ describe("feature roadmap", () => {
     const tk = await c.ticket({ dueDate: "2026-02-28" });
     expect(tk.dueDate).toBe("2026-02-28");
     await refused(c.req("PATCH", `/api/tickets/${tk.id}`, { dueDate: "2026-06-31" }));
+    const leap = await c.req("PATCH", `/api/tickets/${tk.id}`, { dueDate: "2028-02-29" });
+    expect(leap.statusCode).toBe(200);
+    expect(leap.json().dueDate).toBe("2028-02-29");
 
     // A wrong shape still gets the format hint, not the "doesn't exist" one.
     const shape = await c.req("PATCH", `/api/tickets/${tk.id}`, { dueDate: "30/02/2026" });
