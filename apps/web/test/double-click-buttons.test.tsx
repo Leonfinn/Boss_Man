@@ -90,6 +90,54 @@ describe("Features: Add criterion and Add area (BOS-2065)", () => {
   });
 });
 
+describe("Feature page: Priority 1 switch (BOS-2091)", () => {
+  const row = { id: "f1", companyId: "c1", areaId: null, parentId: null, title: "Dark mode", description: null, status: "in_progress", effort: null, driverScores: {}, milestoneId: null, portalVisible: false, keepOffPortal: false, keepOffReason: null, publicSummary: null, publicTitle: null, showPublicly: false, priorityOne: false, createdAt: "2026-10-19T09:00:00Z", updatedAt: "2026-10-19T09:00:00Z", releasedAt: null, demand: 0, insightCount: 0, customerCount: 0, value: 0, demandPart: 0, priority: 0, tickets: { total: 0, done: 0, items: [] }, portal: { onPortal: false, reason: null } };
+  const tk = (id: string, state: string) => ({ id, title: `Task ${id}`, state, outcome: null, assignee: null });
+  function setup() {
+    const gate = hold();
+    const puts: Array<{ url: string; body: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          puts.push({ url, body: String(init.body) });
+          return gate.pending;
+        }
+        if (url.endsWith("/features")) return json({ settings: { demandWeight: 1, ceoTriage: false }, drivers: [], maxDemand: 0, features: [row] });
+        if (url.startsWith("/api/features/")) return json({ feature: row, drivers: [], settings: { demandWeight: 1 }, maxDemand: 0, subfeatures: [], insights: [], tickets: [tk("a", "in_progress"), tk("b", "ready"), tk("c", "done")] });
+        if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: true, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
+        return json([]);
+      }),
+    );
+    const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [], projects: [] };
+    render(<Features companies={[company]} companyId="c1" featureId="f1" go={() => {}} />);
+    return { gate, puts };
+  }
+
+  it("asks first with the open-task count, and Cancel sends nothing", async () => {
+    const { puts } = setup();
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    fireEvent.click(await screen.findByLabelText(/^Priority 1:/));
+    expect(confirm).toHaveBeenCalledWith('Put all 2 open tasks of "Dark mode" first? They go ahead of other work and past the usage-limit hold.');
+    expect(puts).toHaveLength(0);
+  });
+
+  it("on confirm sends once, is disabled while it runs, then says how many tasks moved", async () => {
+    const { gate, puts } = setup();
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const box = (await screen.findByLabelText(/^Priority 1:/)) as HTMLInputElement;
+    fireEvent.click(box);
+    fireEvent.click(box);
+    await waitFor(() => expect(box.disabled).toBe(true));
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.body).toBe(JSON.stringify({ on: true }));
+    await act(async () => gate.release(json({ ok: true, priorityOne: true, tickets: 2 })));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Priority 1 on: 2 tasks marked to go first."));
+    expect(box.disabled).toBe(false);
+  });
+});
+
 describe("Sidebar: new company", () => {
   const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [], projects: [] };
   const show = (onCreateCompany: (n: string) => Promise<void>) => {
