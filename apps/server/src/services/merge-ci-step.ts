@@ -1,0 +1,451 @@
+// The GitHub CI step of one merge attempt (BOS-1903, move 3 of the BOS-1886 split): region I of landOnce, moved out of
+// merge-attempt.ts unchanged. landOnce calls it once, straight after its setup, with the service as `this`, the shared
+// context as `ctx` and the attempt's setup values as `a`. It sets `a.ci` and returns the CI wait's closures, which
+// landOnce and the merge rounds (merge-rounds.ts) use.
+import { and, eq, gt, ne } from "drizzle-orm";
+import { ticketRef, type MergeResult, type VerifyResult, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { agents, checkJobs, checkResults, companies, projects, ticketMessages, tickets } from "../db/schema.js";
+import { RunnerGone } from "./runners.js";
+import { DIFFERENT_APPROACH } from "./loop-guards.js";
+import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop, type FlakeAnswer } from "./ci-publish.js";
+import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts } from "./ci-flake.js";
+import type { CiStatus, GitHostConfig } from "./git-hosts.js";
+import { CHECK_AGAIN } from "./decisions.js";
+import { record } from "./activity.js";
+import { lineEvent } from "./merge-line.js";
+import { touchesScope } from "./review-holds.js";
+import { knownRedOnly, mainCiFailures, namedFiles, type BranchFailure, type OpenFailure } from "./main-ci.js";
+import { CHECK_JOB_POLL_MS, checkNeverFinished, checkVerdict, checkWaitedForLock, ciBounceRecord, FLAKE_RERUN_MAX_MS, HANDED_OVER_WHY, INFRA_CAUSE_TEXT, INFRA_RETRY_ATTEMPTS, INFRA_RETRY_BASE_MS, MERGE_WAIT_MS, ReviewError, type InfraCause, type LandOnceResult } from "./review-common.js";
+import type { ReviewCtx } from "./review-ctx.js";
+import type { ReviewSelf } from "./review.js";
+import type { MergeAttempt } from "./merge-attempt.js";
+
+export type Early = { status: "early"; result: LandOnceResult };
+
+export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) {
+  const { db, deps, gate, queue, scanListWarning, phases, ciWaits, ciPassedTrees, ciCardWaiting, ciTiming, prTarget, approvedAndWaiting, tellCeo, checkStuck, waitForCi, holdForWaits } = ctx;
+  const { t, ticketId, opts, runner, repoUrl, defaultBranch, verifyCommand, landing, gitHost, gitApiBase, touch, ask, sendBack, keepBounce, whileActive, readDiff, changed, checks, named, kindOf, timedCheck, checkFailed, checkPrio, serverChecks, checkMerged } = a;
+  // BOS-1070: with the owner's switch on, a GitHub project's merge also waits for GitHub CI on the exact merge commit.
+  // The gate pushes that commit to bossman-ci/<ticket>, reads its Actions runs (BOS-1630), and merges only on green.
+  // Everything here sits behind the switch: off, the flow below is unchanged.
+  let ci: { cfg: GitHostConfig; token: string } | null = null;
+  if (!opts?.skipChecks && landing !== "pull_request" && gitHost === "github" && deps.gitHosts && (await waitForCi())) {
+    if (!deps.runners.can(runner.id, "ci-publish")) {
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: "Waiting for GitHub CI is on, but this company's runner is too old to push the merge for CI, so this merge goes ahead on Boss Man's own check only. Update the runners: Settings → Server and runner → Updates → Build and update runners." });
+    } else {
+      ci = await prTarget(t.companyId, repoUrl, gitHost, gitApiBase).catch((err: Error) => {
+        throw new ReviewError(409, `Waiting for GitHub CI is on, but Boss Man can't read GitHub for this project: ${err.message}`);
+      });
+    }
+  }
+  // The push and the read live in ci-publish.ts (BOS-1664), where the pre-flight run reuses them.
+  const publishAndWait = (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> => {
+    // BOS-1871: the wait's start and end in the merge-line records, so a CI wait can be told from a stall afterwards.
+    // The start row is written once, on the first wait report; the end row (awaited after it) says how the wait ended.
+    let ciWaitFrom: number | null = null;
+    let ciWaitStartRow: Promise<void> = Promise.resolve();
+    const endCiWait = async (outcome: string) => {
+      if (ciWaitFrom === null) return;
+      const waitedMs = Math.max(0, Date.now() - ciWaitFrom);
+      ciWaitFrom = null;
+      await ciWaitStartRow;
+      await lineEvent(db, t, { event: "ci_wait_ended", commit: prep.commit, outcome, waitedMs });
+    };
+    return ciPublishAndWait(
+      {
+        hosts: deps.gitHosts!,
+        target: ci!,
+        timing: ciTiming,
+        passedTrees: ciPassedTrees,
+        // BOS-1664: the runner scans before this push with the owner's list too (a runner without "ci-publish-scan" drops the field).
+        publish: async (commit) => {
+          const scanList = await scanListWarning.forScan();
+          ciPushed = true;
+          return ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit, ...(scanList ? { scanList } : {}) }), MERGE_WAIT_MS);
+        },
+        announce: async (branch) => {
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
+        },
+        announceRerun: async (commit) => {
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${commit.slice(0, 12)} and no newer run replaced it, so Boss Man asked GitHub to run it once more. Nothing to do.` });
+        },
+        onWait: (s) => {
+          if (s && ciWaitFrom === null) {
+            ciWaitFrom = s.since;
+            ciWaitStartRow = lineEvent(db, t, { event: "ci_wait_started", commit: prep.commit }, new Date(s.since));
+          }
+          if (s) ciWaits.set(ticketId, s);
+          else ciWaits.delete(ticketId);
+        },
+        touch,
+        // BOS-1733: only in server check-queue mode, where the gate can queue a job on the exact merge commit.
+        ...(serverChecks && deps.cancelCheck ? { flakeRetry: (s: CiStatus, st: CiStop) => flakeRetry(prep, s, st), announceFlakeRetry: (files: string[], accepted: boolean) => announceFlakeRetry(prep, files, accepted) } : {}),
+      },
+      prep,
+      stop,
+    ).then(
+      async (got) => {
+        // R40: a failure that is only main's known red becomes known_red, which lets the gate's own check finish.
+        const red = got.kind === "failed" && !got.status.billing ? await knownRed(got.status) : null;
+        const o: CiOutcome = red ? { kind: "known_red", ...red } : got;
+        await endCiWait(o.kind);
+        // BOS-1749: the branch has done its job on every ending except a pass (the merge deletes it after landing) and a
+        // replacement by a newer push (that push owns the branch now). Best effort; the periodic sweep catches a miss.
+        if (o.kind !== "passed" && o.kind !== "superseded") await dropCiBranch();
+        return o;
+      },
+      async (err: Error) => {
+        await endCiWait("error");
+        await dropCiBranch();
+        throw err instanceof CiPublishError ? new ReviewError(409, err.message) : err;
+      },
+    );
+  };
+  let ciPushed = false; // a refusal before the push leaves nothing to delete
+  const dropCiBranch = () => !ciPushed ? Promise.resolve() : ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "unpublish", phase: "unpublish" }), MERGE_WAIT_MS).then(() => undefined, () => undefined);
+  // Other tickets in this project that waited on an open CI card: CI can be read again, so start them.
+  const startCiWaiters = () => {
+    const held = ciCardWaiting.get(t.projectId);
+    if (!held) return;
+    ciCardWaiting.delete(t.projectId);
+    for (const id of held) {
+      if (id === ticketId) continue;
+      void approvedAndWaiting(id)
+        .then((ok) => (ok ? this.startLanding(id, "Boss Man (GitHub CI can be read again)") : undefined))
+        .catch(() => undefined);
+    }
+  };
+  // One owner card per project for what only the owner can fix (the token, the GitHub bill); other tickets wait on it.
+  const ciCard = async (why: "access" | "billing" | "error", message: string): Promise<LandOnceResult> => {
+    const switchOff = `To stop waiting for GitHub CI instead, turn off "Wait for GitHub CI" in Settings → Server and runner → Checks, then choose "${CHECK_AGAIN}".`;
+    const question =
+      why === "access"
+        ? `GitHub CI: the company's git token can't read GitHub Actions runs (${message}), so Boss Man can't tell whether CI passed. Nothing in this project merges until it can. To fix it on GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens → open the token Boss Man uses → Repository permissions → Actions: Read-only (Metadata: Read-only is set with it) → Update token. Then choose "${CHECK_AGAIN}". ${switchOff}`
+        : why === "billing"
+          ? `GitHub CI didn't run for "${t.title}": GitHub wouldn't start its jobs because of the account's spending limit or a failed payment. This isn't a problem with the agent's work. To fix it on GitHub: Settings → Billing and licensing → check the payment method and the Actions budget. Then choose "${CHECK_AGAIN}". ${switchOff}`
+          : `GitHub CI: Boss Man couldn't read the CI result for "${t.title}" from GitHub after several tries (${message}), so nothing was merged. If GitHub is having trouble (githubstatus.com), wait for it to recover, then choose "${CHECK_AGAIN}". ${switchOff}`;
+    // BOS-1873: the token and the bill are the owner's; a read that kept failing (a GitHub outage) the CEO retries first.
+    const raised = await checkStuck(t, "GitHub CI", why === "access" ? "couldn't read GitHub Actions runs" : why === "billing" ? "wasn't started by GitHub (billing)" : "couldn't be read from GitHub", message, { question, tier: why === "error" ? "ceo" : "owner", dedupeKey: `ci-${why}:${t.projectId}` });
+    if (raised === null) {
+      const held = ciCardWaiting.get(t.projectId) ?? new Set<string>();
+      held.add(ticketId);
+      ciCardWaiting.set(t.projectId, held);
+    }
+    await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub Actions runs" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : why === "error" ? "The card is with the CEO first." : "It's in the owner's Decisions."}` });
+    return { outcome: "check_stuck", delivered: null, detail: { ci: why, message } };
+  };
+  // BOS-1733 (CI fix 2): GitHub failed in named tests this branch doesn't change. The decision table (ci-flake.ts) says
+  // whether to try; then the gate runs those tests once more on the exact merge commit, as a merge-kind job on the same
+  // commit and tree (so every reader of the ticket's merge jobs treats it as part of this merge: restart pick-up, the
+  // branch-moved cancel, its place in line). Failing there means the failure is real; passing buys one GitHub retry.
+  /**
+   * R40 (BOS-1685): the failure is main's known GitHub-only red, not this branch's. All of: the gate's own check of
+   * main isn't red (so the red is GitHub-only); the red's ticket is open and its scope known; this branch's files don't
+   * touch that scope (nor .github/ or a root file); and every failed job matches the red exactly (knownRedOnly). The
+   * last condition, the gate's own check passing, holds because a known_red outcome doesn't stop that check (ciStops).
+   * Any doubt (a read fails, a diff unknown) is null: the usual path.
+   */
+  const knownRed = async (s: CiStatus): Promise<{ jobs: string[]; refs: string[] } | null> => {
+    try {
+      const [proj] = await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, t.projectId));
+      if (!proj || proj.s === "red") return null;
+      const open = await mainCiFailures(db, t.projectId);
+      if (!open.length || !s.failed.length) return null;
+      const mine = changed?.files.length ? changed.files.map((f) => f.path) : null;
+      if (!mine) return null;
+      const reds: Array<OpenFailure & { ref: string }> = [];
+      for (const r of open) {
+        if (!r.scope?.length || touchesScope(mine, r.scope)) continue;
+        const [rt] = await db.select({ state: tickets.systemState, number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, r.ticketId));
+        if (!rt || rt.state === "done") continue;
+        reds.push({ ...r, ref: ticketRef(rt.prefix, rt.number) ?? r.ticketId });
+      }
+      if (!reds.length) return null;
+      const found = await deps.gitHosts!.failures(ci!.cfg, ci!.token, s.failed).catch(() => []);
+      const failed: BranchFailure[] = [];
+      for (const run of s.failed) {
+        const f = found.find((x) => x.run === run);
+        const log = run.id ? await deps.gitHosts!.jobLogBlock(ci!.cfg, ci!.token, run.id).catch(() => [] as string[]) : [];
+        const files = new Set([...(f?.paths ?? []).filter(Boolean), ...namedFiles([...(f?.lines ?? []), ...log])]);
+        failed.push({ job: run.name, ...(run.step ? { step: run.step } : {}), files: [...files] });
+      }
+      const m = knownRedOnly(failed, reds);
+      return m ? { jobs: s.failed.map((r) => r.name), refs: [...new Set(m.map((r) => (r as OpenFailure & { ref: string }).ref))] } : null;
+    } catch {
+      return null;
+    }
+  };
+  // not state: one landing attempt's flake counts, dropped when it returns.
+  let flakeCounts = new Map<string, number>();
+  const flakeRetry = async (prep: { commit: string; tree: string }, s: CiStatus, stop: CiStop): Promise<FlakeAnswer> => {
+    // BOS-1752: a copy that handed over queues no re-run and asks GitHub for no retry; ciVerdict then ends it quietly.
+    if (deps.isLeader && !deps.isLeader()) return { retry: false, why: HANDED_OVER_WHY };
+    // R40: main's known red would pass a re-run at the gate (GitHub-only) and fail GitHub's retry: neither is worth it.
+    if (await knownRed(s)) return { retry: false, why: "it fails the same way on main" };
+    const found = await deps.gitHosts!.failures(ci!.cfg, ci!.token, s.failed).catch(() => []);
+    const named = namedTestFiles(s.failed.map((run) => ({ job: run.name, paths: found.find((f) => f.run === run)?.paths ?? null })));
+    const diff = await readDiff().catch(() => null);
+    const [proj] = await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, t.projectId));
+    const since = new Date(Date.now() - RETRY_WINDOW_MS);
+    const rows = await db.select({ sha: checkResults.sha, detail: checkResults.detail }).from(checkResults).where(and(eq(checkResults.companyId, t.companyId), eq(checkResults.kind, FLAKE_RETRY_KIND), gt(checkResults.at, since)));
+    flakeCounts = retryCounts(rows.map((r) => r.detail));
+    const d = flakeDecision({
+      billing: !!s.billing || found.some((f) => f.billing),
+      named,
+      changed: diff ? diff.files.map((f) => f.path) : null,
+      mainRed: proj?.s === "red",
+      retriedThisCommit: rows.some((r) => r.sha === prep.commit),
+      recent: flakeCounts,
+    });
+    if (d.act === "bounce") return { retry: false, why: d.why };
+    const files = d.files;
+    await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI failed in ${files.join(", ")}, which this branch doesn't change. Boss Man is running ${files.length > 1 ? "them" : "it"} once more on the same merge commit (${prep.commit.slice(0, 12)}) before deciding. Nothing to do.` });
+    const { job } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "quick", commit: prep.commit, tree: prep.tree, command: gateRerunCommand(files), priority: checkPrio, requestedBy: null });
+    const deadline = Date.now() + FLAKE_RERUN_MAX_MS;
+    let cur = job;
+    while (cur.state === "queued" || cur.state === "running") {
+      // BOS-1752: handed over: leave the re-run job alone (the server now in charge reuses it for the same commit and tree).
+      if (deps.isLeader && !deps.isLeader()) return { retry: false, why: HANDED_OVER_WHY };
+      // The gate's own check failed meanwhile: its send-back is the answer, and the re-run's slot is given back.
+      if (stop.stopped || Date.now() > deadline) {
+        await deps.cancelCheck?.(cur.id, stop.stopped ? "Boss Man's own merge check failed first, so the re-run of GitHub's failed tests was stopped." : "The re-run of GitHub's failed tests took too long, so it was stopped.").catch(() => undefined);
+        return { retry: false, why: stop.stopped ? "Boss Man's own merge check failed first" : `the re-run at Boss Man's gate didn't finish within ${Math.round(FLAKE_RERUN_MAX_MS / 60_000)} minutes` };
+      }
+      await touch();
+      await new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
+      const [row] = await db.select().from(checkJobs).where(eq(checkJobs.id, cur.id));
+      if (!row) return { retry: false, why: "the re-run at Boss Man's gate disappeared from the check queue" };
+      cur = row;
+    }
+    if (cur.state === "passed") return { retry: true, files };
+    const tail = cur.logTail ?? "";
+    if (cur.state === "failed" && cur.exitCode !== CANT_RERUN_EXIT && !/timed out/i.test(cur.reason ?? "")) {
+      return { retry: false, why: `${files.join(", ")} failed again when Boss Man re-ran ${files.length > 1 ? "them" : "it"} on the same merge commit, so the failure is real`, gateOutput: tail.slice(-3000) };
+    }
+    const said = [...tail.matchAll(/^boss-man re-run: (.+)$/gm)].pop()?.[1];
+    return { retry: false, why: `Boss Man couldn't re-run ${files.length > 1 ? "them" : "it"} at its gate (${(cur.state === "failed" && cur.exitCode === CANT_RERUN_EXIT && said ? said : cur.reason ?? cur.state).slice(0, 200)})` };
+  };
+  // The one retry is recorded only once GitHub accepted it: the record is what the per-commit and per-week limits count.
+  const announceFlakeRetry = async (prep: { commit: string }, files: string[], accepted: boolean) => {
+    if (!accepted) {
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"}, but GitHub refused to re-run the failed jobs (the git token needs Actions: Read and write), so the ticket goes back as before.` });
+      return;
+    }
+    await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: FLAKE_RETRY_KIND, passed: true, detail: files.join("\n") });
+    const counts = files.map((f) => `${f}: retry ${(flakeCounts.get(f) ?? 0) + 1} of ${RETRIES_PER_WEEK} this week`).join("; ");
+    await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"} on the same merge commit, so Boss Man asked GitHub to re-run the failed jobs once (${counts}). Nothing to do.` });
+  };
+  // After a retried run passed: one "Flaky on GitHub: <file>" ticket per file for the CEO, reused while it is open.
+  const reportFlaky = async (files: string[], url: string | undefined, commit: string) => {
+    const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+    const ref = ticketRef(co?.prefix ?? null, t.number) ?? `"${t.title}"`;
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+    for (const file of files) {
+      const n = (flakeCounts.get(file) ?? 0) + 1;
+      const line = `GitHub CI failed in \`${file}\` on the merge of ${ref} ("${t.title}", commit ${commit.slice(0, 12)}${url ? `, ${url}` : ""}). It passed when Boss Man re-ran it on the same commit, and again on GitHub's one retry, so ${ref} merged. Retry ${n} of ${RETRIES_PER_WEEK} this week for this file; after ${RETRIES_PER_WEEK}, a failure in it sends the ticket back until it is fixed.`;
+      const title = `Flaky on GitHub: ${file}`.slice(0, 200);
+      const [open] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, t.companyId), eq(tickets.title, title), ne(tickets.systemState, "done"))).limit(1);
+      if (open) {
+        await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId: open.id, author: "system", text: line });
+        continue;
+      }
+      const made = await deps.work.createTicket(t.projectId, {
+        title,
+        body: [`**Why:** ${line}`, "", `**Do:** find why \`${file}\` fails on GitHub's runners and not at Boss Man's gate, and fix the test (CLAUDE.md: "Writing tests: they must pass on GitHub's runners too"). Each further one-off failure is added here.`, "", "Opened by Boss Man's merge gate after a recorded GitHub retry (BOS-1733)."].join("\n"),
+        risk: "medium",
+        state: "ready",
+        overLimit: true,
+        assigneeAgentId: ceo?.id ?? null,
+        createdByAgentId: null,
+      });
+      await tellCeo(made, "flaky test on GitHub", `${line} Boss Man opened "${made.title}" for it. Assign it to whoever should fix the test.`).catch(() => undefined);
+    }
+  };
+  // What a CI wait means for this attempt: null carries on to the merge, anything else ends it.
+  const ciVerdict = async (o: CiOutcome, prep: { commit: string; tree: string }): Promise<LandOnceResult | null> => {
+    // BOS-1752: a copy that handed over acts on no CI result: the server now in charge published its own merge commit and
+    // reads CI on that. Before this, a standby sent tickets back, raised cards or retried on a run the new leader replaced.
+    if (deps.isLeader && !deps.isLeader()) return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while GitHub CI ran; the server now in charge carries on with the merge." } };
+    switch (o.kind) {
+      case "stopped":
+        return null;
+      case "passed":
+        if (!o.reused) {
+          ciPassedTrees.add(prep.tree);
+          if (ciPassedTrees.size > 500) ciPassedTrees.delete(ciPassedTrees.values().next().value!);
+          await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: true, detail: null });
+        }
+        if (o.flaky?.length) {
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI passed on its one retry, so ${o.flaky.join(", ")} failed only once; Boss Man told the CEO about the flaky test. Nothing to do.` });
+          await reportFlaky(o.flaky, o.retryRunUrl, prep.commit).catch(() => undefined);
+        }
+        startCiWaiters();
+        return null;
+      case "known_red":
+        // R40: no "ci" pass row on purpose: this tree never passed GitHub CI, so no later run may reuse it as green.
+        // The gate's own check still decides: alongsideCi waits for it (known_red isn't in ciStops), ciThenChecked runs it next.
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI failed only in ${o.jobs.join(", ")}, which also fails on main (${o.refs.join(", ")}) and which this branch doesn't touch, so it merges on Boss Man's own check. Nothing to do.` });
+        startCiWaiters();
+        return null;
+      case "no_workflows":
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: "The merged result has no GitHub workflows, so there is no GitHub CI to wait for; it merges on Boss Man's own check." });
+        return null;
+      case "none":
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI didn't start for this push within ${Math.round(ciTiming.graceMs / 60_000)} minutes (the repo's workflow may not run on bossman-ci/** branches), so it merges on Boss Man's own check only.` });
+        startCiWaiters();
+        return null;
+      case "timeout": {
+        const mins = Math.round(ciTiming.ceilingMs / 60_000);
+        await checkStuck(t, "GitHub CI", `was still running after ${mins} minutes${o.waiting.length ? ` (${o.waiting.join(", ")})` : ""}`, "");
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub CI was still running after ${mins} minutes; the merge card is with the CEO first.` });
+        return { outcome: "check_stuck", delivered: null, detail: { ci: "timeout", waiting: o.waiting } };
+      }
+      case "superseded":
+        // A newer push to the CI branch replaced this run: not a failure. Start the attempt again on the current main.
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${prep.commit.slice(0, 12)} because a newer run on the same branch (${o.newerSha.slice(0, 12)}) replaced it. No test failed; the merge starts again. Nothing to do.` });
+        return { outcome: "lock_wait", delivered: null, detail: { status: "ci_superseded", newerSha: o.newerSha } };
+      case "cancelled": {
+        const what = o.runs.join(", ") || "the CI run";
+        // BOS-1873: owner-first: re-running the run is done on GitHub, which only the owner can reach.
+        await checkStuck(t, "GitHub CI", `was cancelled on GitHub (${what})${o.rerunTried ? ", and cancelled again after one re-run" : "; Boss Man's token couldn't re-run it (it needs Actions: Read and write)"}. No test failed. Open the run on GitHub and re-run it, then choose "${CHECK_AGAIN}"`, "", { tier: "owner" });
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub cancelled the run (${what}); no test failed. It's in your Decisions.` });
+        return { outcome: "check_stuck", delivered: null, detail: { ci: "cancelled", runs: o.runs } };
+      }
+      case "refused":
+        return ciCard("access", o.message);
+      case "error":
+        return ciCard("error", o.message);
+      case "failed": {
+        startCiWaiters();
+        const found = await deps.gitHosts!.failures(ci!.cfg, ci!.token, o.status.failed).catch(() => []);
+        if (o.status.billing || found.some((f) => f.billing)) return ciCard("billing", o.status.failed.map((r) => r.name).join(", ") || "jobs not started");
+        const jobs = o.status.failed.map((r) => r.name);
+        const listed = found.length ? found : o.status.failed.map((run) => ({ run, lines: [] as string[] }));
+        // The agent can't read GitHub's logs and never holds the token, so the server reads each failed job's log (BOS-1667).
+        const logs = new Map<number, string[]>();
+        for (const f of listed.slice(0, 5)) if (f.run.id) logs.set(f.run.id, await deps.gitHosts!.jobLogBlock(ci!.cfg, ci!.token, f.run.id));
+        const body = listed.length
+          ? listed
+              .map((f) => {
+                const log = logs.get(f.run.id);
+                return `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}${log ? `\n  Log lines (secrets redacted):\n${log.map((l) => `  > ${l}`).join("\n")}` : ""}`;
+              })
+              .join("\n")
+          : "- the workflow failed before any job ran; open the commit's checks on GitHub";
+        // As for the gate's own check (checkFailed, BOS-1173): a merge-check fix marked, or a waits-on link added, while
+        // CI ran means the failure is main's until that fix is in force (BOS-1643). The throw ends the attempt held, the
+        // way checkFailed's does: ciVerdict is awaited inside alongsideCi / ciThenChecked, so it reaches the landing.
+        const waiting = await holdForWaits(ticketId);
+        if (waiting) throw waiting;
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: false, detail: (jobs.join(", ") || "workflow failed").slice(0, 500) });
+        await keepBounce(ciBounceRecord({ commit: prep.commit, target: defaultBranch, body }));
+        const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: body, what: "GitHub CI" });
+        // BOS-1733: what the gate tried before sending it back.
+        const tried = o.retried
+          ? "\n\nIt failed on GitHub twice: once, then again after Boss Man re-ran the failed jobs, so it isn't a one-off."
+          : o.why
+            ? `\n\nBoss Man didn't ask GitHub for a retry: ${o.why}.${o.gateOutput ? `\n\nBoss Man's re-run on the merge commit, last output:\n${o.gateOutput}` : ""}`
+            : "";
+        const delivered = await sendBack(
+          `The review was approved, but GitHub CI failed on the merge of your branch with ${defaultBranch} (commit ${prep.commit.slice(0, 12)}), so it can't be merged yet. Failed:\n${body}${tried}\n\nFix it on your branch (merge origin/${defaultBranch} in if the failure comes from the two together), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`,
+          "ci failed",
+          `GitHub CI failed on commit ${prep.commit.slice(0, 12)} (${jobs.join(", ") || "workflow failed before any job ran"})`,
+        );
+        return { outcome: "verify_failed", delivered, detail: { ci: "failed", jobs } };
+      }
+    }
+  };
+  // The gate's own check and the CI wait side by side. Whichever ends the attempt first (a failure) stops the other;
+  // its later result is dropped, so the ticket is never sent back twice.
+  const alongsideCi = async <O extends object>(prep: { commit: string; tree: string; targetSha: string }, own: (stop: CiStop) => Promise<O | null>): Promise<O | Early | null> => {
+    if (!ci) return own({ stopped: false });
+    const stop: CiStop = { stopped: false };
+    const ownP = own(stop).then(
+      (r) => {
+        if (r) stop.stopped = true;
+        return r;
+      },
+      (e: unknown) => {
+        // The gate's own check threw (the runner went away): stop the CI poll too, or it holds this landing for up to
+        // the CI ceiling before the error reaches the retry.
+        stop.stopped = true;
+        throw e;
+      },
+    );
+    const ciP = publishAndWait(prep, stop).then((o) => {
+      if (ciStops(o)) stop.stopped = true;
+      return o;
+    });
+    const first = await new Promise<"both" | "ci">((resolve) => {
+      let n = 0;
+      const one = () => void (++n === 2 && resolve("both"));
+      ownP.then(one, () => {
+        ciP.catch(() => undefined);
+        resolve("both");
+      });
+      ciP.then((o) => (ciStops(o) ? resolve("ci") : one()), one);
+    });
+    if (first === "ci") {
+      ownP.catch(() => undefined);
+      const v = await ciVerdict(await ciP, prep);
+      return v ? { status: "early", result: v } : null;
+    }
+    const r = await ownP;
+    if (r) {
+      // BOS-1820: a refreshed merge publishes a new commit to the same CI branch next. Wait for the old wait to end (it
+      // sees the stop and deletes the branch) so that delete can't land after the new push.
+      if ((r as { status?: string }).status === "refreshed") await ciP.catch(() => undefined);
+      else ciP.catch(() => undefined);
+      return r;
+    }
+    const v = await ciVerdict(await ciP, prep);
+    return v ? { status: "early", result: v } : null;
+  };
+
+  // The project's checks on the branch, through the gate (legacy mode). Without CI they run here, before the merge, as
+  // always; with CI they run inside the split merge below, beside the CI wait.
+  const legacyChecks = async (stop: CiStop): Promise<LandOnceResult | null> => {
+  for (const command of checkMerged || serverChecks ? [] : checks) {
+    await touch();
+    // Through the gate: at most N checks run at once. A runner that doesn't answer counts as an infra failure too.
+    const runCheck = (alone: boolean) =>
+      whileActive(() => {
+        phases.set(ticketId, "queued");
+        return timedCheck(named(command), "gate", (w) => gate.run(checkPrio, alone, w), checkVerdict, () => {
+          phases.set(ticketId, "checking");
+          return (async () => {
+            const scanList = await scanListWarning.forScan();
+            return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command, ...(scanList ? { scanList } : {}) }), VERIFY_ASK_TIMEOUT_MS);
+          })().catch((err: Error): VerifyResult & { noAnswer: true } => {
+            // The runner went away mid-check: land() runs the merge again once it is back, without using the check retries.
+            if (err instanceof RunnerGone) throw err;
+            return { ok: false, exitCode: null, timedOut: false, output: err.message, ms: 0, noAnswer: true };
+          });
+        });
+      });
+    let v = await runCheck(false);
+    // CI failed while this ran (BOS-1070): CI's send-back is the one the agent gets.
+    if (stop.stopped) return null;
+    // Killed, out of memory, timed out or no answer: the host was cut off, not the work. Run it again by itself,
+    // keeping the ticket's place, before any card appears (BOS-446). The lock wait has its own retries in land().
+    for (let retry = 1; !v.ok && !checkWaitedForLock(v); retry++) {
+      const why: InfraCause | null = (v as { noAnswer?: boolean }).noAnswer ? "no_answer" : checkNeverFinished(v);
+      if (!why || retry > INFRA_RETRY_ATTEMPTS) break;
+      const pause = INFRA_RETRY_BASE_MS * 2 ** (retry - 1);
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check ${INFRA_CAUSE_TEXT[why](v.ms)} before it finished; running it again (try ${retry} of ${INFRA_RETRY_ATTEMPTS}, in ${Math.max(1, Math.round(pause / 1000))}s${retry === INFRA_RETRY_ATTEMPTS ? ", on its own" : ""}). Nothing to do.` });
+      await whileActive(() => new Promise((resolve) => setTimeout(resolve, pause)));
+      const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+      if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge check waited, so it was not retried." } };
+      v = await runCheck(retry === INFRA_RETRY_ATTEMPTS);
+      if (stop.stopped) return null;
+    }
+    await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(command), passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
+    if (!v.ok) return checkFailed(named(command), v);
+  }
+  return null;
+  };
+  a.ci = ci;
+  return { publishAndWait, ciVerdict, alongsideCi, legacyChecks };
+}
+
+export type CiStepParts = Awaited<ReturnType<typeof ciStep>>;
