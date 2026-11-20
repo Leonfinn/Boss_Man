@@ -170,16 +170,16 @@ export const OWNER_CONTROLS = {
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
-  "Team and CEO": ["Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Save", "Run a retro now"],
+  "Team and CEO": ["Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
   Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
-  Watchdog: ["Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
+  Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
   Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
-  Secrets: ["Revoke", "Rotate", "Delete", "Save", "Check with Claude", "Check", "Remove"],
+  Secrets: ["Revoke", "Rotate", "Delete", "Check with Claude", "Check", "Remove"],
   Workflow: [],
 } as const satisfies Record<string, readonly string[]>;
 
