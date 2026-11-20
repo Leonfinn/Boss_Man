@@ -472,6 +472,8 @@ export function deploysService(
         .insert(deployTargets)
         .values({ companyId, name: input.name, kind: input.kind, endpoint: input.endpoint.trim(), isProduction: input.isProduction ?? false, rules })
         .returning();
+      // BOS-2100: the owner can see when a target appeared. Name only; the endpoint can hold a user name, so it stays out.
+      await record(db, { companyId, kind: "settings", summary: `Owner added deploy target ${t!.name}` });
       return t!;
     },
 
@@ -493,11 +495,21 @@ export function deploysService(
         })
         .where(eq(deployTargets.id, id))
         .returning();
+      // BOS-2100: name each of the three settings that really changed. Values are never written, only the fact (an
+      // endpoint can carry a user name); the target's secrets are not part of this row.
+      const approval = (r: unknown) => !!(r as TargetRules | null)?.requiresApproval;
+      const changed: string[] = [];
+      if (row!.isProduction !== t.isProduction) changed.push(`production turned ${row!.isProduction ? "on" : "off"}`);
+      if (approval(row!.rules) !== approval(t.rules)) changed.push(`approval needed turned ${approval(row!.rules) ? "on" : "off"}`);
+      if (row!.endpoint !== t.endpoint) changed.push("endpoint changed");
+      if (row!.name !== t.name) changed.push(`renamed (was ${t.name})`);
+      if (changed.length) await record(db, { companyId: t.companyId, kind: "settings", summary: `Owner changed deploy target ${row!.name}: ${changed.join(", ")}` });
       return row!;
     },
 
     async deleteTarget(id: string) {
-      const rows = await db.delete(deployTargets).where(eq(deployTargets.id, id)).returning({ id: deployTargets.id });
+      const rows = await db.delete(deployTargets).where(eq(deployTargets.id, id)).returning({ id: deployTargets.id, companyId: deployTargets.companyId, name: deployTargets.name });
+      if (rows[0]) await record(db, { companyId: rows[0].companyId, kind: "settings", summary: `Owner removed deploy target ${rows[0].name}` });
       return rows.length > 0;
     },
 

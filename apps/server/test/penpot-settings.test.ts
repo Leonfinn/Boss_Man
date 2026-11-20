@@ -227,6 +227,15 @@ describe("Penpot in Settings (BOS-1582)", () => {
     expect((await c.noCookie("PUT", url)).statusCode).toBe(401);
   });
 
+  it("answers 404 when Penpot is removed from a company that does not exist, and revokes nothing (BOS-2100)", async () => {
+    const c = (ctx = await setup());
+    await c.req("PUT", `/api/companies/${c.co.id}/penpot`, { url: "http://192.168.1.50:9001", token: TOKEN, agentIds: [], exportAgentIds: [] });
+    const r = await c.req("DELETE", "/api/companies/00000000-0000-4000-8000-000000000000/penpot");
+    expect(r.statusCode).toBe(404);
+    expect(r.json()).toMatchObject({ error: "not_found" });
+    expect(((await c.req("GET", `/api/companies/${c.co.id}/penpot`)).json() as View).configured).toBe(true);
+  });
+
   it("removes only the export login when asked, keeping the rest", async () => {
     const c = (ctx = await setup());
     const url = `/api/companies/${c.co.id}/penpot`;
