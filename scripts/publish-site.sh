@@ -17,8 +17,9 @@
 #                       publish if a page lacks it. Empty: no statistics and a warning.
 #   CF_PAGES_PROJECT    the Cloudflare Pages project name. When it is empty, only the build runs and nothing is deployed.
 #   INDEXNOW_KEY        the key from Boss Man's Secrets screen. Empty: no key file is served and no notice is sent.
-#   INDEXNOW_ON_FAILURE a shell command to run after the notice fails twice (the publish step supplies it to raise a
-#                       CEO ticket; it gets a plain summary in INDEXNOW_FAILURE). Empty: the failure is only printed.
+#   INDEXNOW_ON_FAILURE a shell command to run after the notice fails twice (it gets a plain summary in
+#                       INDEXNOW_FAILURE). The publish step supplies scripts/request-ceo-ticket.sh to raise a CEO
+#                       ticket; set it to override, or to empty to only print the failure.
 #   DIST_TMP            where the build, the previous sitemap and the deploy log are kept; a fresh temp dir by default.
 #                       Must be writable and persist until the script ends (not a fixed /tmp path; mktemp is used).
 #   WRANGLER            the wrangler command, default "npx --yes wrangler@4".
@@ -69,5 +70,8 @@ $wrangler pages deploy "$dist" --project-name "$CF_PAGES_PROJECT" --branch "$bra
 # 4. Tell IndexNow about the changed pages. Never fails the publish: indexnow.mjs always exits 0, and the
 #    "|| true" is a second guard in case node itself cannot start.
 echo "publish-site: sending the IndexNow notice"
-SITE_URL="$site_url" DIST="$dist" node apps/site/scripts/indexnow.mjs --previous "$previous" || true
+# A notice that fails twice raises a CEO ticket (scripts/request-ceo-ticket.sh). An INDEXNOW_ON_FAILURE set in the
+# command replaces it; an empty one leaves the failure in the log only.
+if [ -n "${INDEXNOW_ON_FAILURE+set}" ]; then on_failure="$INDEXNOW_ON_FAILURE"; else on_failure="bash $(dirname "${BASH_SOURCE[0]}")/request-ceo-ticket.sh"; fi
+SITE_URL="$site_url" DIST="$dist" INDEXNOW_ON_FAILURE="$on_failure" node apps/site/scripts/indexnow.mjs --previous "$previous" || true
 echo "publish-site: done"

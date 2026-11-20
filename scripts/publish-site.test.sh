@@ -8,7 +8,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 # A tiny checkout with just what the script calls: a git HEAD and the two site scripts it runs.
 repo="$t/repo"; mkdir -p "$repo/scripts" "$repo/apps/site/scripts"
-cp "$here/publish-site.sh" "$repo/scripts/"
+cp "$here/publish-site.sh" "$here/request-ceo-ticket.sh" "$repo/scripts/"
 git init -q "$repo"; git -C "$repo" config user.email t@t; git -C "$repo" config user.name t
 touch "$repo/x"; git -C "$repo" add -A; git -C "$repo" commit -qm one
 s="$repo/scripts/publish-site.sh"
@@ -25,7 +25,12 @@ case "$script" in
   *indexnow.mjs)
     case "${1:-}" in
       --fetch-previous) echo '<urlset><url><loc>x/old</loc></url></urlset>' >"$2" ;;
-      --previous) [ -z "${INDEXNOW_FAIL:-}" ] || exit 0 ;; # indexnow.mjs always exits 0, even on failure
+      --previous)
+        # The publish step's INDEXNOW_ON_FAILURE must be set to the CEO-ticket hook (BOS-2070). Record it, then
+        # run it like indexnow.mjs does after a second failure when INDEXNOW_FAIL asks for one.
+        echo "on_failure=${INDEXNOW_ON_FAILURE:-}" >>"$FAKE_LOG"
+        [ -z "${INDEXNOW_FAIL:-}" ] || { INDEXNOW_FAILURE="IndexNow answered HTTP 403" "$INDEXNOW_ON_FAILURE"; }
+        exit 0 ;;
     esac ;;
 esac
 FAKE
@@ -43,8 +48,9 @@ run() { : >"$FAKE_LOG"; "$s" >"$t/out" 2>&1 || { cat "$t/out" >&2; return 1; }; 
 # 1. The happy path: build, fetch previous, deploy, notice — in that order, with the right values.
 CF_PAGES_PROJECT=site INDEXNOW_KEY=k12345678 WRANGLER=wrangler DIST_TMP="$t/run1" SITE_URL="https://example.test/" \
   run || fail "publish should succeed"
-order="$(sed -e 's/ .*//' "$FAKE_LOG" | tr '\n' ' ')"
+order="$(sed -e 's/ .*//' "$FAKE_LOG" | grep -v '^on_failure=' | tr '\n' ' ')"
 [[ "$order" == "node node wrangler node " ]] || fail "wrong call order: $order"
+grep -q '^on_failure=bash .*request-ceo-ticket.sh$' "$FAKE_LOG" || fail "the notice should raise a CEO ticket by default: $(grep on_failure "$FAKE_LOG")"
 grep -q "build.mjs" "$FAKE_LOG" || fail "no build step"
 grep -q "wrangler pages deploy .* --project-name site --branch main" "$FAKE_LOG" || fail "wrangler args wrong: $(grep wrangler "$FAKE_LOG")"
 grep -q -- "--fetch-previous .*previous-sitemap.xml" "$FAKE_LOG" || fail "previous sitemap not saved"
@@ -55,6 +61,8 @@ grep -q "SITE_URL=https://example.test$\|publish-site: building https://example.
 INDEXNOW_FAIL=1 CF_PAGES_PROJECT=site INDEXNOW_KEY=k12345678 WRANGLER=wrangler DIST_TMP="$t/run2" SITE_URL="https://example.test" \
   run || fail "a failed notice must not fail the publish"
 grep -q "Deployment complete" "$t/out" || fail "deploy output missing on notice failure"
+# ..., and when it really fails twice it runs the hook, which reaches for Boss Man (no token here: it says so, exits 0).
+grep -q "request-ceo-ticket:" "$t/out" || fail "the CEO-ticket hook did not run after a failed notice: $(cat "$t/out")"
 
 # 3. A failed deploy DOES fail the publish (nothing to notice after).
 if DEPLOY_FAIL=1 CF_PAGES_PROJECT=site WRANGLER=wrangler DIST_TMP="$t/run3" SITE_URL="https://example.test" "$s" >"$t/out" 2>&1; then
