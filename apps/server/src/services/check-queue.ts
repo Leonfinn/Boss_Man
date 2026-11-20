@@ -505,7 +505,7 @@ export function checkQueue(db: Db) {
     now = new Date(),
     companyId?: string,
     skip?: (jobId: string) => boolean,
-    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean } = {},
+    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; quickOnly?: boolean } = {},
   ): Promise<ClaimResult> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
     // BOS-1748: the hold parks the company runner and every merge check, but a separate check worker still takes quick
@@ -520,10 +520,12 @@ export function checkQueue(db: Db) {
     // BOS-2058: what the hold stops is the table's `blocks` for the server wait, the same list its quiet test counts.
     if (held && (!worker || blocksClass("server-quiet", "quick-check-worker"))) return no(ofCompany[0] ? declineOf(ofCompany[0], "update_hold", "new checks are paused for a server update", true) : null);
     // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
-    const candidates = ofCompany.filter((j) => !skip?.(j.id)).filter((j) => !held || !isLong(j));
+    // BOS-2108: `quickOnly` is the runner drain's rule for a worker (the dispatcher reads it from WAIT_RULES): quick checks only.
+    const longHeld = held || !!opts.quickOnly;
+    const candidates = ofCompany.filter((j) => !skip?.(j.id)).filter((j) => !longHeld || !isLong(j));
     if (candidates.length === 0) {
-      const heldLong = held ? ofCompany.find((j) => isLong(j) && !skip?.(j.id)) : undefined;
-      if (heldLong) return no(declineOf(heldLong, "update_hold", "merge and full checks are paused for a server update", true));
+      const heldLong = longHeld ? ofCompany.find((j) => isLong(j) && !skip?.(j.id)) : undefined;
+      if (heldLong) return no(declineOf(heldLong, "update_hold", `merge and full checks are paused for a ${held ? "server" : "runner"} update`, true));
       const skipped = ofCompany.find((j) => skip?.(j.id));
       return no(skipped ? declineOf(skipped, "no_code", "this machine could not get the code for it, so it goes to another machine", false) : null);
     }

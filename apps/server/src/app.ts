@@ -31,7 +31,7 @@ import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js"
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
 import { serverWaitChecks } from "./services/runner-busy.js";
-import { activeWaits } from "./services/update-waits.js";
+import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
@@ -377,9 +377,10 @@ export async function buildApp(opts: AppOptions) {
   bundleStore.clear();
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
+    // BOS-2108: which wait it is, so the dispatcher stops only what that wait's WAIT_RULES row blocks (a worker keeps its quick checks).
     drainPending: async () => {
       const h = runnerCardHold(await getHold(db));
-      return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
+      return h && holdBlocksStarts(h, opts.now?.() ?? new Date()) ? runnerHoldWait(h) : null;
     },
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
