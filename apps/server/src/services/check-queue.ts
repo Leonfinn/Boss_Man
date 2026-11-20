@@ -2,7 +2,11 @@
 // and what happened to every job. The runner runs the jobs; nothing here touches a lock file or a process.
 //
 // Rules the tests pin down:
-//  - merge jobs go before pre-review jobs; inside a kind, jobs fixing main first, then urgent, then oldest;
+//  - serving order (DR-056, see `serving`): jobs fixing main first, then the merge holding the landing turn, then seated merge
+//    train members (on machines with two or more slots), then the "with the merges" group (every merge job, and any pre-review
+//    job, quick or full, that has waited QUICK_AGE_MS, is urgent or was moved to front), then the other pre-review jobs; inside
+//    a group, moved to front first, then tier (urgent, ordinary, background lane until it ages), then oldest. A merge does not
+//    simply go before every quick check, and a slot is kept for a waiting quick check (`admits`);
 //  - while a project's main is red only jobs fixing main run (merge jobs of other tickets wait, they don't fail); pre-review jobs keep running;
 //  - a passed job on the same tree satisfies a request of equal or narrower scope, so the same tree is never checked twice;
 //  - a job never leaves the queue without a recorded reason (stuck / cancelled / re-queued all carry one).
@@ -327,7 +331,10 @@ export function checkQueue(db: Db) {
     // DR-056: a quick pre-review job that has waited QUICK_AGE_MS sorts with the merges, by queue time, so a long line of quick checks drains.
     // BOS-1519: an urgent (top-tier) or moved-to-front quick check sorts there from the moment it is queued. Otherwise it sorted
     // below every aged quick check for its first QUICK_AGE_MS, so urgency and Move to front did nothing in a long line.
-    const withMerges = (j: CheckJob) => j.kind === "merge" || (!isLong(j) && (now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS || !!j.frontAt || prio(j) === 0));
+    // BOS-2105: a full pre-review check (request_check scope full) follows the same rule. It used to be left out, so it sat in
+    // the last group for good, even when urgent, and started only once every merge and aged quick check had gone. Slot use is
+    // unchanged: `admits` still counts it as a long job, so it can't take the slot kept for a waiting quick check.
+    const withMerges = (j: CheckJob) => j.kind === "merge" || now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS || !!j.frontAt || prio(j) === 0;
     // BOS-1504, merge train on: the train decides which landing goes next, so the queue follows it. A merge job of a ticket still
     // waiting for a seat is held back (it keeps its place: it stays queued, and its landing's own job replaces it once seated). The
     // seated members' merge jobs are served as one block in seat order, at the block's best place: the latest Move to front and
