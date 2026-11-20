@@ -12,3 +12,6 @@
   Cache-Control: public, max-age=3600
 /menu.js
   Cache-Control: public, max-age=3600
+/whats-new.xml
+  Content-Type: application/atom+xml; charset=utf-8
+  Cache-Control: public, max-age=3600

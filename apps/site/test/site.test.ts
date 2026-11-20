@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { build, checkPortalUrl, checkUmami, fill, parsePage, portalBlocks, readChangelog, requireSiteUrlOnPages } from "../scripts/build.mjs";
-import { checkSite } from "../scripts/check.mjs";
+import { checkSite, xmlProblem } from "../scripts/check.mjs";
 
 let tmp: string;
 let dist: string;
@@ -118,6 +118,55 @@ describe("build", () => {
     expect(sitemap).not.toContain("404");
     expect(readFileSync(path.join(withUrl, "index.html"), "utf8")).toContain('property="og:image" content="https://example.test/img/og-v2.png"');
     expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toEqual([]);
+  });
+
+  it("writes an Atom feed of the changelog, newest first, only when SITE_URL is set", () => {
+    expect(existsSync(path.join(dist, "whats-new.xml"))).toBe(false);
+    expect(read("index.html")).not.toContain("whats-new.xml");
+    expect(read("whats-new.html")).not.toContain("Follow by feed");
+    const withUrl = path.join(tmp, "dist-feed");
+    build({ outDir: withUrl, siteUrl: "https://example.test", portalUrl: "" });
+    const feed = readFileSync(path.join(withUrl, "whats-new.xml"), "utf8");
+    const source = readFileSync(path.join(__dirname, "..", "..", "..", "CHANGELOG.md"), "utf8");
+    const first = /^## (.+)$/m.exec(source)![1];
+    const id = first.toLowerCase().replace(/ /g, "-");
+    expect(xmlProblem(feed)).toBe("");
+    expect(feed).toContain(`<id>https://example.test/whats-new#${id}</id>`);
+    expect(feed).toContain(`<title>${first}</title>`);
+    const [day, month, year] = first.split(" ");
+    const iso = new Date(Date.UTC(+year, ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].indexOf(month), +day)).toISOString().replace(".000Z", "Z");
+    expect(feed).toMatch(new RegExp(`</title>\\s*<updated>${iso}</updated>\\s*<content type="html">&lt;`));
+    expect(feed.match(/<updated>/g)!.length).toBeLessThanOrEqual(21);
+    expect(feed.indexOf(`<updated>${iso}</updated>`)).toBeLessThan(feed.indexOf("<entry>"));
+    const head = '<link rel="alternate" type="application/atom+xml" title="Boss Man: What\'s new" href="/whats-new.xml">';
+    for (const f of ["index.html", "404.html", "whats-new.html", "guides/index.html"]) expect(readFileSync(path.join(withUrl, f), "utf8"), f).toContain(head);
+    expect(readFileSync(path.join(withUrl, "whats-new.html"), "utf8")).toContain('<a href="/whats-new.xml">Follow by feed</a>');
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toEqual([]);
+  });
+
+  it("caps the feed at 20 entries", () => {
+    const f = path.join(tmp, "long-changelog.md");
+    const days = Array.from({ length: 25 }, (_, i) => `## ${25 - i} October 2026\n\n- Change ${i}\n`).join("\n");
+    writeFileSync(f, `# Title\n\n${days}`);
+    const out = path.join(tmp, "dist-long");
+    build({ outDir: out, siteUrl: "https://example.test", portalUrl: "", changelogFile: f });
+    const feed = readFileSync(path.join(out, "whats-new.xml"), "utf8");
+    expect(feed.match(/<entry>/g)).toHaveLength(20);
+    expect(feed).toContain("<updated>2026-10-25T00:00:00Z</updated>\n  <entry>");
+    expect(feed).not.toContain("<title>5 October 2026</title>");
+  });
+
+  it("the site check fails when the feed is missing or not well-formed", () => {
+    const withUrl = path.join(tmp, "dist-feed-check");
+    build({ outDir: withUrl, siteUrl: "https://example.test", portalUrl: "" });
+    const file = path.join(withUrl, "whats-new.xml");
+    const good = readFileSync(file, "utf8");
+    writeFileSync(file, good.replace("</feed>", ""));
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" }).join("\n")).toMatch(/whats-new\.xml is not well-formed XML/);
+    writeFileSync(file, good.replace("<title>Boss Man", "<title>Boss & Man"));
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" }).join("\n")).toMatch(/bare &/);
+    rmSync(file);
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toContain("whats-new.xml is missing");
   });
 
   it("fails a Cloudflare Pages build without SITE_URL", () => {

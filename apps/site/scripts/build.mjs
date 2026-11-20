@@ -1,6 +1,6 @@
 // Builds the static site: src/pages/*.html, src/guides/*.md and the repo's CHANGELOG.md (the "What's new" page) + shared
 // header/footer -> dist/, plus public/ copied as
-// is, _headers, _redirects, robots.txt and (when SITE_URL is set) sitemap.xml.
+// is, _headers, _redirects, robots.txt and (when SITE_URL is set) sitemap.xml and the What's new feed whats-new.xml.
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -188,6 +188,7 @@ function headTags(config, meta, siteUrl, umami) {
     `<link rel="preload" href="/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>`,
     `<link rel="preload" href="/fonts/archivo-latin-wdth-normal.woff2" as="font" type="font/woff2" crossorigin>`,
     `<link rel="stylesheet" href="/styles.css">`,
+    siteUrl && `<link rel="alternate" type="application/atom+xml" title="Boss Man: What's new" href="/whats-new.xml">`,
     `<meta property="og:type" content="website">`,
     `<meta property="og:site_name" content="${escapeHtml(config.name)}">`,
     `<meta property="og:title" content="${title}">`,
@@ -336,6 +337,27 @@ export function readChangelog(file) {
   return { source, dates };
 }
 
+const FEED_LIMIT = 20;
+
+/**
+ * The Atom feed of the "What's new" page: one entry per `## <date>` section, newest first, at most FEED_LIMIT. Entry ids
+ * and links are the page's own anchors; the content is the section's rendered HTML (relative links resolve against xml:base).
+ */
+export function whatsNewFeedXml(changelog, siteUrl, repo) {
+  const { headings } = renderMarkdown(changelog.source, { name: "CHANGELOG.md", repo });
+  const sections = changelog.source.split(/^(?=## )/m);
+  const entries = sections.slice(0, FEED_LIMIT).map((section, i) => {
+    const heading = changelog.dates[i];
+    const [, d, month, y] = /^(\d{1,2}) ([A-Z][a-z]+) (\d{4})$/.exec(heading);
+    const updated = new Date(Date.UTC(+y, MONTHS.indexOf(month), +d)).toISOString().replace(".000Z", "Z");
+    const body = section.replace(/^## .*\n?/, "");
+    const { html } = renderMarkdown(body, { name: "CHANGELOG.md", repo });
+    const link = `${siteUrl}/whats-new#${headings[i].id}`;
+    return { updated, xml: `  <entry>\n    <id>${escapeHtml(link)}</id>\n    <link rel="alternate" type="text/html" href="${escapeHtml(link)}"/>\n    <title>${escapeHtml(heading)}</title>\n    <updated>${updated}</updated>\n    <content type="html">${escapeHtml(html)}</content>\n  </entry>` };
+  });
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en-GB" xml:base="${siteUrl}/">\n  <id>${siteUrl}/whats-new.xml</id>\n  <title>Boss Man: What's new</title>\n  <link rel="self" type="application/atom+xml" href="${siteUrl}/whats-new.xml"/>\n  <link rel="alternate" type="text/html" href="${siteUrl}/whats-new"/>\n  <updated>${entries[0].updated}</updated>\n${entries.map((e) => e.xml).join("\n")}\n</feed>\n`;
+}
+
 function whatsNewPage(changelog, ctx) {
   const { html, headings } = renderMarkdown(changelog.source, { name: "CHANGELOG.md", repo: ctx.vars.repo });
   const toc = headings.map((h) => `<li><a href="#${h.id}">${escapeHtml(h.text)}</a></li>`).join("");
@@ -343,7 +365,7 @@ function whatsNewPage(changelog, ctx) {
 <main id="main" class="g-main" tabindex="-1">
 <h1>What's new</h1>
 <p class="g-lead">The changes you will notice in Boss Man, newest first, in plain words. Each day's entry covers what was added that day. Boss Man has no numbered releases: to get these changes, <a href="/guides/updates-and-backups">update your server</a>.</p>
-${html}
+${ctx.feed ? `<p class="g-meta"><a href="/whats-new.xml">Follow by feed</a></p>\n` : ""}${html}
 <p class="g-edit muted">The full history, with every change, is in the <a href="${ctx.vars.repo}/commits/main">list of changes on GitHub</a>.</p>
 </main>
 <nav class="g-toc" aria-label="Entries">
@@ -410,7 +432,8 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
 
   const changelog = readChangelog(changelogFile);
   const newsMeta = { title: "What's new: Boss Man", description: `The changes you will notice in Boss Man, newest first, in plain words. Latest entry: ${changelog.dates[0]}.`, path: "/whats-new", nav: "whats-new", body: "guide-page" };
-  write(newsMeta, whatsNewPage(changelog, { vars }), "whats-new.html", [changelogFile]);
+  write(newsMeta, whatsNewPage(changelog, { vars, feed: Boolean(siteUrl) }), "whats-new.html", [changelogFile]);
+  if (siteUrl) writeFileSync(path.join(outDir, "whats-new.xml"), whatsNewFeedXml(changelog, siteUrl, config.repo));
 
   writeFileSync(path.join(outDir, "robots.txt"), `User-agent: *\nAllow: /\n${siteUrl ? `\nSitemap: ${siteUrl}/sitemap.xml\n` : ""}`);
   if (siteUrl) {
