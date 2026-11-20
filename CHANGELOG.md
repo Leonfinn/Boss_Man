@@ -38,6 +38,7 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - The next ticket for a busy agent stays in Ready as "Next up" until its run starts.
 - Merged tickets no longer sit in "Merged, watching" for ever after go-live, and never count against your limits.
 - Moving a ticket that is already in review back to review asks the reviewers who asked for changes to look again.
+- The website now serves its search-engine key file after a publish, and tells Bing and other search engines which pages changed each time it is published. If that notice keeps failing, the publish says so plainly so your CEO hears about it instead of it being lost.
 - A ticket's activity feed shows its newest runs. Changing who reviews, and adding, editing or removing a permission rule, each leave a line in the activity log.
 - In the CEO chat, a reply can add up to 2 short lines saying where you already answered a point it names.
 - The workflow report opens with a "What this shows" card of up to three plain findings, and its column definitions fold behind "What the columns mean".
