@@ -2017,16 +2017,17 @@ export async function buildApp(opts: AppOptions) {
     // The reviews a ticket needs, every round, newest first (review kinds).
     owner.get("/api/tickets/:id/reviews", async (req) => listReviews(db, IdParam.parse(req.params).id));
 
-    // The runs on a ticket, oldest first, for its activity feed (R76).
+    // The newest 200 runs on a ticket, oldest first, for its activity feed (R76).
     owner.get("/api/tickets/:id/runs", async (req) => {
       const { id } = IdParam.parse(req.params);
-      return db
+      const newest = await db
         .select({ id: runsTable.id, agent: agents.name, agentId: runsTable.agentId, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, purpose: runsTable.purpose })
         .from(runsTable)
         .leftJoin(agents, eq(agents.id, runsTable.agentId))
         .where(eq(runsTable.ticketId, id))
-        .orderBy(asc(runsTable.startedAt))
+        .orderBy(desc(runsTable.startedAt))
         .limit(200);
+      return newest.reverse();
     });
 
     // A ticket's conversation with the agents working it (R65).
