@@ -7,15 +7,25 @@ import { checkJobs, runs } from "../db/schema.js";
 import { DEFAULT_NO_OUTPUT_MINUTES } from "./check-queue.js";
 
 /**
- * Live agent runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
- * those never hold a runner swap, and they are what the banner's "N agents" counts.
+ * The one rule for "a run an update waits for" (BOS-2088): every reader that counts work for an update uses it (the
+ * scheduler's hold, the runner drain and banner, maintenance's run lists, the server update's quiet test). It leaves
+ * out the owner's chat and the CEO's reply lane (BOS-349), and a run marked `passed_update_hold`: a work run on an urgent
+ * or fixes-live ticket that a hold let through (wake-classes.ts duringUpdate). That is the "update alert" work class,
+ * which no wait counts (DR-072 rule a): the swap cuts it off and the interrupted-run recovery resumes it afterwards.
+ * The caller adds `endedAt is null`.
+ */
+export const updateWaitCountsRun = () => and(sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`, sql`not ${runs.passedUpdateHold}`)!;
+
+/**
+ * Live agent runs per company. `workOnly` counts only what an update waits for (`updateWaitCountsRun`): no chat, no
+ * reply lane, no run that passed a hold. That is what holds a runner swap and what the banner's "N agents" counts.
  */
 export async function runsByCompany(db: Db, workOnly = false): Promise<Map<string, number>> {
   const live = isNull(runs.endedAt);
   const rows = await db
     .select({ companyId: runs.companyId, n: sql<number>`count(*)::int` })
     .from(runs)
-    .where(workOnly ? and(live, sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`) : live)
+    .where(workOnly ? and(live, updateWaitCountsRun()) : live)
     .groupBy(runs.companyId);
   return new Map(rows.map((r) => [r.companyId, r.n]));
 }

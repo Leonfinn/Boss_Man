@@ -109,10 +109,26 @@ export type WakeReason = keyof typeof WAKE_TABLE;
  * The generic "ceo reply" is NOT listed: routine replies stay held once nothing else runs (DR-048 A). A reason not listed is held, the safe default (work started now would only push
  * the swap back). Typed against the table above, so a name that is not a wake reason fails typecheck, and
  * update-waits-guard.test.ts starts each of them while a hold is on. A run one of these starts is the "update alert"
- * class: no wait counts it, so it cannot hold the update it reports on.
+ * class: no wait counts it, so it cannot hold the update it reports on. Since BOS-2088 a wake about an open, unmerged
+ * urgent or fixes-live ticket passes as well, whatever its reason (`passesForTicket` below).
  */
 export const PASSES_UPDATE_HOLD: ReadonlyArray<WakeReason> = ["update alert"];
-export const duringUpdate = (reason: string): "held" | "passes" => ((PASSES_UPDATE_HOLD as readonly string[]).includes(reason) ? "passes" : "held");
+
+/** What duringUpdate needs to know about a wake's ticket (BOS-2088). */
+export type HoldTicketFacts = { urgent: boolean; fixesLive: string | null; systemState: string; mergeCommit: string | null };
+
+/**
+ * BOS-2088: a wake about a ticket that is urgent or fixes a live problem (`fixesLive`) passes the hold too, whatever its
+ * reason: it may be the very fix the update waits to deliver, or a live problem. Only while the ticket is open and not
+ * merged: both flags stay set after the merge, and a wake about a merged fix (live release, watch) is not the fix. Its
+ * run is marked `passed_update_hold` and is the same "update alert" work class: no wait counts it (runner-busy.ts
+ * updateWaitCountsRun), so it never holds the update; the swap cuts it off and the interrupted-run recovery resumes it.
+ */
+export const passesForTicket = (t: HoldTicketFacts | null | undefined): boolean =>
+  !!t && t.systemState !== "done" && !t.mergeCommit && (t.urgent || !!t.fixesLive?.trim());
+
+export const duringUpdate = (reason: string, ticket?: HoldTicketFacts | null): "held" | "passes" =>
+  (PASSES_UPDATE_HOLD as readonly string[]).includes(reason) || passesForTicket(ticket) ? "passes" : "held";
 
 /** A reason nobody classified is treated as the agent class, today's rate-limited behaviour. */
 export const wakeClass = (reason: string): WakeClass => WAKE_CLASS[reason] ?? "agent";

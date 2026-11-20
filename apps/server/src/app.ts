@@ -30,7 +30,7 @@ import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListen
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
-import { serverWaitChecks } from "./services/runner-busy.js";
+import { serverWaitChecks, updateWaitCountsRun } from "./services/runner-busy.js";
 import { activeWaits } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
@@ -434,7 +434,8 @@ export async function buildApp(opts: AppOptions) {
     // DR-008's memory-headroom check is not built; this is the part that exists today.
     hostQuiet: async () => {
       // A run row left open by a restart must not hold the card back for ever: runs that started over 6 hours ago don't count.
-      const [live] = await db.select({ n: count() }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`, sql`${runsTable.startedAt} > now() - interval '6 hours'`));
+      // BOS-2088: the one "an update waits for it" rule (runner-busy.ts updateWaitCountsRun).
+      const [live] = await db.select({ n: count() }).from(runsTable).where(and(isNull(runsTable.endedAt), updateWaitCountsRun(), sql`${runsTable.startedAt} > now() - interval '6 hours'`));
       return (live?.n ?? 0) === 0 && review.runningMerges().length === 0;
     } });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
@@ -1192,7 +1193,9 @@ export async function buildApp(opts: AppOptions) {
       return review.gateState().running + (await serverWaitChecks(db));
     },
     openRuns: async () => {
-      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`))) as [{ n: number }];
+      // BOS-2088: the one "an update waits for it" rule (runner-busy.ts updateWaitCountsRun). It also leaves out the CEO's
+      // reply lane, which this count alone used to include, so an "update alert" run no longer held the wait it reports on.
+      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), updateWaitCountsRun()))) as [{ n: number }];
       return n;
     },
     send: (ctx, id, o) => selfDeploy.send(ctx, id, o),

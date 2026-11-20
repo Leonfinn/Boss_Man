@@ -5,8 +5,8 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import type { Db } from "../src/db/client.js";
-import { checkJobs, checkWorkers, companies, projects, settings, tickets } from "../src/db/schema.js";
-import { serverWaitChecks } from "../src/services/runner-busy.js";
+import { checkJobs, checkWorkers, companies, projects, runs, settings, tickets } from "../src/db/schema.js";
+import { runnerBusy, runsByCompany, serverWaitChecks } from "../src/services/runner-busy.js";
 import { activeWaits, blocksClass, describeWait, drainEndsAt, LANDING_END_MS, landingsThatCount, ruleProblems, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
 import { duringUpdate, PASSES_UPDATE_HOLD, WAKE_CLASS } from "../src/services/wake-classes.js";
 
@@ -152,5 +152,44 @@ describe("wakes that report on an update pass its hold", () => {
     expect(duringUpdate("ceo reply")).toBe("held");
     expect(duringUpdate("checking an old card")).toBe("held");
     expect(duringUpdate("nudge")).toBe("held");
+  });
+});
+
+// BOS-2088: a wake about an urgent ticket, or one that fixes a live problem, waited behind the update it may be the fix for.
+describe("wakes about an urgent or fixes-live ticket pass an update's hold (BOS-2088)", () => {
+  const open = { urgent: false, fixesLive: null, systemState: "in_progress", mergeCommit: null };
+  it("passes for an open, unmerged urgent or fixes-live ticket, whatever the reason", () => {
+    expect(duringUpdate("nudge", { ...open, urgent: true })).toBe("passes");
+    expect(duringUpdate("resume", { ...open, fixesLive: "server freezes as memory climbs" })).toBe("passes");
+    expect(duringUpdate("assigned", { ...open, urgent: true, systemState: "review" })).toBe("passes");
+  });
+  it("holds a plain ticket, a blank fixesLive, a merged or done one, and a wake with no ticket", () => {
+    expect(duringUpdate("nudge", open)).toBe("held");
+    expect(duringUpdate("nudge", { ...open, fixesLive: "  " })).toBe("held");
+    expect(duringUpdate("live release", { ...open, fixesLive: "server freezes", mergeCommit: "a".repeat(40) })).toBe("held");
+    expect(duringUpdate("ticket watch", { ...open, urgent: true, systemState: "done" })).toBe("held");
+    expect(duringUpdate("nudge", null)).toBe("held");
+    expect(duringUpdate("nudge")).toBe("held");
+  });
+});
+
+describe("what an update counts as running work (runner-busy.ts updateWaitCountsRun, BOS-2088)", () => {
+  let db: Db;
+  let close: () => Promise<void>;
+  beforeEach(async () => {
+    ({ db, close } = await openPglite());
+  });
+  afterEach(async () => close());
+
+  it("leaves out chat, the reply lane and a run that passed the hold; counts plain work", async () => {
+    const [c] = await db.insert(companies).values({ name: "Co" }).returning();
+    const run = (o: { purpose?: string | null; passed?: boolean }) => db.insert(runs).values({ companyId: c!.id, purpose: o.purpose ?? null, passedUpdateHold: o.passed ?? false, startedAt: new Date() });
+    await run({});
+    await run({ purpose: "chat" });
+    await run({ purpose: "reply" });
+    await run({ passed: true });
+    expect(await runsByCompany(db, true)).toEqual(new Map([[c!.id, 1]]));
+    expect(await runsByCompany(db, false)).toEqual(new Map([[c!.id, 4]]));
+    expect((await runnerBusy(db, true)).runsTotal).toBe(1);
   });
 });

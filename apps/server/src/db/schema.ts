@@ -707,6 +707,12 @@ export const runs = pgTable("runs", {
   costCheck: text("cost_check"),
   purpose: text("purpose"),
   /**
+   * BOS-2088: the run started while an update held other work, because its ticket is urgent or fixes a live problem
+   * (wake-classes.ts duringUpdate). No update waits for it (runner-busy.ts updateWaitCountsRun): the swap cuts it off and
+   * the interrupted-run recovery resumes it afterwards.
+   */
+  passedUpdateHold: boolean("passed_update_hold").notNull().default(false),
+  /**
    * What started the run, in plain words, for runs with no ticket: "nudge", "wiki upkeep",
    * "owner_chat" and so on (the wake's reason). It may name a ticket the run was about
    * without being on it (a nudge that passed one); that link is `runTicketId`.

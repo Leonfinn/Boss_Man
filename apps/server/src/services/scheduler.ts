@@ -13,7 +13,7 @@ import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
-import { checkJobsByCompany } from "./runner-busy.js";
+import { checkJobsByCompany, updateWaitCountsRun } from "./runner-busy.js";
 import { pickAccount } from "./claude-accounts.js";
 import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
@@ -43,7 +43,7 @@ import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { agedRank, duringUpdate, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { agedRank, duringUpdate, reasonsOfClass, wakeClass, type HoldTicketFacts, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -107,6 +107,9 @@ export const UPDATE_ALERT_REASON = "update alert";
 export const REPLY_LANE_REASONS: readonly string[] = [CEO_REPLY_REASON, UPDATE_ALERT_REASON];
 export const isReplyLane = (reason: string) => REPLY_LANE_REASONS.includes(reason);
 export const REPLY_PURPOSE = "reply";
+/** BOS-2088: the prompt line of a run an update hold let through because its ticket is urgent or fixes a live problem. */
+export const PASSED_UPDATE_HOLD_LINE =
+  "This run started while an update holds other work, because the ticket is urgent or fixes a live problem. Commit and note your progress often: if the update goes ahead this run is stopped and picked up again after the swap.";
 /** BOS-1082: said to a run that starts with no ticket checkout, so the agent doesn't take its folder for a lost one. */
 export const noCheckoutNote = (folder: string) =>
   `\n\nThis run has no ticket checkout: it started in ${folder}, which is not a copy of the repo. Don't edit code, run checks or create a worktree here. To change code, work on a run woken on that ticket: it starts in the ticket's own checkout.`;
@@ -240,9 +243,8 @@ const outcomeOf = (row: typeof wakes.$inferSelect, merged = false): WakeResult =
 /** A message the owner didn't send via a run counts as the owner's; one an agent sent is agent-started. */
 const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): WakeClass => (fromOwner(w) ? "waiting" : w.reason === "message" ? "agent" : wakeClass(w.reason));
 
-/** Runs still going that are real work, not the owner's chat or the CEO's reply lane (BOS-349). */
-const liveWorkRuns = async (db: Db) =>
-  (await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`))).length;
+/** Runs still going that an update waits for: not the owner's chat, the CEO's reply lane (BOS-349) or a run that passed the hold (BOS-2088). */
+const liveWorkRuns = async (db: Db) => (await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), updateWaitCountsRun()))).length;
 
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
@@ -293,6 +295,9 @@ export function schedulerService(
 ) {
   const limits = { ...DEFAULT_LIMITS, ...deps.limits };
   let lane: Promise<unknown> = Promise.resolve();
+  // lost on restart, harmless because it only carries wake ids from a pass's hold check to that same pass's launch()
+  // calls (BOS-2088): tickOnce clears it at its start, and a wake not launched in that pass is checked again next pass.
+  const passedHold = new Set<string>();
   const now = deps.now ?? (() => new Date());
   const workspaceRoot = deps.workspaceRoot ?? "/home/node/workspaces";
 
@@ -872,6 +877,7 @@ export function schedulerService(
         "",
         "This is a short run about an update that is waiting (it started while the update holds other work, so keep it short: the swap may happen while you work). Read server_status's updateWaits, decide whether anything needs doing (cancel or go ahead with the update, tell the owner, or nothing), do it, and stop. Don't start other work, edit files or run long commands.",
       );
+    if (passedHold.has(w.id)) lines.push("", PASSED_UPDATE_HOLD_LINE);
     if (w.reason === CEO_REPLY_REASON)
       lines.push(
         "",
@@ -1104,7 +1110,7 @@ export function schedulerService(
     // the wrong ticket.
     const origin = w.reason;
     const aboutTicket = onTicket ? null : w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, fundingSourceId: onSource ?? null, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : reply ? REPLY_PURPOSE : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, fundingSourceId: onSource ?? null, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : reply ? REPLY_PURPOSE : null, passedUpdateHold: !chat && !reply && passedHold.has(w.id), origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
     // BOS-1082: a run with no ticket checkout (no ticket, a watch or a reply) is told so, so it doesn't take its folder for a lost checkout.
     const noCheckout = !chat && agent.role !== "ceo" && !copy && !(ticket?.repoUrl && workTicketId);
@@ -1746,6 +1752,7 @@ export function schedulerService(
 
     async tickOnce() {
       const result = { launched: 0, deferred: 0, waiting: 0, dropped: 0, paused: false };
+      passedHold.clear();
       if (await globallyPaused()) return { ...result, paused: true };
       const t = now();
       const queue = await db
@@ -1760,7 +1767,13 @@ export function schedulerService(
       // quota hold, is untouched. Someone-is-waiting wakes go first. Equal ranks go oldest first.
       // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
       const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];
-      const urgentIds = new Set(queuedTicketIds.length ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.urgent, true), inArray(tickets.id, queuedTicketIds)))).map((r) => r.id) : []);
+      // BOS-2088: the same read gives what the update hold needs (urgent or fixes-live, and still open and unmerged).
+      const ticketFacts = new Map<string, HoldTicketFacts>(
+        queuedTicketIds.length
+          ? (await db.select({ id: tickets.id, urgent: tickets.urgent, fixesLive: tickets.fixesLive, systemState: tickets.systemState, mergeCommit: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, queuedTicketIds))).map(({ id, ...f }) => [id, f])
+          : [],
+      );
+      const urgentIds = new Set([...ticketFacts].filter(([, f]) => f.urgent).map(([id]) => id));
       const rank = (w: (typeof queue)[number]) => agedRank(w.priority, wakeClassOf(w), t.getTime() - w.createdAt.getTime()) + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0);
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
       queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt.getTime() - b.createdAt.getTime());
@@ -1815,12 +1828,19 @@ export function schedulerService(
         // pending" because a landing and then nothing nameable was what the swap waited on. Its run is a short reply-lane
         // run. Routine CEO replies stay held once nothing else runs (DR-048 A): the swap may happen at any moment.
         const busy = work > 0 || checksWaited > 0;
+        // BOS-2088: a work wake about an open, unmerged urgent or fixes-live ticket passes too, and its run is marked so no
+        // wait counts it (the swap cuts it off; recovery resumes it). Chat and the reply lane keep their own rules above,
+        // since the swap waits for those runs. Not under a wrap-up with no update behind it: the owner asked for quiet.
+        const standaloneWrapup = hold.kind === "wrapup" && hold.forUpdate !== "server" && hold.forUpdate !== "runner";
+        const passesByTicket = (w: (typeof queue)[number]) => !standaloneWrapup && w.reason !== CHAT_REASON && !isReplyLane(w.reason) && !!w.ticketId && duringUpdate(w.reason, ticketFacts.get(w.ticketId)) === "passes";
         const passes = (w: (typeof queue)[number]) => {
           if (duringUpdate(w.reason) === "passes") return true;
+          if (passesByTicket(w)) return true;
           if (w.reason === CHAT_REASON) return busy || merging > 0 || mystery;
           return busy && w.reason === CEO_REPLY_REASON;
         };
         const through = queue.filter(passes);
+        for (const w of through) if (passesByTicket(w)) passedHold.add(w.id);
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
         const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
