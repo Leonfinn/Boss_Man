@@ -41,6 +41,7 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - A ticket's activity feed shows its newest runs. Changing who reviews, and adding, editing or removing a permission rule, each leave a line in the activity log.
 - In the CEO chat, a reply can add up to 2 short lines saying where you already answered a point it names.
 - The workflow report opens with a "What this shows" card of up to three plain findings, and its column definitions fold behind "What the columns mean".
+- The website now serves its search-engine key file after a publish, and tells Bing and other search engines which pages changed each time it is published. If that notice keeps failing, it now reaches your CEO as a ticket instead of being lost.
 
 ## 19 November 2026
 
