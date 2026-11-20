@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decryptSecret, encryptSecret } from "../src/crypto.js";
-import { agents, runs, secretAccessLog, secrets } from "../src/db/schema.js";
+import { and, eq } from "drizzle-orm";
+import { activity, agents, runs, secretAccessLog, secrets } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 // Made-up key shapes, joined at run time so this file holds no key-shaped line for the secret scans (BOS-1932).
@@ -164,6 +165,49 @@ describe("which agents get a key", () => {
     expect((await s.put(g, [s.a, s.foreign])).statusCode).toBe(400);
     expect((await t.app.inject({ method: "GET", url: `/api/companies/${s.c}/grants`, headers: { cookie } })).json()[0].agentIds).toEqual([]);
     expect((await s.put(crypto.randomUUID(), [])).statusCode).toBe(404);
+  });
+});
+
+describe("grant changes leave an activity line (BOS-2062)", () => {
+  const VALUE = "zq-activity-secret-value-91827";
+  async function lines(companyId: string) {
+    return (await t.db.select().from(activity).where(and(eq(activity.companyId, companyId), eq(activity.kind, "settings")))).map((r) => r.summary);
+  }
+
+  it("records grant, agent limit and revoke against the company, never the value", async () => {
+    const c = await company("App Co");
+    const other = await company("Homelab Co");
+    const [a, b] = await t.db.insert(agents).values([{ companyId: c, name: "A", role: "worker", agentKind: "claude" }, { companyId: c, name: "B", role: "worker", agentKind: "claude" }]).returning();
+    const sid = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "Deploy key", kind: "generic", value: VALUE } })).json().secret.id;
+    const gid = (await t.app.inject({ method: "POST", url: `/api/secrets/${sid}/grants`, headers: { cookie }, payload: { companyId: c, envName: "DEPLOY_KEY" } })).json().id;
+    const put = (agentIds: string[]) => t.app.inject({ method: "PUT", url: `/api/grants/${gid}/agents`, headers: { cookie }, payload: { agentIds } });
+    await put([a!.id, b!.id]);
+    await put([]);
+    await t.app.inject({ method: "DELETE", url: `/api/grants/${gid}`, headers: { cookie } });
+    const got = await lines(c);
+    expect(got).toEqual([
+      "Owner gave App Co the secret Deploy key as DEPLOY_KEY",
+      "Owner limited DEPLOY_KEY to 2 agents",
+      "Owner limited DEPLOY_KEY to every agent",
+      "Owner took DEPLOY_KEY away from App Co",
+    ]);
+    expect(got.join(" ")).not.toContain(VALUE);
+    expect(await lines(other)).toEqual([]);
+  });
+
+  it("records nothing when the change is refused", async () => {
+    const c = await company("App Co");
+    const other = await company("Homelab Co");
+    const [foreign] = await t.db.insert(agents).values({ companyId: other, name: "F", role: "worker", agentKind: "claude" }).returning();
+    const sid = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "Key", kind: "generic", value: VALUE } })).json().secret.id;
+    const gid = (await t.app.inject({ method: "POST", url: `/api/secrets/${sid}/grants`, headers: { cookie }, payload: { companyId: c, envName: "SOME_KEY" } })).json().id;
+    const before = await lines(c);
+    expect((await t.app.inject({ method: "PUT", url: `/api/grants/${gid}/agents`, headers: { cookie }, payload: { agentIds: [foreign!.id] } })).statusCode).toBe(400);
+    expect((await t.app.inject({ method: "PUT", url: `/api/grants/${crypto.randomUUID()}/agents`, headers: { cookie }, payload: { agentIds: [] } })).statusCode).toBe(404);
+    expect((await t.app.inject({ method: "DELETE", url: `/api/grants/${crypto.randomUUID()}`, headers: { cookie } })).statusCode).toBe(404);
+    expect((await t.app.inject({ method: "POST", url: `/api/secrets/${sid}/grants`, headers: { cookie }, payload: { companyId: c, envName: "SOME_KEY" } })).statusCode).toBeGreaterThanOrEqual(400);
+    expect(await lines(c)).toEqual(before);
+    expect(before).toEqual(["Owner gave App Co the secret Key as SOME_KEY"]);
   });
 });
 
