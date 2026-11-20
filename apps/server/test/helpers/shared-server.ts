@@ -1,23 +1,18 @@
 // One database and one app per test file instead of one per test (BOS-686, after BOS-663 and BOS-657).
-// Building an app costs about 0.2 CPU-s a test; emptying every table costs about 0.08.
+// Building an app costs about 0.2 CPU-s a test; emptying the tables costs about 0.015 (BOS-1940).
 //
 // Between tests the database is emptied: every table, ids restarted. So no row a test made is there for
 // the next one, and each test still makes its own company, owner and agents. What stays across tests is
 // only the app's in-memory state, which is keyed by ids that no later test can have.
-import { sql } from "drizzle-orm";
 import { closePglitePool, openPglite, type Db } from "../../src/db/client.js";
 
 /** Open one in-process database; `reset()` empties it, `close()` releases it (a test file's afterAll). */
 export async function sharedDatabase() {
-  const { db, close } = await openPglite();
-  let tables: string[] | undefined;
-  const reset = async () => {
-    tables ??= ((await db.execute(sql`select tablename from pg_tables where schemaname = 'public' order by tablename`)) as unknown as { rows: Array<{ tablename: string }> }).rows.map((r) => r.tablename);
-    if (tables.length) await db.execute(sql.raw(`truncate table ${tables.map((t) => `"${t}"`).join(", ")} restart identity cascade`));
-  };
+  const { db, close, empty } = await openPglite();
   return {
     db: db as Db,
-    reset,
+    // The same emptying as a parked pool copy gets (src/db/client.ts emptyTables): rows deleted where there are any, sequences restarted.
+    reset: empty,
     close: async () => {
       await close();
       await closePglitePool();

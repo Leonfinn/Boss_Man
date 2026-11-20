@@ -66,7 +66,7 @@ async function setup() {
     expect(r.statusCode).toBe(200);
     return r.json();
   };
-  const smWakes = () => db.select().from(wakes).where(and(eq(wakes.agentId, sm.id), eq(wakes.reason, WATCHDOG_REASON)));
+  const smWakes = () => db.select().from(wakes).where(and(eq(wakes.agentId, sm.id), eq(wakes.reason, WATCHDOG_REASON))).orderBy(wakes.createdAt);
   return { ...built, db, base, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, stalled, switchOn, smWakes, now: () => clock };
 }
 
