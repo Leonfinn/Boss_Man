@@ -86,6 +86,16 @@ describe("merge_line_records", () => {
     await c.close();
   });
 
+  it("exports a restart failure's own reason, and no other failure's note (BOS-2089)", async () => {
+    await row(ctx.mine, "2026-11-09T02:00:00Z", "merge_line", { event: "attempt_failed", reason: "restart", note: "Timed out waiting for the lock on p1." });
+    await row(ctx.mine, "2026-11-09T02:01:00Z", "merge_line", { event: "attempt_failed", reason: "git_transport", note: "private transport note" });
+    const c = await asCeo(ctx.mine);
+    const out = JSON.parse(textOf(await call(c, { since: "2026-11-09T01:59:00Z" }))) as { rows: Array<Record<string, unknown>> };
+    expect(out.rows[0]).toMatchObject({ event: "attempt_failed", reason: "restart", note: "Timed out waiting for the lock on p1." });
+    expect(out.rows[1]).toMatchObject({ event: "attempt_failed", reason: "git_transport", note: null });
+    await c.close();
+  });
+
   it("never returns other kinds of activity or another company's rows", async () => {
     await row(ctx.mine, "2026-11-09T00:00:00Z", "ticket_reply", { event: "approved", by: "Someone" });
     await row(ctx.other, "2026-11-09T00:00:00Z", "merge_line", { event: "approved", by: "Other Co person" });

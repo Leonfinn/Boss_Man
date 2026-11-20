@@ -22,7 +22,7 @@
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -214,6 +214,33 @@ export async function diskUsage(target: string): Promise<number> {
 /** BOS-1413: a merge pinned to the reviewed head refuses any other branch commit. No pin (an older server) keeps the old behaviour. */
 function pinMoved(branchSha: string, pin: string | undefined): { status: "branch_moved"; head: string; pinned: string } | null {
   return pin && branchSha !== pin ? { status: "branch_moved", head: branchSha, pinned: pin } : null;
+}
+
+/**
+ * BOS-2089: the repo lock is a lease. Its holder touches a `lease` file inside the lock folder every
+ * REPO_LOCK_BEAT_MS; a lock whose lease went untouched for REPO_LOCK_STALE_MS was left by a process that died
+ * holding it (a runner or check worker restarted mid-operation) and is taken over. Before this, a dead holder's
+ * lock blocked every repo operation for 10 minutes, longer than the merge's restart retries (20 Nov, 14:05-14:15).
+ * A lock with no lease file is an older holder's: it keeps the old 10-minute rule, so a live one is never taken.
+ */
+export let REPO_LOCK_BEAT_MS = 5_000;
+export let REPO_LOCK_STALE_MS = 45_000;
+export const REPO_LOCK_LEGACY_STALE_MS = 10 * 60_000;
+/** How long one operation waits for the lock before giving up with RepoLockTimeout. */
+export let REPO_LOCK_WAIT_MS = 60_000;
+/** Tests only: shorter beat, lease and wait. */
+export const setRepoLockTiming = (t: { beatMs?: number; staleMs?: number; waitMs?: number }) => {
+  if (t.beatMs !== undefined) REPO_LOCK_BEAT_MS = t.beatMs;
+  if (t.staleMs !== undefined) REPO_LOCK_STALE_MS = t.staleMs;
+  if (t.waitMs !== undefined) REPO_LOCK_WAIT_MS = t.waitMs;
+};
+
+/** How long ago the lock at lockDir was last known alive, and which rule judges it. Null when there is no lock. */
+export function repoLockAge(lockDir: string, now = Date.now()): { ms: number; staleAfterMs: number } | null {
+  const lease = statSync(path.join(lockDir, "lease"), { throwIfNoEntry: false });
+  if (lease) return { ms: now - lease.mtimeMs, staleAfterMs: REPO_LOCK_STALE_MS };
+  const dir = statSync(lockDir, { throwIfNoEntry: false });
+  return dir ? { ms: now - dir.mtimeMs, staleAfterMs: REPO_LOCK_LEGACY_STALE_MS } : null;
 }
 
 /** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
@@ -626,27 +653,44 @@ export class Workspaces {
 
   /**
    * Serialises work on one repo: in-process with a promise chain, and across processes with
-   * a lock directory in the repo's folder. A lock left by a dead process expires after 10 minutes.
+   * a lock directory in the repo's folder. The lock is a lease its holder keeps touching (BOS-2089, repoLockAge):
+   * one left by a dead process is taken over once its lease is REPO_LOCK_STALE_MS old.
    */
   private async withRepoLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.locks.get(projectId) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(async () => {
       const lockDir = path.join(this.root, "repos", `${projectId}.lock`);
+      const lease = path.join(lockDir, "lease");
       mkdirSync(path.dirname(lockDir), { recursive: true });
-      for (let i = 0; ; i++) {
+      const deadline = Date.now() + REPO_LOCK_WAIT_MS;
+      for (;;) {
         try {
           mkdirSync(lockDir);
           break;
         } catch {
-          const age = Date.now() - (statSync(lockDir, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-          if (age > 10 * 60_000) rmSync(lockDir, { recursive: true, force: true });
-          else if (i > 600) throw new RepoLockTimeout(projectId);
+          const age = repoLockAge(lockDir);
+          if (age && age.ms > age.staleAfterMs) rmSync(lockDir, { recursive: true, force: true });
+          else if (Date.now() > deadline) throw new RepoLockTimeout(projectId);
           else await new Promise((r) => setTimeout(r, 100));
         }
       }
+      // The lease: written at once, then touched while fn runs, so a holder that dies stops renewing it.
+      const touch = () => {
+        try {
+          const now = new Date();
+          writeFileSync(lease, "");
+          utimesSync(lease, now, now);
+        } catch {
+          // The folder went (taken over after a long stall): fn carries on, as it did before leases.
+        }
+      };
+      touch();
+      const beat = setInterval(touch, REPO_LOCK_BEAT_MS);
+      beat.unref?.();
       try {
         return await fn();
       } finally {
+        clearInterval(beat);
         rmSync(lockDir, { recursive: true, force: true });
       }
     });
