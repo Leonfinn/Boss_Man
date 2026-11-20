@@ -26,7 +26,7 @@ concurrency:
   group: publish-images
   cancel-in-progress: false
 
-# Every job has a timeout-minutes (BOS-2097): this workflow and release.yml share the publish-images group without
+# Every job has a time limit (BOS-2097): this workflow and release.yml share the publish-images group without
 # cancelling, so a hung buildx push or cosign step would hold every later publish and the owner's Release button for
 # GitHub's 6-hour default. Limits as in ci.yml: about 1.5x the longest green run, rounded up to 5 minutes, at least 10.
 jobs:

@@ -26,7 +26,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/bossman') }}
 
-# Every job has a timeout-minutes (BOS-2097): without one a hung step runs for GitHub's 6-hour default, and the merge gate
+# Every job has a time limit (BOS-2097): without one a hung step runs for GitHub's 6-hour default, and the merge gate
 # reports "still running" after its own 90 minutes instead of a red run. Each limit is about 1.5x the job's longest green
 # run in recent history, rounded up to 5 minutes, at least 10. The longest chain of limits along `needs` stays under the
 # gate's 90 minutes (CI_TIMING.ceilingMs in apps/server/src/services/ci-publish.ts). apps/server/test/ci-workflow-timeouts.test.ts
