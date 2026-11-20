@@ -659,7 +659,7 @@ export const OWNER_SETUP_FIX_PREFIX = "owner-setup-fix:";
 /**
  * DR-052 point 4: a live ticket's setup steps failed the card check, so instead of the owner's card the CEO gets one
  * to fix them. One per ticket (the first of a shared card), never stacked; it closes by itself when the owner's card
- * goes out. While it is open the CEO may change the merged ticket's steps (work.ts `setupFix`).
+ * goes out. While no owner's card is raised the CEO may change the merged ticket's steps (work.ts `setupFrozenRefusal`, BOS-2075).
  */
 async function raiseOwnerSetupFix(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string }[]; findings: LintFinding[]; commit: string }) {
   const first = t.tickets[0]!;

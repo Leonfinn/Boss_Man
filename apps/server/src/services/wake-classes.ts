@@ -92,6 +92,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   assigned: "agent",
   engagement: "agent",
   "note request": "agent",
+  // A merged ticket's setup steps were corrected before go-live (BOS-2075): each reviewer who approved it is told, on the ticket.
+  "setup steps corrected": "agent",
 };
 
 /** A reason nobody classified is treated as the agent class, today's rate-limited behaviour. */

@@ -258,7 +258,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     return me?.role === "ceo" || me?.role === "manager";
   }
 
-  registerTicketAdmin(server, db, { work, engagements, feedback, hostFacts, review }, scope);
+  registerTicketAdmin(server, db, { work, engagements, feedback, hostFacts, review }, scope, hooks);
 
   server.registerTool(
     "sizing_guide",
