@@ -32,6 +32,13 @@ const PARKED_SHOWN = 4;
 const watchPastEnd = (t: { watchEndsAt?: string | null }) => !!t.watchEndsAt && Date.parse(t.watchEndsAt) < Date.now();
 /** Past the 14-day default with no date from the agent: the amber "No date" tag; whole days since the watch began. */
 const watchNoDateDays = (t: { watchEndsAt?: string | null; watchUntil?: string | null }) => (t.watchEndsAt && !t.watchUntil && watchPastEnd(t) ? 14 + Math.floor((Date.now() - Date.parse(t.watchEndsAt)) / 86_400_000) : null);
+/** "3 days", or hours when it has been less than a day. */
+const stuckFor = (ms: number) => {
+  const days = Math.floor(ms / 86_400_000);
+  if (days >= 1) return `${days} day${days === 1 ? "" : "s"}`;
+  const hours = Math.max(1, Math.floor(ms / 3_600_000));
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
+};
 const PROJECT_TABS = [
   { id: "kanban", label: "Kanban" },
   { id: "budget", label: "Budget" },
@@ -469,14 +476,20 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
 }
 
 const FILTERS_KEY = "board-filters";
-type SavedFilters = { feature: string; working: boolean };
-/** The feature and "working now" filters, kept for the browser session like the feature states below. */
+type BoardView = "all" | "features" | "tasks";
+type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string };
+/** The view, Assigned to, feature and "working now" filters, kept for the browser session like the feature states below. */
 function readFilters(): SavedFilters {
   try {
     const saved = JSON.parse(sessionStorage.getItem(FILTERS_KEY) ?? "null") as Partial<SavedFilters> | null;
-    return { feature: typeof saved?.feature === "string" ? saved.feature : "any", working: saved?.working === true };
+    return {
+      feature: typeof saved?.feature === "string" ? saved.feature : "any",
+      working: saved?.working === true,
+      view: saved?.view === "features" || saved?.view === "tasks" ? saved.view : "all",
+      assignee: typeof saved?.assignee === "string" && saved.assignee ? saved.assignee : "anyone",
+    };
   } catch {
-    return { feature: "any", working: false };
+    return { feature: "any", working: false, view: "all", assignee: "anyone" };
   }
 }
 
@@ -546,7 +559,7 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
-function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, mergeLine, quiet }: { quiet?: boolean; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet }: { quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -566,7 +579,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
   const hover = (cut: boolean, text: string) => (cut && !open ? text : undefined);
   const first = who ? name.split(" ")[0]! : name;
   return (
-    <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId}>
+    <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId} data-ticket-id={t.id}>
       <div className="top">
         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
         {(t.risk === "high" || t.risk === "critical") && (
@@ -586,6 +599,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
             Next up
           </span>
         )}
+        {t.looksStuck && <span className="tag amber" title="The watchdog has handed this to the Scrum Master.">Looks stuck</span>}
         {t.reviewStage === "checking" && <span className="tag">Being checked</span>}
         {isLiveCheckWait(t) && <span className="tag green">Merged</span>}
         {isLiveCheckWait(t) && watchNoDateDays(t) !== null && <span className="tag amber">No date · {watchNoDateDays(t)} days</span>}
@@ -613,6 +627,12 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
           {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
         </a>
+      )}
+      {t.looksStuck && (
+        <span className="state-line stuck-line" data-testid="board-looks-stuck-note">
+          <span className="ico" aria-hidden="true">⚠</span>
+          <span>No movement for {stuckFor(t.looksStuck.idleMs)}. The Scrum Master has been told.</span>
+        </span>
       )}
       {t.wipExempt && t.wipExempt !== "live" && !isLiveCheckWait(t) && (
         <span className={t.wipExempt === "busy" ? "state-line" : "note"} title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
@@ -668,11 +688,12 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
       {t.quotaHeldUntil && !t.working?.length && (
         <span className="note" role="status">
           Held by the quota hold{t.quotaHeldReason ? ` (${t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")})` : ""}.{" "}
-          <button type="button" className="linkish" onClick={() => onRunNow(t.id)}>
+          <button type="button" className="linkish" disabled={runState?.busy} onClick={() => onRunNow(t.id)}>
             Run now
           </button>
         </span>
       )}
+      {runState?.error && <span className="note" role="alert">{runState.error}</span>}
       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
       {merging && t.mergeNote && !mergeLine && <span className="note">{t.mergeNote}</span>}
       {t.reviewStage === "checking" && (
@@ -753,11 +774,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const mergeLineOf = (id: string) => [...(mergeLines.data?.running ?? []), ...(mergeLines.data?.waiting ?? [])].find((r) => r.ticketId === id)?.statusLine;
   const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
   const goals = usePoll((signal) => (current ? api<Tree>(`/api/companies/${current.companyId}/objectives`, { signal }) : Promise.resolve(null)), 120_000, `board-goals-${current?.companyId ?? "none"}`);
-  const [view, setView] = useState<"all" | "features" | "tasks">("all");
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [assignee, setAssignee] = useState("anyone");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState(readFilters);
   const setFilter = (change: Partial<SavedFilters>) =>
@@ -770,6 +789,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       }
       return next;
     });
+  const { view, assignee } = filters;
+  const setView = (v: BoardView) => setFilter({ view: v });
+  const setAssignee = (a: string) => setFilter({ assignee: a });
   const [allDone, setAllDone] = useState(false);
   // BOS-1909: a parked lane shows this many cards, then "Show N more" (once pressed, all of them).
   const [moreOpen, setMoreOpen] = useState<Record<string, boolean>>({});
@@ -800,9 +822,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const filterCompany = companies.find((c) => c.id === current?.companyId);
   const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0);
   const clearFilters = () => {
-    setView("all");
-    setAssignee("anyone");
-    setFilter({ feature: "any", working: false });
+    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false });
   };
   const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
   const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
@@ -860,15 +880,34 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     beingChecked: lanes.find((l) => l.checking)?.tickets.filter(passes).length ?? 0,
     watching: lanes.find((l) => l.liveCheck)?.tickets.filter(passes).length ?? 0,
   };
+  // BOS-1910: every shown card the watchdog has handed on, in lane order; the strip links to the first.
+  const stuckCards = lanes.flatMap((l) => l.tickets.filter((t) => t.looksStuck && passes(t)));
   const standingTargets = { inProgress: progressCol ? `lane-${progressCol.id}` : undefined, nextUp: readyCol ? `lane-${readyCol.id}` : undefined, beingChecked: "lane-being-checked", watching: "lane-live-check" };
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
     board.reload();
   };
+  // Per card: "busy" while the request is out (a second click is ignored), or the error text if it failed.
+  const [runState, setRunState] = useState<Record<string, { busy: boolean; error?: string }>>({});
+  const runNowBusy = useRef(new Set<string>());
   const runNow = async (id: string) => {
-    await api(`/api/tickets/${id}/run-now`, { method: "POST" });
-    board.reload();
+    if (runNowBusy.current.has(id)) return;
+    runNowBusy.current.add(id);
+    setRunState((s) => ({ ...s, [id]: { busy: true } }));
+    try {
+      await api(`/api/tickets/${id}/run-now`, { method: "POST" });
+      setRunState((s) => {
+        const { [id]: _done, ...rest } = s;
+        return rest;
+      });
+      board.reload();
+    } catch (e) {
+      const why = e instanceof Error && e.message ? ` (${e.message})` : "";
+      setRunState((s) => ({ ...s, [id]: { busy: false, error: `Couldn't start this now${why}. Try again in a moment.` } }));
+    } finally {
+      runNowBusy.current.delete(id);
+    }
   };
   const openForm = (a: Adding) => setAdding({ ...a, n: (adding?.n ?? 0) + 1 });
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
@@ -1109,7 +1148,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           )}
         </div>
       </div>
-      {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} />}
+      {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} stuck={stuckCards.length} stuckTicketId={stuckCards[0]?.id} />}
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
         <div className="segmented state-filter" role="group" aria-label="Show features that are">
@@ -1264,6 +1303,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       tiers={tiers}
                       numberOf={(id) => (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === id)?.number}
                       onRunNow={(id) => void runNow(id)}
+                      runState={runState[t.id]}
                       mergeLine={t.reviewStage === "merging" || t.reviewStage === "held" ? mergeLineOf(t.id) : undefined}
                     />
                   ))}

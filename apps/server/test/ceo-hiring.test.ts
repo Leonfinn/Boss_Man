@@ -64,6 +64,22 @@ describe("the CEO builds the team (R62)", () => {
     await other.close();
   });
 
+  it("logs a change to what the CEO may change, and answers 404 for an unknown company", async () => {
+    const c = (ctx = await setup());
+    const res = await c.req("PUT", `/api/companies/${c.company.id}/agent-approvals`, { approvals: "nothing" });
+    expect(res.json()).toEqual({ approvals: "nothing" });
+    const rows = (await c.db.select().from(activity).where(eq(activity.companyId, c.company.id))).filter((a) => a.kind === "settings");
+    expect(rows.map((a) => a.summary)).toContain("Owner set agent changes to nothing");
+    expect(rows.find((a) => a.summary.includes("agent changes"))!.detail).toEqual({ setting: "agent_approvals", value: "nothing" });
+
+    const ghost = "00000000-0000-4000-8000-000000000000";
+    const bad = await c.req("PUT", `/api/companies/${ghost}/agent-approvals`, { approvals: "nothing" });
+    expect(bad.statusCode).toBe(404);
+    expect(bad.json()).toEqual({ error: "not_found" });
+    expect(await c.db.select().from(settings).where(eq(settings.key, `agent_approvals:${ghost}`))).toEqual([]);
+    expect(await c.db.select().from(activity).where(eq(activity.companyId, ghost))).toEqual([]);
+  });
+
   it("always waits for the owner on a hire, even when nothing else needs approval", async () => {
     const c = (ctx = await setup());
     expect((await c.req("GET", `/api/companies/${c.company.id}/agent-approvals`)).json()).toEqual({ approvals: "hires" });

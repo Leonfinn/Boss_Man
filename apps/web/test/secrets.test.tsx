@@ -33,6 +33,37 @@ describe("secrets page", () => {
     expect((await screen.findAllByText("Boss Man Github token")).length).toBeGreaterThan(0);
   });
 
+  it("shows a loader while the stored secrets load, not 'No secrets yet'", async () => {
+    // Released at the end: the api layer shares one in-flight GET per URL, so a request left hanging would leak into the next test.
+    let release: (r: Response) => void = () => {};
+    vi.stubGlobal("fetch", vi.fn((url: string) => (url === "/api/secrets" ? new Promise<Response>((res) => (release = res)) : Promise.resolve(json([])))));
+    render(<Secrets companies={[company]} companyId="c1" />);
+    expect(await screen.findByText(/Loading the stored secrets/, undefined, { timeout: 4000 })).toBeTruthy();
+    expect(screen.queryByText(/No secrets yet/)).toBeNull();
+    release(json([]));
+    expect(await screen.findByText(/No secrets yet/)).toBeTruthy();
+  });
+
+  it("says the stored secrets could not load, and Retry loads them", async () => {
+    let fail = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url === "/api/secrets"
+          ? fail
+            ? new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } })
+            : json([{ id: "s1", name: "Stored one", kind: "generic", hint: null, version: 1, createdAt: "2026-10-19T17:22:00Z", updatedAt: "2026-10-19T17:22:00Z" }])
+          : json([]),
+      ),
+    );
+    render(<Secrets companies={[company]} companyId="c1" />);
+    expect(await screen.findByText(/Couldn't load the stored secrets/)).toBeTruthy();
+    expect(screen.queryByText(/No secrets yet/)).toBeNull();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Stored one")).toBeTruthy();
+  });
+
   it("names the deploy target a secret is limited to, and falls back when it is unknown", async () => {
     const grant = (id: string, target: string) => ({ id, secretId: "s1", envName: `VAR_${id}`, secretName: "Token", hint: null, deployTargetId: target, agentIds: [] });
     vi.stubGlobal(

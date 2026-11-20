@@ -1525,6 +1525,7 @@ export async function buildApp(opts: AppOptions) {
       // A fence mode sent from Settings is the owner's choice (BOS-940): Boss Man never changes it, and its card goes.
       const chosenAt = b.fenceMode ? new Date() : null;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt, fenceOffFingerprint: null } : {}) };
+      const [before] = await db.select({ fenceMode: companies.fenceMode, permissionJudge: companies.permissionJudge, maxRunMinutes: companies.maxRunMinutes }).from(companies).where(eq(companies.id, id));
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       if (!c) return reply.code(404).send({ error: "not_found" });
       if (chosenAt) await closeFenceCard(db, id, chosenAt);
@@ -1538,6 +1539,12 @@ export async function buildApp(opts: AppOptions) {
       // The start hold's limits (BOS-1489) change what starts, so keep a record of who set them and to what.
       for (const [key, label] of [["holdStartsMergesWaiting", "merges waiting"], ["holdStartsQuickChecksQueued", "quick checks queued"]] as const)
         if (b[key] !== undefined) await record(db, { companyId: id, kind: "settings", summary: b[key] === null ? `Owner turned off holding new starts on ${label}` : `Owner set new starts to be held while ${b[key]} or more ${label}`, detail: { [key]: b[key] } });
+      // The agent fence, permission-card advice and the run time limit change what agents may do (BOS-2063): record each one the request changed.
+      const FENCE_WORDS = { off: "Off", watch: "Watch", enforce: "Enforce" } as const;
+      const JUDGE_WORDS = { off: "Off", watch: "Watch", advise: "Advise" } as const;
+      if (b.fenceMode !== undefined && b.fenceMode !== before?.fenceMode) await record(db, { companyId: id, kind: "settings", summary: `Owner set the agent fence to ${FENCE_WORDS[b.fenceMode]}`, detail: { fenceMode: b.fenceMode } });
+      if (b.permissionJudge !== undefined && b.permissionJudge !== before?.permissionJudge) await record(db, { companyId: id, kind: "settings", summary: `Owner set permission-card advice to ${JUDGE_WORDS[b.permissionJudge]}`, detail: { permissionJudge: b.permissionJudge } });
+      if (b.maxRunMinutes !== undefined && b.maxRunMinutes !== before?.maxRunMinutes) await record(db, { companyId: id, kind: "settings", summary: b.maxRunMinutes === null ? "Owner removed the run time limit" : `Owner set runs to end after ${b.maxRunMinutes} minutes`, detail: { maxRunMinutes: b.maxRunMinutes } });
       return c;
     });
 
@@ -2326,10 +2333,11 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/models/refresh", async (req) => ({ probed: await modelProbe.probe(IdParam.parse(req.params).id, { force: true }) }));
     // What the CEO may change about the team without asking (R62).
     owner.get("/api/companies/:id/agent-approvals", async (req) => ({ approvals: await agentsSvc.approvals(IdParam.parse(req.params).id) }));
-    owner.put("/api/companies/:id/agent-approvals", async (req) => {
+    owner.put("/api/companies/:id/agent-approvals", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { approvals } = z.object({ approvals: z.enum(AGENT_APPROVALS) }).parse(req.body);
-      return { approvals: await agentsSvc.setApprovals(id, approvals) };
+      const saved = await agentsSvc.setApprovals(id, approvals);
+      return saved === null ? reply.code(404).send({ error: "not_found" }) : { approvals: saved };
     });
     owner.get("/api/companies/:id/agents", async (req) => agentsSvc.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/agents", async (req, reply) => {

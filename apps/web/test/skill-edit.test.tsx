@@ -38,6 +38,17 @@ describe("skills", () => {
     expect(await screen.findByText(/Saved\. Agents get the new version/)).toBeTruthy();
   });
 
+  it("shows a loader in the skill pane while the skill loads", async () => {
+    const slow = { ...row, id: "s9", name: "slow-load" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => (url.endsWith("/skills/s9") ? new Promise<Response>(() => {}) : Promise.resolve(url.endsWith("/skills") ? json([slow]) : json([])))),
+    );
+    render(<Skills company={company} />);
+    fireEvent.click((await screen.findByText("slow-load", { selector: "a span" })).closest("a")!);
+    expect(await screen.findByText(/Loading the skill/, undefined, { timeout: 4000 })).toBeTruthy();
+  });
+
   it("marks a skill with no instructions, on the list and on the skill", async () => {
     const empty = { ...row, id: "s2", name: "empty-body", hasInstructions: false };
     vi.stubGlobal(

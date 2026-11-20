@@ -9,7 +9,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { FENCE_DENIED_PATTERN, FENCE_OFF_CONSEQUENCE, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, companies, decisions, runners, wakes } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, runners, wakes } from "../src/db/schema.js";
 import { FENCE_HELD, FENCE_KEEP_OFF, FENCE_KEEP_STOPPED, FENCE_RUN_UNFENCED, FENCE_TO_WATCH, fenceCardKey, fenceDefaultSweep, fenceUnavailableKey } from "../src/services/fence-default.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -334,5 +334,33 @@ describe("no agent run goes unfenced unless the owner chose Off (BOS-373)", () =
     expect((await heldCards(c)).filter((d) => d.status === "open")).toHaveLength(1);
     expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "off" })).statusCode).toBe(200);
     expect((await heldCards(c)).filter((d) => d.status === "open")).toHaveLength(0);
+  });
+});
+
+describe("the activity log for fence, advice and run limit changes (BOS-2063)", () => {
+  const lines = async (c: Awaited<ReturnType<typeof setup>>) =>
+    (await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")))).map((a) => a.summary);
+
+  it("records each changed setting with its new value, and nothing for an unchanged one", async () => {
+    const c = (ctx = await setup(["fence"]));
+    const url = `/api/companies/${c.company.id}`;
+    expect((await c.req("PATCH", url, { fenceMode: "off", permissionJudge: "advise", maxRunMinutes: 90 })).statusCode).toBe(200);
+    expect(await lines(c)).toEqual(expect.arrayContaining(["Owner set the agent fence to Off", "Owner set permission-card advice to Advise", "Owner set runs to end after 90 minutes"]));
+    expect(await lines(c)).toHaveLength(3);
+    // The same values again change nothing, so add no lines.
+    await c.req("PATCH", url, { fenceMode: "off", permissionJudge: "advise", maxRunMinutes: 90 });
+    expect(await lines(c)).toHaveLength(3);
+    await c.req("PATCH", url, { maxRunMinutes: null });
+    expect(await lines(c)).toContain("Owner removed the run time limit");
+    // Other fields leave no line.
+    await c.req("PATCH", url, { name: "Renamed Co" });
+    expect(await lines(c)).toHaveLength(4);
+  });
+
+  it("a refused fence change and an unknown company write nothing", async () => {
+    const c = (ctx = await setup(["fence"]));
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "enforce" })).statusCode).toBe(400);
+    expect((await c.req("PATCH", "/api/companies/00000000-0000-4000-8000-000000000000", { fenceMode: "off", maxRunMinutes: 5 })).statusCode).toBe(404);
+    expect(await lines(c)).toEqual([]);
   });
 });

@@ -2,6 +2,8 @@ import { useState, type FormEvent } from "react";
 import { api, type Company } from "../api";
 import { Credentials } from "./settings/Credentials";
 import { usePoll } from "../hooks";
+import { LoadError } from "../components/LoadError";
+import { Loader } from "../components/Loader";
 import { when } from "./Runs";
 
 type Secret = { id: string; name: string; kind: string; hint: string | null; version: number; createdAt: string; updatedAt: string };
@@ -146,7 +148,9 @@ export function Secrets({ companies, companyId, onChanged }: { companies: Compan
       </header>
       {company && <Credentials key={company.id} company={company} title={`${company.name}'s variables`} onChanged={() => (list.reload(), onChanged?.())} />}
       <h2 style={{ fontSize: 17, fontWeight: 600 }}>All stored secrets</h2>
-      {list.data && list.data.length === 0 ? (
+      {!list.data && list.error && <LoadError what="the stored secrets" message={list.error.message} onRetry={list.reload} />}
+      {!list.data && !list.error && <Loader label="Loading the stored secrets" size={16} />}
+      {!list.data ? null : list.data.length === 0 ? (
         <p className="muted">No secrets yet. Add one above.</p>
       ) : (
         <ul className="secret-list">

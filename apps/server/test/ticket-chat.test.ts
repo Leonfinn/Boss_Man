@@ -78,6 +78,19 @@ describe("ticket conversation (R65)", () => {
     expect(new Date(list[199]!.startedAt).getTime()).toBe(base + 204 * 60_000);
   });
 
+  it("lists the newest 500 messages of a ticket, oldest first (BOS-1986)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Long thread" })).json() as { id: string };
+    const base = Date.UTC(2026, 0, 1);
+    await c.db.insert(ticketMessages).values(
+      Array.from({ length: 505 }, (_, i) => ({ companyId: c.company.id, ticketId: t.id, author: "owner" as const, text: `m${i}`, delivery: "unassigned", createdAt: new Date(base + i * 60_000) })),
+    );
+    const list = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json() as { items: { text: string }[] };
+    expect(list.items).toHaveLength(500);
+    expect(list.items[0]!.text).toBe("m5");
+    expect(list.items[499]!.text).toBe("m504");
+  });
+
   it("sends into the live run, records its last message, then wakes the agent once for later messages", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
