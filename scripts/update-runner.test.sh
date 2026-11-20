@@ -20,7 +20,9 @@ chmod +x "$T/bin/docker"
 cp "$here/update-runner.sh" "$T/repo/"
 export PATH="$T/bin:$PATH" FAKE_LOG="$T/docker.log" BOSSMAN_DEPLOYER="$T/deployer" COMPOSE_PROFILES=launcher
 cd "$T/repo"
-run() { : >"$FAKE_LOG"; rm -f "$T/deployer/inbox/drain.json"; ./update-runner.sh "$@" >"$T/out" 2>&1; }
+run() { : >"$FAKE_LOG"; rm -f "$T/deployer/inbox/drain.json" "$T/deployer/inbox/drain-cancel.json"; ./update-runner.sh "$@" >"$T/out" 2>&1; }
+# The reason in a request file the script wrote ("none" when it carries no reason).
+reason_of() { node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); console.log(j.reason ?? "none")' "$1"; }
 logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 
 # Default: image promoted, drain requested, no runner touched, and the launcher rebuilt (BOS-335).
@@ -139,11 +141,57 @@ run
 logged "--build-arg RUNNER_ADDONS=agent-browser " || fail "a symlinked saved file was followed"
 rm -f "$T/deployer/inbox/runner-addons" "$T/deployer/outbox/runner-addons.built" .env
 
-# A failed canary promotes nothing and asks for nothing.
+# BOS-1955: the early "building" hold. On a good run it is asked for before the first docker build, and the real drain
+# replaces it with no cancel file; no deployer folder or no launcher means nothing is written at all.
+hold_probe="$T/hold-probe"
+# A docker wrapper that records, at the first build, whether the building hold file already exists and what it says.
+mv "$T/bin/docker" "$T/bin/docker.real"
+cat >"$T/bin/docker" <<'WRAP'
+#!/usr/bin/env bash
+if [[ $1 == build && ! -e $HOLD_PROBE ]]; then
+  if [[ -f $BOSSMAN_DEPLOYER/inbox/drain.json ]]; then cat "$BOSSMAN_DEPLOYER/inbox/drain.json" >"$HOLD_PROBE"; else echo none >"$HOLD_PROBE"; fi
+fi
+exec "$(dirname "$0")/docker.real" "$@"
+WRAP
+chmod +x "$T/bin/docker"
+export HOLD_PROBE="$hold_probe"
+rm -f "$hold_probe"; run
+grep -q '"reason":"building"' "$hold_probe" || fail "the building hold was not on file before the first docker build: $(cat "$hold_probe")"
+[[ $(reason_of "$T/deployer/inbox/drain.json") == none ]] || fail "the real drain did not replace the building hold"
+[[ ! -e $T/deployer/inbox/drain-cancel.json ]] || fail "a good update left a cancel file"
+grep -q "hold new work while the image is built" "$T/out" || fail "no message about the early hold"
+# No launcher: no drain would follow, so no early hold either.
+rm -f "$hold_probe"; HAVE_LAUNCHER=0 run
+grep -q none "$hold_probe" || fail "an early hold was written with no launcher: $(cat "$hold_probe")"
+[[ ! -e $T/deployer/inbox/drain-cancel.json ]] || fail "a cancel file was written with no launcher"
+# No deployer folder: nothing written anywhere.
+saved="$BOSSMAN_DEPLOYER"; unset BOSSMAN_DEPLOYER
+rm -f "$hold_probe"; run
+[[ $(find "$T/deployer/inbox" "$T/deployer/state" -type f 2>/dev/null | wc -l) == 0 ]] || fail "request files were written without a deployer folder"
+export BOSSMAN_DEPLOYER="$saved"
+# A failed build (the docker build itself exits non-zero) cancels the hold by itself.
+mv "$T/bin/docker.real" "$T/bin/docker.real.ok"
+cat >"$T/bin/docker.real" <<'BAD'
+#!/usr/bin/env bash
+echo "docker $*" >>"$FAKE_LOG"
+if [[ $1 == build && $* == *apps/runner/Dockerfile* ]]; then exit 7; fi
+case "$*" in
+  "image inspect --format"*) echo sha256:oldguard ;;
+  "ps -q"*) echo launcher-1 ;;
+esac
+BAD
+chmod +x "$T/bin/docker.real"
+if run; then fail "a failed build succeeded"; fi
+[[ $(reason_of "$T/deployer/inbox/drain.json") == building ]] || fail "a failed build changed the hold request"
+[[ -s $T/deployer/inbox/drain-cancel.json ]] || fail "a failed build did not cancel the building hold"
+mv -f "$T/bin/docker.real.ok" "$T/bin/docker.real"
+
+# A failed canary promotes nothing and asks for nothing (the early hold is cancelled, never turned into a real drain).
 if CANARY_RC=1 run; then fail "a failed canary succeeded"; fi
 logged "docker tag boss-man-runner:candidate" && fail "a failed canary was promoted"
 logged "boss-man-netguard:previous" && fail "a failed canary moved the network guard's :previous tag"
-[[ ! -e $T/deployer/inbox/drain.json ]] || fail "a failed canary asked for a drain"
+[[ $(reason_of "$T/deployer/inbox/drain.json") == building ]] || fail "a failed canary asked for a real drain"
+[[ -s $T/deployer/inbox/drain-cancel.json ]] || fail "a failed canary did not cancel the building hold"
 grep -q "runners keep running it" "$T/out" || fail "an update's failed canary lost its message"
 logged "compose up" && fail "a failed canary on an existing install started services"
 # BOS-1893: on a first install (no :current image) a failed canary still starts db, server and launcher, says so, and exits non-zero.

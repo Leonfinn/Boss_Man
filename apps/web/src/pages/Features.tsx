@@ -846,6 +846,26 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   const keepOffReasonDraftKey = `feature-keep-off-reason/${id}`;
   const [keepOffReasonDraft, setKeepOffReasonDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Priority 1 (BOS-2091): off while the request runs, and the reply's count is shown after it.
+  const [p1Busy, setP1Busy] = useState(false);
+  const [p1Note, setP1Note] = useState<string | null>(null);
+  const setPriorityOne = (on: boolean, title: string, openTasks: number) => {
+    if (p1Busy) return;
+    if (on && !window.confirm(`Put all ${openTasks} open task${openTasks === 1 ? "" : "s"} of "${title}" first? They go ahead of other work and past the usage-limit hold.`)) return;
+    setP1Busy(true);
+    void api<{ tickets?: number }>(`/api/features/${id}/priority-one`, { method: "PUT", body: { on } })
+      .then(
+        (r) => {
+          const n = r?.tickets ?? 0;
+          const s = n === 1 ? "" : "s";
+          setError(null);
+          setP1Note(on ? `Priority 1 on: ${n} task${s} marked to go first.` : `Priority 1 off: ${n} task${s} back to normal order.`);
+          data.reload();
+        },
+        (err: Error) => (setP1Note(null), setError(err.message)),
+      )
+      .finally(() => setP1Busy(false));
+  };
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
   const saveKeepOffReason = (reason: string) =>
     void api(`/api/features/${id}`, { method: "PATCH", body: { keepOffPortal: true, keepOffReason: reason.trim() || null } }).then(
@@ -1053,10 +1073,14 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           <input
             type="checkbox"
             checked={!!f.priorityOne}
-            onChange={(e) => void api(`/api/features/${id}/priority-one`, { method: "PUT", body: { on: e.target.checked } }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message))}
+            disabled={p1Busy}
+            onChange={(e) => setPriorityOne(e.target.checked, f.title, d.tickets.filter((t) => t.state !== "done").length)}
           />
           Priority 1: every open task of it goes first, and you get one page when all of it has merged
         </label>
+        <p role="status" className="muted" style={{ fontSize: 13, margin: 0 }}>
+          {p1Note}
+        </p>
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
           Show on the feedback portal, where visitors can vote on it

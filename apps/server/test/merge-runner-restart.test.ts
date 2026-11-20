@@ -39,13 +39,19 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   /** What the fake runner does with each kind of request; a held one never answers, like a runner that was swapped. */
-  const behave = { verify: () => Promise.resolve() as Promise<void>, merge: () => Promise.resolve() as Promise<void>, running: 0, maxRunning: 0 };
+  const behave = { verify: () => Promise.resolve() as Promise<void>, merge: () => Promise.resolve() as Promise<void>, running: 0, maxRunning: 0, lockedDiffs: 0 };
   const connect = () =>
     built.runners.connect(reg.runnerId, (c) => {
       sent.push(c);
       const requestId = (c as { requestId: string }).requestId;
       const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId, ok: true, data }));
-      if (c.type === "workspace.diff") ok(DIFF);
+      if (c.type === "workspace.diff") {
+        // BOS-2089: a restarted runner whose repo lock is still held answers every diff with the lock time-out.
+        if (behave.lockedDiffs > 0) {
+          behave.lockedDiffs--;
+          queueMicrotask(() => built.runners.resolveReply({ requestId, ok: false, error: `Timed out waiting for the lock on ${project.id}.` }));
+        } else ok(DIFF);
+      }
       if (c.type === "workspace.carried") ok({ carried: [] });
       if (c.type === "workspace.migrations") ok({ needed: false, reason: "none" });
       if (c.type === "workspace.verify") {
@@ -190,6 +196,50 @@ describe("a runner restart fails what it was handling", () => {
     expect(c.behave.maxRunning).toBeLessThanOrEqual(2);
     expect(await c.db.query.decisions.findMany()).toHaveLength(0);
   }, 60_000);
+});
+
+describe("a runner still catching up after a restart (BOS-2089)", () => {
+  const cards = async (c: Awaited<ReturnType<typeof setup>>, id: string) => (await c.db.query.decisions.findMany()).filter((d) => (d.context as { ticketId?: string }).ticketId === id);
+
+  it("20 Nov: the diff hits the held repo lock more times than the retry budget, and the merge still lands with no card", async () => {
+    const c = await setup();
+    // 14:09-14:15 on 20 Nov: four tries in a row failed this way, then the card. Here it fails six times.
+    c.behave.lockedDiffs = 6;
+    c.connect();
+    const t = await c.ticket();
+    await c.built.review.landVisible(t.id, "the owner");
+    expect((await c.row(t.id)).systemState).toBe("done");
+    expect(c.sent.filter((x) => x.type === "workspace.diff").length).toBeGreaterThanOrEqual(7);
+    expect(await cards(c, t.id)).toHaveLength(0);
+    // Each failed try keeps the runner's own reason, so the next one of these can be explained from the records.
+    const fails = (await c.db.query.activity.findMany()).filter((a) => a.ticketId === t.id && (a.detail as { event?: string } | null)?.event === "attempt_failed");
+    expect(fails).toHaveLength(6);
+    for (const f of fails) expect(f.detail).toMatchObject({ reason: "restart", note: expect.stringContaining("Timed out waiting for the lock") });
+  });
+
+  it("a runner that has been back a while and still fails: the card comes after the usual tries", async () => {
+    const c = await setup();
+    c.behave.lockedDiffs = 100;
+    c.connect();
+    vi.spyOn(c.built.runners, "isSettling").mockReturnValue(false);
+    const t = await c.ticket();
+    await c.built.review.landVisible(t.id, "the owner").catch(() => undefined);
+    // One try plus INFRA_RETRY_ATTEMPTS (3) retries, as before.
+    expect(c.sent.filter((x) => x.type === "workspace.diff")).toHaveLength(4);
+    expect(await cards(c, t.id)).toHaveLength(1);
+    expect((await c.row(t.id)).systemState).toBe("review");
+  });
+
+  it("a runner that keeps reconnecting still ends at a card: uncounted tries are capped", async () => {
+    const c = await setup();
+    c.behave.lockedDiffs = 100;
+    c.connect();
+    const t = await c.ticket();
+    await c.built.review.landVisible(t.id, "the owner").catch(() => undefined);
+    // SETTLE_FREE_TRIES (8) uncounted, then the usual 3 retries: 1 + 8 + 3 diffs.
+    expect(c.sent.filter((x) => x.type === "workspace.diff")).toHaveLength(12);
+    expect(await cards(c, t.id)).toHaveLength(1);
+  });
 });
 
 describe("merge state on card lists", () => {

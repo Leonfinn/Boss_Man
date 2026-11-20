@@ -26,11 +26,15 @@ concurrency:
   group: publish-images
   cancel-in-progress: false
 
+# Every job has a time limit (BOS-2097): this workflow and release.yml share the publish-images group without
+# cancelling, so a hung buildx push or cosign step would hold every later publish and the owner's Release button for
+# GitHub's 6-hour default. Limits as in ci.yml: about 1.5x the longest green run, rounded up to 5 minutes, at least 10.
 jobs:
   settings:
     # Only a CI run that passed on a push to main (not the nightly run, not a pull request).
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10 # longest green run 0.2 min
     environment: publish # holds the Docker Hub secrets; only main may use it
     permissions:
       contents: read
@@ -78,6 +82,9 @@ jobs:
         arch: [amd64, arm64]
     # Native runners, no emulation (as CI's images job).
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    # Longest green run here 2.4 min (runner, amd64), but a change to a Dockerfile or the lockfile can mean a cold
+    # build: CI's images job builds all four cold in up to 10.1 min, so this takes that job's limit.
+    timeout-minutes: 20
     environment: publish # holds the Docker Hub secrets; only main may use it
     permissions:
       contents: read
@@ -143,6 +150,7 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.settings.outputs.images) }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10 # longest green run 1.3 min
     environment: publish # holds the Docker Hub secrets; only main may use it
     permissions:
       contents: read

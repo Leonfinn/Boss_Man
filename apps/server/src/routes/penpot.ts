@@ -162,8 +162,10 @@ export function penpotRoutes(owner: FastifyInstance, deps: { db: Db; secretsSvc:
 
   // Removes Penpot from this company: its four grants go, so no agent gets them and the guard closes the address. The
   // secrets themselves stay on the Secrets page (another company may use them); the form reuses an unused one next time.
-  owner.delete("/api/companies/:id/penpot", async (req) => {
+  owner.delete("/api/companies/:id/penpot", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
+    const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!c) return reply.code(404).send({ error: "not_found" });
     const g = await grantsOf(id);
     for (const f of FIELDS) if (g[f]) await secretsSvc.revoke(g[f]!.id);
     return view(id);

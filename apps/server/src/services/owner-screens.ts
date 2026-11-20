@@ -243,11 +243,11 @@ function namedPlaces(prose: string, skip: Array<[number, number]>): PlaceHit[] {
 }
 
 /** The place a name at `pos` is read against: the last one named before it, or else the next one in its sentence. */
-function placeFor(pos: number, hits: PlaceHit[], prose: string): PlaceHit | null {
+function placeFor(pos: number, hits: PlaceHit[], sents: ReturnType<typeof sentences>): PlaceHit | null {
   let best: PlaceHit | null = null;
   for (const h of hits) if (h.at <= pos && (!best || h.at > best.at)) best = h;
   if (best) return best;
-  const end = sentences(prose).find((s) => pos >= s.at && pos < s.at + s.text.length);
+  const end = sents.find((s) => pos >= s.at && pos < s.at + s.text.length);
   const after = hits.filter((h) => h.at > pos && (!end || h.at < end.at + end.text.length)).sort((a, b) => a.at - b.at);
   return after[0] ?? null;
 }
@@ -258,7 +258,7 @@ type FieldMention = { label: string; start: number; end: number };
 /** The listed fields, longest first, each as a pattern over its words (so "Before merging, Boss Man will…" matches with or without the comma). */
 const FIELD_PATTERNS = (() => {
   const seen = new Set<string>(); // not state: local to the FIELD_PATTERNS lookup-table builder
-  const out: Array<{ label: string; words: number; re: RegExp; exact: RegExp }> = [];
+  const out: Array<{ label: string; words: number; first: string; re: RegExp; exact: RegExp }> = [];
   for (const labels of Object.values(OWNER_FIELDS) as ReadonlyArray<readonly string[]>) {
     for (const l of labels) {
       const base = l.replace(/\s*…$/, "");
@@ -269,7 +269,7 @@ const FIELD_PATTERNS = (() => {
         seen.add(key);
         const body = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(String.raw`[^\p{L}\p{N}']+`);
         const src = String.raw`(?<![\p{L}\p{N}])${body}(?![\p{L}\p{N}])`;
-        out.push({ label: form, words: words.length, re: new RegExp(src, "giu"), exact: new RegExp(`^${src}$`, "u") });
+        out.push({ label: form, words: words.length, first: foldCase(words[0]!), re: new RegExp(src, "giu"), exact: new RegExp(`^${src}$`, "u") });
       }
     }
   }
@@ -279,25 +279,58 @@ const FIELD_PATTERNS = (() => {
 const FILL = String.raw`fill(?:\s+in|\s+out)?|enter|type|put|paste|set|choose|pick|select|change|complete|write`;
 const VERB = new RegExp(String.raw`\b(?:(${FILL})|(leave|tick|untick|turn on|turn off|switch on|switch off)|(press|click|tap|hit|open|go to))\b`, "gi");
 
+// BOS-2124: the end-anchored tests on the text before a field, compiled once (they used to be built per match).
+const QUOTE_BEFORE = /(?:\*\*|["“`'])$/;
+const FILL_BEFORE_ONE = new RegExp(String.raw`\b(?:${FILL})\s+(?:the\s+)?$`, "i");
+const FILL_BEFORE_MANY = new RegExp(String.raw`\b(?:${FILL})\s+(?:the\s+|a\s+|an\s+|your\s+)?$`, "i");
+const PRESS_BEFORE = /\b(?:press|click|tap|hit)\s+(?:on\s+)?(?:the\s+)?[*"“`']*$/i;
+
+/**
+ * BOS-2124: the end of the text before `end` that the three tests above can reach, so each test reads a few dozen
+ * characters, not everything before the field (that made the cost grow with the square of a long step). The result is
+ * the same as on the whole text: a match of any of them has at most 12 characters that aren't spaces or quote marks
+ * ("complete your", "click on the"), and their runs of spaces and quote marks have no limit. So the tail takes the last
+ * TAIL_SOLID such characters with every space and quote mark between them, plus one character before, which `\b` reads.
+ */
+const TAIL_SOLID = 32;
+const TAIL_FREE = /[\s*"“”`'…]/;
+function tailBefore(prose: string, end: number): string {
+  let i = end;
+  for (let solid = 0; i > 0 && solid < TAIL_SOLID; ) if (!TAIL_FREE.test(prose[--i]!)) solid++;
+  return prose.slice(Math.max(0, i - 1), end);
+}
+
+/**
+ * Lower case as the "iu" flags compare letters, for the prefilter below. Under simple case folding only two letters
+ * outside ASCII match an ASCII one: the Kelvin sign, which toLowerCase already makes "k", and the long s ("ſ"), which
+ * it leaves alone.
+ */
+function foldCase(s: string): string {
+  return s.toLowerCase().replace(/ſ/g, "s");
+}
+
 /**
  * The fields a step names. A field counts when its label is quoted or bold, followed by "field" or "box", written as
  * the app writes it with two words or more ("Variable name"), or right after a fill-in word ("set Kind"). A single
  * common word ("name", "value") in a sentence is not taken as a field, and a label after press/click is a button.
  */
-function fieldMentions(prose: string): FieldMention[] {
+export function fieldMentions(prose: string): FieldMention[] {
   const out: FieldMention[] = [];
+  // A label whose first word isn't in the text can't match, so its regex isn't run (BOS-2124).
+  const folded = foldCase(prose);
   for (const f of FIELD_PATTERNS) {
+    if (!folded.includes(f.first)) continue;
     for (const m of prose.matchAll(f.re)) {
       const start = m.index;
       const end = start + m[0].length;
       if (out.some((o) => start < o.end && end > o.start)) continue;
-      const before = prose.slice(0, start);
+      const before = tailBefore(prose, start);
       const after = prose.slice(end);
-      const quoted = /(?:\*\*|["“`'])$/.test(before) && /^…?(?:\*\*|["”`'])/.test(after);
+      const quoted = QUOTE_BEFORE.test(before) && /^…?(?:\*\*|["”`'])/.test(after);
       const fieldWord = /^[\s*"”`'…]*(?:field|box|drop-?down|menu|setting|check ?box|tick ?box)\b/i.test(after);
       const asWritten = f.exact.test(m[0]) && /^\p{Lu}/u.test(m[0]);
-      const afterFill = new RegExp(String.raw`\b(?:${FILL})\s+(?:the\s+${f.words > 1 ? "|a\\s+|an\\s+|your\\s+" : ""})?$`, "i").test(before);
-      if (/\b(?:press|click|tap|hit)\s+(?:on\s+)?(?:the\s+)?[*"“`']*$/i.test(before)) continue;
+      const afterFill = (f.words > 1 ? FILL_BEFORE_MANY : FILL_BEFORE_ONE).test(before);
+      if (PRESS_BEFORE.test(before)) continue;
       if (quoted || fieldWord || (asWritten && f.words > 1) || (afterFill && (asWritten || f.words > 1))) out.push({ label: f.label, start, end });
     }
   }
@@ -354,11 +387,33 @@ export type Pressed = { label: string; at: number };
  * options and keys are left out). Returns the problems for each rule, and the screen the step ends on, which R7
  * uses to list the right buttons.
  */
-export function screenFindings(prose: string, pressed: Pressed[]): { r8: string[]; r13: string[]; screen: OwnerScreen | null } {
+export function screenFindings(prose: string, pressed: Pressed[]): ScreenFindings {
+  const key = `${JSON.stringify(pressed)}\u0000${prose}`;
+  let found = findingsCache.get(key);
+  if (!found) {
+    found = readScreens(prose, pressed);
+    if (findingsCache.size >= FINDINGS_CACHE_MAX) findingsCache.clear();
+    findingsCache.set(key, found);
+  }
+  // Copies, so a caller that adds to its lists can't change what the next caller with the same step is given.
+  return { r8: [...found.r8], r13: [...found.r13], screen: found.screen };
+}
+
+type ScreenFindings = { r8: string[]; r13: string[]; screen: OwnerScreen | null };
+
+// lost on restart, harmless because it only remembers a pure function of the step's text and buttons. BOS-2124: while a
+// CEO setup-fix card is open, the go-live retry (release-log.ts) re-lints the same unchanged steps on every deployer
+// poll, about once a minute. Bounded: emptied whenever it reaches FINDINGS_CACHE_MAX steps.
+const findingsCache = new Map<string, ScreenFindings>();
+const FINDINGS_CACHE_MAX = 500;
+
+function readScreens(prose: string, pressed: Pressed[]): ScreenFindings {
   const r8: string[] = [];
   const r13: string[] = [];
   const paths = walkPaths(prose, r8);
-  const pathSpans = sentences(prose).filter((s) => ARROW.test(s.text)).map((s): [number, number] => [s.at, s.at + s.text.length]);
+  // Split once: each field and place below used to split the whole text again (BOS-2124).
+  const sents = sentences(prose);
+  const pathSpans = sents.filter((s) => ARROW.test(s.text)).map((s): [number, number] => [s.at, s.at + s.text.length]);
   // Clicking a menu item or a tab ("click Config") goes there: it is a place, not a button to check.
   const clicked = pressed.filter((p) => PLACES.has(p.label)).map((p): PlaceHit => ({ at: p.at, place: PLACES.get(p.label)! }));
   const hits = [...paths, ...namedPlaces(prose, pathSpans), ...clicked];
@@ -368,7 +423,7 @@ export function screenFindings(prose: string, pressed: Pressed[]): { r8: string[
     ...fields.map((f) => ({ name: f.label, n: norm(f.label), at: f.start })),
   ];
   for (const x of named) {
-    const hit = placeFor(x.at, hits, prose);
+    const hit = placeFor(x.at, hits, sents);
     const screen = hit?.place?.screen;
     const screens = screensOf(x.n);
     if (!hit?.place || !screen || !screens || screens.has("Any screen") || screens.has(screen)) continue;
@@ -376,7 +431,7 @@ export function screenFindings(prose: string, pressed: Pressed[]): { r8: string[
     if (!r8.includes(problem)) r8.push(problem);
   }
   for (const f of fields) {
-    const sentence = sentences(prose).find((s) => f.start >= s.at && f.start < s.at + s.text.length) ?? { text: prose, at: 0 };
+    const sentence = sents.find((s) => f.start >= s.at && f.start < s.at + s.text.length) ?? { text: prose, at: 0 };
     if (actionFor(prose, f, sentence) !== "fill" || valueGiven(prose, f, sentence.text)) continue;
     const problem = `tells the owner to fill in "${f.label}" but doesn't say what to put there. Give the value (set ${f.label} to \`…\`), or say plainly that any value works`;
     if (!r13.includes(problem)) r13.push(problem);

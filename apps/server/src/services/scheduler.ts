@@ -28,6 +28,7 @@ import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts, unknownWait } from "./maintenance.js";
+import { createLaneWatch } from "./lane-watch.js";
 import { limitUnderHold, softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
@@ -298,6 +299,8 @@ export function schedulerService(
   // lost on restart, harmless because it only carries wake ids from a pass's hold check to that same pass's launch()
   // calls (BOS-2088): tickOnce clears it at its start, and a wake not launched in that pass is checked again next pass.
   const passedHold = new Set<string>();
+  // BOS-1955: a pass that never ends is named in the log (kind and how long) every minute, and the drain can say which one.
+  const laneWatch = createLaneWatch({ log: (m) => deps.log?.(m) });
   const now = deps.now ?? (() => new Date());
   const workspaceRoot = deps.workspaceRoot ?? "/home/node/workspaces";
 
@@ -1725,7 +1728,7 @@ export function schedulerService(
      * (the timer, a run ending, the API) can't both pass the same concurrency check.
      */
     tick() {
-      const pass = lane.then(() => this.tickOnce());
+      const pass = lane.then(() => laneWatch.run("queue", () => this.tickOnce()));
       lane = pass.catch(() => undefined);
       return pass;
     },
@@ -1737,18 +1740,20 @@ export function schedulerService(
      * slow pass is never half-done when a queue pass starts.
      */
     slow() {
-      const pass = lane.then(async () => {
+      const pass = lane.then(() => laneWatch.run("slow checks", async () => {
         if (await globallyPaused()) return;
         await watchDue();
         await monitorDue();
         await quotaNotices(now()).catch((err) => deps.log?.(`quota notices failed: ${(err as Error).message}`));
-      });
+      }));
       lane = pass.catch(() => undefined);
       return pass;
     },
 
     /** Resolves once no scheduling pass is mid-flight (the drain uses it before counting runs). */
     settled: () => lane.catch(() => undefined),
+    /** BOS-1955: the pass running now (its kind and how long), for the drain's "a pass has not ended" line. */
+    passInfo: () => laneWatch.current(),
 
     async tickOnce() {
       const result = { launched: 0, deferred: 0, waiting: 0, dropped: 0, paused: false };

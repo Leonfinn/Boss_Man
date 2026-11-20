@@ -138,16 +138,23 @@ const median = (a: number[]) => [...a].sort((x, y) => x - y)[Math.floor(a.length
  * Median of the longest loop stall, and of the wall time, over ITERATIONS runs after one warm-up. `refs` holds the
  * reference scan's block before every run and one after the last, so run i sits between refs[i] and refs[i + 1].
  */
+// BOS-1940: SETTLE_MS was 20. blockOf runs about 16 times per item (warm-up, samples, reference readings), so the two
+// waits cost ~19 s of this file's ~35 s of tests while measuring nothing. 5 ms is still 5 ticks of the 1 ms histogram
+// timer, and both waits only need one: Node starts counting at the histogram's first tick, and a stall is recorded by
+// the first tick after it. That tick is due before our 5 ms timer, and timers fire in due order, so this holds on a
+// busy machine too.
+const SETTLE_MS = 5;
+
 async function blockOf(fn: () => Promise<unknown>): Promise<{ block: number; wall: number }> {
   const h = monitorEventLoopDelay({ resolution: 1 });
   h.enable();
   // Let the histogram's own timer run a few times first: a stall that starts before its first tick is not recorded.
-  await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, SETTLE_MS));
   const t0 = performance.now();
   await fn();
   const wall = performance.now() - t0;
   // The histogram records a stall only when its timer fires after it, so give the loop a few ticks before stopping.
-  await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, SETTLE_MS));
   h.disable();
   return { block: h.max / 1e6, wall };
 }

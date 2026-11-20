@@ -11,7 +11,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, companies, decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { INFRA_RETRY_BASE_MS, setInfraRetryBase } from "../src/services/review.js";
+import { INFRA_RETRY_ATTEMPTS, INFRA_RETRY_BASE_MS, SETTLE_FREE_TRIES, setInfraRetryBase } from "../src/services/review.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
 
 let server: Awaited<ReturnType<typeof boot>>;
@@ -79,8 +79,9 @@ async function mergeOne(commit: string, path: string, opts: { noFileList?: boole
   const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live panel", assigneeAgentId: dev.id, acceptanceCriteria: [LIVE] })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${t.id}`, systemState: "review" }).where(eq(tickets.id, t.id));
   const r = await ctx.review.landVisible(t.id, "the owner");
-  // With no file list the gate asks again before giving up (BOS-1396): the first try plus its retries.
-  expect(stand).toEqual(opts.noFileList ? Array(4).fill("workspace.diff") : []);
+  // With no file list the gate asks again before giving up (BOS-1396): the first try plus its retries. The stand-in
+  // runner has only just connected, so the first SETTLE_FREE_TRIES retries aren't counted (BOS-2089).
+  expect(stand).toEqual(opts.noFileList ? Array(1 + SETTLE_FREE_TRIES + INFRA_RETRY_ATTEMPTS).fill("workspace.diff") : []);
   expect(co.company.id).toBeTruthy();
   return { id: t.id, r };
 }
