@@ -32,6 +32,8 @@ export const OWNER_CONTROLS = {
     "Reload",
     // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
     "Resume",
+    // The Dashboard's "Company paused" notice has the same button, busy label "Resuming".
+    "Resuming",
     // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
     "More about this",
   ],
@@ -172,7 +174,7 @@ export const OWNER_CONTROLS = {
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
-  "Team and CEO": ["Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
+  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
   Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
@@ -373,7 +375,7 @@ export const OWNER_SECTIONS = {
   "Tools and deploys": ["Tool servers (MCP)", "Penpot", "Deploy targets", "If the git host protects the tag"],
   Reviews: ["Reviews"],
   "Team and CEO": [
-    "Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references",
+    "Pause this company", "Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references",
     "Did it move the goal?", "Cleaning up temp files",
   ],
   Watchdog: ["Watchdog"],

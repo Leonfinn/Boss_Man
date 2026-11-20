@@ -55,9 +55,9 @@ describe("dashboard runner links", () => {
     }
   });
 
-  it("shows the paused notice without a link to a page that has no resume control", () => {
+  it("shows the paused notice linking to the Team tab, which now holds the Resume control", () => {
     render(<RightNow lines={[]} paused={true} companyId="c1" />);
     expect(screen.getByText("Company paused")).toBeTruthy();
-    expect(document.querySelector("a[href*='/team']")).toBeNull();
+    expect(document.querySelector("a[href='#/settings/c1/team']")).not.toBeNull();
   });
 });

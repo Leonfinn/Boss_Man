@@ -11,7 +11,7 @@ import { Funding, ProjectBudgets } from "./settings/Funding";
 import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
-import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
+import { CompanyPause, GoalCheck,StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
 import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
@@ -247,6 +247,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     ),
     team: company ? (
       <div key={company.id} style={{ display: "contents" }}>
+        <CompanyPause company={company} onChanged={onChanged} />
         <StandingRules company={company} onChanged={onChanged} />
         <Chapters company={company} />
         <AdviceTimeout company={company} onChanged={onChanged} />
