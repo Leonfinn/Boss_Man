@@ -83,6 +83,18 @@ describe("Priority 1 on a feature leaves a line per changed task (BOS-2090)", ()
     // Off again with nothing left to change: no new line.
     await ctx.req("PUT", `/api/features/${f.id}/priority-one`, { on: false });
     expect(await lines(open.id)).toHaveLength(2);
+    // On twice in a row: the second switch-on changes nothing, so it writes no line.
+    await ctx.req("PUT", `/api/features/${f.id}/priority-one`, { on: true });
+    expect(await lines(open.id)).toHaveLength(3);
+    await ctx.req("PUT", `/api/features/${f.id}/priority-one`, { on: true });
+    expect(await lines(open.id)).toHaveLength(3);
+  });
+
+  it("an unknown feature id gives 404 and writes no line", async () => {
+    const before = (await ctx.db.select().from(activity).where(eq(activity.kind, "quota"))).length;
+    const res = await ctx.req("PUT", "/api/features/00000000-0000-4000-8000-000000000000/priority-one", { on: true });
+    expect(res.statusCode).toBe(404);
+    expect((await ctx.db.select().from(activity).where(eq(activity.kind, "quota"))).length).toBe(before);
   });
 });
 
