@@ -46,6 +46,21 @@ export async function checkJobsByCompany(db: Db, onRunnerOnly = false): Promise<
   return new Map(rows.map((r) => [r.companyId, r.n]));
 }
 
+/**
+ * BOS-2058: the running check jobs a waiting server update counts as "not quiet": exactly the ones its soft hold also
+ * stops from starting. The hold lets a separate check worker start quick pre-review checks (BOS-1748, check-queue.ts),
+ * so counting those made the wait look for a quiet moment its own hold could never give: on 20 Nov a new worker quick
+ * check began each time the last one ended, 10:05 to 10:50. What a wait counts and what its hold blocks are one rule,
+ * `SERVER_WAIT_BLOCKS` in update-waits.ts, read by both.
+ */
+export async function serverWaitChecks(db: Db): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.state, "running"), sql`(${checkJobs.workerId} is null or ${checkJobs.kind} = 'merge' or ${checkJobs.scope} = 'full')`));
+  return row?.n ?? 0;
+}
+
 export type RunnerBusy = { runs: Map<string, number>; checks: Map<string, number>; byCompany: Map<string, number>; runsTotal: number; checksTotal: number };
 
 /**

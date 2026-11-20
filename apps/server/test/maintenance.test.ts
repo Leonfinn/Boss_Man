@@ -523,6 +523,8 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.maintenance.step();
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false); // the run is still going: not killed
     await c.finish(a);
+    await c.scheduler.tick(); // BOS-2058: the CEO's late-update note passes the hold; its short reply run is waited for
+    await c.finish(a);
     await c.maintenance.step();
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true); // the check no longer holds the swap
   });
@@ -568,6 +570,10 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
     expect(await getHold(c.db)).not.toBeNull();
     // The runner confirms the stop, the company is idle, and the update goes ahead by itself.
+    await c.finish(a);
+    // BOS-2058: the CEO's "update is late" note (woken at 30 minutes) is let through the hold even with no work left; its
+    // short reply run is waited for, never killed, and then the swap goes ahead.
+    await c.scheduler.tick();
     await c.finish(a);
     await c.maintenance.step();
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
@@ -995,14 +1001,62 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect((await row()).step).toBeNull();
   });
 
+  it("BOS-2058: a wrap-up with no update behind it lifts by itself after 60 minutes and stops no run", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
+    c.advance(61 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(c.commands).toHaveLength(1); // the run was not touched
+    expect(await c.titles()).toContain("note: Wrap-up lifted after 60 minutes");
+  });
+
+  // 20 Nov 11:48: the CEO's note that the update was late sat "update pending" because the swap waited on something it could
+  // not name (or on a merge record). A wake that reports on the update is never held by it; every other wake still is.
+  it("BOS-2058: the CEO's reply-lane note starts while the hold is on and nothing nameable is left; other wakes stay held", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.maintenance.start({ minutes: 30 });
+    c.advance(3 * MIN); // past UNKNOWN_WAIT_MS: no run, check or merge is left, and the swap has still not happened
+    await c.scheduler.wake({ agentId: a.ceo, reason: "nudge", note: "routine" });
+    await c.scheduler.notify(a.ceo, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note: "The update is late." });
+    await c.scheduler.tick();
+    const started = await c.db.select().from(runs);
+    expect(started.map((r) => r.purpose)).toEqual(["reply"]);
+    const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
+    expect(held.map((w) => [w.reason, w.statusReason])).toEqual([["nudge", HOLD_REASON]]);
+  });
+
+  it("BOS-2058: a wrap-up pressed while a server update waits belongs to it and lifts when that wait is over", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const wait = { decisionId: randomUUID(), commit: "b".repeat(40), fromCommit: "a".repeat(40), approvedAt: new Date().toISOString(), phase: "waiting", deadline: new Date().toISOString(), minutes: 30, origin: "approve" };
+    await c.db.insert(settings).values({ key: "deploy_wait", value: wait });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "server" });
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull(); // the update still waits
+    await c.db.update(settings).set({ value: { ...wait, phase: "sent" } }).where(eq(settings.key, "deploy_wait"));
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Wrap-up lifted");
+  });
+
   it("never stops a run by itself, even well past the not-responding time", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
     await c.wake(a);
     await c.scheduler.tick();
     await c.req("POST", "/api/maintenance/wrapup", {});
-    c.advance(120 * MIN);
-    // Passes of the drain do nothing for a wrap-up: no swap, no page, and the run is still there.
+    c.advance(50 * MIN);
+    // Passes of the drain do nothing for a wrap-up: no swap, no page, and the run is still there. (BOS-2058: it lifts by
+    // itself after 60 minutes when no update is behind it; see the next test.)
     await c.maintenance.step();
     await c.maintenance.step();
     expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);

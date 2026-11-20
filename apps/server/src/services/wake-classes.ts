@@ -10,7 +10,7 @@
 // because those modules import the scheduler; the test checks each constant against this table.
 export type WakeClass = "waiting" | "scheduled" | "agent";
 
-export const WAKE_CLASS: Record<string, WakeClass> = {
+const WAKE_TABLE = {
   // Someone is waiting.
   decision: "waiting",
   alert: "waiting",
@@ -92,7 +92,22 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   assigned: "agent",
   engagement: "agent",
   "note request": "agent",
-};
+} satisfies Record<string, WakeClass>;
+
+export const WAKE_CLASS: Record<string, WakeClass> = WAKE_TABLE;
+export type WakeReason = keyof typeof WAKE_TABLE;
+
+/**
+ * BOS-2058 (rule: an alert about a wait is never held by it). While a server or runner update holds new starts, every
+ * queued wake is held with "update pending" except the owner's chat and the CEO's one-off reply, and the reasons listed
+ * here: wakes that REPORT on an update. Today that is the CEO's reply lane, which is how every "update is late" or "update
+ * gave up" note reaches the CEO (it has a slot of its own, and no wait counts a reply run). A reason not listed is held, the safe default (work started now would only push
+ * the swap back). Typed against the table above, so a name that is not a wake reason fails typecheck, and
+ * update-waits-guard.test.ts starts each of them while a hold is on. A run one of these starts is the "update alert"
+ * class: no wait counts it, so it cannot hold the update it reports on.
+ */
+export const PASSES_UPDATE_HOLD: ReadonlyArray<WakeReason> = ["ceo reply"];
+export const duringUpdate = (reason: string): "held" | "passes" => ((PASSES_UPDATE_HOLD as readonly string[]).includes(reason) ? "passes" : "held");
 
 /** A reason nobody classified is treated as the agent class, today's rate-limited behaviour. */
 export const wakeClass = (reason: string): WakeClass => WAKE_CLASS[reason] ?? "agent";

@@ -43,7 +43,7 @@ import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { agedRank, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { agedRank, duringUpdate, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -1796,9 +1796,12 @@ export function schedulerService(
         // name (the 19 Nov update sat 86 minutes with chat paused): chat pauses only for the swap itself.
         const merging = hold.kind !== "wrapup" && work === 0 && checksWaited === 0 && deps.landingMergeIds ? (await deps.landingMergeIds().catch(() => [] as string[])).length : 0;
         const mystery = work === 0 && checksWaited === 0 && merging === 0 && unknownWait(hold, t);
-        // Only the owner's chat passes for the two new cases: the CEO's one-off replies (such as BOS-1954's late-swap wake)
-        // stay held there, so a run that ends is not followed by a reply run the swap would then wait for.
-        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : merging > 0 || mystery ? queue.filter((w) => w.reason === CHAT_REASON) : [];
+        // BOS-2058: a wake that reports on the update itself (wake-classes.ts PASSES_UPDATE_HOLD: the CEO's reply lane, which
+        // carries every "update is late" note) is never held by it. On 20 Nov at 11:48 the CEO's late-swap wake sat "update
+        // pending" because a landing and then nothing nameable was what the swap waited on. Its run is a reply run, which no
+        // wait counts, so it cannot hold the update it reports on.
+        const alerts = queue.filter((w) => duringUpdate(w.reason) === "passes");
+        const through = work > 0 || checksWaited > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [...(merging > 0 || mystery ? queue.filter((w) => w.reason === CHAT_REASON) : []), ...alerts];
         pass = through;
         const held = queue.filter((w) => !through.includes(w));
         const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);

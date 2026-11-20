@@ -23,6 +23,7 @@ import { recordFailedAttempt } from "./merge-failures.js";
 import { mainMoved } from "./merge-train.js";
 import { openHold, releaseReadyHolds } from "./review-holds.js";
 import { carriedTitles } from "./merge-queue.js";
+import { LANDING_END_MS } from "./update-waits.js";
 
 // BOS-1901 (BOS-1886 plan): region A lives in review-common.ts and the closure's state and helpers in review-ctx.ts. Every name
 // review.ts exported before is re-exported here, so callers keep importing review.ts.
@@ -50,8 +51,25 @@ export function reviewService(
   // `reviewState`, not `state`: settle and others have a local `state` (the review verdict) that would hide it.
   const { state: reviewState, landings, gate, landingBeat, phases, ciWaits, beatNow, ticketWithRepo, clashOnMain, landingStale, prTarget, approvedAndWaiting, closeAfterMerge, tellCeo, mergeStuck, checkStuck, setGitNote, tellAgent, checkMergedResult, waitForCi, mergeCarry, mergeRetarget, mergeTurnMinutes, templates, checkHoldInput, startHold, ownerSignoffOpen, refuseIfHeld } = ctx;
 
+  const landingStartMs = (id: string): number => {
+    const l = landings.get(id);
+    return l?.state === "running" ? Date.parse(l.startedAt) : NaN;
+  };
+
   async function landingMergeIds(): Promise<string[]> {
     let ids = [...landings.entries()].filter(([id, l]) => l.state === "running" && phases.get(id) === "merging").map(([id]) => id);
+    if (!ids.length) return [];
+    // BOS-2058: a wait counts live work only. A landing record whose ticket stopped beating (the 20 Nov 11:44 BOS-1991
+    // record created by a restart, with nothing running) is not work, and a landing past its own end (LANDING_END_MS) no
+    // longer holds the swap: DR-014 says a restart fails an in-flight merge at once and the gate retries it.
+    const live: string[] = [];
+    for (const id of ids) {
+      const startedAt = landingStartMs(id);
+      if (Number.isFinite(startedAt) && Date.now() - startedAt > LANDING_END_MS) continue;
+      if (await landingStale(id)) continue;
+      live.push(id);
+    }
+    ids = live;
     if (!ids.length) return [];
     // BOS-1954: a merge whose check job is still queued has not pushed anything: the phase is "merging" from before its
     // prepare, but its check can't start while the update holds new checks, so counting it made the swap wait for a merge
@@ -563,6 +581,13 @@ export function reviewService(
 
     /** BOS-1951: the tickets whose merge a runner swap waits on, so the banner can name them (see landingMergesByCompany). */
     landingMergeIds,
+
+    /** BOS-2058: the live landings the swap waits on with when the oldest began, for the one list of waits (update-waits.ts). */
+    async landingWaitFacts(): Promise<{ since: string | null; ids: string[] }> {
+      const ids = await landingMergeIds();
+      const starts = ids.map(landingStartMs).filter((n) => Number.isFinite(n));
+      return { since: starts.length ? new Date(Math.min(...starts)).toISOString() : null, ids };
+    },
 
     /**
      * BOS-1645 (R27): records the merges on main the gate never recorded (its answer was lost, e.g. to a runner swap between

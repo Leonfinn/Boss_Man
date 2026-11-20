@@ -13,6 +13,7 @@ import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 import { untrusted } from "@boss-man/shared";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, type RunnerCheck } from "./runner-busy.js";
+import { STANDALONE_WRAPUP_MS } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 
@@ -88,6 +89,13 @@ export type Hold = {
    * the update's own start message.
    */
   wrapSince?: string;
+  /**
+   * BOS-2058 (rule e): which update the owner's wrap-up belongs to, set when it is pressed. "runner": it joined the runner
+   * update's hold (which lifts it). "server": a server update was waiting for a quiet machine; the wrap-up lifts by
+   * itself when that wait is over. "none": no update was waiting; it lifts by itself after STANDALONE_WRAPUP_MS.
+   * Absent on a hold saved before this: read as "none" from `since`.
+   */
+  forUpdate?: "server" | "runner" | "none";
   /** The still-running-list timeout for the owner's wrap-up ask (BOS-929/988): only a flag, never an automatic stop. */
   wrapNotRespondingAfter?: number;
   /** runId -> when the owner's wrap-up message went to it (BOS-988), so a drain pass never tells a run twice. */
@@ -193,6 +201,8 @@ export type MaintenanceDeps = {
   landingMerges?: () => Promise<Map<string, number>>;
   /** BOS-1951: the same merges as ticket ids, so the banner can name them. */
   landingMergeIds?: () => Promise<string[]>;
+  /** BOS-2058: a server update is waiting for a quiet machine right now (a wrap-up pressed then belongs to it, and lifts with it). */
+  serverUpdateWaiting?: () => Promise<boolean>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
   /** BOS-1954: how long to wait for `settled` (default SETTLE_WAIT_MS); a test makes it short. */
@@ -458,7 +468,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // who it told. Runs already told keep their time, so pressing again tells only the runs that came after.
         if (kind === "wrapup" && have.kind !== "wrapup") {
           const asked = have.wrapSince ?? now().toISOString();
-          const up: Hold = { ...have, wrapSince: asked, wrapNotRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES };
+          const up: Hold = { ...have, wrapSince: asked, wrapNotRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES, forUpdate: "runner" };
           await save(up);
           const told = await tell(WRAP_UP_DURING_UPDATE, up, "wrapTold");
           return { ...up, wrapTold: told };
@@ -485,7 +495,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // "still going" timeout is only a flag for the owner (WRAPUP_NOT_RESPONDING_MINUTES).
       const minutes = opts.minutes ?? (kind === "wrapup" ? WRAPUP_NOT_RESPONDING_MINUTES : (deps.drainMinutes ?? 30));
       const t = now();
-      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? "asking agents to wrap up" : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
+      // BOS-2058: a wrap-up pressed while a server update waits for a quiet machine belongs to that update (it used to be a
+      // standalone hold that ended only when someone pressed Cancel: the 20 Nov 10:40 "wrapped up for no reason" entry).
+      const forServer = kind === "wrapup" && (await deps.serverUpdateWaiting?.().catch(() => false));
+      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? (forServer ? "asking agents to wrap up for the waiting server update" : "asking agents to wrap up") : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes, ...(kind === "wrapup" ? { forUpdate: forServer ? ("server" as const) : ("none" as const) } : {}) };
       await save(h);
       const said = kind === "settings" ? WRAP_UP_SETTINGS : kind === "wrapup" ? WRAP_UP_ASKED : WRAP_UP;
       const told = kind === "wrapup" ? await tell(said, h, "wrapTold") : await tell(said, h, "startTold");
@@ -692,7 +705,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
 
       // A wrap-up hold (BOS-929) swaps nothing and asks nothing: it only keeps new runs from starting until the
       // owner cancels it, or a real update takes it over in start() above. The scheduler's hold already does that.
-      if (h.kind === "wrapup") return;
+      if (h.kind === "wrapup") {
+        // BOS-2058 (rule e): a wrap-up belongs to an update and lifts by itself. For a server update it lifts when that wait
+        // is over (sent, cancelled or given up); with no update behind it, after an hour. It never waits for a press.
+        const t = now();
+        if (h.forUpdate === "server" && !(await deps.serverUpdateWaiting?.().catch(() => true))) {
+          await end("Wrap-up lifted", "note", "The server update it was asked for is no longer waiting for the machine, so new runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+        } else if (h.forUpdate !== "server" && t.getTime() - Date.parse(h.wrapSince ?? h.since) > STANDALONE_WRAPUP_MS) {
+          await end("Wrap-up lifted after 60 minutes", "note", "No update was waiting for it, so new runs start again after 60 minutes. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+        }
+        return;
+      }
 
       // BOS-988: the hold's own message went only to the runs going when it started, and the runner puts a message
       // behind the run's current turn. A run that started just before the hold (its start already on the wire) or
