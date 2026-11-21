@@ -142,6 +142,7 @@ import { featureRoutes } from "./routes/features.js";
 import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
+import { ticketRecordRoutes } from "./routes/ticket-record.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
@@ -2376,6 +2377,7 @@ export async function buildApp(opts: AppOptions) {
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
+    ticketRecordRoutes(owner, db, { filesChanged: (tid) => review.diff(tid).then((d) => d.files.length) });
 
     // The owner chat (v1.1, R70): the CEO or any agent, in plain language; tickets and links out.
     const chatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {

@@ -392,6 +392,7 @@ sections:
   - Feature
   - Related
   - Roadmap, feature and dependencies
+  - What Boss Man recorded
   - Work
 reads: 
   - /api/companies/:id/features
@@ -409,6 +410,7 @@ reads:
   - /api/tickets/:id/landing
   - /api/tickets/:id/links
   - /api/tickets/:id/messages
+  - /api/tickets/:id/record
   - /api/tickets/:id/related
   - /api/tickets/:id/reviews
   - /api/tickets/:id/runs
