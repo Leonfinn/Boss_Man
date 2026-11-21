@@ -117,7 +117,8 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
     if (x.withOwner || x.assignedToOwner) continue;
 
     // BOS-1907: a merged ticket in its watch ("Merged, watching") is quiet until the watch date, in Blocked or In progress.
-    if (x.watching && (x.state === "blocked" || x.state === "in_progress")) continue;
+    // BOS-2141: unless the agent set its own blocked-until date; that date wins over the default watch (BOS-2070 sat parked for 15 hours).
+    if (x.watching && (x.state === "blocked" || x.state === "in_progress") && !(x.state === "blocked" && x.blockedUntil)) continue;
 
     if (x.state === "ready" || x.state === "in_progress") {
       if (!x.assigneeAgentId) {

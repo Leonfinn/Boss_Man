@@ -213,6 +213,25 @@ describe("Blocked on an open card is freed when the card is answered (BOS-1209)"
     expect(await c.block(agent, u.id, { blocked_until: tomorrow(), blocked_reason: "72h of data", summary: "Collecting data." })).toContain("is now blocked");
   });
 
+  it("BOS-2141: a merged ticket in its watch is refused a note that names a colleague without a link, but a quiet watch note is accepted", async () => {
+    const c = await setup();
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Brian - Release Manager" })).json();
+    const crit = [{ text: "Panel shows the host", after: "merge" as const }];
+    const agent = await c.mcp(c.worker.id);
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress", mergeCommit: "d".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
+    expect(await c.block(agent, t.id, { summary: "Waiting on Brian's check." })).toMatch(/waits on Brian/);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+    // No name, no date: still "Merged, watching" (BOS-1907).
+    expect(await c.block(agent, t.id, { summary: "Watching for a week of real use." })).toContain("is now blocked");
+    // Named and linked: accepted.
+    const u = await c.ticket();
+    await c.put(u.id, { systemState: "in_progress", mergeCommit: "e".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
+    const theirs = await c.ticket({ assigneeAgentId: other.id });
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: u.id, blockerTicketId: theirs.id, until: "done" });
+    expect(await c.block(agent, u.id, { summary: "Waiting on Brian's check." })).toContain("is now blocked");
+  });
+
   it("wakes the CEO once on the third date-only park in a row (R36)", async () => {
     const c = await setup();
     const t = await c.ticket();
