@@ -80,6 +80,22 @@ export function policyRoutes(
       throw err;
     }
   });
+  // "Remember this" from Chat (BOS-2184): adds one new line at the end, never overwriting what is there.
+  owner.post("/api/companies/:id/standing-rules/append", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const b = z.object({ text: z.string() }).parse(req.body);
+    const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    const line = b.text.replace(/\r\n/g, "\n").trim();
+    if (!line) return reply.code(400).send({ error: "invalid_standing_rules", message: "There is no text to add." });
+    const current = (await getStandingRules(db, id)).text.trim();
+    const combined = current ? `${current}\n${line}` : line;
+    const problem = standingRulesError(combined);
+    if (problem) return reply.code(400).send({ error: "invalid_standing_rules", message: `That doesn't fit: the standing rules are capped at ${STANDING_RULES_MAX} characters and this would make them ${combined.length}. Shorten it, or trim the rules in Settings → Team.` });
+    const saved = await setStandingRules(db, id, { text: combined, by: "the owner", byAgentId: await standingRulesCeo(id) });
+    await record(db, { companyId: id, kind: "settings", summary: "Owner added a line to the standing rules from Chat" });
+    return { ...saved, max: STANDING_RULES_MAX };
+  });
   owner.post("/api/companies/:id/standing-rules/undo", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const ceo = await standingRulesCeo(id);

@@ -107,6 +107,62 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   );
 }
 
+/** "Remember this" on the owner's own message (BOS-2184): adds the text as a new line of the standing rules, with Undo. */
+export function RememberThis({ companyId, text }: { companyId: string; text: string }) {
+  const [step, setStep] = useState<"idle" | "editing" | "added">("idle");
+  const [draft, setDraft] = useState(text);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const url = `/api/companies/${companyId}/standing-rules`;
+  const call = (path: string, body: unknown, done: () => void) => {
+    setBusy(true);
+    setError(null);
+    void api(`${url}/${path}`, { method: "POST", body }).then(
+      () => {
+        setBusy(false);
+        done();
+      },
+      (err: Error) => {
+        setBusy(false);
+        setError(err.message);
+      },
+    );
+  };
+  if (step === "added")
+    return (
+      <p className="remember-note muted" role="status">
+        Added to standing rules.{" "}
+        <button type="button" className="linkish" disabled={busy} onClick={() => call("undo", undefined, () => setStep("idle"))}>
+          Undo
+        </button>
+        {error && <span className="error"> {error}</span>}
+      </p>
+    );
+  if (step === "idle")
+    return (
+      <button type="button" className="linkish remember-btn" onClick={() => { setDraft(text); setError(null); setStep("editing"); }}>
+        Remember this
+      </button>
+    );
+  return (
+    <div className="remember-box">
+      <label>
+        <span className="muted">Add this to the standing rules every agent reads:</span>
+        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={3} />
+      </label>
+      <div className="remember-actions">
+        <button type="button" className="btn primary" disabled={busy || !draft.trim()} onClick={() => call("append", { text: draft }, () => setStep("added"))}>
+          Add to standing rules
+        </button>
+        <button type="button" className="btn" disabled={busy} onClick={() => setStep("idle")}>
+          Cancel
+        </button>
+      </div>
+      {error && <p className="error" role="alert">{error}</p>}
+    </div>
+  );
+}
+
 export function ChatPage({ companies, companyId, agentId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
@@ -278,6 +334,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                       <small>
                         {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
                       </small>
+                      {m.role === "owner" && <RememberThis companyId={company.id} text={m.text} />}
                     </div>
                   );
                 })}
