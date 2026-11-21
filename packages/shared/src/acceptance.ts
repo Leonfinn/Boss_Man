@@ -106,7 +106,8 @@ export function cardAnswerLine(question: string, by: string, verdicts: ReadonlyA
  * sentences (on . ; and newlines); a sentence counts for a criterion when it contains enough of
  * the criterion's words (60%, or every word if the criterion has few), and that sentence's pass
  * or fail word is the verdict. Numbered verdicts ("1 pass; 2 fail: why", "C3 ok") in criteria order
- * also count when they start a segment; a fail from either reading wins. A criterion no sentence claims comes back as null: not reported.
+ * also count when they start a segment; a fail from either reading wins, but the word reading skips a sentence
+ * that starts with the criterion's own numbered verdict (BOS-2144). A criterion no sentence claims comes back as null: not reported.
  */
 export function readVerdicts(criteria: readonly Criterion[], note: string | null | undefined): Array<{ criterion: string; verdict: Verdict }> {
   const texts = criteria.map(criterionText);
@@ -122,9 +123,10 @@ export function readVerdicts(criteria: readonly Criterion[], note: string | null
   const bag = segments.map((s) => new Set(tokens(s)));
   const raw = segments;
   // The segment each numbered verdict sits in (a segment may hold commas, which also split verdicts).
-  const numberedAt = new Map<number, { verdict: Exclude<Verdict, null>; at: number }>();
+  // `leads`: the sentence starts with the verdict ("1 pass: ..."), not a mid-sentence count ("..., 2 ok of 5 checks").
+  const numberedAt = new Map<number, { verdict: Exclude<Verdict, null>; at: number; leads: boolean }>();
   segments.forEach((s, at) => {
-    for (const [n, v] of numberedVerdicts(texts.length, s.split(","))) if (!numberedAt.has(n)) numberedAt.set(n, { verdict: v.verdict, at });
+    for (const [n, v] of numberedVerdicts(texts.length, s.split(","))) if (!numberedAt.has(n)) numberedAt.set(n, { verdict: v.verdict, at, leads: v.at === 0 });
   });
   return texts.map((criterion, idx) => {
     const byNumber = numberedAt.get(idx + 1) ?? null;
@@ -135,6 +137,11 @@ export function readVerdicts(criteria: readonly Criterion[], note: string | null
       const need = want.length <= 2 ? want.length : Math.ceil(want.length * 0.6);
       let best = -1;
       for (let i = 0; i < bag.length; i++) {
+        // A sentence that starts "N pass" is read by its number only (BOS-2144): restating a criterion worded
+        // with a negated fail ("no failed step", "nothing fails") must not turn that pass into a fail. Other
+        // sentences are still read, so a fail stated elsewhere still wins; so does a fail word in a sentence
+        // whose "2 ok" is only a count after a comma.
+        if (byNumber?.leads && i === byNumber.at) continue;
         const hit = want.filter((w) => bag[i]!.has(w)).length;
         if (hit >= need && hit > (best < 0 ? 0 : want.filter((w) => bag[best]!.has(w)).length)) best = i;
       }
