@@ -1149,7 +1149,7 @@ export function schedulerService(
     for (const h of withheld) {
       // Told once per skill and missing set. shortcut: never re-told after the add-on recovers and breaks again; clear the key on a healthy report (docs/12 step 2).
       const told = await db.insert(settings).values({ key: `addon-missing:${runner.id}:${h.name}:${h.missing.join(",")}`, value: true }).onConflictDoNothing().returning();
-      if (told.length) await deps.alert(w.companyId, `${agent.name}'s skill "${h.name}" is left out of its runs: it needs the ${h.missing.join(" and ")} add-on, which this company's runner doesn't have working. See Settings → Server and runner.`, {
+      if (told.length) await deps.alert(w.companyId, `${agent.name}'s skill "${h.name}" is left out of its runs: it needs the ${h.missing.join(" and ")} add-on, which this company's runner doesn't have working. See Settings → Server and runner → Runner → Add-ons.`, {
           // Fixing the runner needs host access: past the Scrum Master's actions, so the CEO first.
           kind: "alert",
           from: "ceo",

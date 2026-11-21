@@ -172,7 +172,7 @@ cd $B/src && docker compose up -d server
 cd $B/src && docker compose exec server ls /run/deployer
 ```
 
-The last command should list `inbox` and `outbox`. Reload Boss Man: **Settings → Server and runner** now has an **Updates** section.
+The last command should list `inbox` and `outbox`. Reload Boss Man: **Settings → Server and runner → Updates** now shows the updates.
 
 ## 7. Run the script every minute
 
