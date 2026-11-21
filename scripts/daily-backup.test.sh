@@ -66,6 +66,20 @@ for mode in fail empty; do
   grep -q "daily_backup_last" "$t/sql" && fail "success row written after $mode"
 done
 
+# With the default keep count: 16 daily files (the newest one fresh) end as the newest 14, other files untouched.
+rm -f "$t"/backups/daily-* "$t"/backups/bossman-* "$t"/backups/restore-test-* "$t"/backups/penpot-*
+for d in $(seq 1 15); do touch -d "$((d + 1)) days ago" "$t/backups/daily-2001-01-$(printf %02d "$d")-0300.sql.gz"; done
+touch -d '2 hours ago' "$t/backups/daily-2001-02-01-0300.sql.gz"
+touch -d '9 days ago' "$t/backups/bossman-a.sql.gz" "$t/backups/rebuild-a.sql.gz" "$t/backups/restore-test-a.sql.gz" "$t/backups/penpot-a.tar"
+BOSSMAN_BACKUP_KEEP=14 "$here/daily-backup.sh" --once >/dev/null
+[[ $(count) -eq 14 ]] || fail "16 files should end as 14, got $(count)"
+[[ -e $t/backups/daily-2001-02-01-0300.sql.gz && ! -e $t/backups/daily-2001-01-15-0300.sql.gz ]] || fail "wrong files pruned"
+for k in bossman-a.sql.gz rebuild-a.sql.gz restore-test-a.sql.gz penpot-a.tar; do [[ -e $t/backups/$k ]] || fail "deleted $k"; done
+
+# A failed dump says so in plain words on the way out.
+rm -f "$t"/backups/daily-*
+FAKE_DUMP=fail "$here/daily-backup.sh" --once 2>&1 | grep -q "FAILED: The database dump failed" || fail "no plain failure message"
+
 # A status-row failure never loses the file.
 rm -f "$t"/backups/daily-*
 FAKE_PSQL=fail "$here/daily-backup.sh" --once >/dev/null

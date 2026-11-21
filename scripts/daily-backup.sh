@@ -59,7 +59,7 @@ pass() {
   mkdir -p "$BACKUP_DIR" || { record_failed "The backup folder cannot be created"; return 1; }
   cur="$(newest)"
   if [[ -n $cur && -z $(find "$cur" -mmin "-$((MAX_HOURS * 60))" 2>/dev/null) ]]; then cur=""; fi
-  if [[ -n $cur ]]; then record_ok "$cur" || true; return 0; fi # recent enough: just keep the status line right
+  if [[ -n $cur ]]; then record_ok "$cur" || true; prune; return 0; fi # recent enough: keep the status line right, and the count
 
   out="$BACKUP_DIR/daily-$(date +%F-%H%M).sql.gz"
   [[ ! -s $out ]] || { record_ok "$out" || true; return 0; }
