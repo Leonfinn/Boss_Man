@@ -106,7 +106,15 @@ describe("wiki and ticket outputs (R69)", () => {
     await c.req("POST", base, { title: "Release log", body: long });
     expect((await c.req("PUT", `${base}/release-log`, { title: "Release log", body: "## Releases\n\n- v30", replace: true })).statusCode).toBe(200);
     expect((await c.req("DELETE", `${base}/how-we-deploy`)).statusCode).toBe(204);
-    expect((await c.req("GET", `${base}/how-we-deploy`)).statusCode).toBe(404);
+    // BOS-2197: delete goes to the Deleted pages list; the owner's link view gets a "deleted" stub, the page is out of the list.
+    const gone = await c.req("GET", `${base}/how-we-deploy`);
+    expect(gone.statusCode).toBe(200);
+    expect(gone.json()).toMatchObject({ deleted: true, slug: "how-we-deploy" });
+    expect(((await c.req("GET", base)).json() as Array<{ slug: string }>).some((p) => p.slug === "how-we-deploy")).toBe(false);
+    const bin = (await c.req("GET", `${base}-deleted`)).json() as { pages: Array<{ slug: string }> };
+    expect(bin.pages.map((p) => p.slug)).toEqual(["how-we-deploy"]);
+    expect((await c.req("POST", `${base}-deleted/restore`, { slug: "how-we-deploy" })).statusCode).toBe(200);
+    expect((await c.req("GET", `${base}/how-we-deploy`)).json()).toMatchObject({ slug: "how-we-deploy", title: expect.any(String) });
   });
 
   it("keeps the wiki routes owner-only: no session gets 401 (BOS-903 moved them to routes/wiki.ts)", async () => {
