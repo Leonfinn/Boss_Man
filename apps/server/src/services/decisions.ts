@@ -1206,10 +1206,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   // (BOS-996) The tally, kept for a few seconds per view so the badge, the page heading and the
   // dashboard share one walk of the ranked queue instead of one each. Cleared on every answer.
-  // shortcut: a 5-second copy, cleared on every answer; lost on restart, harmless because the next
-  // read simply walks the queue again.
   const TALLY_CACHE_MS = 5_000;
   type QueueTally = { open: number; waiting: number; oldestOpenAt: string | null; medianAnswerMs: number | null };
+  // shortcut: a 5-second copy, cleared on every answer; lost on restart, harmless because the next read simply walks the queue again.
   const tallyCache = new Map<string, { tally: QueueTally; until: number }>();
   const clearTallyCache = () => tallyCache.clear();
 
