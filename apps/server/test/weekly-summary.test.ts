@@ -105,5 +105,7 @@ describe("weekly email", () => {
     expect(w.text).toContain("Spent this week: $10.00 (the week before: $4.00, up $6.00)");
     expect(w.text).toContain("Features released: Search");
     expect(w.text).toContain("Cards still waiting for you: none");
+    // Only counts, titles and dollars: no address, token or key.
+    expect(w.text + w.subject).not.toMatch(/https?:\/\/|\d+\.\d+\.\d+\.\d+|token|password|secret|sk-/i);
   });
 });
