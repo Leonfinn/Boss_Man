@@ -212,6 +212,13 @@ describe("two open branches changing the same file (BOS-2179)", () => {
     expect((await c.row(mine.id)).systemState).toBe("review");
     expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, mine.id))).toHaveLength(0);
     expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, other.id))).toHaveLength(0);
+    // The review and the merge go ahead as before: an approval with the overlap still open merges the ticket.
+    const r = await c.review.submit(mine.id, { verdict: "approved", reviewer: "Sam", reviewerAgentId: c.senior.id });
+    expect(r.verdict).toBe("approved");
+    const mergeDeadline = Date.now() + 20_000;
+    while ((await c.row(mine.id)).systemState !== "done" && Date.now() < mergeDeadline) await new Promise((res) => setTimeout(res, 50));
+    expect((await c.row(mine.id)).systemState).toBe("done");
+    expect((await c.row(mine.id)).mergeCommit).toBe("c".repeat(40));
   });
 });
 

@@ -98,6 +98,23 @@ describe("one note per pair (BOS-2179)", () => {
     for (const t of [done, backlog, elsewhere]) expect(await notes(t.id)).toHaveLength(0);
   });
 
+  it("an existing ticket with no recorded files (as every ticket was before this): no warning and no error", async () => {
+    const c = await company();
+    const old = await c.ticket("Opened before the change", "review");
+    const fresh = await c.ticket("New work");
+    const rowOf = async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
+    expect((await rowOf(old.id)).diffFiles).toEqual([]);
+    expect(await branchOverlapView(db, await rowOf(old.id))).toEqual([]);
+    expect(await noteBranchOverlaps(db, old.id)).toEqual([]);
+    await recordBranchFiles(db, fresh.id, ["src/app.ts"]);
+    expect(await branchOverlapView(db, await rowOf(fresh.id))).toEqual([]);
+    expect(await notes(old.id)).toHaveLength(0);
+    expect(await notes(fresh.id)).toHaveLength(0);
+    // An empty list recorded (a runner that saw no files) changes nothing either.
+    await recordBranchFiles(db, old.id, []);
+    expect((await rowOf(old.id)).diffFiles).toEqual([]);
+  });
+
   it("the page names up to 5 files and how many more, and clears once the other ticket is done", async () => {
     const c = await company();
     const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "g.ts"].map((f) => `src/${f}`);
