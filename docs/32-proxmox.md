@@ -7,7 +7,7 @@ This page is for owners who want to run Boss Man on a Proxmox VE server.
 ## Why a VM
 
 Boss Man mounts the Docker socket and starts runner containers that run agent code. In a VM:
-- **The network guard works.** It stops runners reaching your home network. It needs nftables in the kernel, which a VM has. Most LXC containers have no nftables, so there the guard is "unavailable" and runners run **without that protection** (see [docs/27-netguard.md](27-netguard.md)). Settings → Server and runner shows a warning when that happens.
+- **The network guard works.** It stops runners reaching your home network. It needs nftables in the kernel, which a VM has. Most LXC containers have no nftables, so there the guard is "unavailable" and runners run **without that protection** (see [docs/27-netguard.md](27-netguard.md)). Settings → Server and runner → Runner shows a warning when that happens.
 - **Docker works as normal.** A VM has its own kernel, so Docker uses its normal storage, and nothing depends on LXC nesting, AppArmor or user ID mapping.
 - **Agent code stays behind a hardware boundary,** not just a shared kernel.
 

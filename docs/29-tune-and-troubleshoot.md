@@ -18,7 +18,7 @@ docker ps -a --filter name=boss-man-runner
 docker logs --tail 50 boss-man-runner-<slug>
 ```
 
-`<slug>` is shown in **Settings > Server and runner** under **Runner**. Fixes:
+`<slug>` is shown in **Settings > Server and runner > Runner**. Fixes:
 - If the runner image was never built, or the canary failed in step 5 of the install, run `scripts/update-runner.sh` again, then choose **Start runner**.
 - If **Settings** shows an error under the runner (the launcher couldn't start it), check `BOSSMAN_DOCKER_GID` in `.env` matches `stat -c %g /var/run/docker.sock`, then `docker compose up -d`.
 - The launcher checks its own set-up when it starts and every 30 seconds. If it can't open Docker's socket or write the data folder, `docker compose ps` shows it as **unhealthy**, and **Start the runner** shows the same message: it names the fix (the `BOSSMAN_DOCKER_GID` number to use, or the `chown 1000:1000` for the data folder). Run `docker inspect --format '{{json .State.Health}}' <launcher container>` to read it. If `BOSSMAN_DATA` is missing from `.env`, Docker creates the default folder as root: set it to your own folder and run `docker compose up -d`.
@@ -110,7 +110,7 @@ df -h $B
 docker system df
 ```
 
-**Settings > Server and runner** shows the runner's **Workspaces** size. Each company has a disk cap (20 GB by default); Boss Man tells you once a day when a company is over it, and it releases the workspaces of tickets that were finished a while ago (7 days by default). Builds of the runner image also use space. Check `docker system df` before removing anything.
+**Settings > Server and runner > Runner** shows the runner's **Workspaces** size. Each company has a disk cap (20 GB by default); Boss Man tells you once a day when a company is over it, and it releases the workspaces of tickets that were finished a while ago (7 days by default). Builds of the runner image also use space. Check `docker system df` before removing anything.
 
 ### Parallel test runs fail with `spawn EAGAIN`
 
