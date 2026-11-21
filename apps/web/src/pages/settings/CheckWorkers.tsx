@@ -1,4 +1,4 @@
-// Settings → Server and runner → Checks → Check workers (DR-060, BOS-1435). Other machines that take checks when the
+// Settings → Server and runner → Limits and checks → Check workers (DR-060, BOS-1435). Other machines that take checks when the
 // company runner's slots are full. The owner adds one (its token is shown once), sets its slots and per-check caps, and
 // can turn it off or remove it. Each worker says, per company, whether it takes checks and if not, why.
 import { useState } from "react";

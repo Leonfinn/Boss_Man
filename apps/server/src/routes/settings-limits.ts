@@ -112,7 +112,7 @@ export function settingsLimitsRoutes(
     await db.insert(settings).values({ key: "wip_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
     return { ...value, defaultAgent: DEFAULT_AGENT_WIP_LIMIT };
   });
-  // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
+  // BOS-798: Settings → Server and runner → Limits and checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
   // Owner only: no agent tool or route writes these settings.
   const checkQueueView = async () => {
     const rows = await db.select({ id: runnersTable.id, company: companies.name }).from(runnersTable).innerJoin(companies, eq(companies.id, runnersTable.companyId));
@@ -197,7 +197,7 @@ export function settingsLimitsRoutes(
     await mainCi.setOn(z.object({ on: z.boolean() }).parse(req.body).on);
     return mainCiView();
   });
-  // BOS-1435 (DR-060): Settings → Server and runner → Checks → Check workers. Owner only. The token is in the answer to the
+  // BOS-1435 (DR-060): Settings → Server and runner → Limits and checks → Check workers. Owner only. The token is in the answer to the
   // add, once; only its hash is kept. Turning a worker off or removing it puts its running checks back in line at once
   // and closes its socket.
   const WorkerBody = z.object({

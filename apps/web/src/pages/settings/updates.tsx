@@ -6,7 +6,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -112,6 +112,39 @@ export function waitLine(w: Extract<DeployWaitView, { on: true }>): string {
 /** The label of the button that takes back a waiting update (BOS-420). */
 export const waitCancelLabel = (w: Extract<DeployWaitView, { on: true }>) =>
   w.phase === "waiting" && w.origin === "hand" ? "Stop making room" : w.phase === "waiting" || w.phase === "sent" ? "Cancel the update" : "Lift the hold now";
+
+/**
+ * BOS-2056: what the owner's wrap-up is for, in plain words. A wrap-up that joined a runner update's hold ("update" kind with
+ * wrapSince) is for the runner update; a wrap-up hold names the server update it was pressed for, or says no update was waiting.
+ */
+export function wrapUpFor(m: { kind?: string; wrapSince?: string; since?: string; wrapForUpdate?: "server" | "runner" | "none" }): { forUpdate: "server" | "runner" | "none"; at: string | null } {
+  const forUpdate = m.wrapForUpdate ?? (m.kind === "wrapup" ? "none" : "runner");
+  return { forUpdate, at: m.wrapSince ?? m.since ?? null };
+}
+
+/** The top banner for a standalone wrap-up hold: names the update it is for, or says none was waiting (BOS-2056). */
+export function wrapUpBannerText(m: { runs: number; wrapSince?: string; since?: string; wrapForUpdate?: "server" | "runner" | "none" }): string {
+  const { forUpdate, at } = wrapUpFor({ ...m, kind: "wrapup" });
+  const runs = m.runs > 0 ? ` Waiting for ${plural(m.runs, "run", "runs")} to finish.` : "";
+  if (forUpdate === "server") return `Wrapping up for the server update${at ? ` (asked at ${atTime(at)})` : ""}. Nothing new starts until it goes in; this lifts by itself then.${runs}`;
+  return `You asked agents to wrap up${at ? ` at ${atTime(at)}` : ""} (no update was waiting). It lifts by itself after an hour, or sooner if you cancel it on Settings → Server and runner.${runs}`;
+}
+
+/** What a "Waiting" row in Recent updates waits on, in plain words (BOS-2056). Null when the row is not waiting. */
+export function historyWaitingOn(r: HistoryRow, wait: DeployWaitView | null, maint: MaintenanceView | null, queued: boolean): string | null {
+  if (historyTag(r).tag !== "Waiting") return null;
+  const w = wait && wait.on ? wait : null;
+  if (r.target === "runner") {
+    if (queued) return "waiting for the update in front of it to finish";
+    if (maint && maint.on && maint.kind !== "wrapup") return `the runner swap: ${waitingFor(maint as Parameters<typeof waitingFor>[0])}`;
+    return "waiting for the host to start the runner swap";
+  }
+  if (!w) return "waiting for your approval (nothing has been sent to the host yet)";
+  if (w.phase === "waiting") return `waiting for a quiet machine${w.quiet?.why.length ? `: ${w.quiet.why.join("; ")}` : ""} (you have approved it)`;
+  if (w.phase === "sent") return "waiting for the host to build and switch to the new server";
+  if (w.phase === "window") return "waiting for the new server's standby window to end";
+  return "waiting for the runner update to start";
+}
 
 /** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
 export function atTime(iso: string): string {
@@ -280,11 +313,16 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   }
   if (wrap && maint && maint.on && maint.kind === "wrapup") {
     const n = wrap.runsList.length;
+    const { forUpdate, at } = wrapUpFor(wrap);
+    const forServer = forUpdate === "server";
+    const who = forServer ? "Wrapping up for the server update. " : "";
     return {
       tone: "amber",
       tag: "Wrapping up",
-      say: n === 0 ? "Every agent has finished. Nothing new starts until you cancel the wrap-up." : `${plural(n, "agent is", "agents are")} still finishing the step ${n === 1 ? "it is" : "they are"} on.`,
-      more: "Nothing new starts until you press Cancel wrap-up.",
+      say: `${who}${n === 0 ? "Every agent has finished." : `${plural(n, "agent is", "agents are")} still finishing the step ${n === 1 ? "it is" : "they are"} on.`}`,
+      more: forServer
+        ? "Nothing new starts until that update goes in or is cancelled. The wrap-up then lifts by itself and work restarts; you do not need to press anything."
+        : `You asked agents to wrap up${at ? ` at ${atTime(at)}` : ""} and no update was waiting. It lifts by itself after an hour, or press Cancel wrap-up to restart work now.`,
       next: null,
       primary: null,
       normal: [],

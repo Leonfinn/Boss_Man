@@ -763,7 +763,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   );
   // An archived project opens only by its own link.
   const current = projects.data?.find((p) => p.id === projectId) ?? projects.data?.find((p) => !p.archivedAt);
-  const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
+  const [query, setQuery] = useState("");
+  const [allDone, setAllDone] = useState(false);
+  // BOS-2166: the server sends the newest done tickets only; every done ticket is asked for while "Show all done" is on or the search has words.
+  const wantAllDone = allDone || query.trim() !== "";
+  const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board${wantAllDone ? "?done=all" : ""}`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
+  const reloadBoard = board.reload;
+  const firstAsk = useRef(true);
+  useEffect(() => {
+    if (firstAsk.current) { firstAsk.current = false; return; }
+    reloadBoard();
+  }, [wantAllDone, reloadBoard]);
   // BOS-1546: the merge queue's own status line for each approved ticket (place in line, check running since, the ticket it waits for). Asked only when the board has such a ticket.
   const inMergeLine = (board.data?.columns ?? []).some((c) => c.tickets.some((t) => t.reviewStage === "merging" || t.reviewStage === "held"));
   const mergeLines = usePoll(
@@ -777,7 +787,6 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
   const [filters, setFilters] = useState(readFilters);
   const setFilter = (change: Partial<SavedFilters>) =>
     setFilters((cur) => {
@@ -792,7 +801,6 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const { view, assignee } = filters;
   const setView = (v: BoardView) => setFilter({ view: v });
   const setAssignee = (a: string) => setFilter({ assignee: a });
-  const [allDone, setAllDone] = useState(false);
   // BOS-1909: a parked lane shows this many cards, then "Show N more" (once pressed, all of them).
   const [moreOpen, setMoreOpen] = useState<Record<string, boolean>>({});
   const [shownStates, setShownStates] = useState(readShownStates);
@@ -1239,7 +1247,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <div className="lane-title">
                       <h2 id={`lane-${col.id}`} tabIndex={-1}>{label(col)}</h2>
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
-                        {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : shown.length}
+                        {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : done && !words.length && shown.length === tickets.length && board.data?.doneTotal != null ? board.data.doneTotal : shown.length}
                       </span>
                       <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} title="Rename this column. Agents always see the fixed state." onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
@@ -1282,9 +1290,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </li>
                       ))}
                     </ul>
-                    {rows.length > DONE_SHOWN && (
+                    {Math.max(rows.length, board.data?.doneTotal ?? 0) > DONE_SHOWN && (
                       <button type="button" className="linkish" onClick={() => setAllDone(!allDone)}>
-                        {allDone ? "Show fewer" : "Show all done tasks"}
+                        {allDone ? "Show fewer" : `Show all done tasks (${Math.max(rows.length, board.data?.doneTotal ?? 0)})`}
                       </button>
                     )}
                   </>

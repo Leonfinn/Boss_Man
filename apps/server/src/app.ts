@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
@@ -58,6 +58,7 @@ import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
+import { PageQuery } from "./services/list-page.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { deploysService } from "./services/deploys.js";
 import { runsService } from "./services/runs.js";
@@ -142,6 +143,7 @@ import { featureRoutes } from "./routes/features.js";
 import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
+import { ticketRecordRoutes } from "./routes/ticket-record.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
@@ -870,6 +872,9 @@ export async function buildApp(opts: AppOptions) {
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    // BOS-2160: a background step that throws is logged (the error buffer reads app.log.error) and, if it keeps failing, raises one owner card.
+    log: (message) => app.log.error(message),
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
@@ -1526,6 +1531,39 @@ export async function buildApp(opts: AppOptions) {
       return o;
     });
 
+    // Account (BOS-2159): the owner changes their password and ends every other login. Only valid behind requireOwner.
+    /** Ends every login of this owner except the one in this request's cookie; returns how many it ended. */
+    async function endOtherSessions(req: FastifyRequest, ownerId: string) {
+      const keep = hashToken(req.cookies[SESSION_COOKIE] ?? "");
+      const gone = await db.delete(sessions).where(and(eq(sessions.ownerId, ownerId), ne(sessions.tokenHash, keep))).returning({ h: sessions.tokenHash });
+      return gone.length;
+    }
+    owner.post("/api/account/password", async (req, reply) => {
+      const body = z.object({ currentPassword: z.string().min(1).max(256), newPassword: Credentials.shape.password }).parse(req.body);
+      const ownerId = await currentOwnerId(req);
+      const [me] = ownerId ? await db.select().from(owners).where(eq(owners.id, ownerId)) : [];
+      if (!me) return reply.code(401).send({ error: "not_signed_in" });
+      // A guess at the current password is a login guess: same limiter as /api/login.
+      const wait = logins.retryAfter(req.ip, me.username);
+      if (wait > 0) {
+        const minutes = Math.ceil(wait / 60_000);
+        return reply.code(429).header("retry-after", String(Math.ceil(wait / 1000))).send({ error: "too_many_attempts", message: `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.` });
+      }
+      if (!(await verifyPassword(body.currentPassword, me.passwordHash))) {
+        logins.failed(req.ip, me.username);
+        return reply.code(403).send({ error: "wrong_current_password", message: "The current password is not right." });
+      }
+      if (body.newPassword === body.currentPassword) return reply.code(400).send({ error: "same_password", message: "Choose a password different from the current one." });
+      await db.update(owners).set({ passwordHash: await hashPassword(body.newPassword) }).where(eq(owners.id, me.id));
+      logins.succeeded(req.ip, me.username);
+      return { ok: true, signedOut: await endOtherSessions(req, me.id) };
+    });
+    owner.post("/api/account/sign-out-others", async (req, reply) => {
+      const ownerId = await currentOwnerId(req);
+      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
+      return { ok: true, signedOut: await endOtherSessions(req, ownerId) };
+    });
+
     // Device profiles (BOS-641): the owner's browsers report their measured screens.
     deviceRoutes(owner, { deviceProfiles, currentOwnerId });
 
@@ -1991,7 +2029,7 @@ export async function buildApp(opts: AppOptions) {
     // The Spend page's read (BOS-2194): routes/spend-report.ts.
     spendReportRoutes(owner, db, { now: opts.now });
 
-    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all" }));
 
     owner.post("/api/projects/:id/tickets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2343,6 +2381,7 @@ export async function buildApp(opts: AppOptions) {
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
+    ticketRecordRoutes(owner, db, { filesChanged: (tid) => review.diff(tid).then((d) => d.files.length) });
 
     // The owner chat (v1.1, R70): the CEO or any agent, in plain language; tickets and links out.
     const chatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -2352,8 +2391,8 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/chat/threads", async (req) => chat.threads(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { agentId } = z.object({ agentId: Uuid.optional() }).parse(req.query);
-      return chat.list(id, agentId).catch(chatErrors(reply));
+      const { agentId, before } = z.object({ agentId: Uuid.optional(), before: Uuid.optional() }).parse(req.query);
+      return chat.list(id, agentId, before).catch(chatErrors(reply));
     });
     owner.post("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2537,7 +2576,7 @@ export async function buildApp(opts: AppOptions) {
       if (err instanceof EngagementError) return reply.code(err.status).send({ error: "engagement", message: err.message });
       throw err;
     };
-    owner.get("/api/engagements", async () => engagementsSvc.list());
+    owner.get("/api/engagements", async (req) => engagementsSvc.list(undefined, PageQuery.parse(req.query)));
     owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id, undefined, true).catch(engagementErrors(reply)));
     owner.post("/api/engagements", async (req, reply) => {
       const b = z
@@ -2696,5 +2735,7 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
+  const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
+  return { app, sweepExpiredSessions, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }
