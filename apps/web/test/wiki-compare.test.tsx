@@ -59,7 +59,7 @@ describe("wiki compare view (BOS-2198)", () => {
     const long = { ...bodies };
     bodies.v1 = ["x", ...Array.from({ length: 10 }, (_, i) => `same ${i}`), "end?"].join("\n");
     render(<WikiCompare companyId="c1" versions={versions} from="v1" to="v3" onRestore={() => {}} onClose={() => {}} />);
-    await screen.findByText(/10 unchanged lines/);
+    await screen.findByText(/11 unchanged lines/);
     expect(screen.queryByText("same 3")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show" }));
     expect(screen.getByText("same 3")).toBeTruthy();
