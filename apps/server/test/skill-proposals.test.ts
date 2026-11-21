@@ -710,6 +710,8 @@ describe("proposal list paging", () => {
       reviewRequired: true,
       createdAt: new Date(t0 + Math.floor(i / 2) * 1000),
     }));
+    // The newest is large: three files of ~400 KB each, as a real bundle near the 1 MB cap is.
+    rows[54]!.files = Array.from({ length: 3 }, (_, k) => ({ path: `big${k}.md`, content: b64("y".repeat(400_000)) }));
     await c.db.insert(skillProposals).values(rows);
     return rows;
   };
@@ -721,7 +723,9 @@ describe("proposal list paging", () => {
     expect(first).toHaveLength(50);
     expect(first[0]).not.toHaveProperty("files");
     expect(first[0]!.name).toBe("p54");
-    for (const p of first) expect(p.fileCount).toBe((Number(String(p.name).slice(1)) % 4) + 1);
+    expect(first[0]!.fileCount).toBe(3);
+    for (const p of first.slice(1)) expect(p.fileCount).toBe((Number(String(p.name).slice(1)) % 4) + 1);
+    expect(JSON.stringify(first).length).toBeLessThan(100_000); // the 1.2 MB of files never travel
     const times = first.map((p) => Date.parse(String(p.createdAt)));
     expect([...times].sort((a, b) => b - a)).toEqual(times);
     // Walk the whole list two at a time: the cursor is the row id, so rows sharing a created time are neither skipped nor repeated.
@@ -739,6 +743,7 @@ describe("proposal list paging", () => {
     // Capped at 200, and a bad cursor is refused rather than ignored.
     expect((await c.req("GET", `/api/companies/${c.company.id}/skill-proposals?limit=100000`)).json()).toHaveLength(55);
     expect((await c.req("GET", `/api/companies/${c.company.id}/skill-proposals?before=nope`)).statusCode).toBe(400);
+    expect((await c.req("GET", `/api/companies/${c.company.id}/skill-proposals?limit=abc`)).statusCode).toBe(400);
   });
 
   it("gives an agent 50 with a note on how to see older ones", async () => {

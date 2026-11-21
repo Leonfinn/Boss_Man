@@ -262,6 +262,7 @@ describe("engagement list paging", () => {
     expect(new Set(seen).size).toBe(55);
     expect((await ctx.req("GET", "/api/engagements?limit=100000")).json()).toHaveLength(55);
     expect((await ctx.req("GET", "/api/engagements?limit=0")).statusCode).toBe(400);
+    expect((await ctx.req("GET", "/api/engagements?limit=abc")).statusCode).toBe(400);
   });
 
   it("gives an agent 50 with a note on how to see older ones", async () => {

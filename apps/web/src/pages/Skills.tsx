@@ -556,8 +556,7 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
-// The panel sits above the skill list, so it stays short: 10 at a time, as before this was paged.
-const PROPOSALS_PAGE = 10;
+const PROPOSALS_PAGE = 50;
 type ProposalRow = { id: string; name: string; source: "draft" | "link" | "retro"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
 const PROPOSAL_STATUS: Record<string, string> = {
   proposed: "Waiting",
