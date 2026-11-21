@@ -107,7 +107,7 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   );
 }
 
-export function ChatPage({ companies, companyId, agentId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
+export function ChatPage({ companies, companyId, agentId, messageId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; /** BOS-2192: a search result's message, scrolled to once loaded. */ messageId?: string; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
   const team = threads.data ?? [];
@@ -138,9 +138,26 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
   const latest = items.at(-1)?.createdAt;
   useEffect(() => setBusy(state !== "idle"), [state]);
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
+  // A search result names one message (BOS-2192): scroll to it once it has loaded. If the conversation
+  // loaded without it (older than the newest 200 shown), say so and open at the end as usual.
+  const target = useRef(messageId);
+  const [olderThanShown, setOlderThanShown] = useState(false);
+  const loaded = !!chat.data;
   useEffect(() => {
+    const want = target.current;
+    if (want) {
+      const el = document.getElementById(`chat-msg-${want}`);
+      if (el) {
+        target.current = undefined;
+        el.scrollIntoView({ block: "center" });
+        return;
+      }
+      if (!loaded) return;
+      target.current = undefined;
+      setOlderThanShown(true);
+    }
     end.current?.scrollIntoView({ block: "end" });
-  }, [items.length, current?.id]);
+  }, [items.length, current?.id, loaded]);
   useEffect(() => {
     if (!current || !latest) return;
     markSeen(current.id, latest);
@@ -245,6 +262,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
               <div className="chat-log" role="log" aria-live="polite">
                 {!chat.data && chat.error && <LoadError what="this conversation" message={chat.error.message} onRetry={chat.reload} />}
                 {!chat.data && !chat.error && <Loader label="Loading the conversation" size={16} />}
+                {olderThanShown && <p className="muted">The message you searched for is older than the messages shown here, so the chat opens at its newest.</p>}
                 {items.length === 0 && chat.data && (
                   <p className="muted">
                     {current.role === "ceo" || current.duty === "assistant" ? 'Try: "Add rate limiting to the login API before the beta, after the auth refactor."' : `Ask ${current.name} about their work, or for something to go on the board.`}
@@ -253,7 +271,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                 {items.map((m, i) => {
                   const trace = m.trace;
                   return (
-                    <div key={m.id} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}`}>
+                    <div key={m.id} id={`chat-msg-${m.id}`} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}${m.id === messageId ? " found" : ""}`}>
                       {trace && m.role === "assistant" && (
                         <ThinkingTrace
                           trace={trace}

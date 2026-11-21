@@ -139,6 +139,7 @@ import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
 import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { searchRoutes } from "./routes/search.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
@@ -2373,6 +2374,8 @@ export async function buildApp(opts: AppOptions) {
 
     // The roadmap and plan views: routes/roadmap.ts, on this owner scope.
     roadmapRoutes(owner, db, { feedback, now: opts.now, planning: planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) }) });
+    // The search box (BOS-2192): routes/search.ts, on this owner scope.
+    searchRoutes(owner, db);
 
     // Agents (R62): hire from a template, and undo any change (the other agent routes are in routes/agents-runs.ts).
     const agentErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
