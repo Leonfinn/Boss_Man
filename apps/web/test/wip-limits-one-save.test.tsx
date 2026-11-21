@@ -45,4 +45,24 @@ describe("Tickets in progress section", () => {
     expect(calls.some((c) => c.url.includes("/api/wip-limits") && c.method === "PUT")).toBe(true);
     expect(calls.find((c) => c.method === "PATCH")!.body).toContain('"holdStartsQuickChecksQueued":7');
   });
+
+  // BOS-2196: the third limit, cards that need the owner, saves with the same one Save and is off (null) when empty.
+  it("saves the 'need you' limit with the other two, and an empty box sends null", async () => {
+    const calls: { method?: string; body?: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method, body: init?.body as string | undefined });
+        return json({ agent: 2, company: null, defaultAgent: 2 });
+      }),
+    );
+    render(<WipLimits company={company} onChanged={() => {}} />);
+    const box = (await screen.findByLabelText(/Hold new starts when this many need you/)) as HTMLInputElement;
+    expect(box.value).toBe("");
+    fireEvent.change(box, { target: { value: "5" } });
+    fireEvent.click(screen.getAllByRole("button", { name: /^Save/ })[0]!);
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    const body = JSON.parse(calls.find((c) => c.method === "PATCH")!.body!) as Record<string, unknown>;
+    expect(body).toMatchObject({ holdStartsMergesWaiting: 20, holdStartsQuickChecksQueued: null, holdStartsOwnerWaiting: 5 });
+  });
 });

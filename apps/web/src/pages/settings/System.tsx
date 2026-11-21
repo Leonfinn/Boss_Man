@@ -622,7 +622,7 @@ export function RunLimits({ updatesHref }: { updatesHref?: string } = {}) {
  * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Only the
  * fields: WipLimits saves them together with the in-progress limits (BOS-1944), one Save for the section.
  */
-function HoldStarts({ v, onChange }: { v: { merges: string; checks: string }; onChange: (next: { merges: string; checks: string }) => void }) {
+function HoldStarts({ v, onChange }: { v: { merges: string; checks: string; owner: string }; onChange: (next: { merges: string; checks: string; owner: string }) => void }) {
   const setEdit = onChange;
   return (
     <>
@@ -638,6 +638,13 @@ function HoldStarts({ v, onChange }: { v: { merges: string; checks: string }; on
         <input id="hold-checks" type="number" min={1} max={1000} placeholder="Off" value={v.checks} onChange={(e) => setEdit({ ...v, checks: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. The same hold, for quick checks waiting in the check queue. If both limits are set, either one holds new starts.</p>
       </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-owner">Hold new starts when this many need you (leave empty for off)</label>
+        <input id="hold-owner" type="number" min={1} max={1000} placeholder="Off" value={v.owner} onChange={(e) => setEdit({ ...v, owner: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. Counts what Needs you counts on the Dashboard: reviews, sign-offs and other cards waiting for your answer. While at least this many need you, a Ready ticket is not started: it shows "Held: 6 need you (limit 5)" and starts by itself when fewer need you. Work already started, urgent and live-fix tickets, and the CEO's own tickets carry on.
+        </p>
+      </div>
     </>
   );
 }
@@ -649,21 +656,21 @@ function HoldStarts({ v, onChange }: { v: { merges: string; checks: string }; on
 export function WipLimits({ company, onChanged }: { company?: Company; onChanged?: () => void } = {}) {
   const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
   const act = useAction();
-  const [edit, setEdit] = useState<{ agent: string; company: string; merges: string; checks: string } | null>(null);
+  const [edit, setEdit] = useState<{ agent: string; company: string; merges: string; checks: string; owner: string } | null>(null);
   const [saved, setSaved] = useState(false);
   // Right after a save, show what was just saved until the refetch brings the same values back (no stale numbers in between).
-  const [last, setLast] = useState<{ agent: string; company: string; merges: string; checks: string } | null>(null);
+  const [last, setLast] = useState<{ agent: string; company: string; merges: string; checks: string; owner: string } | null>(null);
   const d = view.data;
-  useEffect(() => setLast(null), [d, company?.holdStartsMergesWaiting, company?.holdStartsQuickChecksQueued]);
+  useEffect(() => setLast(null), [d, company?.holdStartsMergesWaiting, company?.holdStartsQuickChecksQueued, company?.holdStartsOwnerWaiting]);
   if (!d) return null;
   const text = (n: number | null | undefined) => (n == null ? "" : String(n));
-  const base = last ?? { agent: text(d.agent), company: text(d.company), merges: text(company?.holdStartsMergesWaiting), checks: text(company?.holdStartsQuickChecksQueued) };
+  const base = last ?? { agent: text(d.agent), company: text(d.company), merges: text(company?.holdStartsMergesWaiting), checks: text(company?.holdStartsQuickChecksQueued), owner: text(company?.holdStartsOwnerWaiting) };
   const v = edit ?? base;
   const parse = (s: string) => (s.trim() === "" ? null : Number(s));
-  const [a, c, m, q] = [parse(v.agent), parse(v.company), parse(v.merges), parse(v.checks)];
+  const [a, c, m, q, o] = [parse(v.agent), parse(v.company), parse(v.merges), parse(v.checks), parse(v.owner)];
   const okHold = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
-  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000)) && (!company || (okHold(m) && okHold(q)));
-  const dirty = !!edit && (v.agent !== base.agent || v.company !== base.company || (!!company && (v.merges !== base.merges || v.checks !== base.checks)));
+  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000)) && (!company || (okHold(m) && okHold(q) && okHold(o)));
+  const dirty = !!edit && (v.agent !== base.agent || v.company !== base.company || (!!company && (v.merges !== base.merges || v.checks !== base.checks || v.owner !== base.owner)));
   return (
     <Section id="wip-limits-h" title="Tickets in progress">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -689,7 +696,7 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
             void act.run(async () => {
               await api("/api/wip-limits", { method: "PUT", body: { agent: a, company: c } });
               if (company) {
-                await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
+                await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q, holdStartsOwnerWaiting: o } });
                 onChanged?.();
               }
               setLast(v);

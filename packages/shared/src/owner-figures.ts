@@ -103,7 +103,7 @@ export const OWNER_FIGURES = {
     source: "GET /api/decisions/tally → open",
     word: "need",
     label: (n) => `${n} ${s(n, "needs", "need")} you`,
-    places: ["sidebar Decisions badge", "company switcher", "Dashboard Needs you count", "Decisions page heading", "Decisions page, other companies line"],
+    places: ["sidebar Decisions badge", "company switcher", "Dashboard Needs you count", "Decisions page heading", "Decisions page, other companies line", "a held ticket's start-hold reason (BOS-2196, written by the server)"],
   },
   "decisions.withTeam": {
     area: "decisions",
