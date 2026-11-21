@@ -46,8 +46,20 @@ describe.skipIf(!URL_)("real Postgres", () => {
     const { db, close } = await openPostgres(URL_!);
     try {
       const stuck = db.execute(sql`select pg_sleep(10)`);
-      const waiting = db.execute(sql`select 1`); // the only connection is busy
-      await expect(waiting).rejects.toThrow();
+      stuck.catch(() => undefined); // checked below; no unhandled rejection meanwhile
+      // Poll: until the stuck query actually holds the only connection, `select 1` succeeds; once it does, `select 1`
+      // waits for a free connection and must fail at the acquire timeout (not hang). Deadline: 5 s.
+      let waitError: unknown;
+      const deadline = Date.now() + 5000;
+      while (!waitError && Date.now() < deadline) {
+        try {
+          await db.execute(sql`select 1`);
+          await new Promise((r) => setTimeout(r, 20));
+        } catch (e) {
+          waitError = e;
+        }
+      }
+      expect(waitError).toBeDefined();
       await expect(stuck).rejects.toThrow();
       const ok = await db.execute(sql`select 1 as ok`); // the pool recovers
       expect((ok as unknown as { rows: unknown[] }).rows[0]).toEqual({ ok: 1 });
