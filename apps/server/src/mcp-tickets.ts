@@ -597,7 +597,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
         // BOS-1837: a ticket that is already done and merged only gets its note replaced (the branch now equals main,
         // so the "no changes of its own" check would wrongly refuse the assignee). Moves that need a diff keep it.
-        const doneNoteOnly = t?.systemState === "done" && !!t.mergeCommit;
+        // BOS-2204: the same holds for a merged ticket Blocked for its after-merge checks: its branch equals main too, so
+        // its own assignee closes it (the after-merge criteria are still checked below).
+        const doneNoteOnly = !!t?.mergeCommit && (t.systemState === "done" || (t.systemState === "blocked" && !!scope.agentId && t.assignee === scope.agentId));
         // A ticket whose branch is already merged but stayed in review (e.g. waiting on the owner's yes) can be closed by a manager.
         const merged = !!t?.mergeCommit && (await managerIn(db, scope));
         // A no-code ticket never has a branch to merge, so its own assignee closes it once the work is
