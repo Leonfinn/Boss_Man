@@ -148,7 +148,7 @@ import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
-import { loginLimiter, type LoginLimits } from "./login-limit.js";
+import { DEFAULT_LOGIN_LIMITS, loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
@@ -1488,7 +1488,27 @@ export async function buildApp(opts: AppOptions) {
     return reply.code(201).send({ username: owner!.username });
   });
 
-  const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()));
+  // BOS-2177: the first time sign-in locks, tell the owner once (an alert and one activity line, on the oldest
+  // company, as sign-in belongs to no company). The text carries the address only: never a guessed name or password.
+  const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()), (e) => {
+    const limits = opts.loginLimits ?? DEFAULT_LOGIN_LIMITS;
+    const address = e.ip.replace(/[^0-9a-fA-F.:%]/g, "").slice(0, 64) || "an unknown address";
+    const at = new Date(e.at);
+    void (async () => {
+      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+      await notes.notify({
+        companyId: null,
+        agentId: null,
+        level: "flag",
+        title: e.byAddress
+          ? `Sign-in was locked after ${limits.maxFailures} wrong passwords from ${address}`
+          : `Sign-in for the owner's username was locked after ${limits.maxFailures} wrong passwords from several addresses, the latest ${address}`,
+        body: "If this wasn't you, change your password in Settings → Account.",
+        link: "#/settings",
+      });
+      if (home) await record(db, { companyId: home.id, kind: "security", summary: `Sign-in locked after ${limits.maxFailures} failed attempts from ${address} at ${at.toISOString()}`, detail: { address, at: at.toISOString(), byAddress: e.byAddress, byUsername: e.byUsername }, at });
+    })().catch((err) => app.log.warn({ err }, "sign-in lockout alert failed"));
+  });
   app.post("/api/login", async (req, reply) => {
     const body = Credentials.parse(req.body);
     const wait = logins.retryAfter(req.ip, body.username);

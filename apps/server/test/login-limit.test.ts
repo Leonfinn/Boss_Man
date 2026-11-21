@@ -88,6 +88,71 @@ describe("loginLimiter", () => {
     expect(limiter.retryAfter("10.0.0.1", "owner")).toBe(0);
   });
 
+  // BOS-2177: the owner is told once when a lock starts.
+  describe("lockout notice", () => {
+    function withNotice(maxFailures = 3, windowMs = 60_000) {
+      let t = 1_000_000;
+      const events: Array<{ ip: string; at: number; byAddress: boolean; byUsername: boolean }> = [];
+      const limiter = loginLimiter({ maxFailures, windowMs }, () => t, (e) => events.push(e));
+      return { limiter, events, advance: (ms: number) => (t += ms) };
+    }
+
+    it("fires once, on the failure that reaches the limit, and not below it", () => {
+      const { limiter, events } = withNotice();
+      limiter.failed("192.168.1.50", "guess-one");
+      limiter.failed("192.168.1.50", "guess-two");
+      expect(events).toEqual([]);
+      limiter.failed("192.168.1.50", "guess-three");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ ip: "192.168.1.50", at: 1_000_000, byAddress: true, byUsername: false });
+    });
+
+    it("adds nothing for attempts refused while locked", () => {
+      const { limiter, events } = withNotice();
+      for (let i = 0; i < 3; i++) limiter.failed("192.168.1.50", "owner");
+      expect(events).toHaveLength(1);
+      // The route refuses on retryAfter and never calls failed again while locked.
+      for (let i = 0; i < 5; i++) expect(limiter.retryAfter("192.168.1.50", "owner")).toBeGreaterThan(0);
+      expect(events).toHaveLength(1);
+    });
+
+    it("tells again for a new window, and separately for another address", () => {
+      const { limiter, events, advance } = withNotice();
+      for (let i = 0; i < 3; i++) limiter.failed("192.168.1.50", "owner");
+      advance(60_001);
+      for (let i = 0; i < 3; i++) limiter.failed("192.168.1.50", "owner");
+      expect(events).toHaveLength(2);
+      for (let i = 0; i < 3; i++) limiter.failed("192.168.1.51", "someone");
+      expect(events).toHaveLength(3);
+    });
+
+    it("tells once when address and username lock together, and says which", () => {
+      const { limiter, events } = withNotice();
+      for (let i = 0; i < 3; i++) limiter.failed("192.168.1.50", "owner");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ byAddress: true, byUsername: true });
+    });
+
+    it("tells for a username locked from changing addresses, and never carries the guess", () => {
+      const { limiter, events } = withNotice();
+      limiter.failed("192.168.1.50", "owner");
+      limiter.failed("192.168.1.51", "owner");
+      limiter.failed("192.168.1.52", "owner");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ ip: "192.168.1.52", byAddress: false, byUsername: true });
+      expect(Object.keys(events[0]!).sort()).toEqual(["at", "byAddress", "byUsername", "ip"]);
+    });
+
+    it("a notice that throws doesn't change the lockout", () => {
+      let t = 0;
+      const limiter = loginLimiter({ maxFailures: 1, windowMs: 1000 }, () => t, () => {
+        throw new Error("boom");
+      });
+      expect(() => limiter.failed("192.168.1.50", "owner")).not.toThrow();
+      expect(limiter.retryAfter("192.168.1.50", "owner")).toBe(1000);
+    });
+  });
+
   it("defaults to 10 failures in 15 minutes", () => {
     expect(DEFAULT_LOGIN_LIMITS).toEqual({ maxFailures: 10, windowMs: 15 * 60_000 });
 
