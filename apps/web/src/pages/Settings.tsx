@@ -16,6 +16,7 @@ import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./se
 import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
+import { Account } from "./settings/Account";
 import { ExportCompany, ImportCompany } from "./settings/Transfer";
 
 export { Section, useAction } from "./settings/shared";
@@ -30,6 +31,7 @@ export { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./se
 export { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy, TrialLines, useNow } from "./settings/System";
 export { ServerPanel, ThisHost, NetguardAllow, deployerScriptLine } from "./settings/ThisHost";
 export { Devices } from "./settings/Devices";
+export { Account } from "./settings/Account";
 export { ExportCompany, ImportCompany } from "./settings/Transfer";
 
 // The Settings menu (BOS-1019, from the approved structure in BOS-1018): 9 pages in 3 groups, each a URL of its own.
@@ -44,6 +46,7 @@ export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly Set
     items: [
       { id: "funding", label: "Funding", hint: "Accounts agents run on, and budgets", help: "The subscriptions and API accounts agents run on, so their cost and quota are tracked, and each project's budget." },
       { id: "secrets", label: "Secrets", hint: "Keys and tokens, and who gets them", help: "Every stored credential, who gets it, and when it was used." },
+      { id: "account", label: "Account", hint: "Your password, and signing out other devices", help: "Change your password, and sign out every other device that is logged in.", allCompanies: true },
       { id: "tools", label: "Tools and deploys", hint: "Tool servers and deploy targets", help: "Tool servers (MCP) that give agents extra tools, and the deploy targets work can ship to." },
     ],
   },
@@ -311,6 +314,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         <PrivateDetails />
       </>
     ),
+    account: <Account />,
     transfer: (
       <>
         {company ? <ExportCompany key={company.id} company={company} /> : line}

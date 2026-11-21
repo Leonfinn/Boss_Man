@@ -9,6 +9,7 @@ import { record } from "../services/activity.js";
 import { SkillError, type skillsService } from "../services/skills.js";
 import { skillChangeEntry, skillSide } from "../services/skill-files.js";
 import type { skillProposalsService } from "../services/skill-proposals.js";
+import { PageQuery } from "../services/list-page.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
@@ -26,7 +27,7 @@ export function skillRoutes(
   const SkillParams = z.object({ id: Uuid, skillId: Uuid });
   const SkillFiles = z.array(z.object({ path: z.string().min(1).max(500), content: z.string().max(4_000_000) })).min(1).max(200);
   // Skills the CEO proposed: the owner answers through the decision; these show what is behind it.
-  owner.get("/api/companies/:id/skill-proposals", async (req) => skillProposals.list(IdParam.parse(req.params).id));
+  owner.get("/api/companies/:id/skill-proposals", async (req) => skillProposals.list(IdParam.parse(req.params).id, PageQuery.parse(req.query)));
   owner.get("/api/companies/:id/skill-proposals/:pid", async (req, reply) => {
     const { id, pid } = z.object({ id: Uuid, pid: Uuid }).parse(req.params);
     return skillProposals.detail(id, pid).catch(skillErrors(reply));

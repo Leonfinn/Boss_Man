@@ -835,7 +835,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               {isInfiniteModel(a.model) && (
                 <>
                   {" "}
-                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › Server and runner › Agents at once.">
+                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › Server and runner › Limits and checks › Agents at once.">
                     Infinite mode · free, slow
                   </span>
                 </>

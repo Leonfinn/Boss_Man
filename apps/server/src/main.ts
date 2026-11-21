@@ -37,7 +37,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, mailer, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, wiki, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, sweepExpiredSessions, mailer, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, wiki, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -96,6 +96,8 @@ const bg = createBackground(
     // BOS-1472: the host's staging lane: offers the staging target and records each staging deploy's result. // leader-only
     { name: "staging sync", everyMs: Number(env.BOSSMAN_STAGING_SYNC_MS ?? 30_000), run: async () => { await deploys.syncStaging(); await selfDeploy.stagingTick(); } },
     { name: "deploy tags", everyMs: Number(env.BOSSMAN_DEPLOY_TAGS_MS ?? 60_000), run: () => deploys.resumeTags() },
+    // Expired owner logins (BOS-2159): refused already; this deletes the rows so the table doesn't grow. // leader-only
+    { name: "expired sessions", everyMs: Number(env.BOSSMAN_SESSION_SWEEP_MS ?? 60 * 60_000), run: async () => { await sweepExpiredSessions(); } },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
     { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: async () => { await notes.markAnsweredRead(); await notes.clearSettledPushes(); } },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
