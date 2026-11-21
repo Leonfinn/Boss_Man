@@ -229,7 +229,7 @@ export type Decision = {
 
 /** (BOS-969) The Decisions menu badge and page heading: how many cards need the owner now, and how
  * many are folded into "Waiting, nothing to do yet". One server figure, so the two never drift. */
-export type DecisionTally = { open: number; waiting: number };
+export type DecisionTally = { open: number; waiting: number; oldestOpenAt?: string | null; medianAnswerMs?: number | null };
 
 export type StallEvidence = {
   runId: string;

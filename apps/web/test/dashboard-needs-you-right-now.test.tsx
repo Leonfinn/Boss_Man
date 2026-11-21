@@ -37,6 +37,22 @@ describe("Needs you", () => {
     expect(screen.getByText(/2 cards are with the team/)).toBeTruthy();
   });
 
+  it("says how long the oldest card has waited and the usual wait, leaving out what is null (BOS-2174)", () => {
+    const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+    const { unmount } = render(<NeedsYou decisions={[card(1)]} tally={{ open: 1, waiting: 0, oldestOpenAt: ago(72), medianAnswerMs: 5 * 3_600_000 }} />);
+    expect(screen.getByText("Oldest waiting 3 days · usually answered in 5 hours")).toBeTruthy();
+    unmount();
+    render(<NeedsYou decisions={[card(1)]} tally={{ open: 1, waiting: 0, oldestOpenAt: ago(2), medianAnswerMs: null }} />);
+    expect(screen.getByText("Oldest waiting 2 hours")).toBeTruthy();
+    cleanup();
+    render(<NeedsYou decisions={[]} tally={{ open: 0, waiting: 0, oldestOpenAt: null, medianAnswerMs: 3_600_000 }} />);
+    expect(screen.queryByText(/usually answered/)).toBeNull();
+    cleanup();
+    // An older server sends neither figure: the panel is as before, no line, no error.
+    const { container } = render(<NeedsYou decisions={[card(1)]} tally={{ open: 1, waiting: 0 }} />);
+    expect(container.querySelector(".dash-needs-wait")).toBeNull();
+  });
+
   it("keeps its size while loading", () => {
     render(<NeedsYou decisions={null} tally={null} />);
     expect(screen.getByText("Checking…")).toBeTruthy();
