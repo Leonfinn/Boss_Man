@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, checkJobs, companies, decisions, reviewRequests, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, companies, decisions, reviewRequests, runs, tickets, wakes } from "../src/db/schema.js";
 import { moveTicket } from "../src/services/ticket-moves.js";
 import { canStartNow } from "../src/services/agent-wip.js";
 
@@ -60,7 +60,7 @@ async function setup() {
     return ids;
   };
   const needYou = async () => ((await req("GET", `/api/decisions/tally?companyId=${company.id}`)).json() as { open: number }).open;
-  return { ...built, db, close, req, company, ceo, project, worker, ticket, approved, queuedQuick, set, row, start, ownerCards, needYou };
+  return { ...built, db, close, req, company, ceo, project, worker, runnerId: reg.runnerId, ticket, approved, queuedQuick, set, row, start, ownerCards, needYou };
 }
 
 describe("merges waiting", () => {
@@ -197,6 +197,64 @@ describe("cards that need you", () => {
     expect(r.held).toBeNull();
     expect(r.ticket.systemState).toBe("in_progress");
     expect(r.ticket.wipHeldAt).toBeNull();
+  });
+
+  it("at 3 of 3 a new start is held, and work already in progress is not stopped", async () => {
+    const c = (ctx = await setup());
+    const going = await c.ticket("ready");
+    await c.start(going.id);
+    await c.set({ holdStartsOwnerWaiting: 3 });
+    await c.ownerCards(3);
+    const t = await c.ticket("ready");
+    expect((await c.start(t.id)).held).toBe("Held: 3 need you (limit 3). It starts by itself when fewer need you.");
+    await c.sweeps.run();
+    await c.scheduler.tick();
+    expect((await c.row(going.id)).systemState).toBe("in_progress");
+    expect((await c.row(t.id)).systemState).toBe("ready");
+  });
+
+  it("when the count drops to 2 the next pass starts the held ticket with no owner step, also after a server restart", async () => {
+    const c = (ctx = await setup());
+    await c.set({ holdStartsOwnerWaiting: 3 });
+    const [first] = await c.ownerCards(3);
+    const t = await c.ticket("ready");
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: t.id, reason: "assigned", note: "Please start." });
+    await c.scheduler.tick();
+    expect((await c.row(t.id)).wipHeldAt).not.toBeNull();
+    await c.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.agentId, c.worker.id));
+    // A restart: the old process goes, a new one starts on the same database and registers its count source again.
+    await c.app.close();
+    const again = await buildApp({ db: c.db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+    ctx = { ...c, ...again };
+    again.runners.connect(c.runnerId, () => true);
+    // Still 3 cards: a pass after the restart keeps it held.
+    await again.sweeps.run();
+    await again.scheduler.tick();
+    expect((await c.row(t.id)).systemState).toBe("ready");
+    // The owner answers one card on the new process (2 need them, under 3); the next pass starts it with nothing else done.
+    const login = await again.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${login.cookies.find((k) => k.name === "bm_session")!.value}`;
+    expect((await again.app.inject({ method: "POST", url: `/api/decisions/${first}/answer`, headers: { cookie }, payload: { answer: "Yes" } })).statusCode).toBe(200);
+    await c.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.agentId, c.worker.id));
+    expect(await canStartNow(c.db, await c.row(t.id))).toBe(true);
+    await again.sweeps.run();
+    await again.scheduler.tick();
+    const after = await c.row(t.id);
+    expect(after.systemState).toBe("in_progress");
+    expect(after.wipHeldAt).toBeNull();
+  });
+
+  it("an owner reply on a ticket in progress still wakes its agent while the hold is on", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("ready");
+    await c.start(t.id);
+    await c.set({ holdStartsOwnerWaiting: 1 });
+    await c.ownerCards(2);
+    expect((await c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Please also cover the empty case." })).statusCode).toBe(201);
+    await c.scheduler.tick();
+    const launched = await c.db.select({ status: wakes.status, statusReason: wakes.statusReason }).from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(launched.some((w) => w.status === "launched" && w.statusReason === null)).toBe(true);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
   });
 
   it("does not hold work already started, an urgent ticket, a live fix or the CEO's own ticket", async () => {
