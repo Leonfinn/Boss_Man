@@ -16,7 +16,7 @@ This guide is for you if you want to stop an agent, or every agent, for example 
 | One company should not start anything new | **Pause company** in **Settings > Team and CEO** | Finishes by itself | **Resume company** |
 | Nothing should start anywhere, for as long as you say | **Stop all work** in **Settings > Server and runner > Updates** | Finishes by itself | **Resume** on the banner at the top of every page |
 | You want agents to save their work and stop soon, for example before an update | **Ask agents to wrap up** in **Settings > Server and runner > Updates** | Each agent is asked to save and stop | **Cancel wrap-up**, or wait: it lifts by itself |
-| One run is doing the wrong thing now | **Stop** on the ticket page, or **Stop run** on the run's page | That run ends now. Unsaved work is lost | Nothing to undo. The ticket waits where it stopped |
+| One run is doing the wrong thing now | **Stop** on the ticket page, or **Stop run** on the run's page, then confirm | That run ends now. Unsaved work is lost | Nothing to undo. The ticket waits where it stopped |
 | Everything must stop now | **End all running runs** on the **Runs** page | Every run ends now. Unsaved work is lost | Nothing to undo |
 
 Ending a run does not stop new ones from starting. To stop everything and keep it stopped, use **Stop all work** first, then end the runs.
@@ -74,7 +74,7 @@ You only see **Ask agents to wrap up** if the optional host deployer is set up (
 
 ## Stop one run
 
-On the ticket page, while an agent is working on the ticket, choose the red **Stop** button next to **Interrupt and send**. Or open the run from **Runs** and choose **Stop run**.
+On the ticket page, while an agent is working on the ticket, choose the red **Stop** button next to **Interrupt and send**. Or open the run from **Runs** and choose **Stop run**. Then confirm: Boss Man first asks whether to stop the agent's run, and warns that it stops mid-step, so anything not yet committed can be lost. Choose **Cancel** and the run carries on.
 
 The run ends where it is. Anything the agent has not saved is lost. Commits it already made are kept. The agent is not woken again for that run: its ticket waits where it stopped.
 
@@ -90,7 +90,7 @@ Every run going now, in every company, ends at once. Work the agents have not sa
 
 It does not stop new runs from starting. Use **Stop all work** first if you want nothing to start again.
 
-**Check it worked:** a line next to the button says how many runs ended, for example "Ended 3 runs." If it says some "could not be ended", open each run still listed under **Running now** and choose **Stop run**.
+**Check it worked:** a line next to the button says how many runs ended, for example "Ended 3 runs." If it says some "could not be ended", open each run still listed under **Running now**, choose **Stop run** and confirm.
 
 ## Example: before a server update
 
@@ -100,13 +100,13 @@ You want to update Boss Man, and three agents are working.
 
 1. Open **Settings > Server and runner > Updates** and choose **Review and deploy**, then **Deploy** on the card that opens in **Decisions**. Back in **Updates**, the status box shows **Approved, waiting**: "Your update is approved and waiting for a quiet machine."
 2. Choose **Ask agents to wrap up**. The banner says agents were asked to wrap up.
-3. Wait for the list of running agents to empty. If an agent shows **Still going after 30 min**, choose **Stop this run** on its row.
+3. Wait for the list of running agents to empty. If an agent shows **Still going after 30 min**, choose **Stop this run** on its row and confirm.
 4. The update goes in by itself once the machine is quiet. The wrap-up then lifts by itself and new work starts again. There is nothing to press.
 
 **With `scripts/deploy.sh`** (no host deployer):
 
 1. Open **Settings > Server and runner > Updates** and choose **Stop all work**.
-2. Open **Runs** and wait until **Running now** says "No agents are running". To end a run sooner, open it and choose **Stop run**.
+2. Open **Runs** and wait until **Running now** says "No agents are running". To end a run sooner, open it, choose **Stop run** and confirm.
 3. Run `scripts/deploy.sh` on the machine, as [Updating and backups](/guides/updates-and-backups#update-the-server) explains, and wait for it to report healthy.
 4. Choose **Resume** on the banner at the top of the page.
 
@@ -114,7 +114,7 @@ You want to update Boss Man, and three agents are working.
 
 An agent called Moss keeps changing the wrong files on a ticket.
 
-1. Open the ticket and choose the red **Stop** button. Moss's run ends. Anything Moss had not saved is lost.
+1. Open the ticket and choose the red **Stop** button, then confirm. Moss's run ends. Anything Moss had not saved is lost.
 2. Open **Agents** and choose **Pause** on Moss's row, so Moss does not start again on this or another ticket.
 3. Write on the ticket what Moss should do differently, or move the ticket back.
 4. When you are ready, choose **Start** on Moss's row.
