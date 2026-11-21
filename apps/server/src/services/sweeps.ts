@@ -830,12 +830,35 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return recorded;
   }
 
+  /**
+   * BOS-2210: the branch moved off the commit the approvals were given on (the author pushed a fix after the merge sent it
+   * back, and it now waits in review for its quick check or new round with the old approvals still the latest). Nothing
+   * stopped there: the merge already said "branch changed after approval" and the ticket is with its author, so neither the
+   * retry nor the "nothing merged it" card applies. Like BOS-970's dropped-for-newer check, it is left out. A head that only
+   * took clean merges of main still counts as approved (the landing merges it); unknown (no stamped head, head unreadable,
+   * runner can't say) keeps the card, so a real stop is never hidden.
+   */
+  async function approvedHeadMoved(ticketId: string): Promise<boolean> {
+    if (!opts.branchHead) return false;
+    const approved = (await latestRows(db, ticketId)).filter((r) => r.status === "approved");
+    const heads = [...new Set(approved.map((r) => r.head).filter((h): h is string => !!h))];
+    if (!heads.length) return false;
+    const head = await opts.branchHead(ticketId).catch(() => null);
+    if (!head) return false;
+    // Approvals on different commits (or some unstamped): the landing refuses that ("approved heads differ", BOS-1528) and sends it back, as for a move.
+    if (heads.length > 1 || approved.some((r) => !r.head)) return true;
+    if (heads[0] === head) return false;
+    const cover = opts.signoffCovers ? await opts.signoffCovers(ticketId, heads[0]!, head).catch(() => null) : null;
+    return cover ? !cover.covers : false;
+  }
+
   async function unmergedApprovals(t: Date) {
     let raised = 0;
     for (const ticket of await approvedUnmerged()) {
       // Quiet is measured from the last approval (BOS-362).
       if (ticket.approvedAt > t.getTime() - limits.mergeMissedAfterMs) continue;
       if (heldByCap.has(ticket.id)) continue;
+      if (await approvedHeadMoved(ticket.id)) continue;
       if (opts.retryLand && !retried.has(ticket.id)) {
         retried.add(ticket.id);
         await opts.retryLand(ticket.id).catch(() => undefined);

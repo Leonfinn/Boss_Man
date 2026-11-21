@@ -15,11 +15,11 @@ afterEach(async () => {
   await ctx.close();
 });
 
-async function setup(leader?: Leader) {
+async function setup(leader?: Leader, branchHead?: (ticketId: string) => Promise<string | null>) {
   const { db, close } = await openPglite();
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock, leader });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock, leader, ...(branchHead ? { branchHead } : {}) });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -341,6 +341,45 @@ describe("unmerged approvals sweep", () => {
     await ctx.db.update(tickets).set({ projectId: p2.id }).where(eq(tickets.id, id));
     leading = false;
     await expect(ctx.review.land(id, "Reviewer")).rejects.toThrow();
+    expect(await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"))).toHaveLength(0);
+  });
+
+  it("neither retries nor raises the card for a ticket whose branch moved off the approved commit (BOS-2210)", async () => {
+    const A = "a".repeat(40);
+    const B = "b".repeat(40);
+    const heads = new Map<string, string | null>();
+    ctx = await setup(undefined, async (id) => heads.get(id) ?? null);
+    // A clean merge of main since the approval still counts as approved; anything else does not.
+    const covered = new Set<string>();
+    vi.spyOn(ctx.review, "signoffCovers").mockImplementation(async (id: string) => ({ covers: covered.has(id), reason: "test", newCommits: 1, handMerges: 0 }));
+    const approve = (ticketId: string, head: string | null) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", head, createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
+    // No repo here, so a retry simply closes the ticket: "done" shows the sweep acted, "review" that it left it alone.
+    const moved = await ctx.forgotten("Kit pushed a fix after the approval", { systemState: "review" });
+    await approve(moved, A);
+    heads.set(moved, B);
+    const mixed = await ctx.forgotten("Approved on two commits", { systemState: "review" });
+    await approve(mixed, A);
+    await ctx.db.insert(reviewRequests).values({ ticketId: mixed, kind: "security", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", head: B, createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
+    heads.set(mixed, B);
+    // Real stops keep the retry (and then the card): same head, a head with only clean main merges, a head that can't be read.
+    const same = await ctx.forgotten("Server restarted mid-merge", { systemState: "review" });
+    await approve(same, A);
+    heads.set(same, A);
+    const mainMerged = await ctx.forgotten("Main merged in cleanly", { systemState: "review" });
+    await approve(mainMerged, A);
+    heads.set(mainMerged, B);
+    covered.add(mainMerged);
+    const unknown = await ctx.forgotten("Runner can't say", { systemState: "review" });
+    await approve(unknown, A);
+
+    expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 3 });
+    const stateOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!.systemState;
+    // The retries run in the background.
+    await vi.waitFor(async () => expect([await stateOf(same), await stateOf(mainMerged), await stateOf(unknown)]).toEqual(["done", "done", "done"]), { timeout: 10_000 });
+    expect(await stateOf(moved)).toBe("review");
+    expect(await stateOf(mixed)).toBe("review");
+    // The next pass is where the old code raised "nothing merged it": still nothing for the moved ones.
+    expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
     expect(await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"))).toHaveLength(0);
   });
 });
