@@ -2,8 +2,12 @@
 // restart, and deploy targets. Owner routes: app.ts registers these inside its owner scope, so the
 // owner check and error handling are the same as for its other routes.
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { RUNNER_ADDONS } from "@boss-man/shared";
+import type { Db } from "../db/client.js";
+import { companies } from "../db/schema.js";
+import { record } from "../services/activity.js";
 import { DeployError, type deploysService } from "../services/deploys.js";
 import type { launcherService } from "../services/launcher.js";
 import type { maintenanceService } from "../services/maintenance.js";
@@ -19,6 +23,7 @@ const IdParam = z.object({ id: Uuid });
 export function serverAdminRoutes(
   owner: FastifyInstance,
   deps: {
+    db: Db;
     scheduler: ReturnType<typeof schedulerService>;
     maintenance: ReturnType<typeof maintenanceService>;
     runnerReport: ReturnType<typeof runnerReportService>;
@@ -32,7 +37,7 @@ export function serverAdminRoutes(
     activeWaits: () => Promise<ActiveWait[]>;
   },
 ) {
-  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits } = deps;
+  const { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits } = deps;
   // One list for every screen (rule c): what each update wait waits on, since when, and when it goes ahead or ends.
   owner.get("/api/update-waits", async () => ({ waits: await activeWaits() }));
 
@@ -51,10 +56,13 @@ export function serverAdminRoutes(
     await scheduler.setGlobalPause(paused);
     return { paused };
   });
-  owner.post("/api/companies/:id/pause", async (req) => {
+  owner.post("/api/companies/:id/pause", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
+    const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!company) return reply.code(404).send({ error: "not_found" });
     await scheduler.setCompanyPause(id, paused);
+    await record(db, { companyId: id, kind: "settings", summary: paused ? "Owner paused this company" : "Owner resumed this company" });
     return { paused };
   });
 

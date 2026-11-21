@@ -5,7 +5,7 @@ import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
-import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -128,6 +128,18 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 0, waiting: 1 });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
     expect(await ctx.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("pausing or resuming a company leaves an activity line, and an unknown company is not found (BOS-2148)", async () => {
+    ctx = await setup();
+    await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true });
+    await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
+    const lines = (await ctx.db.select().from(activity).where(eq(activity.companyId, ctx.company.id))).map((a) => a.summary);
+    expect(lines).toContain("Owner paused this company");
+    expect(lines).toContain("Owner resumed this company");
+    const res = await ctx.req("POST", "/api/companies/00000000-0000-4000-8000-000000000001/pause", { paused: true });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: "not_found" });
   });
 
   it("Stop all work (BOS-836): a fresh server starts work as today; the hold keeps a wake waiting without cancelling a run already going; Resume launches it", async () => {
