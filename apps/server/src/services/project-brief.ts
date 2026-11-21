@@ -6,7 +6,7 @@ import type { Db } from "../db/client.js";
 import { agents, projects, settings, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import type { gitHostService } from "./git-hosts.js";
 import type { workService } from "./work.js";
-import { LESSONS_CAP, LESSONS_HEADING, addLesson, lessonLine, lessonsFrom, removeLessonLine, serialiseWrite, splitSections } from "./wiki.js";
+import { LESSONS_CAP, LESSONS_HEADING, addLesson, liveWikiPage, lessonLine, lessonsFrom, removeLessonLine, serialiseWrite, splitSections } from "./wiki.js";
 
 // The lessons helpers and their decision answers live in wiki.ts beside the section parsing
 // (the brief-write guard needs them there); re-exported so callers find them at the brief.
@@ -47,7 +47,8 @@ export async function writeLesson(db: Db, ctx: { companyId: string; projectId: s
       }
       const body = bodyOf(page.body);
       if (body !== page.body) {
-        await tx.update(wikiPages).set({ body, updatedAt: new Date() }).where(eq(wikiPages.id, page.id));
+        // A lesson the owner approved brings a deleted brief back (BOS-2197), rather than editing a page nobody can see.
+        await tx.update(wikiPages).set({ body, updatedAt: new Date(), deletedAt: null, deletedByAgentId: null }).where(eq(wikiPages.id, page.id));
         await tx.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
       }
     });
@@ -70,7 +71,7 @@ export function parseCommitLine(body: string) {
 /** The project's brief page with what its first line says, or null when nobody has written it. */
 export async function findBrief(db: Db, companyId: string, projectId: string) {
   const slug = briefSlug(projectId);
-  const [p] = await db.select({ body: wikiPages.body, updatedAt: wikiPages.updatedAt }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug)));
+  const [p] = await db.select({ body: wikiPages.body, updatedAt: wikiPages.updatedAt }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage, eq(wikiPages.slug, slug)));
   if (!p) return null;
   // The headings go into wake prompts and an agent wrote them, so they're capped.
   const headings = splitSections(p.body).filter((s) => s.level === 2).slice(0, 12).map((s) => s.heading.slice(0, 60));

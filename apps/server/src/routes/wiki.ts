@@ -41,6 +41,9 @@ export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<type
       const q = z.object({ offset: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(HISTORY_PAGE_MAX).optional() }).parse(req.query);
       return wiki.versions(id, slug, q).catch(wikiErrors(reply));
     }
+    // A deleted page answers with its "deleted on <date>" stub (deleted: true) so the link view can offer Restore (BOS-2197).
+    const gone = await wiki.deletedStub(id, slug);
+    if (gone) return gone;
     return wiki.get(id, slug).catch(wikiErrors(reply));
   });
   owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
@@ -50,6 +53,13 @@ export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<type
   owner.delete("/api/companies/:id/wiki/*", async (req, reply) => {
     const { id, slug } = SlugParams.parse(req.params);
     return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
+  });
+  // The Deleted pages list and Restore (BOS-2197). The slug goes in the body, as for wiki-restore.
+  owner.get("/api/companies/:id/wiki-deleted", async (req) => ({ pages: await wiki.listDeleted(IdParam.parse(req.params).id) }));
+  owner.post("/api/companies/:id/wiki-deleted/restore", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const b = z.object({ slug: z.string().min(1).max(500) }).parse(req.body);
+    return wiki.restoreDeleted(id, b.slug).catch(wikiErrors(reply));
   });
   // Put an old version back (BOS-430): a new version of its own, so the restore can be undone.
   // The page's slug goes in the body, as a page address can hold folders and Fastify's wildcard must be last.
