@@ -137,6 +137,9 @@ describe("scheduler", () => {
     const lines = (await ctx.db.select().from(activity).where(eq(activity.companyId, ctx.company.id))).map((a) => a.summary);
     expect(lines).toContain("Owner paused this company");
     expect(lines).toContain("Owner resumed this company");
+    // Pausing twice still works (the second call is a no-op on the flag).
+    expect((await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true })).json()).toEqual({ paused: true });
+    expect((await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true })).json()).toEqual({ paused: true });
     const res = await ctx.req("POST", "/api/companies/00000000-0000-4000-8000-000000000001/pause", { paused: true });
     expect(res.statusCode).toBe(404);
     expect(res.json()).toEqual({ error: "not_found" });
