@@ -186,6 +186,29 @@ describe("owner chat", () => {
     expect(items.some((m) => m.text.includes("You said"))).toBe(false);
   });
 
+  it("BOS-2167: the chat list pages back from a message id with hasMore, and an unknown id is a 404", async () => {
+    const c = await setup();
+    const { ownerChatMessages } = await import("../src/db/schema.js");
+    const base = Date.now() - 1_000_000;
+    await c.db.insert(ownerChatMessages).values(Array.from({ length: 450 }, (_, i) => ({ companyId: c.company.id, agentId: c.ceo.id, role: "owner" as const, text: `m${i}`, createdAt: new Date(base + i * 1000) })));
+    const url = `/api/companies/${c.company.id}/chat?agentId=${c.ceo.id}`;
+    const first = (await c.req("GET", url)).json();
+    expect(first.items).toHaveLength(200);
+    expect(first.items[0].text).toBe("m250");
+    expect(first.hasMore).toBe(true);
+    const second = (await c.req("GET", `${url}&before=${first.items[0].id}`)).json();
+    expect(second.items).toHaveLength(200);
+    expect(second.items[0].text).toBe("m50");
+    expect(second.items.at(-1).text).toBe("m249");
+    expect(second.hasMore).toBe(true);
+    const third = (await c.req("GET", `${url}&before=${second.items[0].id}`)).json();
+    expect(third.items).toHaveLength(50);
+    expect(third.hasMore).toBe(false);
+    const missing = await c.req("GET", `${url}&before=${randomUUID()}`);
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().message).toBe("message not found");
+  });
+
   it("BOS-1870: a Settings path through Limits shows the saved and in-force values; other paths and a failing source say nothing", async () => {
     const c = await setup();
     const { namedThingsSection } = await import("../src/services/named-things.js");

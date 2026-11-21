@@ -5,7 +5,7 @@
 // Boss Man's board tools is refused. Each agent has its own conversation and answers one
 // message batch at a time.
 import path from "node:path";
-import { and, count, desc, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { agentIdentity, BUILT_IN_RULES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, ownerChatMessages, ownerChatTraces, projects, runs, tickets, wakes } from "../db/schema.js";
@@ -207,15 +207,19 @@ export function chatService(
       return { agentId: m.agentId };
     },
 
-    async list(companyId: string, agentId?: string | null) {
+    /** The newest 200 messages, or the 200 before message `before` (BOS-2167); `hasMore` says whether older ones remain. */
+    async list(companyId: string, agentId?: string | null, before?: string | null) {
       const agent = agentId ? await agentOf(companyId, agentId) : await who(companyId);
-      const items = await db
-        .select()
-        .from(ownerChatMessages)
-        .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agent.id)))
-        .orderBy(desc(ownerChatMessages.createdAt))
-        .limit(200);
-      const ordered = items.reverse();
+      const mine = and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agent.id));
+      let where = mine;
+      if (before) {
+        const [cursor] = await db.select({ createdAt: ownerChatMessages.createdAt }).from(ownerChatMessages).where(and(mine, eq(ownerChatMessages.id, before)));
+        if (!cursor) throw new ChatError(404, "message not found");
+        where = and(mine, or(lt(ownerChatMessages.createdAt, cursor.createdAt), and(eq(ownerChatMessages.createdAt, cursor.createdAt), lt(ownerChatMessages.id, before))));
+      }
+      const found = await db.select().from(ownerChatMessages).where(where).orderBy(desc(ownerChatMessages.createdAt), desc(ownerChatMessages.id)).limit(201);
+      const hasMore = found.length > 200;
+      const ordered = found.slice(0, 200).reverse();
       // The Thinking trace for each reply (BOS-1368): one query for the page's messages, only this company's.
       const ids = ordered.filter((m) => m.role === "assistant").map((m) => m.id);
       const traceRows = ids.length ? await db.select({ messageId: ownerChatTraces.messageId, trace: ownerChatTraces.trace }).from(ownerChatTraces).where(and(eq(ownerChatTraces.companyId, companyId), inArray(ownerChatTraces.messageId, ids))) : [];
@@ -229,7 +233,7 @@ export function chatService(
         const shown = m.role === "assistant" ? { ...m, text: stripYouSaidLines(m.text) } : m;
         return trace ? { ...shown, trace } : shown;
       });
-      return { agentId: agent.id, items: withTrace, state: await state(companyId, agent.id), live };
+      return { agentId: agent.id, items: withTrace, hasMore, state: await state(companyId, agent.id), live };
     },
 
     /** Everyone the owner can message, CEO first, each with their last message and what they're doing. */
