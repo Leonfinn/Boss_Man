@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { WATCHDOG_RULE_LABEL, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { WATCHDOG_RULE_LABEL, watchdogLimitRule, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, type Company } from "../../api";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
@@ -39,6 +39,26 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "spareCapacityMinutes", label: "Tell the CEO the company is under-used after", unit: "minutes" },
 ];
 
+function rangeText(key: keyof WatchdogSettings): string {
+  const l = WATCHDOG_LIMITS.find((x) => x.key === key)!;
+  const rule = watchdogLimitRule(key);
+  return rule ? `"${l.label}" must be ${rule.whole ? "a whole number " : ""}from ${rule.min} to ${rule.max} ${l.unit}.` : `"${l.label}" isn't allowed.`;
+}
+
+/** Says in plain words what is wrong with a box's text, or null when it is fine; the range comes from the shared schema. */
+function limitProblem(key: keyof WatchdogSettings, text: string): string | null {
+  const l = WATCHDOG_LIMITS.find((x) => x.key === key);
+  const rule = watchdogLimitRule(key);
+  if (!l || !rule) return null;
+  const name = l.label;
+  if (text.trim() === "") return `Type a number for "${name}".`;
+  const n = Number(text);
+  if (!Number.isFinite(n)) return `"${name}" must be a number.`;
+  if (rule.whole && !Number.isInteger(n)) return `"${name}" must be a whole number, from ${rule.min} to ${rule.max} ${l.unit}.`;
+  if (n < rule.min || n > rule.max) return `"${name}" must be from ${rule.min} to ${rule.max} ${l.unit}.`;
+  return null;
+}
+
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
 export function Watchdog({ company }: { company: Company }) {
   const [status, setStatus] = useState<WatchdogStatus | null>(null);
@@ -46,6 +66,7 @@ export function Watchdog({ company }: { company: Company }) {
   const [sm, setSm] = useState("");
   const [bt, setBt] = useState<Backtest | null>(null);
   const [savedOk, setSavedOk] = useState(false);
+  const [problems, setProblems] = useState<Record<string, string>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const act = useAction();
   const test = useAction();
@@ -70,14 +91,41 @@ export function Watchdog({ company }: { company: Company }) {
     );
   }
   const candidates = company.agents.filter((a) => a.role !== "ceo" && (!a.duty || a.duty === "scrum_master"));
-  const save = (extra: Record<string, unknown>) =>
-    act.run(async () => {
+  const save = (extra: Record<string, unknown>) => {
+    // Check every box first, so the owner is told which one and why (BOS-2163).
+    const found = Object.fromEntries(WATCHDOG_LIMITS.flatMap((l) => {
+      const msg = limitProblem(l.key, draft[l.key] ?? "");
+      return msg ? [[l.key, msg]] : [];
+    }));
+    setProblems(found);
+    if (Object.keys(found).length) {
+      setSavedOk(false);
+      return Promise.resolve(act.run(async () => { throw new Error(`${Object.keys(found).length === 1 ? "One limit needs" : "Some limits need"} fixing before it can be saved: see the red text beside ${Object.keys(found).length === 1 ? "it" : "them"}.`); }));
+    }
+    return act.run(async () => {
       const limits = Object.fromEntries(WATCHDOG_LIMITS.map((l) => [l.key, Number(draft[l.key])]));
-      await api(`/api/companies/${company.id}/watchdog`, { method: "PATCH", body: { ...limits, scrumMasterAgentId: sm || null, ...extra } });
+      try {
+        await api(`/api/companies/${company.id}/watchdog`, { method: "PATCH", body: { ...limits, scrumMasterAgentId: sm || null, ...extra } });
+      } catch (err) {
+        // A server 422 reads "unassignedMinutes: Number must be…"; show each part beside its box instead.
+        const back: Record<string, string> = {};
+        for (const part of (err as Error).message.split("; ")) {
+          const m = /^(\w+): /.exec(part);
+          const l = m && WATCHDOG_LIMITS.find((x) => x.key === m[1]);
+          if (l) back[l.key] = limitProblem(l.key, draft[l.key] ?? "") ?? rangeText(l.key);
+        }
+        if (Object.keys(back).length) {
+          setProblems(back);
+          throw new Error("One or more limits need fixing before it can be saved: see the red text beside them.");
+        }
+        throw err;
+      }
+      setProblems({});
       await load();
       setSavedOk(true);
       return "Saved.";
     });
+  };
   const dirty = sm !== (status.scrumMaster?.id ?? "") || WATCHDOG_LIMITS.some((l) => (draft[l.key] ?? "") !== String(status.settings[l.key]));
   const preset = matchPreset(limitsFromDraft(draft) as WatchdogLimits, WATCHDOG_PRESETS);
   const on = status.settings.enabled;
@@ -119,7 +167,7 @@ export function Watchdog({ company }: { company: Company }) {
       </div>
       {/* Presets (BOS-1493): picking one fills the limits below; nothing is saved until Save. */}
       <PresetCards label="Watchdog preset" presets={WATCHDOG_PRESETS} active={preset} onPick={(p) => setDraft({ ...draft, ...Object.fromEntries(Object.entries(p.values).map(([k, v]) => [k, String(v)])) })} />
-      <Advanced storeKey="watchdog" forceOpen={!preset} summary={preset ? `The ${WATCHDOG_LIMITS.length} limits behind ${preset.name}.` : "Your own limits: edit them or pick a card."}>
+      <Advanced storeKey="watchdog" forceOpen={!preset || Object.keys(problems).length > 0} summary={preset ? `The ${WATCHDOG_LIMITS.length} limits behind ${preset.name}.` : "Your own limits: edit them or pick a card."}>
         <div className="wd-limits" style={{ marginTop: 8 }}>
           {WATCHDOG_LIMITS.map((l) => (
             <div key={l.key} style={{ display: "contents" }}>
@@ -132,8 +180,26 @@ export function Watchdog({ company }: { company: Company }) {
                   </>
                 )}
               </label>
-              <input id={`wd-${l.key}`} type="number" min={0} value={draft[l.key] ?? ""} onChange={(e) => setDraft({ ...draft, [l.key]: e.target.value })} />
+              <input
+                id={`wd-${l.key}`}
+                type="number"
+                min={watchdogLimitRule(l.key)?.min}
+                max={watchdogLimitRule(l.key)?.max}
+                step={watchdogLimitRule(l.key)?.whole ? 1 : "any"}
+                value={draft[l.key] ?? ""}
+                aria-invalid={problems[l.key] ? true : undefined}
+                aria-describedby={problems[l.key] ? `wd-${l.key}-err` : undefined}
+                onChange={(e) => {
+                  setDraft({ ...draft, [l.key]: e.target.value });
+                  if (problems[l.key]) setProblems(Object.fromEntries(Object.entries(problems).filter(([k]) => k !== l.key)));
+                }}
+              />
               <span className="muted">{l.unit}</span>
+              {problems[l.key] && (
+                <span id={`wd-${l.key}-err`} className="error" role="alert" style={{ gridColumn: "1 / -1", fontSize: 13 }}>
+                  {problems[l.key]}
+                </span>
+              )}
             </div>
           ))}
         </div>

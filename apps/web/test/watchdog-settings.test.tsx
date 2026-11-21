@@ -52,6 +52,40 @@ describe("watchdog settings (BOS-58)", () => {
     expect(calls.find((c) => c.method === "PATCH")).toMatchObject({ url: "/api/companies/c1/watchdog", body: { enabled: true, scrumMasterAgentId: "sm", inProgressHours: 3, reviewHours: 2, blockedHours: 8 } });
   });
 
+  it("checks the numbers before saving and names the bad box in plain words (BOS-2163)", async () => {
+    const calls = stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: false } }));
+    render(<Watchdog company={company} />);
+    await screen.findByText("Off.");
+    fireEvent.change(screen.getByLabelText("Scrum Master"), { target: { value: "sm" } });
+    fireEvent.change(screen.getByLabelText("Unassigned work"), { target: { value: "0" } });
+    fireEvent.change(screen.getByLabelText("Review loop after more than"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText(/Most Scrum Master runs per hour/), { target: { value: "2.5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Switch on" }));
+    expect(await screen.findByText('"Unassigned work" must be from 1 to 1440 minutes.')).toBeTruthy();
+    expect(screen.getByText('Type a number for "Review loop after more than".')).toBeTruthy();
+    expect(screen.getByText(/must be a whole number, from 1 to 30 runs/)).toBeTruthy();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect((screen.getByLabelText("Unassigned work") as HTMLInputElement).getAttribute("aria-invalid")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Unassigned work"), { target: { value: "20" } });
+    expect(screen.queryByText('"Unassigned work" must be from 1 to 1440 minutes.')).toBeNull();
+  });
+
+  it("maps a server 422 back to the box label", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push(init?.method ?? "GET");
+        if (init?.method === "PATCH") return new Response(JSON.stringify({ error: "watchdog", message: "alertMinutes: Number must be greater than or equal to 5" }), { status: 422, headers: { "content-type": "application/json" } });
+        return json(status());
+      }),
+    );
+    render(<Watchdog company={company} />);
+    await screen.findByText(/On\./);
+    fireEvent.click(screen.getByRole("button", { name: "Switch off" }));
+    expect(await screen.findByText(/"Move an alert up a level after" must be a whole number from 5 to 1440 minutes/)).toBeTruthy();
+  });
+
   it("ticks record only in Settings and PATCHes just that setting (BOS-166)", async () => {
     const calls = stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: true }, scrumMaster: { id: "sm", name: "Scrum Master", paused: false } }));
     render(<Watchdog company={company} />);
