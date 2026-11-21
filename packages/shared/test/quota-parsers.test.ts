@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normaliseUtilization, parseClaudeRateLimit, parseCodexRateLimits, windowHasReset, toDate, windowLabel } from "../src/quota.js";
+import { currentReportSamples, normaliseUtilization, parseClaudeRateLimit, parseCodexRateLimits, windowHasReset, toDate, windowLabel } from "../src/quota.js";
 
 describe("windowHasReset (BOS-1409)", () => {
   const reset = new Date("2026-11-12T10:00:00.000Z");
@@ -166,5 +166,35 @@ describe("windowLabel", () => {
 
   it("falls back to Other limit for an empty key", () => {
     expect(windowLabel("_").name).toBe("Other limit");
+  });
+});
+
+describe("currentReportSamples (BOS-1916)", () => {
+  const at = (iso: string, window: string) => ({ window, observedAt: new Date(iso) });
+
+  it("keeps nothing when there are no samples", () => {
+    expect(currentReportSamples([])).toEqual([]);
+  });
+
+  it("keeps a single sample, which is always the newest report", () => {
+    const one = at("2026-11-21T08:00:00.000Z", "five_hour");
+    expect(currentReportSamples([one])).toEqual([one]);
+  });
+
+  it("keeps every sample when they all came from the same report", () => {
+    const samples = [at("2026-11-21T08:00:00.000Z", "five_hour"), at("2026-11-21T08:00:00.000Z", "seven_day")];
+    expect(currentReportSamples(samples)).toEqual(samples);
+  });
+
+  it("drops windows left out of the newest report, keeping the current ones in order", () => {
+    const current = [at("2026-11-21T08:00:00.000Z", "five_hour"), at("2026-11-21T08:00:00.000Z", "seven_day")];
+    const old = at("2026-11-21T07:00:00.000Z", "fable");
+    expect(currentReportSamples([old, ...current])).toEqual(current);
+  });
+
+  it("keeps a whole newer batch even when an older one had more windows", () => {
+    const older = [at("2026-11-21T07:00:00.000Z", "five_hour"), at("2026-11-21T07:00:00.000Z", "seven_day")];
+    const newest = at("2026-11-21T08:00:00.000Z", "five_hour");
+    expect(currentReportSamples([...older, newest])).toEqual([newest]);
   });
 });
