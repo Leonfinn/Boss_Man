@@ -28,6 +28,15 @@ function stub(first: unknown, backtest?: unknown) {
 }
 
 describe("watchdog settings (BOS-58)", () => {
+  it("shows a loader while loading and an alert when the load fails (BOS-2152)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "server down" }), { status: 500, headers: { "content-type": "application/json" } })));
+    render(<Watchdog company={company} />);
+    // The loader's words appear after a second; its role=status mark is mounted at once.
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("is off by default; picking a Scrum Master and switching on sends the limits too", async () => {
     // BOS-762 made it on for a new company; this test covers a company that has it switched off.
     const calls = stub(status({ settings: { ...DEFAULT_WATCHDOG, enabled: false } }));
