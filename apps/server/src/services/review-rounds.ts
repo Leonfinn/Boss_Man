@@ -21,6 +21,7 @@ import { openHold } from "./review-holds.js";
 import { ReviewError, ReviewHeldError, SignoffPendingError, when, type HoldInput } from "./review-common.js";
 import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
+import { recordBranchFiles } from "./branch-overlaps.js";
 
 /** The ticket's changes against its base, from the runner that holds its worktree. A review diff is measured from the merge-base with the project's current default branch (BOS-694); a last-turn diff is that turn only. */
 export async function diff(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, companyId?: string, range: "base" | "last_turn" = "base"): Promise<WorkspaceDiff> {
@@ -313,8 +314,8 @@ export async function approve(this: ReviewSelf, ctx: ReviewCtx, t: typeof ticket
   let files: number | undefined;
   const head = await this.diff(ticketId).then(async (x) => {
     files = x.files.length;
-    // Keep the files where the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a review.
-    if (x.files.length) await db.update(tickets).set({ diffFiles: x.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
+    // Keep the files where the overlap warnings can read them without a runner call (BOS-1411, BOS-2179). Never fails a review.
+    await recordBranchFiles(db, ticketId, x.files.map((f) => f.path));
     return x.head || null;
   }, () => null);
   // BOS-1528: approvals are stamped by submit() with the head each reviewer approved; this read is for the sign-off card only.

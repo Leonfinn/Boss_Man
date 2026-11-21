@@ -2,6 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import type { Db } from "../db/client.js";
+import { recordBranchFiles } from "./branch-overlaps.js";
 
 // BOS-1901 (BOS-1886 plan): region A lives in review-common.ts and the closure's state and helpers in review-ctx.ts. Every name
 // review.ts exported before is re-exported here, so callers keep importing review.ts.
@@ -43,6 +44,11 @@ export function reviewService(
     // BOS-1904: review rounds and verdicts live in review-rounds.ts, the landing start and retry loop in merge-land.ts, and
     // merge status and upkeep in merge-status.ts; each delegate passes the service as `this`.
     diff(...a: Rest<typeof diff>) { return diff.call(this, ctx, ...a); },
+    /** BOS-2179: on a move to review, record the branch's files and post any overlap notes owed. Never throws; a runner that can't answer records nothing. */
+    async recordFiles(ticketId: string): Promise<void> {
+      const d = await this.diff(ticketId).catch(() => null);
+      if (d?.files.length) await recordBranchFiles(db, ticketId, d.files.map((f) => f.path));
+    },
     noteRead(...a: Rest<typeof noteRead>) { return noteRead.call(this, ctx, ...a); },
     migrations(...a: Rest<typeof migrations>) { return migrations.call(this, ctx, ...a); },
     needsChanges(...a: Rest<typeof needsChanges>) { return needsChanges.call(this, ctx, ...a); },
