@@ -17,6 +17,7 @@ import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
 import { backInBandReason } from "./cost-check.js";
 import { idleSlotsGoneReason } from "./idle-slots-alert.js";
 import { backupFreshReason } from "./daily-backup.js";
+import { sweepStepOkReason } from "./sweep-step-guard.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -77,7 +78,9 @@ export type ClearWhen =
   /** The idle-slots alert's card (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
   | { kind: "idleSlotsGone"; companyId: string }
   /** The daily-backup card (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
-  | { kind: "backupFresh" };
+  | { kind: "backupFresh" }
+  /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
+  | { kind: "sweepStepOk"; step: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -146,6 +149,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "idleSlotsGone":
         if (typeof c.companyId === "string") out.push({ kind: "idleSlotsGone", companyId: c.companyId });
+        break;
+      case "sweepStepOk":
+        if (typeof c.step === "string") out.push({ kind: "sweepStepOk", step: c.step });
         break;
       case "mergeFailuresCalm":
         if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
@@ -314,6 +320,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         return backInBandReason(db, c.companyId, card.createdAt);
       case "idleSlotsGone":
         return deps.freeSlots ? idleSlotsGoneReason(db, c.companyId, deps.freeSlots) : null;
+      case "sweepStepOk":
+        return sweepStepOkReason(db, c.step);
       case "mergeFailuresCalm": {
         // Calm for the whole window, and the card itself is at least that old.
         const since = new Date(now().getTime() - FAILURE_WINDOW_MS);

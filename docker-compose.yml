@@ -72,6 +72,10 @@ x-runner: &runner
     BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
     # Days the runner keeps OpenCode sessions before deleting them (BOS-616): empty = 14, 0 = never.
     BOSSMAN_OPENCODE_SESSION_DAYS: ${BOSSMAN_OPENCODE_SESSION_DAYS:-}
+    # Free-disk levels (BOS-2182): empty = defaults (warn under 10% or 5 GB free, hold new runs under 1024 MB).
+    BOSSMAN_DISK_WARN_PERCENT: ${BOSSMAN_DISK_WARN_PERCENT:-}
+    BOSSMAN_DISK_WARN_GB: ${BOSSMAN_DISK_WARN_GB:-}
+    BOSSMAN_DISK_FLOOR_MB: ${BOSSMAN_DISK_FLOOR_MB:-}
   # Agents run code: keep the container unprivileged and bounded. Never mount docker.sock;
   # use a deploy target with a socket proxy instead (R14).
   cap_drop: [ALL]

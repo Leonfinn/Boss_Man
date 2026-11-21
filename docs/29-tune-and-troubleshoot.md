@@ -112,6 +112,16 @@ docker system df
 
 **Settings > Server and runner > Runner** shows the runner's **Workspaces** size. Each company has a disk cap (20 GB by default); Boss Man tells you once a day when a company is over it, and it releases the workspaces of tickets that were finished a while ago (7 days by default). Builds of the runner image also use space. Check `docker system df` before removing anything.
 
+The runner also watches the free space on its workspace disk, whatever fills it (images, the pnpm store, logs, other files). Below the warning level you get one card a day naming the space left and what Boss Man's own files use most. Below the hard floor the runner holds new agent runs and checks instead of letting them fail with "no space left": the run or check says "Runner disk almost full: N MB free; free space and it restarts on its own", work already running carries on, and held work starts again by itself once space is back; there is nothing to press. Set these on the runner (read at start):
+
+| Variable | What it does | Default |
+| --- | --- | --- |
+| `BOSSMAN_DISK_WARN_PERCENT` | warn when free space is under this share of the disk | `10` |
+| `BOSSMAN_DISK_WARN_GB` | or under this many GB; the larger of the two applies | `5` |
+| `BOSSMAN_DISK_FLOOR_MB` | hold new runs and checks under this many MB free; `0` never holds | `1024` |
+
+The warning card's levels on the server are the same defaults; a runner given other levels still reports its free space, and the card follows the server's defaults.
+
 ### Parallel test runs fail with `spawn EAGAIN`
 
 The runner hit its limit of processes and threads. Raise `BOSSMAN_RUNNER_PIDS` (see the table below).

@@ -706,12 +706,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
                   cmd(`cd ${src} && docker compose kill -s SIGUSR2 server-${colour}`),
                 )
               : noHost
-            : "Check the new server has taken charge. Boss Man can't tell which copy is live or where it is installed, so no command is shown. Open Settings → Server and runner → Server and ask us on this ticket.",
+            : "Check the new server has taken charge. Boss Man can't tell which copy is live or where it is installed, so no command is shown. Open Settings → Server and runner → This server and ask us on this ticket.",
         );
       // Only when the runner's files changed: the same flag drives the summary line on the card.
       if (a?.runnerChanged) handSteps.push(`${RUNNER_STEP[0]!.toUpperCase()}${RUNNER_STEP.slice(1)}.`);
     }
-    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads ${ROLE_EXPECTED}.`: undefined;
+    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → This server: Role reads ${ROLE_EXPECTED}.`: undefined;
     const rollbackNote = "Database restore isn't a fallback yet.";
     const rollback = infra
       ? src && shaOk && bg !== undefined
@@ -1268,7 +1268,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       missing ??
         (live
           ? step(`Check Boss Man reconnected. Run this on the same machine; it asks the running server (${live}) whether it is ready. The answer should say ok is true and the role is ${ROLE_EXPECTED}:`, cmd(`cd ${src} && docker compose exec -T ${live} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`))
-          : `Check Boss Man reconnected: open Settings → Server and runner → Server. Role should read ${ROLE_EXPECTED}. (Boss Man can't tell which server copy is live, so no command is shown.)`),
+          : `Check Boss Man reconnected: open Settings → Server and runner → This server. Role should read ${ROLE_EXPECTED}. (Boss Man can't tell which server copy is live, so no command is shown.)`),
     );
     return steps;
   }
@@ -1318,7 +1318,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         question: `This update changes the ${word}'s settings, and they are not applied yet. Apply them when you are ready: Boss Man is unreachable for a few seconds.`,
         key: `${SERVICE_KEY}${svc}:${a.deployed}`,
         steps: serviceSteps(svc, a.deployed, a, host),
-        check: `Settings → Server and runner → Server: Role reads ${ROLE_EXPECTED}, and this card clears by itself once the host sees the ${word} running with its new settings.`,
+        check: `Settings → Server and runner → This server: Role reads ${ROLE_EXPECTED}, and this card clears by itself once the host sees the ${word} running with its new settings.`,
         rollback: serviceRollback(svc),
         ofDecisionId: "system",
       });

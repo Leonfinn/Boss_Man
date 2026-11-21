@@ -34,7 +34,9 @@ export type ClearWhen =
   /** The idle-slots alert (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
   | { kind: "idleSlotsGone"; companyId: string }
   /** The daily-backup alert (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
-  | { kind: "backupFresh" };
+  | { kind: "backupFresh" }
+  /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
+  | { kind: "sweepStepOk"; step: string };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -250,6 +252,11 @@ export const ALERT_KINDS = {
   daily_backup_stale: {
     topRung: "owner",
     clearWhen: () => [{ kind: "backupFresh" }],
+  },
+  // sweep-step-guard.ts (BOS-2160): a background safety step failed in 3 sweeps in a row. Only the owner can fix or
+  // restart the server; one card per step, closes by itself (sweepStepOk) after the step's next success.
+  sweep_step_failing: {
+    topRung: "owner",
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {

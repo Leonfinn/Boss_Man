@@ -182,25 +182,28 @@ const CLOSED_TICKET_REASON = "the ticket was already finished, so there was noth
  * reason is left alone, because it can still be real work on a closed ticket: a watch or tree wake gives
  * its final update, a review or check wake closes one out, and a decision or alert card is answered on
  * the card. Only these replays are dropped for a ticket that was finished before they could start.
+ *
+ * BOS-2172 adds the ticket's own follow-ups booked while it was open: a "check due" (schedule_check), a check
+ * result and a "checking an old card" re-check of its state note. Once the ticket is done each only confirms
+ * there is nothing left (the retro's BOS-2129, BOS-2132, BOS-1984), and a closed ticket's booking and note
+ * are already cleared or no longer flagged (monitorDue, ownerActed skip done tickets).
  */
-const REPLAY_REASONS = new Set(["woken by owner", "nudge", "message", "chased", "assigned", "unblocked"]);
+const REPLAY_REASONS = new Set(["woken by owner", "nudge", "message", "chased", "assigned", "unblocked", "check due", "check_result", "checking an old card"]);
 
 /**
- * Whether these waiting wakes for this ticket have nothing to act on any more (BOS-256): every one is a
- * replay, the ticket is closed (done, cancelled included), and every one was queued at or before the
- * moment it closed. `stateChangedAt` is when it closed (a database trigger sets it on every state
- * change), so a wake created after that is something new — a nudge or message sent once the ticket was
- * finished — and is not a replay. It compares wake times with the close time, not the ticket's last
- * activity: nudges, messages and chases don't update that, so they would be mistaken for replays (R
- * review on BOS-256). Someone who reopens it moves the state clock, so their work keeps its wake too.
+ * Whether this waiting wake has nothing to act on any more (BOS-256): it is a replay, the ticket is
+ * closed (done, cancelled included), and it was queued at or before the moment it closed. `stateChangedAt`
+ * is when it closed (a database trigger sets it on every state change), so a wake created after that is
+ * something new — a nudge or message sent once the ticket was finished — and is not a replay. It compares
+ * wake times with the close time, not the ticket's last activity: nudges, messages and chases don't update
+ * that, so they would be mistaken for replays (R review on BOS-256). Someone who reopens it moves the state
+ * clock, so their work keeps its wake too. Each wake is judged alone (BOS-2172): before, one non-replay wake
+ * beside them (a review, a watch) kept every stale nudge of the ticket, and each then started a run.
  */
-function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { systemState: string; stateChangedAt: Date | null }): boolean {
-  // Only replays; a watch, review, check or card wake is left to its own handling even on a closed ticket.
-  if (!open.length || !open.every((w) => REPLAY_REASONS.has(w.reason))) return false;
-  if (t.systemState !== "done") return false;
+function replayOfClosed(w: { reason: string; createdAt: Date }, t: { systemState: string; stateChangedAt: Date | null }): boolean {
+  if (t.systemState !== "done" || !REPLAY_REASONS.has(w.reason)) return false;
   // No close time recorded: treat it as just closed, so a replay is still dropped rather than waking anyone.
-  if (!t.stateChangedAt) return true;
-  return open.every((w) => w.createdAt.getTime() <= t.stateChangedAt!.getTime());
+  return !t.stateChangedAt || w.createdAt.getTime() <= t.stateChangedAt.getTime();
 }
 
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, background: 2, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, staleWakeMs: 2 * 3_600_000, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
@@ -994,20 +997,21 @@ export function schedulerService(
   }
 
   /**
-   * The waiting wakes for this wake's ticket that have outlived it (BOS-256), or null when it still has
+   * The waiting wakes for this wake's ticket that have outlived it (BOS-256), or null when this one still has
    * work. It reads the ticket once, and only for a wake with a ticket; a wake with none launches as
-   * before. The ids are the ticket's other waiting wakes, so the whole replay goes in one step.
+   * before. The ids are the ticket's other outlived wakes, so the whole replay goes in one step; a wake
+   * beside them that still has work (a review, a watch, a nudge sent after the close) is left to launch.
    */
-  async function finishedTicketWake(w: typeof wakes.$inferSelect): Promise<{ finished: true; ids: string[] } | null> {
+  async function finishedTicketWake(w: typeof wakes.$inferSelect): Promise<{ finished: true; ids: string[]; reasons: string[] } | null> {
     if (!w.ticketId) return null;
     const [t] = await db.select({ systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt }).from(tickets).where(eq(tickets.id, w.ticketId));
-    if (!t || t.systemState !== "done") return null;
+    if (!t || !replayOfClosed(w, t)) return null;
     const waiting = await db
       .select({ id: wakes.id, reason: wakes.reason, createdAt: wakes.createdAt })
       .from(wakes)
       .where(and(eq(wakes.ticketId, w.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
-    if (!finishedSince(waiting, t)) return null;
-    return { finished: true, ids: waiting.map((x) => x.id).filter((id) => id !== w.id) };
+    const outlived = waiting.filter((x) => x.id !== w.id && replayOfClosed(x, t));
+    return { finished: true, ids: outlived.map((x) => x.id), reasons: [...new Set([w.reason, ...outlived.map((x) => x.reason)])] };
   }
 
   /**
@@ -1556,10 +1560,13 @@ export function schedulerService(
       // How long a reason waits for more of itself; 0 still joins a wake that is already waiting.
       // An urgent ticket's note takes no wait at all (BOS-253): no batch window and no quiet hours.
       const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.reviewBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs, [WIKI_REASON]: limits.wikiBatchMs } as Record<string, number>)[input.reason] ?? 0;
+      // BOS-2172: a note sent after its ticket was finished never joins a wake queued before that: the scheduler drops
+      // those by their creation time, and the new note (the owner or a colleague writing on a done ticket) must still wake.
+      const [closed] = ticketId ? await db.select({ at: tickets.stateChangedAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.systemState, "done"))) : [];
       const [waiting] = await db
         .select()
         .from(wakes)
-        .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, input.reason), ticketId ? eq(wakes.ticketId, ticketId) : isNull(wakes.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
+        .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, input.reason), ticketId ? eq(wakes.ticketId, ticketId) : isNull(wakes.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId), closed ? (closed.at ? gt(wakes.createdAt, closed.at) : sql`false`) : undefined))
         .orderBy(asc(wakes.createdAt))
         .limit(1);
       // A note that joins a wake already waiting never reaches wake(), so the reply lane is offered here too.
@@ -1919,6 +1926,8 @@ export function schedulerService(
 
       // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
       // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
+      // not state: this pass's closed-ticket drops (BOS-2172), so a wake dropped beside another isn't looked at again.
+      const droppedClosed = new Set<string>();
       for (const w of fairOrder(pass, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || isReplyLane(x.reason))) {
         const defer = async (reason: string, notBefore: Date | null) => {
           // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
@@ -1951,10 +1960,18 @@ export function schedulerService(
         // agent for nothing (BOS-256). Once the ticket is closed (done, cancelled included) and nothing on it
         // changed after it closed, the wake is dropped. As with the loop guards, the whole of a ticket's
         // waiting wakes go together, so the next pass doesn't start the one that was beside it.
+        // Already dropped beside an earlier wake of its ticket in this pass.
+        if (droppedClosed.has(w.id)) continue;
         const finished = await finishedTicketWake(w);
         if (finished) {
-          await db.update(wakes).set({ status: "dropped", statusReason: CLOSED_TICKET_REASON }).where(inArray(wakes.id, [w.id, ...finished.ids]));
-          result.dropped += 1 + finished.ids.length;
+          const ids = [w.id, ...finished.ids];
+          for (const id of ids) droppedClosed.add(id);
+          await db.update(wakes).set({ status: "dropped", statusReason: CLOSED_TICKET_REASON }).where(inArray(wakes.id, ids));
+          await db.update(nudges).set({ dropped: true }).where(inArray(nudges.wakeId, ids));
+          // BOS-2172: one line on the ticket, so its activity shows why nobody was woken.
+          const n = ids.length;
+          await record(db, { companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, kind: "wake_dropped", summary: `Dropped ${n === 1 ? "a wake" : `${n} wakes`} (${finished.reasons.join(", ")}) queued before this ticket was finished, instead of starting a run`, at: now() });
+          result.dropped += n;
           continue;
         }
         // BOS-1791: a wake queued before the ticket was parked or reassigned never starts it.

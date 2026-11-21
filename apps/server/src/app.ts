@@ -143,6 +143,7 @@ import { featureRoutes } from "./routes/features.js";
 import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
+import { ticketRecordRoutes } from "./routes/ticket-record.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
@@ -871,6 +872,9 @@ export async function buildApp(opts: AppOptions) {
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    // BOS-2160: a background step that throws is logged (the error buffer reads app.log.error) and, if it keeps failing, raises one owner card.
+    log: (message) => app.log.error(message),
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
@@ -2036,7 +2040,7 @@ export async function buildApp(opts: AppOptions) {
     // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
     projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch, now: opts.now });
 
-    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all" }));
 
     owner.post("/api/projects/:id/tickets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2388,6 +2392,7 @@ export async function buildApp(opts: AppOptions) {
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
+    ticketRecordRoutes(owner, db, { filesChanged: (tid) => review.diff(tid).then((d) => d.files.length) });
 
     // The owner chat (v1.1, R70): the CEO or any agent, in plain language; tickets and links out.
     const chatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -2397,8 +2402,8 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/chat/threads", async (req) => chat.threads(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { agentId } = z.object({ agentId: Uuid.optional() }).parse(req.query);
-      return chat.list(id, agentId).catch(chatErrors(reply));
+      const { agentId, before } = z.object({ agentId: Uuid.optional(), before: Uuid.optional() }).parse(req.query);
+      return chat.list(id, agentId, before).catch(chatErrors(reply));
     });
     owner.post("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

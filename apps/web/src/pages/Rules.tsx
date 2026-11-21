@@ -45,11 +45,90 @@ function describeMatch(m: Match, agents: Agent[] = []) {
   return parts.join(" and ");
 }
 
-function RuleRows({ rules, agents, shadowed, onMove, onChange, onDelete }: { rules: Rule[]; agents: Agent[]; shadowed: string[]; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
+/** The row as a form (BOS-2186). Save sends name, match and outcome in one PATCH; the match keeps any field this form doesn't show (agents, safe-only…). A server refusal shows under the form and nothing is saved. */
+function RuleEditForm({ rule, onSave, onCancel }: { rule: Rule; onSave: (patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onCancel: () => void }) {
+  const [f, setF] = useState({ name: rule.name, kinds: rule.match.kinds ?? [], commandPattern: rule.match.commandPattern ?? "", titlePattern: rule.match.titlePattern ?? "", outcome: rule.outcome });
+  const [problem, setProblem] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const id = (s: string) => `edit-${rule.id}-${s}`;
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (saving) return;
+    const { kinds, commandPattern, titlePattern, ...rest } = rule.match;
+    void kinds;
+    void commandPattern;
+    void titlePattern;
+    const match: Match = { ...rest, ...(f.kinds.length ? { kinds: f.kinds } : {}), ...(f.commandPattern ? { commandPattern: f.commandPattern } : {}), ...(f.titlePattern ? { titlePattern: f.titlePattern } : {}) };
+    setSaving(true);
+    setProblem(null);
+    try {
+      await onSave({ name: f.name, match, outcome: f.outcome });
+    } catch (err) {
+      setProblem((err as Error).message);
+      setSaving(false);
+    }
+  };
+  return (
+    <form onSubmit={save} aria-label={`Edit ${rule.name}`} style={{ gridColumn: "1 / -1", display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end" }}>
+      <div className="field" style={{ gridColumn: "1 / -1" }}>
+        <label htmlFor={id("name")}>Rule name</label>
+        <input id={id("name")} required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={id("command")}>Command matches (regex)</label>
+        <input id={id("command")} className="mono" value={f.commandPattern} onChange={(e) => setF({ ...f, commandPattern: e.target.value })} aria-invalid={problem ? true : undefined} aria-describedby={problem ? id("problem") : undefined} />
+      </div>
+      <div className="field">
+        <label htmlFor={id("title")}>Tool title matches (regex)</label>
+        <input id={id("title")} className="mono" value={f.titlePattern} onChange={(e) => setF({ ...f, titlePattern: e.target.value })} aria-invalid={problem ? true : undefined} />
+      </div>
+      <div className="field">
+        <label htmlFor={id("outcome")}>Then</label>
+        <select id={id("outcome")} value={f.outcome} onChange={(e) => setF({ ...f, outcome: e.target.value as Outcome })}>
+          {OUTCOMES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <fieldset style={{ gridColumn: "1 / -1", border: 0, padding: 0, margin: 0, display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+        <legend style={{ fontSize: 13, fontWeight: 500, marginBottom: 6 }}>Tool kinds (any of)</legend>
+        {KINDS.map((k) => (
+          <label key={k} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+            <input type="checkbox" checked={f.kinds.includes(k)} onChange={(e) => setF({ ...f, kinds: e.target.checked ? [...f.kinds, k] : f.kinds.filter((x) => x !== k) })} />
+            {k}
+          </label>
+        ))}
+      </fieldset>
+      {problem && (
+        <p id={id("problem")} className="error" role="alert" style={{ gridColumn: "1 / -1" }}>
+          {problem}
+        </p>
+      )}
+      <span className="row-actions" style={{ gridColumn: "1 / -1" }}>
+        <button className="btn primary small" type="submit" disabled={saving}>
+          Save
+        </button>
+        <button className="btn small" type="button" onClick={onCancel}>
+          Cancel
+        </button>
+      </span>
+    </form>
+  );
+}
+
+function RuleRows({ rules, agents, shadowed, editingId, onEdit, onSave, onMove, onChange, onDelete }: { rules: Rule[]; agents: Agent[]; shadowed: string[]; editingId: string | null; onEdit: (id: string | null) => void; onSave: (r: Rule, patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
   if (!rules.length) return <p className="muted">None yet.</p>;
   return (
     <ol className="rules">
-      {rules.map((r, i) => (
+      {rules.map((r, i) =>
+        editingId === r.id ? (
+          <li key={r.id}>
+            <span className="mono muted">{i + 1}</span>
+            <RuleEditForm rule={r} onSave={(p) => onSave(r, p)} onCancel={() => onEdit(null)} />
+          </li>
+        ) : (
         <li key={r.id}>
           <span className="mono muted">{i + 1}</span>
           <div style={{ minWidth: 0 }}>
@@ -78,12 +157,16 @@ function RuleRows({ rules, agents, shadowed, onMove, onChange, onDelete }: { rul
             <button type="button" className="btn small" aria-label={`Move ${r.name} down`} disabled={i === rules.length - 1} onClick={() => onMove(i, 1)}>
               ↓
             </button>
+            <button type="button" className="btn small" aria-label={`Edit ${r.name}`} onClick={() => onEdit(r.id)}>
+              Edit
+            </button>
             <button type="button" className="btn small" onClick={() => onDelete(r)}>
               Delete
             </button>
           </span>
         </li>
-      ))}
+        ),
+      )}
     </ol>
   );
 }
@@ -95,6 +178,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const list = usePoll((signal) => api<RuleList>(`/api/policy-rules${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 60_000, scopeId ?? "all");
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [ask, setAsk] = useState("");
   // The "what should this rule do?" text is kept in this browser as it is typed (DR-045).
   const askDraftKey = `rule-ask/${scopeId ?? "all"}`;
@@ -194,6 +278,14 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           rules={rules}
           agents={allAgents}
           shadowed={list.data?.shadowedIds ?? []}
+          editingId={editingId}
+          onEdit={setEditingId}
+          onSave={async (r, patch) => {
+            await api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: patch });
+            setEditingId(null);
+            setError(null);
+            list.reload();
+          }}
           onMove={move}
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}
           onDelete={(r) => window.confirm(`Delete "${r.name}"?`) && void act(() => api(`/api/policy-rules/${r.id}`, { method: "DELETE" }))}

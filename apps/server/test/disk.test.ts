@@ -31,9 +31,11 @@ async function setup() {
   built.runners.connect(reg.runnerId, (c) => (sent.push(c), true));
   const ticket = async (title: string) => (await req("POST", `/api/projects/${project.id}/tickets`, { title })).json() as { id: string };
   let seq = 0;
-  const report = async (tickets: Array<{ ticketId: string; bytes: number }>, extra = 0) => {
+  const report = async (tickets: Array<{ ticketId: string; bytes: number }>, extra = 0, space: { freeBytes: number; totalBytes: number; holding?: boolean } = { freeBytes: 0, totalBytes: 0 }) => {
     const event: RunnerEvent = {
       type: "runner.disk",
+      // An old runner sends no free-space figures at all (totalBytes 0 here is left out).
+      ...(space.totalBytes > 0 ? space : {}),
       usedBytes: tickets.reduce((a, t) => a + t.bytes, 0) + extra,
       tickets: tickets.map((t) => ({ ...t, projectId: project.id })),
       repos: [{ projectId: project.id, bytes: extra }],
@@ -105,6 +107,32 @@ describe("workspace clean-up and disk caps (R54)", () => {
     expect(alert!.question).toContain("Settings → Server and runner → Runner → Workspace disk");
     expect(alert!.question).toContain('"Most disk to use (GB)" higher than its current 10.0 GB');
     expect(alert!.question).toContain("This is a warning: nothing is stopped by it.");
+  });
+
+  it("warns once a day when the host's free space is low, not when it is fine or unreported (BOS-2182)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Big one");
+    const cards = () => c.db.select().from(decisions).where(eq(decisions.kind, "question"));
+    // An older runner reports no free space: no card. Plenty free: no card.
+    await c.report([{ ticketId: t.id, bytes: 1000 }]);
+    await c.report([{ ticketId: t.id, bytes: 1000 }], 0, { freeBytes: 200 * GB, totalBytes: 500 * GB });
+    expect(await cards()).toHaveLength(0);
+    // Under 10% of 500 GB: one card naming the free space; a repeat the same day adds none.
+    await c.report([{ ticketId: t.id, bytes: 3 * GB }], 0, { freeBytes: 40 * GB, totalBytes: 500 * GB });
+    await c.report([{ ticketId: t.id, bytes: 3 * GB }], 0, { freeBytes: 30 * GB, totalBytes: 500 * GB });
+    const rows = await cards();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.question).toContain("40.0 GB free of 500.0 GB");
+    expect(rows[0]!.question).toContain("starts them again by itself");
+    // Small disk: under 5 GB counts as low even when that is over 10%.
+    c.advance(DAY);
+    await c.report([{ ticketId: t.id, bytes: 1000 }], 0, { freeBytes: 3 * GB, totalBytes: 20 * GB, holding: false });
+    expect(await cards()).toHaveLength(2);
+    // Held: the card says so.
+    c.advance(DAY);
+    await c.report([{ ticketId: t.id, bytes: 1000 }], 0, { freeBytes: 300 * 1024 ** 2, totalBytes: 20 * GB, holding: true });
+    expect((await cards()).at(-1)!.question).toContain("300 MB free");
+    expect((await cards()).at(-1)!.question).toContain("are being held now");
   });
 
   it("never releases another company's ticket on a runner's say-so", async () => {
