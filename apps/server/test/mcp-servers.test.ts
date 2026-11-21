@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { eq } from "drizzle-orm";
+import { activity } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -29,6 +31,22 @@ async function setup() {
 const good = { name: "scrapling", url: "http://192.168.1.50:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN" };
 
 describe("tool servers (MCP)", () => {
+  it("leaves an activity line for an add and a remove, with no secret in it (BOS-2151)", async () => {
+    const c = (ctx = await setup());
+    const url = `/api/companies/${c.company.id}/mcp-servers`;
+    const added = await c.req("POST", url, { ...good, url: "http://user:pw@192.168.1.50:30301/mcp?key=sekret" });
+    expect(added.statusCode).toBe(201);
+    const lines = async () => (await c.db.select().from(activity).where(eq(activity.kind, "settings"))).map((a) => a.summary);
+    expect(await lines()).toEqual(["Owner added tool server scrapling (http://192.168.1.50:30301/mcp)"]);
+    // A refused duplicate leaves no second line.
+    expect((await c.req("POST", url, good)).statusCode).toBe(409);
+    expect((await c.req("DELETE", `/api/mcp-servers/${added.json().id}`)).statusCode).toBe(204);
+    const all = await lines();
+    expect(all).toContain("Owner removed tool server scrapling");
+    expect(all).toHaveLength(2);
+    for (const l of all) expect(l).not.toMatch(/SCRAPLING_MCP_TOKEN|sekret|pw@/);
+  });
+
   it("refuses bad input", async () => {
     const c = (ctx = await setup());
     const url = `/api/companies/${c.company.id}/mcp-servers`;

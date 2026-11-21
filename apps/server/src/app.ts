@@ -231,6 +231,15 @@ export type AppOptions = {
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
+// An address for the activity log: no login, query or fragment, which could carry a secret.
+function plainUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return "address not shown";
+  }
+}
 
 /** Unique-violation detection across node-postgres and PGlite, including Drizzle's wrapper. */
 function pgCode(err: unknown): string | undefined {
@@ -1771,11 +1780,14 @@ export async function buildApp(opts: AppOptions) {
       const allowPrivate = await allowsPrivate(b.url);
       const [row] = await db.insert(mcpServers).values({ ...b, companyId: id, allowPrivate }).onConflictDoNothing().returning();
       if (row) void launch.syncAllow(id);
+      // Name and address only: no header, secret name or value, and no login or query part of the address.
+      if (row) await record(db, { companyId: id, kind: "settings", summary: `Owner added tool server ${row.name} (${plainUrl(row.url)})` });
       return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });
     });
     owner.delete("/api/mcp-servers/:id", async (req, reply) => {
-      const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id, companyId: mcpServers.companyId });
+      const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id, companyId: mcpServers.companyId, name: mcpServers.name });
       if (row) void launch.syncAllow(row.companyId);
+      if (row) await record(db, { companyId: row.companyId, kind: "settings", summary: `Owner removed tool server ${row.name}` });
       return row ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
     });
 
