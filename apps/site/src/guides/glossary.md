@@ -3,7 +3,7 @@ title: Glossary
 navTitle: Glossary
 description: What each Boss Man word means, in a sentence or two, with a link to the guide that explains it.
 group: Questions
-order: 13
+order: 14
 lead: Meet a Boss Man word you do not know? Find it here. Each term has a sentence or two and a link to the guide that explains it.
 ---
 
@@ -45,6 +45,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## E
 
+- **End all running runs**: A button on the **Runs** page that ends every run going now, in every company. Work the agents have not saved is lost. It does not stop new runs from starting. ([Guide 12](/guides/stopping-work#end-all-running-runs))
 - **Engagements**: Work one of your companies asks another of your companies to do. Open **Engagements** in the sidebar to see them. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
 
 ## F
@@ -87,6 +88,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 ## P
 
 - **Page**: The notification level that is also sent to your phone, for example when a runner goes offline. ([Guide 8](/guides/phone-notifications#notification-levels))
+- **Pause**: A button on an agent's row on the **Agents** page. The agent starts nothing new until you choose **Start**. A run it already has going finishes by itself. **Settings > Team and CEO** can pause a whole company the same way. ([Guide 12](/guides/stopping-work#pause-one-agent))
 - **Penpot**: An open-source design tool that Boss Man can run for your designer agents, on your home network only. ([Guide 9](/guides/add-ons#penpot-a-design-tool-for-your-designer-agents))
 - **Permission card**: A card on Decisions that asks whether an agent may run a command or use a tool, with buttons such as **Allow once** and **Deny**. If nobody answers within 10 minutes, the request counts as denied. ([Guide 6](/guides/permissions#answering-a-permission-card))
 - **Plan**: An agent's outline of how it will do a ticket, approved before the work starts. By default, the CEO approves plans for low and medium risk, and you approve them for high and critical. You can change this in **Settings > Reviews**. ([Guide 7](/guides/reviews-and-merge-queue#risk-levels))
@@ -119,6 +121,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Sign-off**: Your approval before Boss Man merges high or critical work, asked for on a card after the reviewer approves. The card lists the reviews, the last quick check and how many files changed. Choose **Approve and merge** or **Send it back**. ([Guide 7](/guides/reviews-and-merge-queue#your-sign-off))
 - **Skills**: Extra know-how for agents, added from a link, a draft or an upload. A Security Reviewer can check each one, and you approve every one. Open **Skills** in the sidebar. ([Guide 9](/guides/add-ons))
 - **Standing rules**: A block of text, up to 2,000 characters, that every agent reads at the start of each run. Edit them under **Settings > Team and CEO**. ([Guide 6](/guides/permissions#standing-rules))
+- **Stop all work**: A button under **Settings > Server and runner > Updates** that stops every company from starting new runs until you choose **Resume** on the banner at the top of every page. Runs already going finish by themselves. ([Guide 12](/guides/stopping-work#stop-all-work))
 - **Sub-task**: A task under a bigger task, used where the work splits naturally. The parent task waits until its sub-tasks are done. A sub-task cannot have sub-tasks of its own. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Synthetic**: A model provider (synthetic.new) for OpenCode agents. Add its key as **Synthetic API key**. ([Guide 5](/guides/agents-and-models#synthetic))
 
@@ -140,7 +143,8 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Watchdog**: The settings for when the Scrum Master steps in, under **Settings > Watchdog**. ([Guide 5](/guides/agents-and-models#hire-an-agent))
 - **Wiki**: The company's shared pages, written by you and the agents. Open **Wiki** in the sidebar.
 
-- **Workspaces**: The runner's copies of your repository, one for each ticket. **Settings > Server and runner > Runner** shows their size, and Boss Man clears those of tickets that finished more than 7 days ago. ([Guide 12](/guides/troubleshooting#updates-and-backups))
+- **Wrap-up**: What **Ask agents to wrap up** starts: every running agent is asked to save its work and stop, and nothing new starts until it lifts by itself or you choose **Cancel wrap-up**. ([Guide 12](/guides/stopping-work#ask-agents-to-wrap-up))
+- **Workspaces**: The runner's copies of your repository, one for each ticket. **Settings > Server and runner > Runner** shows their size, and Boss Man clears those of tickets that finished more than 7 days ago. ([Guide 13](/guides/troubleshooting#updates-and-backups))
 
 ## Y
 
