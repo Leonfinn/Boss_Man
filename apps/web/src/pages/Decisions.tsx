@@ -1178,7 +1178,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                           </ol>
                         ) : (
                           <p data-hand-nosteps className="banner" style={{ fontSize: 14 }}>
-                            Boss Man has no steps to show for this update, because the machine hasn't reported where Boss Man is installed. Don't press Approve yet: open Settings → Server and runner → Server and ask us on this ticket for the exact commands.
+                            Boss Man has no steps to show for this update, because the machine hasn't reported where Boss Man is installed. Don't press Approve yet: open Settings → Server and runner → This server and ask us on this ticket for the exact commands.
                           </p>
                         )}
                       </div>

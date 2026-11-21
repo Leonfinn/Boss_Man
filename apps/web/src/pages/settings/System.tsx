@@ -796,7 +796,7 @@ export function PrivateDetails() {
   );
 }
 
-/** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
+/** Settings → Server and runner → Limits and checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
