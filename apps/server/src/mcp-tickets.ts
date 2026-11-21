@@ -27,7 +27,7 @@ import { conflictNote } from "./services/merge-line-conflicts.js";
 import { checkTicketDoneRefusal } from "./services/after-merge-check-tickets.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, namesOutsideService, outsideServiceEvidenceRefusal, pageShotRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds, openOwnerOnlyCard } from "./services/ticket-links.js";
-import { noteBlockedPark, refusalForNamedAgent } from "./services/blocked-who-acts.js";
+import { noteBlockedPark, refusalForNamedAgent, refusalForNamedTicket } from "./services/blocked-who-acts.js";
 import { githubOnlyMarkWarning } from "./services/line-holder.js";
 import { OWNER_WAIT_REFUSAL, WAIT_LINK_REFUSAL, ticketHasOpenCard, waitsForNote, waitsOnOwnerNote } from "./services/owner-todo.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
@@ -765,6 +765,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (state === "blocked") {
         const named = await refusalForNamedAgent(db, { companyId: scope.companyId, agentId: scope.agentId, text: `${summary ?? ""}\n${blocked_reason ?? ""}`, holds: blockedNow });
         if (named) return fail(named);
+        // BOS-2142: the same for a note that names only another ticket, on unmerged and merged-watch work alike.
+        const namedTicket = await refusalForNamedTicket(db, { companyId: scope.companyId, ticketId, text: `${summary ?? ""}\n${blocked_reason ?? ""}`, holds: blockedNow });
+        if (namedTicket) return fail(namedTicket);
       }
       // BOS-1576: a note that says the ticket waits on the owner needs a card in their queue, in any state.
       if (state !== "done" && waitsOnOwnerNote(summary) && !(await ticketHasOpenCard(db, ticketId))) return fail(OWNER_WAIT_REFUSAL);

@@ -2,7 +2,7 @@
 // (a date only wakes the ticket's own assignee), and a ticket parked by date again and again goes to the CEO.
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { activity, agents } from "../db/schema.js";
+import { activity, agents, companies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import type { BlockedHold } from "./ticket-links.js";
 
@@ -33,6 +33,30 @@ export async function refusalForNamedAgent(db: Db, input: { companyId: string; a
   if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live" || h.kind === "merged_watch")) return null;
   const name = await namedColleague(db, input.companyId, input.agentId, input.text);
   return name ? NAMED_AGENT_REFUSAL(name) : null;
+}
+
+const WAITS_ON_TICKET = /\b(?:waiting|waits?|blocked|held|holding|hold|pending|behind|until|once|after)\b[^.;\n]{0,40}?\b([A-Za-z]{2,10}-\d{1,9})\b/gi;
+
+/** Ticket references (PREFIX-number) the text says it waits on, other than the ticket's own. */
+export function ticketsWaitedOn(text: string, ownRef: string | null): string[] {
+  const found = new Set<string>();
+  for (const m of text.matchAll(WAITS_ON_TICKET)) {
+    const ref = m[1]!;
+    if (!/^[A-Z]{2,10}-\d+$/.test(ref) || ref === ownRef) continue;
+    found.add(ref);
+  }
+  return [...found];
+}
+
+export const NAMED_TICKET_REFUSAL = (ref: string) =>
+  `This note says the ticket waits on ${ref}, but nothing links it: a date only wakes you, and nothing wakes anyone when ${ref} finishes. Link it first (update_ticket waitsOn add ${ref}, until merged or done), then move it to Blocked again. If ${ref} is not what holds it, leave it out of the note.`;
+
+/** Whether a Blocked move says it waits on another ticket and has no waits-on link (a date, or "Merged, watching", is not one). */
+export async function refusalForNamedTicket(db: Db, input: { companyId: string; ticketId: string; text: string; holds: BlockedHold[] }): Promise<string | null> {
+  if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live")) return null;
+  const [own] = await db.select({ number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, input.ticketId));
+  const ref = ticketsWaitedOn(input.text, own?.prefix ? `${own.prefix}-${own.number}` : null)[0];
+  return ref ? NAMED_TICKET_REFUSAL(ref) : null;
 }
 
 /**

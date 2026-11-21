@@ -213,6 +213,29 @@ describe("Blocked on an open card is freed when the card is answered (BOS-1209)"
     expect(await c.block(agent, u.id, { blocked_until: tomorrow(), blocked_reason: "72h of data", summary: "Collecting data." })).toContain("is now blocked");
   });
 
+  it("refuses a note that names only another ticket with no waits-on link, merged-watch or not, and accepts it once linked (BOS-2142)", async () => {
+    const c = await setup();
+    const agent = await c.mcp(c.worker.id);
+    const note = { blocked_until: tomorrow(), blocked_reason: "redeploy", summary: "Waiting on BOS-2078 to finish." }; // the BOS-2070 note shape
+    // Unmerged.
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress" });
+    expect(await c.block(agent, t.id, note)).toMatch(/waits on BOS-2078, but nothing links it/);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+    // Merged, watching (after-merge criterion unreported, live).
+    const m = await c.ticket();
+    await c.put(m.id, { systemState: "in_progress", mergeCommit: "c".repeat(40), goLiveWait: null, acceptanceCriteria: [{ text: "Panel shows the host", after: "merge" as const }] });
+    expect(await c.block(agent, m.id, note)).toMatch(/waits on BOS-2078, but nothing links it/);
+    // A ticket named in passing, not waited on, and a date alone, are fine.
+    const u = await c.ticket();
+    await c.put(u.id, { systemState: "in_progress" });
+    expect(await c.block(agent, u.id, { blocked_until: tomorrow(), blocked_reason: "72h of data", summary: "Collecting data; the fix shipped in BOS-2078." })).toContain("is now blocked");
+    // With a waits-on link it is accepted.
+    const theirs = await c.ticket();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerTicketId: theirs.id, until: "done" });
+    expect(await c.block(agent, t.id, note)).toContain("is now blocked");
+  });
+
   it("wakes the CEO once on the third date-only park in a row (R36)", async () => {
     const c = await setup();
     const t = await c.ticket();
