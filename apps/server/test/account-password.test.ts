@@ -83,6 +83,19 @@ describe("sign-in lockout notice", () => {
     const lines = await t.db.select().from(activity).where(eq(activity.kind, "security"));
     expect(JSON.stringify([notes, lines])).not.toContain("secret guess");
   });
+
+  it("raises nothing for a correct sign-in, and says the username was locked when it locks from several addresses", async () => {
+    await signIn(t);
+    await t.db.insert(companies).values({ name: "Example Co" });
+    const from = (ip: string, password: string) => t.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password }, remoteAddress: ip });
+    expect((await from("192.168.1.60", OLD)).statusCode).toBe(200);
+    expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(0);
+    for (let i = 0; i < 10; i++) await from(`192.168.1.${100 + i}`, `secret guess ${i}`);
+    await vi.waitFor(async () => expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(1), { timeout: 5000 });
+    const notes = (await t.db.select().from(notifications)).filter((n) => n.title.includes("was locked"));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.title).toContain("username was locked");
+  });
 });
 
 describe("sign out other devices", () => {

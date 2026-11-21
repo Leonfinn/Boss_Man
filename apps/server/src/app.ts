@@ -1493,7 +1493,9 @@ export async function buildApp(opts: AppOptions) {
         companyId: null,
         agentId: null,
         level: "flag",
-        title: `Sign-in was locked after ${limits.maxFailures} wrong passwords from ${address}`,
+        title: e.byAddress
+          ? `Sign-in was locked after ${limits.maxFailures} wrong passwords from ${address}`
+          : `Sign-in for the owner's username was locked after ${limits.maxFailures} wrong passwords from several addresses, the latest ${address}`,
         body: "If this wasn't you, change your password in Settings → Account.",
         link: "#/settings",
       });
