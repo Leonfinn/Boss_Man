@@ -1,5 +1,5 @@
 import { and, eq, gte, ne, sql } from "drizzle-orm";
-import { dateIn } from "@boss-man/shared";
+import { dateIn, isTimeZone } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, features, fundingSources, projects, runs, tickets } from "../db/schema.js";
 
@@ -22,13 +22,7 @@ export type SpendReport = { timeZone: string; days: string[]; rows: SpendReportR
 
 /** A zone Intl accepts, else UTC (the browser sends its own zone; a bad one must not fail the page). */
 export function validZone(tz: string | undefined): string {
-  if (!tz) return "UTC";
-  try {
-    new Intl.DateTimeFormat("en-CA", { timeZone: tz });
-    return tz;
-  } catch {
-    return "UTC";
-  }
+  return tz && isTimeZone(tz) ? tz : "UTC";
 }
 
 /**
@@ -68,6 +62,7 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
     .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, since), ne(fundingSources.kind, "subscription")));
 
   const daySet = new Set(days);
+  // not state: a local that lives for this one call
   const groups = new Map<string, SpendReportRow & { ids: Set<string> }>();
   let totalMicros = 0;
   for (const e of events) {
