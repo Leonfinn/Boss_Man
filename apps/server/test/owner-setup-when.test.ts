@@ -9,7 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, decisions, tickets } from "../src/db/schema.js";
 import { raiseOwnerSetup } from "../src/services/decisions.js";
 import { checkOwnerSetup, NOT_GIVEN, ownerSetupShapeProblem } from "../src/services/owner-setup-check.js";
-import { branchingIn, settleWhen } from "../src/services/owner-setup-when.js";
+import { WHEN_FACT_KEYS, WHEN_MARKER, branchingFindings, branchingIn, settleWhen, whenKey } from "../src/services/owner-setup-when.js";
 import { lintOwnerSteps } from "../src/services/steps.js";
 
 const r20 = (steps: string[]) => {
@@ -51,6 +51,59 @@ describe("R20 prose branching: passing rows", () => {
 
   it("branchingIn names the offending words", () => {
     expect(branchingIn("Only if the entry is marked, remove it.")).toMatch(/^Only if the entry/);
+  });
+});
+
+describe("whenKey (BOS-2135)", () => {
+  it.each([
+    ["already normal", "network guard allow line can go"],
+    ["mixed case", "Network Guard Allow Line Can Go"],
+    ["underscores and hyphens", "network_guard-allow_line can go"],
+    ["extra spaces and padding", "  network   guard allow line can go  "],
+  ])("%s compares as the one fact key", (_name, raw) => {
+    expect(whenKey(raw)).toBe("network guard allow line can go");
+    expect(whenKey(raw)).toBe(WHEN_FACT_KEYS[0]);
+  });
+
+  it("a step without a [when …] prefix has no marker to read", () => {
+    const m = WHEN_MARKER.exec("Open Settings → Server and runner and press Save.");
+    expect(m).toBeNull();
+  });
+
+  it("a step with a [when …] prefix names the fact, case and spacing tolerant", () => {
+    expect(WHEN_MARKER.exec("[when network guard allow line can go] Remove the entries.")?.[1]).toBe("network guard allow line can go");
+    expect(whenKey(WHEN_MARKER.exec("[When Network_Guard allow-line CAN go] Remove.")?.[1] ?? "")).toBe("network guard allow line can go");
+  });
+});
+
+describe("branchingFindings (BOS-2135)", () => {
+  it("a clean step list has no R20 finding", () => {
+    expect(branchingFindings(["Open Settings → Server and runner.", "Press Save."])).toEqual([]);
+  });
+
+  it("a settled [when …] step is clean (the marker is not prose branching)", () => {
+    expect(branchingFindings(["[when network guard allow line can go] Remove the entries."])).toEqual([]);
+  });
+
+  it.each([
+    ["If … at the start", "If the old address is still listed, delete it."],
+    ["Only if …", "Only if the entry is marked can go, remove the line from Settings → Server and runner."],
+    ["Unless …", "Unless the owner already did this, press Save."],
+  ])("%s is refused with an R20 finding naming the offending words", (_name, step) => {
+    const found = branchingFindings([step]);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ step: 1, rule: "R20" });
+    expect(found[0]!.problem).toContain(WHEN_FACT_KEYS[0]!);
+  });
+
+  it("one finding per branching step, numbering the step as written", () => {
+    const found = branchingFindings(["Press Save.", "If the line is empty, press Save.", "Open Settings."]);
+    expect(found.map((f) => f.step)).toEqual([2]);
+  });
+
+  it("a branch in a command block is not prose and is not refused", () => {
+    const step = "Run this.\n```sh host=\"nas01\" as=\"login\"\nif [ -f /opt/example/x ]; then echo ok; fi\n```";
+    expect(branchingFindings([step])).toEqual([]);
   });
 });
 
