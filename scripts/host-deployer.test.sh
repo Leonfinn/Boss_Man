@@ -1236,7 +1236,7 @@ has "$D/outbox/status.json" "whole-stack check found"; live_is blue
 cat >"$T/w/scripts/deploy-staging.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "deploy-staging.sh $* production_dirs=${BOSSMAN_PRODUCTION_DIRS:-}" >>"$STUB_LOG"
-[[ -z ${STUB_STAGING_RC:-} ]] || exit "$STUB_STAGING_RC"
+[[ -z ${STUB_STAGING_RC:-} ]] || { echo "build step failed: image pull denied"; echo "login with password=hunter2 rejected"; exit "$STUB_STAGING_RC"; }
 git checkout --quiet "$1"
 STUB
 cat >"$T/w/scripts/smoke-staging.sh" <<'STUB'
@@ -1340,6 +1340,10 @@ rm -f "$D/state/last-staging"; sreq "$s1"; STUB_SMOKE_FAIL=1 host
 rm -f "$D/state/last-staging"; : >"$STUB_LOG"; sreq "$s1"; STUB_STAGING_RC=1 host
 [[ $(sstatus result) == failed && $(sstatus smoke) == skipped ]] || fail "deploy failure: $(cat "$D/outbox/staging-status.json")"
 hasnt "$STUB_LOG" "smoke-staging.sh"
+# The failed record carries the run's last log lines, with secrets blanked, so nobody has to open the host.
+has "$D/outbox/staging-status.json" "image pull denied"
+has "$D/outbox/staging-status.json" "password=[redacted]"
+hasnt "$D/outbox/staging-status.json" "hunter2"
 
 # A staging deploy cut off by a restart leaves "running" behind: the next tick marks it failed, so the lane isn't wedged (review).
 cut="$(node -e 'console.log(crypto.randomUUID())')"

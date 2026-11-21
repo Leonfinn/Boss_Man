@@ -28,6 +28,8 @@ export const OWNER_CONTROLS = {
     "Send as a .txt file", "Sending",
     // A picture opened from Markdown text.
     "Actual size", "Fit to window",
+    // Under a paged list, Skill proposals and Engagements (BOS-2165): the next page of older entries.
+    "Show older", "Loading",
     // The banner shown when Boss Man was updated after the page was opened (BOS-550).
     "Reload",
     // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
@@ -57,7 +59,7 @@ export const OWNER_CONTROLS = {
     "Copy",
   ],
   Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel"],
-  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
@@ -178,7 +180,7 @@ export const OWNER_CONTROLS = {
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
   "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
-  Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
+  Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
@@ -333,7 +335,7 @@ export const OWNER_FIELDS = {
   Watchdog: ["Record only (rehearse)", "Scrum Master"],
   // The permission rules page, the advice mode, the second opinion and the fence's mode (BOS-325).
   Permissions: [
-    "Rules for", "What should this rule do", "New rule", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",
+    "Rules for", "What should this rule do", "New rule", "Rule name", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",
     "Ask a model for a second opinion", "Provider address", "Model", "API key", "Fence", "Advice",
   ],
   Account: ["Current password", "New password", "New password again"],

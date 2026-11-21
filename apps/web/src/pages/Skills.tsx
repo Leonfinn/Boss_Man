@@ -7,7 +7,8 @@ import { unzipSync } from "fflate";
 import { api, ApiError, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { Loader } from "../components/Loader";
-import { usePoll } from "../hooks";
+import { useOlder, usePoll } from "../hooks";
+import { ShowOlder } from "../components/ShowOlder";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
@@ -555,6 +556,7 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
+const PROPOSALS_PAGE = 50;
 type ProposalRow = { id: string; name: string; source: "draft" | "link" | "retro"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
 const PROPOSAL_STATUS: Record<string, string> = {
   proposed: "Waiting",
@@ -568,8 +570,11 @@ const PROPOSAL_STATUS: Record<string, string> = {
 
 /** Skills the CEO proposed, and where each one stands. The decision itself is answered in Decisions. */
 function Proposals({ companyId }: { companyId: string }) {
-  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals`, { signal }), 30_000, companyId);
-  const rows = (list.data ?? []).slice(0, 10);
+  // The newest PROPOSALS_PAGE, then older ones on "Show older" (BOS-2165): the server never sends the files here.
+  // Paths written out inside api(…): the screen inventory (screen-scan.ts) only sees a read written there.
+  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals?limit=${PROPOSALS_PAGE}`, { signal }), 30_000, companyId);
+  const older = useOlder(list.data, PROPOSALS_PAGE, (before) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals?limit=${PROPOSALS_PAGE}&before=${before}`), companyId);
+  const rows = older.rows ?? [];
   if (!rows.length) return null;
   return (
     <section className="card" aria-label="Skill proposals" style={{ marginBottom: 16 }}>
@@ -584,6 +589,7 @@ function Proposals({ companyId }: { companyId: string }) {
           </li>
         ))}
       </ul>
+      <ShowOlder older={older} />
     </section>
   );
 }

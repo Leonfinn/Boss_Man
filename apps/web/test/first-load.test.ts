@@ -49,5 +49,7 @@ describe("settings addresses outside the Settings page", () => {
     expect(settingsRedirect(["settings", "c1", "system"], "c1")).toBe("settings/c1/updates");
     expect(settingsRedirect(["rules", "all"], "c1")).toBe("settings/c1/permissions");
     expect(settingsRedirect(["settings", "c1", "gone"], "c1")).toBe("settings");
+    expect(settingsRedirect(["settings", "updates"], "c1")).toBe("settings/c1/updates");
+    expect(settingsRedirect(["settings", "updates"], undefined)).toBeNull();
   });
 });

@@ -10,7 +10,7 @@
 
 export const REBUILDS_FOR_TURN = 2;
 
-type Turn = { ticketId: string; since: number; capMs: number };
+export type Turn = { ticketId: string; since: number; capMs: number };
 
 export type TurnCheck = { holder: Turn | null; expired: Turn | null };
 
@@ -77,6 +77,22 @@ export class LandingTurns {
 
   holds(projectId: string, ticketId: string): boolean {
     return this.turns.get(projectId)?.ticketId === ticketId;
+  }
+
+  /** BOS-2119: whether `ticketId` is in the project's line for the turn (earned it while another ticket held it). */
+  queued(projectId: string, ticketId: string): boolean {
+    return (this.next.get(projectId) ?? []).some((x) => x.ticketId === ticketId);
+  }
+
+  /** BOS-2119: the project's line for the turn, first in line first. Read only: a turn past its cap is ended by check(). */
+  line(projectId: string): string[] {
+    return (this.next.get(projectId) ?? []).map((x) => x.ticketId);
+  }
+
+  /** BOS-2119: every project with a turn held or a line, for server_status. Read only, like line(). */
+  snapshot(): Array<{ projectId: string; holder: Turn | null; line: string[] }> {
+    const ids = new Set([...this.turns.keys(), ...[...this.next].filter(([, l]) => l.length).map(([id]) => id)]);
+    return [...ids].map((projectId) => ({ projectId, holder: this.turns.get(projectId) ?? null, line: this.line(projectId) }));
   }
 
   /**

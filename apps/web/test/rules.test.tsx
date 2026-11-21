@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Rules } from "../src/pages/Rules";
@@ -78,6 +78,50 @@ describe("decision rules", () => {
     expect(await screen.findByText("When the request is from Kit")).toBeTruthy();
     expect(screen.getByText("When the request is from Kit or Zippy")).toBeTruthy();
     expect(screen.getByText("When the request is from one named agent")).toBeTruthy();
+  });
+
+  // BOS-2186: edit a rule in place.
+  describe("editing a rule", () => {
+    const mk = (id: string, name: string, extra = {}) => ({ id, companyId: "c1", name, match: { commandPattern: "^docker", safeOnly: true, ...extra }, outcome: "allow", position: 0, createdBy: "Kit", createdAt: "2026-11-01T10:00:00Z", sourceDecisionId: "d1" });
+    const setup = (patchReply: () => Response) => {
+      const fetch = vi.fn(async (_url: string, init?: RequestInit) => (init?.method === "PATCH" ? patchReply() : new Response(JSON.stringify({ company: [mk("r1", "First"), mk("r2", "Second")], global: [], defaults: [] }), { status: 200 })));
+      vi.stubGlobal("fetch", fetch);
+      render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+      return fetch;
+    };
+
+    it("saves name, pattern and outcome in one PATCH, keeping the other match fields", async () => {
+      const fetch = setup(() => new Response("{}", { status: 200 }));
+      fireEvent.click(await screen.findByRole("button", { name: "Edit First" }));
+      const form = within(screen.getByRole("form", { name: "Edit First" }));
+      fireEvent.change(form.getByLabelText("Rule name"), { target: { value: "Docker only" } });
+      fireEvent.change(form.getByLabelText("Command matches (regex)"), { target: { value: "^docker\\s+restart" } });
+      fireEvent.change(form.getByLabelText("Then"), { target: { value: "owner" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Save" })).toBeNull());
+      const call = fetch.mock.calls.find((c) => c[1]?.method === "PATCH")!;
+      expect(call[0]).toBe("/api/policy-rules/r1");
+      expect(JSON.parse(call[1]!.body as string)).toEqual({ name: "Docker only", match: { safeOnly: true, commandPattern: "^docker\\s+restart" }, outcome: "owner" });
+    });
+
+    it("shows the server's refusal under the form and stays in edit mode", async () => {
+      setup(() => new Response(JSON.stringify({ error: "rejected", message: "The command pattern is not a valid regular expression." }), { status: 422 }));
+      fireEvent.click(await screen.findByRole("button", { name: "Edit First" }));
+      fireEvent.change(within(screen.getByRole("form", { name: "Edit First" })).getByLabelText("Command matches (regex)"), { target: { value: "(" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("not a valid regular expression");
+      expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+    });
+
+    it("has one row in edit mode at a time, and Cancel puts the row back with its history", async () => {
+      setup(() => new Response("{}", { status: 200 }));
+      fireEvent.click(await screen.findByRole("button", { name: "Edit First" }));
+      fireEvent.click(screen.getByRole("button", { name: "Edit Second" }));
+      expect(screen.getAllByRole("button", { name: "Save" }).length).toBe(1);
+      expect(screen.queryByRole("button", { name: "Edit First" })).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.getAllByText(/Made by Kit/).length).toBe(2);
+    });
   });
 
   // BOS-786: the built-in defaults line must say the CEO is asked first, as the code does.

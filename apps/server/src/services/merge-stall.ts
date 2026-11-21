@@ -154,7 +154,7 @@ export function mergeStallService(
       return `Merge line stalled: a merge-train seat has been empty for ${ageWords(at - since)} while tickets wait (${facts}). Cause: ${why}.`;
     }
     if (cause === "thrash") {
-      return `Merge line stalled: merge-train tickets have been restacking in a loop for ${ageWords(at - since)}, each going stale before its check could run (${facts}). Each now backs off up to ${Math.round(TRAIN_RESTACK_BACKOFF_MAX_MS / 60_000)} minutes between tries. Likely a fault in the train's idea of main: check server_status mergeTrain and the merge-line records (restacked rows); turning the merge train off in Settings → Server and runner → Checks lands tickets one at a time meanwhile.`;
+      return `Merge line stalled: merge-train tickets have been restacking in a loop for ${ageWords(at - since)}, each going stale before its check could run (${facts}). Each now backs off up to ${Math.round(TRAIN_RESTACK_BACKOFF_MAX_MS / 60_000)} minutes between tries. Likely a fault in the train's idea of main: check server_status mergeTrain and the merge-line records (restacked rows); turning the merge train off in Settings → Server and runner → Limits and checks lands tickets one at a time meanwhile.`;
     }
     const running = f.seated.length
       ? await db.select({ ticketId: checkJobs.ticketId, startedAt: checkJobs.startedAt }).from(checkJobs).where(and(inArray(checkJobs.ticketId, f.seated), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "running")))

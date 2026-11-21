@@ -159,7 +159,7 @@ export function checkQueue(db: Db) {
     return Number.isInteger(n) && n >= 1 ? Math.min(n, MAX_CHECK_SLOTS) : DEFAULT_CHECK_SLOTS;
   }
 
-  /** The owner's switch (Settings → Server and runner → Checks, BOS-798). Owner-only routes call these; no agent tool does. */
+  /** The owner's switch (Settings → Server and runner → Limits and checks, BOS-798). Owner-only routes call these; no agent tool does. */
   async function setMode(value: CheckQueueMode): Promise<void> {
     await db.insert(settings).values({ key: CHECK_QUEUE_MODE_KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
   }
