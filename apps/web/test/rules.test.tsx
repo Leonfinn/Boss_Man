@@ -59,6 +59,16 @@ describe("decision rules", () => {
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
   });
 
+  it("re-enables the buttons and shows the error when a submit fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => (init?.method === "POST" ? new Response(JSON.stringify({ error: "Nope" }), { status: 500 }) : new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }))));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    fireEvent.change(screen.getByLabelText("What should this rule do?"), { target: { value: "Something" } });
+    const ask = screen.getByRole("button", { name: "Ask the CEO to draft it" }) as HTMLButtonElement;
+    fireEvent.click(ask);
+    await screen.findByRole("alert");
+    await waitFor(() => expect(ask.disabled).toBe(false));
+  });
+
   it("names the agents a rule is for, and falls back for an unknown id", async () => {
     const agent = (id: string, name: string) => ({ id, companyId: "c1", name, role: "worker" as const, agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null });
     const co: Company = { ...company, agents: [agent("a1", "Kit"), agent("a2", "Zippy")] };
