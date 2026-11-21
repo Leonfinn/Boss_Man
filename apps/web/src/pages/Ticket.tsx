@@ -823,6 +823,11 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
       {/* Only when the ticket's next step really needs its agent to run (BOS-471): in review, waiting on the
           owner, or done, the hold changes nothing for this ticket, so it is not shown. */}
+      {t.workingHoursNote && (t.systemState === "backlog" || t.systemState === "ready" || t.systemState === "in_progress") && (
+        <div className="card" role="status" data-testid="ticket-working-hours-note" style={{ marginBottom: 16 }}>
+          <strong>{t.workingHoursNote}.</strong> <span className="muted">It starts by itself when the hours open. Urgent tickets and your replies still start it now.</span>
+        </div>
+      )}
       {t.quotaHeldUntil && (t.systemState === "ready" || t.systemState === "in_progress") && (
         <div className="card quota-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>

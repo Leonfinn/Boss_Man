@@ -3,7 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
 import { Star } from "lucide-react";
-import { describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
+import { DAY_NAMES, describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
 import { Avatar } from "../components/Avatar";
 import { Loader } from "../components/Loader";
@@ -32,6 +32,9 @@ type AgentRow = {
   fundingKind: string | null;
   paused: boolean;
   starred: boolean;
+  /** BOS-2200: working hours (null: always available), and while outside them, when they open. */
+  workingHours?: { days: number[]; start: string; end: string; timeZone: string } | null;
+  offUntil?: { at: string; label: string } | null;
   duty: string | null;
   avatarAt?: string | null;
   retiredAt: string | null;
@@ -198,14 +201,17 @@ export function StarButton({ agent, onToggle, where = "Chat", disabled }: { agen
 }
 
 const STATUS: Record<AgentRow["status"], [string, string]> = { working: ["Working", "green"], idle: ["Idle", ""], paused: ["Paused", "amber"], retired: ["Retired", ""] };
-const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", thinking: "Thinking", funding: "Paid from", kind: "Agent kind", paused: "Paused" };
+const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", thinking: "Thinking", funding: "Paid from", kind: "Agent kind", paused: "Paused", working_hours: "Working hours" };
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 const jobOf = (a: Pick<AgentRow, "role" | "title" | "duty">) => (a.role === "ceo" ? "CEO" : (a.title ?? (a.duty === "wiki" ? "Wiki Maintainer" : a.role === "manager" ? "Manager" : "Agent")));
 /** Boolean fields read as plain words, e.g. paused true -> "Paused", false -> "Unpaused", not "yes -> no". */
 const FLIP: Record<string, [string, string]> = { paused: ["Paused", "Unpaused"], starred: ["Starred", "Unstarred"] };
 export const flipWord = (field: string, after: unknown) => (typeof after === "boolean" && FLIP[field] ? FLIP[field]![after ? 0 : 1] : null);
+export type Hours = { days: number[]; start: string; end: string; timeZone: string };
+const isHours = (v: unknown): v is Hours => !!v && typeof v === "object" && Array.isArray((v as Hours).days) && typeof (v as Hours).start === "string";
+export const hoursText = (h: Hours) => `${h.days.map((d) => DAY_NAMES[d]).join(", ")}, ${h.start} to ${h.end} (${h.timeZone})`;
 const show = (v: unknown, sources: FundingSource[]) =>
-  v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
+  isHours(v) ? hoursText(v) : v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
 
 function Hire({ companyId, templates, sources, lists, refresh, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onDone: (name: string) => void }) {
   const [tpl, setTpl] = useState<Template | null>(null);
@@ -350,8 +356,59 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
   );
 }
 
+type HoursForm = { on: boolean; days: number[]; start: string; end: string; timeZone: string };
+const browserZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+};
+const hoursForm = (h: Hours | null | undefined): HoursForm => (h ? { on: true, ...h } : { on: false, days: [1, 2, 3, 4, 5], start: "08:00", end: "18:00", timeZone: browserZone() });
+
+/** BOS-2200: off by default (always available); when on, days, a from-to time (it may cross midnight) and a time zone. */
+export function WorkingHoursField({ id, name, value, onChange }: { id: string; name: string; value: HoursForm; onChange: (v: HoursForm) => void }) {
+  return (
+    <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+      <legend className="label">Working hours</legend>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="checkbox" checked={value.on} onChange={(e) => onChange({ ...value, on: e.target.checked })} />
+        Only start {name} on new work during set hours
+      </label>
+      {value.on && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+          <div role="group" aria-label="Days" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {DAY_NAMES.map((d, i) => (
+              <label key={d} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <input type="checkbox" checked={value.days.includes(i)} onChange={(e) => onChange({ ...value, days: e.target.checked ? [...value.days, i] : value.days.filter((x) => x !== i) })} />
+                {d}
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end" }}>
+            <label htmlFor={`${id}-from`}>
+              From <input id={`${id}-from`} type="time" required value={value.start} onChange={(e) => onChange({ ...value, start: e.target.value })} />
+            </label>
+            <label htmlFor={`${id}-to`}>
+              To <input id={`${id}-to`} type="time" required value={value.end} onChange={(e) => onChange({ ...value, end: e.target.value })} />
+            </label>
+            <label htmlFor={`${id}-zone`}>
+              Time zone <input id={`${id}-zone`} required maxLength={80} value={value.timeZone} onChange={(e) => onChange({ ...value, timeZone: e.target.value })} />
+            </label>
+          </div>
+        </div>
+      )}
+      <small className="muted">
+        {value.on
+          ? `Outside these hours ${name} isn't started on new work; it starts by itself when they open. A run already going finishes, and urgent tickets and your replies still start it. Use a "to" earlier than "from" for a window past midnight (22:00 to 07:00); it belongs to the day it starts on.`
+          : `Off: ${name} is available at any time.`}
+      </small>
+    </fieldset>
+  );
+}
+
 function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string }; policy?: { rules: ReviewPolicy; companyId: string } | null }) {
-  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
+  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind, hours: hoursForm(a.workingHours) });
   // The instructions box is kept in this browser as it is typed (DR-045); it goes once saved.
   const instructionsKey = `agent-instructions/${a.id}`;
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
@@ -373,7 +430,11 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, thinking: form.thinking || null, fundingSourceId: form.fundingSourceId || null, agentKind: form.agentKind };
+    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, thinking: form.thinking || null, fundingSourceId: form.fundingSourceId || null, agentKind: form.agentKind, workingHours: form.hours.on ? { days: [...form.hours.days].sort(), start: form.hours.start, end: form.hours.end, timeZone: form.hours.timeZone.trim() } : null };
+    if (form.hours.on && !form.hours.days.length) {
+      setNote({ ok: false, text: "Choose at least one day for the working hours." });
+      return;
+    }
     setBusy(true);
     const ok = await run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
     setBusy(false);
@@ -428,6 +489,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
               </select>
             </div>
           </div>
+          <WorkingHoursField id={`hours-${a.id}`} name={a.name} value={form.hours} onChange={(hours) => setForm({ ...form, hours })} />
           <div className="field">
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
             <DraftTextarea draftKey={instructionsKey} id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
@@ -844,6 +906,11 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             <div className="muted agent-stats">
               <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "No account to run on yet"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
             </div>
+            {a.offUntil && !a.retiredAt && (
+              <div className="muted agent-stats" data-testid={`off-until-${a.id}`}>
+                Off until {a.offUntil.label} (working hours)
+              </div>
+            )}
             {a.pa && (
               <div className="muted agent-stats">
                 Answers: {a.pa.posted} posted, {a.pa.escalated} passed to the CEO

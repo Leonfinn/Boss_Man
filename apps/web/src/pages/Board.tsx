@@ -693,6 +693,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
           </button>
         </span>
       )}
+      {t.workingHoursNote && !t.working?.length && <span className="note" role="status" data-testid="board-working-hours-note">{t.workingHoursNote}</span>}
       {runState?.error && <span className="note" role="alert">{runState.error}</span>}
       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
       {merging && t.mergeNote && !mergeLine && <span className="note">{t.mergeNote}</span>}

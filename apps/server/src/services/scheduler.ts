@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { REAL_USE_LABEL, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
+import { REAL_USE_LABEL, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import { dueChatReport } from "./chat-report-back.js";
@@ -1520,10 +1520,24 @@ export function schedulerService(
         }
       }
       // Agent wakes below high priority wait out the owner's quiet hours; one morning run covers them (R86).
-      const quietEnd = !fromOwner(input) && base.priority < limits.highPriority && deps.quietHours ? quietHoursEnd(now(), await deps.quietHours()) : null;
+      const routine = !fromOwner(input) && base.priority < limits.highPriority;
+      const quietHours = routine && deps.quietHours ? await deps.quietHours() : null;
+      // BOS-2200: an agent outside its own working hours isn't started on new work; same exemptions as quiet
+      // hours, and a resume of a run that was already going is not new work. The wake waits for the hours to open,
+      // and for quiet hours too if those run on past the start (checked in turn, a few rounds at most).
+      let quietEnd: Date | null = null;
+      let why = "quiet hours";
+      for (let round = 0, t = now(); round < 4; round++) {
+        const q = quietHoursEnd(t, quietHours);
+        const w = routine && !input.resumeRunId ? nextWorkingStart(t, agent.workingHours) : null;
+        if (!q && !w) break;
+        const next = new Date(Math.max(q?.getTime() ?? 0, w?.getTime() ?? 0));
+        why = w && (!q || w >= q) ? WORKING_HOURS_REASON : "quiet hours";
+        quietEnd = t = next;
+      }
       // An urgent ticket's wake takes no wait at all (BOS-253): its window is minutes at most, and
       // a held wake of the same agent must not keep it out of the queue.
-      const hold = urgent ? undefined : quietEnd && (!input.defer || quietEnd > input.defer.until) ? { until: quietEnd, why: "quiet hours" } : input.defer;
+      const hold = urgent ? undefined : quietEnd && (!input.defer || quietEnd > input.defer.until) ? { until: quietEnd, why } : input.defer;
       const [row] = await db.insert(wakes).values(hold ? { ...base, status: "deferred", statusReason: hold.why, notBefore: hold.until } : base).returning();
       // Start it now rather than at the next timer pass (R85).
       if (!hold && deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
@@ -1574,7 +1588,7 @@ export function schedulerService(
       let notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
       // A high-priority note ends a quiet-hours or quota-held wait (BOS-227), and so does any note
       // on an urgent ticket (BOS-253): the wait may have been set by the routine work it joined.
-      const holds = waiting.statusReason === "quiet hours" || waiting.statusReason?.startsWith("subscription ");
+      const holds = waiting.statusReason === "quiet hours" || waiting.statusReason === WORKING_HOURS_REASON || waiting.statusReason?.startsWith("subscription ");
       const release = !!holds && (priority >= limits.highPriority || urgent);
       if (release) notBefore = null;
       // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.

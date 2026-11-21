@@ -29,7 +29,7 @@ export const SAME_ERROR_AGENTS = 2;
 export const NO_PROGRESS_QUIET_MS = 4 * 3_600_000;
 
 /** Wakes held on purpose, which are not work waiting on Boss Man. */
-const DELIBERATE_HOLDS = ["company paused", "agent paused", "quiet hours", HOLD_REASON];
+const DELIBERATE_HOLDS = ["company paused", "agent paused", "quiet hours", "working hours", HOLD_REASON];
 
 /**
  * A run that counts as progress: it ended, and not on an error, a loss, a cut-off or a stop. The CEO's
