@@ -2305,6 +2305,56 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return db.select().from(decisions).where(eq(decisions.status, "open")).orderBy(asc(decisions.createdAt));
     },
 
+    /**
+     * (BOS-2187) Answered and withdrawn cards, newest first, a page at a time. The cursor is the last row's
+     * "when|id" from the page before. `q` keeps cards whose question contains the text.
+     */
+    async answeredList(opts: { limit?: number; cursor?: string; q?: string; companyId?: string } = {}) {
+      const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+      const when = sql<Date>`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`;
+      const conds = [ne(decisions.status, "open")];
+      if (opts.companyId) conds.push(eq(decisions.companyId, opts.companyId));
+      if (opts.q?.trim()) conds.push(sql`position(lower(${opts.q.trim()}) in lower(${decisions.question})) > 0`);
+      if (opts.cursor) {
+        const [at, cid] = opts.cursor.split("|");
+        if (at && cid && !Number.isNaN(Date.parse(at))) conds.push(sql`(${when}, ${decisions.id}) < (${new Date(at).toISOString()}::timestamptz, ${cid}::uuid)`);
+      }
+      const rows = await db
+        .select({ d: decisions, when })
+        .from(decisions)
+        .where(and(...conds))
+        .orderBy(desc(when), desc(decisions.id))
+        .limit(limit + 1);
+      const page = rows.slice(0, limit);
+      const items = [];
+      for (const { d, when: at } of page) {
+        const c = d.context as { settled?: { name?: string }; settledByRepeat?: unknown; judge?: unknown };
+        const ids = await decisionTicketIds(db, d).catch(() => [] as string[]);
+        const ts = ids.length
+          ? await db
+              .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+              .from(tickets)
+              .innerJoin(companies, eq(companies.id, tickets.companyId))
+              .where(and(eq(tickets.companyId, d.companyId), inArray(tickets.id, ids)))
+          : [];
+        const t = ts[0];
+        const by = d.status === "withdrawn" ? "withdrawn" : c.settled?.name ? "ceo" : c.settledByRepeat ? "auto" : "owner";
+        items.push({
+          id: d.id,
+          question: d.question.split("\n").slice(0, 3).join("\n").slice(0, 600),
+          status: d.status as "answered" | "withdrawn",
+          answer: d.status === "answered" ? d.answer : null,
+          by: by as "owner" | "ceo" | "auto" | "withdrawn",
+          byName: c.settled?.name ?? null,
+          at: new Date(at).toISOString(),
+          ticket: t ? { id: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) } : null,
+        });
+      }
+      const last = page[page.length - 1];
+      const next = rows.length > limit && last ? `${new Date(last.when).toISOString()}|${last.d.id}` : null;
+      return { items, next };
+    },
+
     /** Boss Man's alerts the team is still handling (BOS-64), for the owner's collapsed "being handled" line. */
     async withTeam() {
       const rows = await db
