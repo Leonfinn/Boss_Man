@@ -86,4 +86,13 @@ rm -f "$t"/backups/daily-*
 FAKE_PSQL=fail "$here/daily-backup.sh" --once >/dev/null
 [[ $(count) -eq 1 ]] || fail "file lost when the status row failed"
 
+# The container runs as root: a new file is handed to the backup folder's owner (when that is not root), so the host user can read it.
+if [[ $(id -u) -ne 0 ]]; then
+  rm -f "$t"/backups/daily-*
+  printf '#!/usr/bin/env bash\necho "chown $*" >>"$FAKE_LOG"\n' >"$t/bin/chown"; chmod +x "$t/bin/chown"
+  "$here/daily-backup.sh" --once >/dev/null
+  grep -q "^chown $(id -u):$(id -g) .*daily-.*\.sql\.gz$" "$t/log" || fail "file not handed to the folder's owner: $(cat "$t/log")"
+  rm -f "$t/bin/chown"
+fi
+
 echo "daily-backup.test.sh: ok"

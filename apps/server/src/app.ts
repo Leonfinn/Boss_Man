@@ -42,7 +42,7 @@ import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { dailyBackupService } from "./services/daily-backup.js";
-import { serverHealthService,type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
+import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { deployWaitService } from "./services/deploy-wait.js";
@@ -1101,6 +1101,7 @@ export async function buildApp(opts: AppOptions) {
       if (r) await notes.syncDecisions();
       return r;
     },
+    composeCmd: () => hostFacts.value("compose.cmd"),
     log: (m) => app.log.warn(m),
   });
   const gitHosts = gitHostService({ fetch: opts.fetch });

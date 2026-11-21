@@ -4,7 +4,7 @@
 # nobody to start it. Each pass is safe to repeat: it dumps only when the newest daily-*.sql.gz is older
 # than 24 hours.
 #
-#   daily-backup.sh          check once an hour, forever (what the service runs)
+#   daily-backup.sh          check every BOSSMAN_DAILY_SLEEP seconds, forever (the service runs --once every 15 minutes instead)
 #   daily-backup.sh --once   one pass, then exit (tests, or a hand run: docker compose exec backup ...)
 #
 # Settings (environment; the service sets them):
@@ -56,6 +56,15 @@ prune() {
 
 dump_to() { (set -o pipefail; pg_dump | gzip >"$1") 2>/dev/null; }
 
+# The service runs as root inside its container, so a new file would be root-owned and the person who runs the host could
+# not read it (to restore or copy it off). Hand it to whoever owns the backup folder, when that is not root. The folder
+# is made by deploy.sh as the host user, so this is the host user on a normal install. Never fails the backup.
+give_to_folder_owner() { # file
+  local owner
+  owner="$(stat -c %u:%g "$BACKUP_DIR" 2>/dev/null)" || return 0
+  [[ $owner == 0:0 ]] || chown "$owner" "$1" 2>/dev/null || true
+}
+
 pass() {
   local cur out
   mkdir -p "$BACKUP_DIR" || { record_failed "The backup folder cannot be created"; return 1; }
@@ -74,6 +83,7 @@ pass() {
     rm -f -- "$out.partial"; record_failed "The database dump was empty or damaged"; return 1
   fi
   if ! { chmod 600 "$out.partial" && mv -- "$out.partial" "$out"; }; then rm -f -- "$out.partial"; record_failed "The backup could not be saved"; return 1; fi
+  give_to_folder_owner "$out"
   say "Daily backup saved: $out ($(stat -c %s "$out") bytes)"
   record_ok "$out" || say "Saved, but the status line could not be updated"
   prune

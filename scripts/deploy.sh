@@ -135,7 +135,10 @@ wait_healthy() {
 ensure_daily_backup() {
   if ((DRY)); then say "[dry-run] docker compose up -d --no-deps backup (daily backup service, if the stack has one)"; return 0; fi
   docker compose config --services 2>/dev/null | grep -qx backup || return 0
-  docker compose up -d --no-deps backup || say "Warning: the daily backup service did not start. Start it by hand: docker compose up -d backup"
+  # The service sees only this folder (a `daily` folder inside the backup folder). Make it as the host user, so the files
+  # in it end up readable by the host user; Docker would make it root-owned.
+  mkdir -p "${BOSSMAN_BACKUP_DIR:-..}/daily" 2>/dev/null || true
+  docker compose up -d --no-deps backup || say "Warning: the daily backup service did not start. Start it by hand: docker compose up -d --no-deps backup"
 }
 
 rebuild_and_start() {

@@ -73,7 +73,7 @@ Backups go in the install folder, next to `src`, unless you set `BOSSMAN_BACKUP_
 - `rebuild-YYYY-MM-DD-HHMM.sql.gz`: made by `scripts/rebuild-live.sh`
 - `restore-test-YYYY-MM-DD-HHMMSS.sql.gz`: made by `scripts/restore-test.sh --fresh-backup`
 - `penpot-YYYY-MM-DD-HHMM.tar`: made by `scripts/backup-penpot.sh`
-- `daily-YYYY-MM-DD-HHMM.sql.gz`: made once a day by the `backup` service, newest 14 kept. You set nothing up; Settings → Server shows when the last one was made, and you get one alert if it is over 36 hours old. It is not an off-site copy, so copy the folder somewhere else now and then.
+- `daily-YYYY-MM-DD-HHMM.sql.gz`: made once a day by the `backup` service, newest 14 kept, in a `daily` folder inside the backup folder. You set nothing up; Settings → Server shows when the last one was made, and you get one alert if it is over 36 hours old. It is not an off-site copy, so copy the folder somewhere else now and then.
 
 ## Check a backup restores
 

@@ -60,8 +60,18 @@ export type DailyBackupDeps = {
   homeCompany: () => Promise<string | null>;
   isOpen: (dedupeKey: string) => Promise<boolean>;
   raise: (input: Record<string, unknown>) => Promise<{ id: string } | null | undefined | unknown>;
+  /** The host's filled compose prefix (`cd <checkout> && docker compose -f …`, DR-052), or null when the host hasn't reported one. */
+  composeCmd?: () => Promise<string | null>;
   log?: (m: string) => void;
 };
+
+/** The owner's steps for a stopped backup service, built from host facts. `--no-deps` so the database is not recreated. */
+export function backupSteps(cmd: string | null): string {
+  if (!cmd) {
+    return "What to do: Boss Man doesn't have this server's compose command yet (the host deployer hasn't reported it; see Settings → Server and runner → This server). On the machine that runs Boss Man, go to the folder that holds docker-compose.yml (the checkout), and run docker compose with the same -f files your server uses: up -d --no-deps backup. Then check it with ps backup, and read why it stopped with logs --tail 30 backup. Do not leave out --no-deps: without it the database is started again from the base file alone. If the disk is full, free some space; the backups restart by themselves (a pass runs every 15 minutes).";
+  }
+  return `What to do: on the machine that runs Boss Man, run these one at a time:\n1. ${cmd} up -d --no-deps backup\n2. ${cmd} ps backup\n3. ${cmd} logs --tail 30 backup\nIf the disk is full, free some space; the backups restart by themselves (a pass runs every 15 minutes).`;
+}
 
 export function dailyBackupService(db: Db, deps: DailyBackupDeps) {
   return {
@@ -83,7 +93,7 @@ export function dailyBackupService(db: Db, deps: DailyBackupDeps) {
       const why = s.failed ? `The last attempt failed: ${s.failed.message}.` : "The backup service may not be running.";
       const question = [
         `Boss Man's daily database backup is overdue. ${age} ${why}`,
-        "What to do: on the machine that runs Boss Man, in the install folder, run: docker compose up -d backup. Then check that it runs: docker compose ps backup, and read why it stopped: docker compose logs --tail 30 backup. If the disk is full, free some space; the backups restart by themselves (a pass runs every 15 minutes).",
+        backupSteps(await deps.composeCmd?.().catch(() => null) ?? null),
         "This card closes by itself once a new backup has been saved. You get one card, not one every day.",
       ].join("\n\n");
       const card = await deps.raise({

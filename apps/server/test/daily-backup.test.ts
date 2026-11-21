@@ -63,10 +63,25 @@ describe("daily backup alert", () => {
     expect(await s.check()).toEqual({ raised: true });
     expect(raised).toHaveLength(1);
     expect(raised[0]).toMatchObject({ kind: "daily_backup_stale", from: "owner", dedupeKey: "alert:daily-backup", clearWhen: [{ kind: "backupFresh" }] });
-    expect(String(raised[0]!.question)).toContain("docker compose up -d backup");
+    // No host facts reported: says so in words and still warns about --no-deps, never a guessed folder.
+    expect(String(raised[0]!.question)).toContain("up -d --no-deps backup");
+    expect(String(raised[0]!.question)).toContain("doesn't have this server's compose command");
     now = hours(80);
     expect(await s.check()).toEqual({ raised: false }); // the card is open: no second one
     expect(raised).toHaveLength(1);
+  });
+
+  it("builds the owner's commands from the host's compose command, with --no-deps", async () => {
+    const raised: Array<Record<string, unknown>> = [];
+    const cmd = "cd /srv/example/boss-man/src && docker compose -f docker-compose.yml -f deploy/truenas.yml";
+    const s = dailyBackupService(db, { now: () => hours(40), homeCompany: async () => "co-1", isOpen: async () => false, raise: async (i) => (raised.push(i), { id: "c" }), composeCmd: async () => cmd });
+    await put(LAST_KEY, { at: T0.toISOString(), file: "f", bytes: 1 });
+    await s.check();
+    const q = String(raised[0]!.question);
+    expect(q).toContain(`${cmd} up -d --no-deps backup`);
+    expect(q).toContain(`${cmd} ps backup`);
+    expect(q).toContain(`${cmd} logs --tail 30 backup`);
+    expect(q).not.toContain("up -d backup");
   });
 
   it("raises when the newest backup is over 36 hours old and names the failure; a fresh one stays quiet", async () => {
