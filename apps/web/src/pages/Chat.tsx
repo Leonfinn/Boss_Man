@@ -10,6 +10,7 @@ import { when } from "./Runs";
 import { atTime } from "./settings/updates";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -148,7 +149,7 @@ export function RememberThis({ companyId, text }: { companyId: string; text: str
     <div className="remember-box">
       <label>
         <span className="muted">Add this to the standing rules every agent reads:</span>
-        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={3} />
+        <DraftTextarea draftKey={null} noDraft="a short edit of a message that is already in the chat, which stays there" value={draft} onChange={setDraft} rows={3} />
       </label>
       <div className="remember-actions">
         <button type="button" className="btn primary" disabled={busy || !draft.trim()} onClick={() => call("append", { text: draft }, () => setStep("added"))}>
