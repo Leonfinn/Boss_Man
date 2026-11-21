@@ -1536,7 +1536,10 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     async update(companyId: string, patch: Partial<WatchdogSettings> & { scrumMasterAgentId?: string | null }) {
       const c = await company(companyId);
       const { scrumMasterAgentId, ...rest } = patch;
-      const next = WatchdogSettings.parse({ ...readWatchdogSettings(c.watchdog), ...rest });
+      const prev = readWatchdogSettings(c.watchdog);
+      const next = WatchdogSettings.parse({ ...prev, ...rest });
+      const prevSm = scrumMasterAgentId !== undefined ? await scrumMaster(companyId) : null;
+      let nextSmName: string | null = null;
       await db.transaction(async (tx) => {
         if (scrumMasterAgentId !== undefined) {
           if (scrumMasterAgentId) {
@@ -1544,6 +1547,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
             if (!a) throw new WatchdogError(404, "No active agent with that ID in this company.");
             if (a.role === "ceo") throw new WatchdogError(422, "The CEO can't be the Scrum Master: the Scrum Master's tools are limited to the watchdog's actions.");
             if (a.duty && a.duty !== SCRUM_MASTER_DUTY) throw new WatchdogError(422, `${a.name} already has a standing job.`);
+            nextSmName = a.name;
           }
           await tx.update(agents).set({ duty: null }).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY)));
           if (scrumMasterAgentId) await tx.update(agents).set({ duty: SCRUM_MASTER_DUTY }).where(eq(agents.id, scrumMasterAgentId));
@@ -1560,6 +1564,19 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           .set({ watchdog: next, ...(next.enabled ? { watchdogTrippedAt: null, watchdogTrippedReason: null } : {}) })
           .where(eq(companies.id, companyId));
       });
+      // Each change the save made leaves a line in the activity log (BOS-2150), like the fence and run-limit
+      // settings in app.ts (BOS-2063): switching the watchdog off silences it, so the owner must be able to see when.
+      // Written after the transaction, so a refused save leaves none; a field sent with its old value leaves none.
+      const lines: Array<{ summary: string; detail: Record<string, unknown> }> = [];
+      if (next.enabled !== prev.enabled) lines.push({ summary: `Owner switched the watchdog ${next.enabled ? "on" : "off"}`, detail: { enabled: next.enabled } });
+      if (next.recordOnly !== prev.recordOnly) lines.push({ summary: `Owner switched the watchdog's record-only mode ${next.recordOnly ? "on" : "off"}`, detail: { recordOnly: next.recordOnly } });
+      if (next.progressContract !== prev.progressContract) lines.push({ summary: `Owner switched the progress contract ${next.progressContract ? "on" : "off"}`, detail: { progressContract: next.progressContract } });
+      if (scrumMasterAgentId !== undefined && (scrumMasterAgentId ?? null) !== (prevSm?.id ?? null))
+        lines.push({ summary: nextSmName ? `Owner set the Scrum Master to ${nextSmName}` : "Owner removed the Scrum Master", detail: { scrumMasterAgentId: scrumMasterAgentId ?? null, previous: prevSm?.id ?? null } });
+      const SWITCHES = new Set(["enabled", "recordOnly", "progressContract"]);
+      const limits = (Object.keys(next) as Array<keyof WatchdogSettings>).filter((k) => !SWITCHES.has(k) && next[k] !== prev[k]);
+      if (limits.length) lines.push({ summary: "Owner changed the watchdog limits", detail: Object.fromEntries(limits.map((k) => [k, { from: prev[k], to: next[k] }])) });
+      for (const l of lines) await record(db, { companyId, kind: "settings", summary: l.summary, detail: l.detail, at: now() });
       return this.status(companyId);
     },
 
