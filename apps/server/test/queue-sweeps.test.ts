@@ -241,6 +241,17 @@ describe("ranked decision queue (R20)", () => {
       await answered(100, 20); // older than 14 days: left out
       ctx.advance(6_000);
       expect((await tally()).medianAnswerMs).toBe(4 * hour);
+      // Two more open cards, 3 days and 2 hours old: the 3-day-old one is the oldest.
+      const open = async (ageMs: number, question: string) => {
+        await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "owner", status: "open", question, options: ["Yes", "No"], recommendedOption: "Yes", createdAt: new Date(ctx.clock().getTime() - ageMs) });
+      };
+      await open(2 * hour, "Two hours old");
+      await open(72 * hour, "Three days old");
+      ctx.advance(6_000);
+      // The clock reads a few ms apart between calls, so allow a minute around the 3-day mark.
+      const age = ctx.clock().getTime() - new Date((await tally()).oldestOpenAt!).getTime();
+      expect(age).toBeGreaterThanOrEqual(72 * hour);
+      expect(age).toBeLessThan(72 * hour + 60_000);
       // With nothing open the oldest is null.
       await ctx.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.status, "open"));
       ctx.advance(6_000);
