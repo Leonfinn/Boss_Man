@@ -58,6 +58,7 @@ import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
+import { PageQuery } from "./services/list-page.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { deploysService } from "./services/deploys.js";
 import { runsService } from "./services/runs.js";
@@ -2566,7 +2567,7 @@ export async function buildApp(opts: AppOptions) {
       if (err instanceof EngagementError) return reply.code(err.status).send({ error: "engagement", message: err.message });
       throw err;
     };
-    owner.get("/api/engagements", async () => engagementsSvc.list());
+    owner.get("/api/engagements", async (req) => engagementsSvc.list(undefined, PageQuery.parse(req.query)));
     owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id, undefined, true).catch(engagementErrors(reply)));
     owner.post("/api/engagements", async (req, reply) => {
       const b = z

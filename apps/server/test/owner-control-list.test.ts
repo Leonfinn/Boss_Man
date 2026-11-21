@@ -92,6 +92,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/Sidebar.tsx": "Any screen",
   // The page-intro fold, on four screens (P7, BOS-1278).
   "components/MoreAbout.tsx": "Any screen",
+  // The "Show older" button under a paged list (BOS-2165): Skills and Engagements render it.
+  "components/ShowOlder.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   "components/TicketActivity.tsx": "Ticket",

@@ -28,6 +28,8 @@ export const OWNER_CONTROLS = {
     "Send as a .txt file", "Sending",
     // A picture opened from Markdown text.
     "Actual size", "Fit to window",
+    // Under a paged list, Skill proposals and Engagements (BOS-2165): the next page of older entries.
+    "Show older", "Loading",
     // The banner shown when Boss Man was updated after the page was opened (BOS-550).
     "Reload",
     // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
