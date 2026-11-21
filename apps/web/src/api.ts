@@ -331,7 +331,7 @@ export type UnticketedRun = { id: string; agent: string | null; ticketId: string
 /** `workingAgents` is the number of agents with a run going, the Dashboard's figure. */
 /** A run going now on a ticket in another project of the company. */
 export type OtherProjectRun = { id: string; agent: string | null; purpose: string | null; startedAt: string; ticketId: string; ticketNumber: number | null; ticketTitle: string; projectId: string; projectName: string };
-export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; otherProjects?: OtherProjectRun[]; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
+export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; otherProjects?: OtherProjectRun[]; /** All done tickets in the project; the board sends only the newest unless asked for all. */ doneTotal?: number; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 
 export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null; quotaHoldAt?: number; quotaOverage?: "pause" | "urgent" | "all"; quotaDisabledWindows?: string[]; secretId?: string | null; fallbackRank?: number | null };
 export type FundingStatus = {

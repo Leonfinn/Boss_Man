@@ -1,5 +1,8 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
-import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, inArray, isNull, or, ne, sql, type SQL } from "drizzle-orm";
+
+/** BOS-2166: how many of the newest done tickets the board sends unless it asks for all of them. */
+export const BOARD_DONE_LIMIT = 50;
 import { addsUsabilityCriterion, watchEndsAt, withUsabilityCriterion,columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -290,18 +293,32 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return columnsOf(projectId);
     },
 
-    async board(projectId: string) {
+    async board(projectId: string, opts: { doneAll?: boolean } = {}) {
       const p = await project(projectId);
       const cols = await columnsOf(projectId);
-      const rows = await db
-        .select({ t: tickets, milestoneTarget: milestones.targetDate })
-        .from(tickets)
-        .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
-        .where(eq(tickets.projectId, projectId))
-        .orderBy(asc(tickets.createdAt));
+      const boardRows = (where: SQL | undefined) =>
+        db.select({ t: tickets, milestoneTarget: milestones.targetDate }).from(tickets).leftJoin(milestones, eq(milestones.id, tickets.milestoneId)).where(where).orderBy(asc(tickets.createdAt));
+      // BOS-2166: every open ticket, plus the newest BOARD_DONE_LIMIT done ones (all of them with doneAll), and the count of all done.
+      const doneTotal = Number((await db.select({ n: sql<number>`count(*)` }).from(tickets).where(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done"))))[0]?.n ?? 0);
+      const openRows = await boardRows(and(eq(tickets.projectId, projectId), ne(tickets.systemState, "done")));
+      const doneRows = opts.doneAll
+        ? await boardRows(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done")))
+        : (await boardRows(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done"), inArray(tickets.id, db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt)).limit(BOARD_DONE_LIMIT)))));
+      const rows = [...openRows, ...doneRows].sort((a, b) => a.t.createdAt.getTime() - b.t.createdAt.getTime());
+      // Parents, blockers and the checked ticket may be old done tickets outside the rows sent; look them up by id.
+      const sent = new Set(rows.map((r) => r.t.id));
+      const wantedIds = new Set<string>();
+      for (const r of rows) {
+        if (r.t.parentTicketId) wantedIds.add(r.t.parentTicketId);
+        if (r.t.checksTicketId) wantedIds.add(r.t.checksTicketId);
+      }
       const deps = rows.length
         ? await db.select().from(ticketDependencies).where(inArray(ticketDependencies.blockedTicketId, rows.map((r) => r.t.id)))
         : [];
+      for (const d of deps) if (d.blockerTicketId) wantedIds.add(d.blockerTicketId);
+      const missing = [...wantedIds].filter((x) => !sent.has(x));
+      const byId = new Map<string, typeof tickets.$inferSelect>(rows.map((r) => [r.t.id, r.t]));
+      if (missing.length) for (const t of await db.select().from(tickets).where(inArray(tickets.id, missing))) byId.set(t.id, t);
       const fids = [...new Set(rows.map((r) => r.t.featureId).filter((x): x is string => !!x))];
       const featureTitle = new Map((fids.length ? await db.select({ id: features.id, title: features.title }).from(features).where(inArray(features.id, fids)) : []).map((f) => [f.id, f.title]));
       // A ticket in review waits on the owner while the sign-off decision raised after an agent's approval is open (review.approve).
@@ -448,7 +465,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         : [];
       const heldFor = (t: typeof tickets.$inferSelect) => heldWakes.find((h) => h.ticketId === t.id) ?? (t.assigneeAgentId ? heldWakes.find((h) => h.agentId === t.assigneeAgentId) : undefined);
       const heldByAgent = (t: typeof tickets.$inferSelect) => !heldWakes.some((h) => h.ticketId === t.id) && !!(t.assigneeAgentId && heldWakes.some((h) => h.agentId === t.assigneeAgentId));
-      const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
+      const blocker = (id: string | null) => (id ? byId.get(id) : undefined);
+      const doneIds = new Set([...byId.values()].filter((t) => t.systemState === "done").map((t) => t.id));
       const updateCards = rows.some((r) => r.t.goLiveWait && r.t.systemState !== "done") ? await openUpdateCards(db, p.companyId) : { server: null, runner: null };
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
@@ -476,7 +494,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         waitingDecisionId,
         approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : (signoffWaiting.get(t.id) ?? null),
         featureTitle: t.featureId ? (featureTitle.get(t.featureId) ?? null) : null,
-        parentTitle: rows.find((r) => r.t.id === t.parentTicketId)?.t.title ?? null,
+        parentTitle: (t.parentTicketId ? byId.get(t.parentTicketId)?.title : undefined) ?? null,
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
@@ -484,9 +502,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // When the earliest of those runs began, so the card can say how long the work has been going.
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
-        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, ticketNumber: rows.find((r) => r.t.id === d.blockerTicketId)?.t.number ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!blocker(d.blockerTicketId)?.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: blocker(d.blockerTicketId)?.title ?? null, ticketNumber: blocker(d.blockerTicketId)?.number ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         // Why an in-progress ticket doesn't count towards a WIP limit (BOS-1172); null when it counts.
-        wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)), busyOn(t)?.id ?? null) : null,
+        wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!blocker(d.blockerTicketId)?.mergeCommit)), busyOn(t)?.id ?? null) : null,
         // BOS-1908: the ticket this one's agent is running instead ("Agent busy on BOS-N"), and the one marked Next up in Ready.
         busyOnTicketId: t.systemState === "in_progress" ? (busyOn(t)?.id ?? null) : null,
         busyOnNumber: t.systemState === "in_progress" ? (busyOn(t)?.number ?? null) : null,
@@ -498,7 +516,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         goLiveNote: t.systemState !== "done" ? goLiveNote(t.goLiveWait as GoLiveWait | null, updateCards) : null,
         // BOS-1907: a split-out check ticket joins the "Merged, watching" lane through its parent's merge; the card shows the watch.
         checksParentMerged: (() => {
-          const parent = t.checksTicketId ? rows.find((r) => r.t.id === t.checksTicketId)?.t : undefined;
+          const parent = t.checksTicketId ? byId.get(t.checksTicketId) : undefined;
           return !!parent?.mergeCommit && parent.systemState !== "done";
         })(),
         watchEndsAt: t.mergeCommit ? (watchEndsAt(t)?.toISOString() ?? null) : null,
@@ -516,6 +534,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         workingAgents: new Set(everyLive.filter(isWorkingRun).map((r) => r.agentId)).size,
         withoutTicket: withoutCard.map((r) => ({ id: r.id, agent: r.agent, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, wakeNote: r.wakeNote, runTicketId: r.runTicketId, startedAt: r.startedAt.toISOString() })),
         otherProjects,
+        doneTotal,
         columns: cols.map((c) => ({
           ...c,
           // A ticket shows in its column while that column matches its state; otherwise (no
