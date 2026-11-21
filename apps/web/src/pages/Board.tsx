@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { FilterPanel, useIsPhone } from "../components/FilterPanel";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
-import { isLiveCheckWait, ticketRef, type Criterion } from "@boss-man/shared";
+import { BULK_TICKET_MAX, isLiveCheckWait, ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
@@ -559,7 +559,62 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
-function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet }: { quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+/** BOS-2193: what the Select bar can do to every ticket it holds. Moves to In progress, Review or Done are not offered. */
+export type BulkAction = { type: "move"; state: "backlog" | "ready" | "blocked" } | { type: "assign"; assigneeAgentId: string | null } | { type: "priority"; on: boolean };
+
+/** "8 moved, 2 refused: BOS-12 (reason), BOS-14 (reason)", or "8 moved" when nothing was refused. */
+export function bulkSummary(done: number, refused: { ref: string | null; reason: string }[], verb: "moved" | "changed") {
+  if (!refused.length) return `${done} ${verb}`;
+  return `${done} ${verb}, ${refused.length} refused: ${refused.map((r) => `${r.ref ?? "a ticket"} (${r.reason})`).join(", ")}`;
+}
+
+export function BulkBar({ count, agents, busy, result, onRun, onClear }: { count: number; agents: Company["agents"]; busy: boolean; result: string | null; onRun: (a: BulkAction) => void; onClear: () => void }) {
+  const [agent, setAgent] = useState("");
+  const tooMany = count > BULK_TICKET_MAX;
+  const off = busy || count === 0 || tooMany;
+  return (
+    <div className="bulk-bar" role="region" aria-label="Selected tasks">
+      <strong>{count} selected</strong>
+      {tooMany && <span className="muted">Pick {BULK_TICKET_MAX} or fewer: that is the most one action can change.</span>}
+      <span className="bulk-group" role="group" aria-label="Move to">
+        Move to
+        {(["backlog", "ready", "blocked"] as const).map((s) => (
+          <button key={s} type="button" className="btn" disabled={off} onClick={() => onRun({ type: "move", state: s })}>
+            {s === "backlog" ? "Backlog" : s === "ready" ? "Ready" : "Blocked"}
+          </button>
+        ))}
+      </span>
+      <span className="bulk-group">
+        <select aria-label="Assign to" value={agent} onChange={(e) => setAgent(e.target.value)}>
+          <option value="">Assign to…</option>
+          <option value="none">Nobody</option>
+          {agents.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="btn" disabled={off || !agent} onClick={() => onRun({ type: "assign", assigneeAgentId: agent === "none" ? null : agent })}>
+          Assign
+        </button>
+      </span>
+      <span className="bulk-group" role="group" aria-label="Priority 1">
+        <button type="button" className="btn" disabled={off} onClick={() => onRun({ type: "priority", on: true })}>
+          Priority 1 on
+        </button>
+        <button type="button" className="btn" disabled={off} onClick={() => onRun({ type: "priority", on: false })}>
+          Priority 1 off
+        </button>
+      </span>
+      <button type="button" className="linkish" disabled={busy || count === 0} onClick={onClear}>
+        Clear
+      </button>
+      {result && <span className="bulk-result" role="status">{result}</span>}
+    </div>
+  );
+}
+
+function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, runState, mergeLine, quiet, select }: { select?: { checked: boolean; onClick: (id: string, shift: boolean) => void }; quiet?: boolean; runState?: { busy: boolean; error?: string }; mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -581,6 +636,9 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
   return (
     <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId} data-ticket-id={t.id}>
       <div className="top">
+        {select && (
+          <input type="checkbox" className="bulk-check" aria-label={`Select ${ticketRefText}`} checked={select.checked} onChange={() => {}} onClick={(e) => select.onClick(t.id, e.shiftKey)} />
+        )}
         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
         {(t.risk === "high" || t.risk === "critical") && (
           <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
@@ -896,6 +954,51 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
     board.reload();
   };
+  // BOS-2193: Select mode. The selection lives only in this open page, so a reload starts clean.
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const lastPicked = useRef<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResult, setBulkResult] = useState<string | null>(null);
+  const pick = (id: string, shift: boolean) => {
+    setBulkResult(null);
+    // Visible card order, as the page shows it.
+    const order = Array.from(document.querySelectorAll<HTMLElement>("article.ticket[data-ticket-id]")).map((el) => el.dataset.ticketId!);
+    const from = lastPicked.current ? order.indexOf(lastPicked.current) : -1;
+    const to = order.indexOf(id);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (shift && from >= 0 && to >= 0) {
+        // The range takes the state of the card just clicked.
+        const on = !prev.has(id);
+        for (const x of order.slice(Math.min(from, to), Math.max(from, to) + 1)) on ? next.add(x) : next.delete(x);
+      } else if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    lastPicked.current = id;
+  };
+  const stopSelecting = () => {
+    setSelecting(false);
+    setSelected(new Set());
+    setBulkResult(null);
+    lastPicked.current = null;
+  };
+  const runBulk = async (action: BulkAction) => {
+    if (bulkBusy || !selected.size) return;
+    setBulkBusy(true);
+    try {
+      const r = await api<{ done: { id: string; ref: string | null }[]; refused: { id: string; ref: string | null; reason: string }[] }>("/api/tickets/bulk", { method: "POST", body: { ids: [...selected], action } });
+      setBulkResult(bulkSummary(r.done.length, r.refused, action.type === "move" ? "moved" : "changed"));
+      // Done ones leave the selection; refused ones stay selected so the owner can see them.
+      setSelected(new Set(r.refused.map((x) => x.id)));
+    } catch (e) {
+      setBulkResult(`Nothing was changed: ${e instanceof Error && e.message ? e.message : "the request failed"}. Try again.`);
+    } finally {
+      setBulkBusy(false);
+      board.reload();
+    }
+  };
   // Per card: "busy" while the request is out (a second click is ignored), or the error text if it failed.
   const [runState, setRunState] = useState<Record<string, { busy: boolean; error?: string }>>({});
   const runNowBusy = useRef(new Set<string>());
@@ -1141,6 +1244,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             />
           )}
           </span>
+          {current && view !== "features" && (
+            <button type="button" className="btn" aria-pressed={selecting} onClick={() => (selecting ? stopSelecting() : setSelecting(true))}>
+              {selecting ? "Done selecting" : "Select"}
+            </button>
+          )}
           {!phone && chips.map((c) => (
             <span key={c.key} className="filter-chip" title={c.label}>
               <span>{c.label}</span>
@@ -1156,6 +1264,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           )}
         </div>
       </div>
+      {selecting && view !== "features" && <BulkBar count={selected.size} agents={company?.agents ?? []} busy={bulkBusy} result={bulkResult} onRun={(a) => void runBulk(a)} onClear={() => { setSelected(new Set()); setBulkResult(null); lastPicked.current = null; }} />}
       {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} stuck={stuckCards.length} stuckTicketId={stuckCards[0]?.id} />}
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
@@ -1302,6 +1411,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <TicketCard
                       key={t.id}
                       quiet={parked}
+                      select={selecting ? { checked: selected.has(t.id), onClick: pick } : undefined}
                       t={t}
                       mine={!!mine}
                       merging={!!merging}
