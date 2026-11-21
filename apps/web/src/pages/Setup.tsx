@@ -13,7 +13,7 @@ import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, RunnerStep } from "./SetupClaude";
 
-type Progress = { dismissed: boolean; step: number; companyId: string | null };
+type Progress = { dismissed: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null };
 export type ChecklistItem = { id: string; label: string; done: boolean };
 
 const STEPS = [
