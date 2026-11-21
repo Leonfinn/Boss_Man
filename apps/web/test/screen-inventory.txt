@@ -414,6 +414,7 @@ sections:
 reads: 
   - /api/companies/:id/brief
   - /api/companies/:id/wiki
+  - /api/companies/:id/wiki-deleted
   - /api/companies/:id/wiki-revisions/:id
   - /api/companies/:id/wiki-semantic
   - /api/companies/:id/wiki/:id
