@@ -270,7 +270,7 @@ Check it worked: you see "Saved." and the step shows a tick.
 
 **The runner.** It's the container where the company's agents work. It connects out to Boss Man, so it needs no open ports. This step only shows its status.
 - If the tag says **Connected**, there is nothing to do.
-- If it says **Not connected** and the launcher is on, choose **Start the runner**. Without the launcher, the step points you to **Settings → Server and runner**: follow the steps there.
+- If it says **Not connected** and the launcher is on, choose **Start the runner**. Without the launcher, the step points you to **Settings → Server and runner → Runner**: follow the steps there.
 - If something is wrong (the launcher can't be reached, the runner's container has stopped, or its network guard won't start), the step says which, with a link to the fix in [docs/29](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
 - Wait for the tag to say **Connected**. This can take up to a minute; the page updates by itself.
 
@@ -348,7 +348,7 @@ Check it worked: the ticket shows on the board and the page says "Added".
 - **Decisions** is where Boss Man asks you things: a plan to approve, a review, a question. A run may wait there for you.
 - **Notifications** shows what needs your attention.
 
-Check it worked: a run appears under **Runs** within a minute or two and the ticket's state changes on the board. If nothing starts, check that the agent isn't paused and the runner says **Connected** in **Settings > Server and runner**.
+Check it worked: a run appears under **Runs** within a minute or two and the ticket's state changes on the board. If nothing starts, check that the agent isn't paused and the runner says **Connected** in **Settings > Server and runner > Runner**.
 
 ## 14. Updating later
 

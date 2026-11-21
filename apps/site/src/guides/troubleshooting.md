@@ -3,7 +3,7 @@ title: Troubleshooting
 navTitle: Troubleshooting
 description: Fixes for the things that most often go wrong when you install, run and update Boss Man, each with the guide it comes from.
 group: Questions
-order: 12
+order: 13
 lead: Find what you see in the list below. Each entry gives the fix and the guide it comes from.
 ---
 
@@ -108,6 +108,18 @@ Open **Agents** and check the agent is not paused. Then check that **Settings > 
 
 From: [Guide 3](/guides/first-company-and-ticket).
 
+### Nothing starts in any company.
+
+Look at the top of the page. A banner shows if all work is stopped, if agents were asked to wrap up, or if an update is pending. "All work is stopped" means someone chose **Stop all work**: choose **Resume** on the banner. Also check **Settings > Team and CEO** in case the company is paused.
+
+From: [Guide 12](/guides/stopping-work#if-something-goes-wrong).
+
+### An agent is doing the wrong thing and I want it to stop now.
+
+Open its ticket and choose the red **Stop** button, or open the run from **Runs** and choose **Stop run**. Anything it has not saved is lost. Then choose **Pause** on its row on the **Agents** page so it does not start again.
+
+From: [Guide 12](/guides/stopping-work#example-one-agent-is-doing-the-wrong-thing).
+
 ### An agent didn't answer my chat message.
 
 You do not need to resend it. If an agent's chat run ends without a reply, the chat says so and why it stopped, and the agent is asked again once, straight away. If that run also ends without a reply, the chat says your message is kept, and you get a notification. The agent's next chat run answers it; sending another message starts one.
@@ -197,7 +209,7 @@ From: [Guide 10](/guides/updates-and-backups).
 
 ### The runner update seems to take a long time.
 
-Boss Man waits for the current runs and checks to finish, then swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. If work is still going after 30 minutes, you get a card that lists it. Choose **Swap as soon as these finish** to let the update finish by itself with nothing more to press. If you do not answer, new work starts again 90 minutes after the update began, and the swap waits for each company to go quiet. If you ran `scripts/update-runner.sh` yourself, nothing moves until you choose **Update runners (finish runs first)** there. With the host deployer set up, that button is under **For a hand-built runner image**. To stop, choose **Cancel the runner update**. To undo a finished update, run `scripts/update-runner.sh --rollback`.
+Boss Man waits for the current runs and checks to finish, then swaps each company's runner when it is idle. Follow it under **Settings > Server and runner > Updates**. If work is still going after 30 minutes, you get a card that lists it. Choose **Swap as soon as these finish** to let the update finish by itself with nothing more to press. If you do not answer, new work starts again 90 minutes after the update began, and the swap waits for each company to go quiet. If you ran `scripts/update-runner.sh` yourself, nothing moves until you choose **Update runners (finish runs first)** there. With the host deployer set up, that button is under **For a hand-built runner image**. To stop, choose **Cancel the runner update**. To undo a finished update, run `scripts/update-runner.sh --rollback`. To get agents to stop sooner, choose **Ask agents to wrap up** (see [Stopping work](/guides/stopping-work#ask-agents-to-wrap-up)).
 
 From: [Guide 10](/guides/updates-and-backups).
 

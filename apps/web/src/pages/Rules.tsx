@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { SCRATCH_RULE } from "@boss-man/shared";
 import { api, type Agent, type Company } from "../api";
 import { usePoll } from "../hooks";
@@ -102,6 +102,9 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const [probe, setProbe] = useState({ companyId: scopeId ?? companies[0]?.id ?? "", command: "" });
   const [verdict, setVerdict] = useState<{ outcome: Outcome; rule: string } | null>(null);
 
+  // `submitting` disables the two submit buttons; the ref stops a second click that lands before React re-renders.
+  const [submitting, setSubmitting] = useState(false);
+  const submitLock = useRef(false);
   const act = async (fn: () => Promise<unknown>) => {
     try {
       await fn();
@@ -109,6 +112,17 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
       list.reload();
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+  const submitOnce = async (fn: () => Promise<unknown>) => {
+    if (submitLock.current) return;
+    submitLock.current = true;
+    setSubmitting(true);
+    try {
+      await act(fn);
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
     }
   };
   const rules = list.data ? (scopeId ? list.data.company : list.data.global) : [];
@@ -125,14 +139,14 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
       ...(form.commandPattern ? { commandPattern: form.commandPattern } : {}),
       ...(form.titlePattern ? { titlePattern: form.titlePattern } : {}),
     };
-    void act(async () => {
+    void submitOnce(async () => {
       await api("/api/policy-rules", { method: "POST", body: { companyId: scopeId, name: form.name, match, outcome: form.outcome } });
       setForm({ name: "", kinds: [], commandPattern: "", titlePattern: "", outcome: "owner" });
     });
   };
   const askCeo = (e: FormEvent) => {
     e.preventDefault();
-    void act(async () => {
+    void submitOnce(async () => {
       const r = await api<{ ceo: { name: string } }>(`/api/companies/${scopeId}/rule-requests`, { method: "POST", body: { text: ask } });
       setSentTo(r.ceo.name);
       setAsk("");
@@ -212,7 +226,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
               <DraftTextarea draftKey={askDraftKey} id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={setAsk} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
             </div>
             <div className="actions">
-              <button className="btn primary" type="submit" disabled={!ask.trim()}>
+              <button className="btn primary" type="submit" disabled={!ask.trim() || submitting}>
                 Ask the CEO to draft it
               </button>
             </div>
@@ -253,7 +267,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
               </label>
             ))}
           </fieldset>
-          <button className="btn primary" type="submit">
+          <button className="btn primary" type="submit" disabled={submitting}>
             Add rule
           </button>
         </form>

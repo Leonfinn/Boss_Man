@@ -27,6 +27,48 @@ describe("decision rules", () => {
     expect((screen.getByLabelText("What should this rule do?") as HTMLTextAreaElement).value).toBe("");
   });
 
+  // BOS-2154: a double-click must not make two requests or two rules.
+  it("sends one request to the CEO and adds one rule when a button is double-clicked", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        await gate;
+        return new Response(JSON.stringify({ ceo: { name: "Ada" } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    const posts = () => fetch.mock.calls.filter((c) => c[1]?.method === "POST").length;
+
+    fireEvent.change(screen.getByLabelText("What should this rule do?"), { target: { value: "Let agents read GitHub" } });
+    const ask = screen.getByRole("button", { name: "Ask the CEO to draft it" });
+    fireEvent.click(ask);
+    fireEvent.click(ask);
+    expect(posts()).toBe(1);
+    await waitFor(() => expect((ask as HTMLButtonElement).disabled).toBe(true));
+    release();
+    await waitFor(() => expect(screen.getByText(/Sent to Ada/)).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("New rule"), { target: { value: "Restarts" } });
+    const add = screen.getByRole("button", { name: "Add rule" });
+    fireEvent.click(add);
+    fireEvent.click(add);
+    expect(posts()).toBe(2);
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("re-enables the buttons and shows the error when a submit fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => (init?.method === "POST" ? new Response(JSON.stringify({ error: "Nope" }), { status: 500 }) : new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }))));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    fireEvent.change(screen.getByLabelText("What should this rule do?"), { target: { value: "Something" } });
+    const ask = screen.getByRole("button", { name: "Ask the CEO to draft it" }) as HTMLButtonElement;
+    fireEvent.click(ask);
+    await screen.findByRole("alert");
+    await waitFor(() => expect(ask.disabled).toBe(false));
+  });
+
   it("names the agents a rule is for, and falls back for an unknown id", async () => {
     const agent = (id: string, name: string) => ({ id, companyId: "c1", name, role: "worker" as const, agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null });
     const co: Company = { ...company, agents: [agent("a1", "Kit"), agent("a2", "Zippy")] };

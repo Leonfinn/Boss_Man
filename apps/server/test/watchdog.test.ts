@@ -1452,3 +1452,44 @@ describe("record-only mode (BOS-166)", () => {
     expect(await ctx.watchdog.recordOnly(ctx.companyId)).toBe(false);
   });
 });
+
+describe("the owner's watchdog changes leave activity lines (BOS-2150)", () => {
+  const lines = async () =>
+    (await ctx.db.select().from(activity).where(and(eq(activity.companyId, ctx.companyId), eq(activity.kind, "settings")))).map((a) => a.summary).sort();
+  const patch = async (b: Record<string, unknown>) => expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, b)).statusCode).toBe(200);
+
+  it("records each change once, and nothing for a save that changes nothing or is refused", async () => {
+    await ctx.db.update(companies).set({ watchdog: { ...readWatchdogSettings(null), enabled: false } }).where(eq(companies.id, ctx.companyId));
+    // Refused (no Scrum Master yet): no line.
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { enabled: true })).statusCode).toBe(422);
+    expect(await lines()).toEqual([]);
+
+    await patch({ scrumMasterAgentId: ctx.sm.id, enabled: true });
+    expect(await lines()).toEqual(["Owner set the Scrum Master to Scrum Master", "Owner switched the watchdog on"]);
+
+    // The same values again: nothing new.
+    await patch({ scrumMasterAgentId: ctx.sm.id, enabled: true, recordOnly: false });
+    expect(await lines()).toHaveLength(2);
+
+    // Changing one field leaves every other stored setting as it was.
+    const stored = async () => (await ctx.db.select({ watchdog: companies.watchdog }).from(companies).where(eq(companies.id, ctx.companyId)))[0]!.watchdog;
+    const before = await stored();
+    await patch({ inProgressHours: 3 });
+    expect(await stored()).toEqual({ ...readWatchdogSettings(before), inProgressHours: 3 });
+
+    await ctx.db.delete(activity).where(eq(activity.companyId, ctx.companyId));
+    await patch({ recordOnly: true, reviewHours: 5, blockedHours: 9, progressContract: false });
+    expect(await lines()).toEqual(["Owner changed the watchdog limits", "Owner switched the progress contract off", "Owner switched the watchdog's record-only mode on"]);
+    const [lim] = await ctx.db.select().from(activity).where(and(eq(activity.companyId, ctx.companyId), eq(activity.summary, "Owner changed the watchdog limits")));
+    expect(lim!.detail).toEqual({ reviewHours: { from: 2, to: 5 }, blockedHours: { from: 8, to: 9 } });
+
+    await ctx.db.delete(activity).where(eq(activity.companyId, ctx.companyId));
+    await patch({ scrumMasterAgentId: ctx.dev.id });
+    await patch({ enabled: false });
+    expect(await lines()).toEqual(["Owner set the Scrum Master to Developer", "Owner switched the watchdog off"]);
+
+    await ctx.db.delete(activity).where(eq(activity.companyId, ctx.companyId));
+    await patch({ scrumMasterAgentId: null });
+    expect(await lines()).toEqual(["Owner removed the Scrum Master"]);
+  });
+});
