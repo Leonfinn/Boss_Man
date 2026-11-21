@@ -158,4 +158,54 @@ describe("chat opened from a search result (BOS-2192)", () => {
     await screen.findByText("Message m6");
     await screen.findByText(/older than the messages shown here/);
   });
+
+  // The palette is opened over a chat that is already showing: the same ChatPage instance gets a new
+  // messageId (and maybe a new agent) and must still jump, not stay at the end (review of BOS-2192).
+  const twoChats = () =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/chat/threads"))
+          return json([
+            { id: "a1", name: "Radagast", role: "ceo", duty: null, state: "idle", last: null },
+            { id: "a2", name: "Saruman", role: "worker", duty: null, state: "idle", last: null },
+          ]);
+        const agent = url.includes("agentId=a2") ? "a2" : "a1";
+        const ids = agent === "a2" ? ["n0", "n1", "n2"] : ["m0", "m1", "m2"];
+        if (url.includes("/chat?")) return json({ agentId: agent, state: "idle", items: ids.map((id, i) => ({ id, role: "owner", text: `Message ${id}`, createdAt: new Date(2026, 10, 1, 10, i).toISOString() })) });
+        return json([]);
+      }),
+    );
+  const spyScroll = () => {
+    const seen: string[] = [];
+    vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element) {
+      seen.push(this.id || this.className);
+    });
+    return seen;
+  };
+  const page = (agentId: string, messageId?: string) => <ChatPage companies={[company]} companyId="c1" agentId={agentId} messageId={messageId} go={() => {}} onChanged={() => {}} />;
+
+  it("jumps to a message in the chat that is already open", async () => {
+    twoChats();
+    const seen = spyScroll();
+    const { rerender } = render(page("a1"));
+    await screen.findByText("Message m2");
+    await waitFor(() => expect(seen.length).toBeGreaterThan(0));
+    expect(seen).not.toContain("chat-msg-m1");
+    rerender(page("a1", "m1"));
+    await waitFor(() => expect(seen.at(-1)).toBe("chat-msg-m1"));
+    expect(document.getElementById("chat-msg-m1")!.className).toContain("found");
+  });
+
+  it("jumps to a message in another agent's chat picked from an open chat", async () => {
+    twoChats();
+    const seen = spyScroll();
+    const { rerender } = render(page("a1"));
+    await screen.findByText("Message m2");
+    rerender(page("a2", "n1"));
+    await screen.findByText("Message n1");
+    await waitFor(() => expect(seen).toContain("chat-msg-n1"));
+    expect(seen.at(-1)).toBe("chat-msg-n1");
+    expect(screen.queryByText(/older than the messages shown here/)).toBeNull();
+  });
 });

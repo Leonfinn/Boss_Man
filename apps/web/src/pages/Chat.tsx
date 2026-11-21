@@ -175,7 +175,16 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   // loaded without it (older than the newest 200 shown), say so and open at the end as usual.
   const target = useRef(messageId);
   const [olderThanShown, setOlderThanShown] = useState(false);
-  const loaded = !!chat.data;
+  // The palette stays mounted over this page and the page isn't keyed by route, so a result picked while a
+  // chat is open (same chat or another agent's) arrives as a new messageId on this same instance: re-arm.
+  // Declared before the scroll effect so it runs first in the same commit.
+  useEffect(() => {
+    target.current = messageId;
+    setOlderThanShown(false);
+  }, [messageId, current?.id]);
+  // Only this conversation's data counts: right after a switch the previous agent's page is still in
+  // chat.data for one render, and the target missing from it must not read as "older than shown".
+  const loaded = !!current && chat.data?.agentId === current.id;
   useEffect(() => {
     const want = target.current;
     if (want) {
@@ -191,7 +200,7 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
     }
     // Keyed on the polled newest page (BOS-2167), so loading older messages doesn't jump to the end.
     end.current?.scrollIntoView({ block: "end" });
-  }, [newest.length, newest.at(-1)?.id, current?.id, loaded]);
+  }, [newest.length, newest.at(-1)?.id, current?.id, loaded, messageId]);
   useEffect(() => {
     if (!current || !latest) return;
     markSeen(current.id, latest);
