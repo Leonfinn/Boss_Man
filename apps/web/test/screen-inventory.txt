@@ -168,10 +168,12 @@ reads:
 ## #/runs
 sections: 
   - Finished
+  - Permissions in this run
   - Running now
   - Runs
 reads: 
   - /api/runs
+  - /api/runs/:id/permissions
   - /api/runs/:id/transcript
 
 ## #/scrum-master
