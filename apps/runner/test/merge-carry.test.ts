@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { alwaysRetest, carryVerdict, retestFiles } from "../src/merge-carry.js";
+import { alwaysRetest, carryVerdict, nameList, retestFiles } from "../src/merge-carry.js";
 import { Workspaces } from "../src/workspace.js";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -256,6 +256,32 @@ describe("carryVerdict (BOS-1762)", () => {
     for (const p of ["apps/server/src/app.ts", "README.md", "docs/package.json.md", "scripts/deploy.sh", "src/migrationsHelper.ts", "apps/server/tsconfig.build.json", "apps/web/vite.config.ts", ".github/workflows/ci.yml", "db/migrations/001.sql", "apps/server/drizzle/meta/_journal.json"]) {
       expect(alwaysRetest(p), p).toBe(false);
     }
+  });
+});
+
+describe("nameList: git diff --name-only -z output to paths (BOS-2133)", () => {
+  it("is empty for no names, with or without git's trailing NUL", () => {
+    expect(nameList("")).toEqual([]);
+    expect(nameList("\0")).toEqual([]);
+  });
+
+  it("gives one name back", () => {
+    expect(nameList("src/one.ts\0")).toEqual(["src/one.ts"]);
+  });
+
+  it("gives two names back in the order git listed them", () => {
+    expect(nameList("src/one.ts\0src/two.ts\0")).toEqual(["src/one.ts", "src/two.ts"]);
+  });
+
+  it("keeps every name and applies no cut-off, however many there are", () => {
+    const names = Array.from({ length: 200 }, (_, i) => `packages/example/src/file-${i}.ts`);
+    const oneLongName = `${"deep/".repeat(40)}last.txt`;
+    const all = [...names, oneLongName];
+    expect(nameList(all.map((n) => `${n}\0`).join(""))).toEqual(all);
+  });
+
+  it("keeps names with spaces and drops only empty pieces", () => {
+    expect(nameList("a folder/one file.ts\0\0two.ts\0")).toEqual(["a folder/one file.ts", "two.ts"]);
   });
 });
 
