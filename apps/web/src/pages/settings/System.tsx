@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type Company } from "../../api";
+import { stopRun } from "../../stop-run";
 import { usePoll } from "../../hooks";
 import { inForceHeadline, inForceReason, type LimitInForce } from "../../limit-in-force";
 import { setHold, useHold } from "../../hold";
@@ -250,10 +251,10 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     });
   const stopOne = (run: WrapUpRun) =>
     act.run(async () => {
-      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
-      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
+      const said = await stopRun(run.runId, run.agent);
+      if (!said) return;
       maint.reload();
-      return "Stopping that run.";
+      return said;
     });
 
   return (
