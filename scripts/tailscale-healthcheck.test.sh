@@ -19,7 +19,7 @@ case "$test_line" in *"http://$addr/healthz"*) ;; *) fail "the healthcheck does 
 for key in interval timeout retries start_period; do
   a="$(grep -E "^[[:space:]]+$key:" "$f" | head -1 | sed -E 's/.*:[[:space:]]+//')"
   b="$(grep -E "^[[:space:]]+$key:" "$c" | head -1 | sed -E 's/.*:[[:space:]]+//')"
-  [ -n "$a" ] && [ "$a" = "$b" ] || fail "healthcheck $key is '$a', cloudflared uses '$b'"
+  if [ -z "$a" ] || [ "$a" != "$b" ]; then fail "healthcheck $key is '$a', cloudflared uses '$b'"; fi
 done
 
 echo "tailscale-healthcheck.test.sh: ok"
