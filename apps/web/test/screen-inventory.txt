@@ -78,6 +78,7 @@ reads:
   - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
+  - /api/decisions/answered
   - /api/decisions/tally
   - /api/funding-sources
   - /api/runs/:id/transcript
