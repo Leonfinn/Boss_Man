@@ -32,12 +32,11 @@ export function TicketRecord({ ticketId }: { ticketId: string }) {
       <h2 style={{ fontSize: 17, fontWeight: 600, marginBottom: 6 }}>What Boss Man recorded</h2>
       <ul style={{ margin: 0, paddingLeft: 18 }}>
         <li data-testid="record-runs">
-          Runs: {r.runs.total}
-          {r.runs.total > 0 && `, ${r.runs.errored === 0 ? "none ended in error" : `${r.runs.errored} ended in error`}`}
+          Runs: {r.runs.total === 0 ? "No runs yet" : `${r.runs.total}, ${r.runs.errored === 0 ? "none ended in error" : `${r.runs.errored} ended in error`}`}
         </li>
         <li data-testid="record-spend" style={over ? { color: "var(--red-ink)" } : undefined}>
           Spent so far: {usd(r.spendMicros)}
-          {r.capMicros != null ? ` of a ${usd(r.capMicros)} cap${over ? " (cap reached)" : ""}` : ", no cap set"}
+          {r.capMicros != null ? ` of ${usd(r.capMicros)}${over ? " (cap reached)" : ""}` : " (no cap set)"}
         </li>
         <li data-testid="record-check">
           Last check: {r.lastCheck ? `${r.lastCheck.result === "pass" ? "passed" : "failed"} (${r.lastCheck.scope})${r.lastCheck.at ? `, ${ago(r.lastCheck.at)}` : ""}` : "none yet"}
