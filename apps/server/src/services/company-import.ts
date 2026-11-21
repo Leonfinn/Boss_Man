@@ -298,7 +298,7 @@ export function readPackage(zip: Uint8Array): Package {
  */
 export function screenExtras(pkg: Package) {
   const lines: string[] = [];
-  const seenTargets = new Set<string>();
+  const seenTargets = new Set<string>(); // shortcut: local to one call, gone when it returns, so nothing to lose on restart
   const targets: Array<z.infer<typeof DeployTarget>> = [];
   for (const t of pkg.deployTargets) {
     const problem = endpointProblem(t.kind, t.endpoint);
@@ -360,7 +360,7 @@ export function screenExtras(pkg: Package) {
     // A package can't hand out permissions or move the owner's approvals to the CEO (a CEO routing rule beats the built-in
     // owner gates for destructive requests and pushes), so Allow and Ask-the-CEO both come in as Ask me.
     const softened = r.outcome === "allow" || r.outcome === "ceo";
-    if (softened) lines.push(`Rule "${r.name}" was ${r.outcome === "allow" ? "Allow" : "Ask the CEO"} in the export; it asks you now. Change it back in Settings → Rules if you trust it.`);
+    if (softened) lines.push(`Rule "${r.name}" was ${r.outcome === "allow" ? "Allow" : "Ask the CEO"} in the export; it asks you now. If you trust it, change it back in Settings → Permissions.`);
     rules.push({ name: r.name, match, outcome: softened ? "owner" : r.outcome, agentNames: wanted });
   }
   return { targets, rules, lines };

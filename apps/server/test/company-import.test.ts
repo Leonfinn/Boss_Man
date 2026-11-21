@@ -172,14 +172,14 @@ describe("deploy targets and permission rules in a package (BOS-2169)", () => {
     expect(imported.some((r) => r.name === "Global rule")).toBe(false);
 
     expect(checklist).toEqual(expect.arrayContaining([
-      'Rule "Restarts are fine" was Allow in the export; it asks you now. Change it back in Settings → Rules if you trust it.',
+      'Rule "Restarts are fine" was Allow in the export; it asks you now. If you trust it, change it back in Settings → Permissions.',
       'Add the secret "Deploy key" and grant it as DEPLOY_KEY to deploy target "Production".',
       expect.stringContaining('Deploy target "Production" had a live tag "live"'),
       expect.stringContaining('Deploy target "Socket" was not imported'),
       expect.stringContaining('Deploy target "Cred" was not imported'),
       "Rule \"Ghost's rule\" names Nobody, who isn't in this company; it was not imported.",
       expect.stringContaining('Rule "Raw ids" was not imported'),
-      'Rule "Ann\'s deletes go to the CEO" was Ask the CEO in the export; it asks you now. Change it back in Settings → Rules if you trust it.',
+      'Rule "Ann\'s deletes go to the CEO" was Ask the CEO in the export; it asks you now. If you trust it, change it back in Settings → Permissions.',
       expect.stringContaining('Rule "Destructive to CEO" was not imported'),
       expect.stringContaining('Rule "Deny all Boss Man" was not imported'),
       expect.stringContaining('Rule "Bad type" was not imported'),
