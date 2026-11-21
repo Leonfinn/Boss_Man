@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, plainReason, runnerProgress, updateStatus, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, historyWaitingOn, wrapUpBannerText, plainReason, runnerProgress, updateStatus, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
@@ -108,6 +108,29 @@ describe("updateStatus: one row per state, first match wins", () => {
     const s = updateStatus(base(), m, null, NOW);
     expect(s.tag).toBe("Wrapping up");
     expect(s.primary).toBeNull();
+  });
+
+  it("2c. BOS-2056: a wrap-up names the update it is for, or says none was waiting", () => {
+    const mk = (over: Record<string, unknown>) => ({ on: true, kind: "wrapup", deadline: iso(5), runs: 0, companies: 1, wrapAsked: true, notRespondingAfter: 10, runsList: [], wrapSince: iso(-20), ...over }) as unknown as MaintenanceView;
+    const server = updateStatus(base(), mk({ wrapForUpdate: "server" }), null, NOW);
+    expect(server.say).toContain("Wrapping up for the server update");
+    expect(server.more).toContain("lifts by itself");
+    const none = updateStatus(base(), mk({ wrapForUpdate: "none" }), null, NOW);
+    expect(none.more).toContain("no update was waiting");
+    expect(none.more).not.toContain("Nothing new starts until you press");
+    expect(wrapUpBannerText({ runs: 1, wrapSince: iso(-20), wrapForUpdate: "none" })).toMatch(/^You asked agents to wrap up at .+ \(no update was waiting\)\./);
+    expect(wrapUpBannerText({ runs: 0, wrapSince: iso(-20), wrapForUpdate: "server" })).toContain("Wrapping up for the server update");
+  });
+
+  it("2d. BOS-2056: every Waiting row in Recent updates says what it waits on", () => {
+    const row = (over: Partial<HistoryRow>) => ({ id: "h1", at: iso(-5), target: "server", result: "queued", changes: 2, message: "", ...over }) as unknown as HistoryRow;
+    expect(historyTag(row({})).tag).toBe("Waiting");
+    expect(historyWaitingOn(row({}), null, null, false)).toContain("your approval");
+    const w: DeployWaitView = { on: true, phase: "waiting", origin: "approve", commit: "bbbbbbbb22", deadline: iso(20), quiet: { ready: false, runs: 1, checks: 0, freeMb: null, needMb: null, why: ["1 agent is running"] } };
+    expect(historyWaitingOn(row({}), w, null, false)).toContain("a quiet machine: 1 agent is running");
+    expect(historyWaitingOn(row({ target: "runner" }), null, maintUpdate(), false)).toContain("the runner swap: waiting for 2 runs");
+    expect(historyWaitingOn(row({ target: "runner" }), null, null, true)).toContain("in front of it");
+    expect(historyWaitingOn(row({ result: "deployed" }), null, null, false)).toBeNull();
   });
 
   it("3. Approved, waiting for a quiet machine: no main button, a Cancel, BOS-420's line", () => {

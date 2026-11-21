@@ -43,7 +43,7 @@ export async function runnerUpdateNeed(db: Db, companyId: string, opts: { liveFa
     return unknown(null, live, "image-unrecorded", "the runners haven't said which version their image was built from", "Press Build and update runners once: a rebuilt image reports its version, and this line then answers by itself.");
   }
   if (!live) {
-    return unknown(image, null, "live-unrecorded", "Boss Man hasn't recorded which version the server runs yet", "It records it within a few minutes of the server starting; if this stays, the host deployer isn't reporting (Settings → Server and runner → This host).");
+    return unknown(image, null, "live-unrecorded", "Boss Man hasn't recorded which version the server runs yet", "It records it within a few minutes of the server starting; if this stays, the host deployer isn't reporting (Settings → Server and runner → This server).");
   }
   if (image === live) {
     return { state: "not_needed", image, live, tickets: [], words: `Runners are up to date: they were built from the version the server runs (${short(live)}).` };

@@ -35,7 +35,7 @@ export function Devices() {
   return (
     <Section id="devices-h" title="Your devices">
       <p className="muted" style={{ fontSize: 14 }}>
-        This browser can measure its own screen so a layout fix is checked at the real thing, not a guessed size. Open this page on each device you use, press Record, and the figures are kept here: width and height, pixel ratio, touch, standalone mode, and the real 100vh, 100dvh, 100svh and 100lvh heights. Only screen facts are stored; your devices are listed under Server and runner.
+        This browser can measure its own screen so a layout fix is checked at the real thing, not a guessed size. Open this page on each device you use, press Record, and the figures are kept here: width and height, pixel ratio, touch, standalone mode, and the real 100vh, 100dvh, 100svh and 100lvh heights. Only screen facts are stored; your devices are listed on this page, under Devices and privacy.
       </p>
       <button type="button" className="btn primary" onClick={record} disabled={act.busy} style={{ alignSelf: "flex-start" }}>
         {act.busy ? "Measuring…" : "Record this device"}

@@ -11,7 +11,7 @@ import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { lazyPage, PageSuspense } from "./lazy-page";
 import { settingsRedirect } from "./pages/settings-redirect";
-import { drainTiming, waitingFor, type RunnerCheckView } from "./pages/settings/updates";
+import { atTime, drainTiming, waitingFor, wrapUpBannerText, type RunnerCheckView } from "./pages/settings/updates";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 
 // BOS-1843: every page below loads when it is first opened. Login, the shell and the banners stay in the entry file.
@@ -105,7 +105,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951: merges being pushed to main (named by ticket), and a wait on nothing Boss Man can name. */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951: merges being pushed to main (named by ticket), and a wait on nothing Boss Man can name. */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2056: when the owner's wrap-up was asked and which update it is for. */ wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -113,7 +113,7 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
   if (m.kind === "wrapup")
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-        Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner → Updates.
+        {wrapUpBannerText(m)}
       </p>
     );
   if (m.kind === "building")
@@ -144,10 +144,11 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
       {m.overdue && m.phase === "waiting" ? (
         <>
           {m.unknownWait ? "It is running late: Boss Man cannot say what it is waiting for. " : "It is past the time given: "}
-          <a href="#/settings">choose in Settings → Server and runner → Updates</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
+          <a href="#/settings/updates">choose in Settings → Server and runner → Updates</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
         </>
       ) : null}
-      {m.runs > 0
+      {m.wrapSince ? `Wrapping up for this update (asked at ${atTime(m.wrapSince)}): it ends by itself when the update goes in. ` : ""}
+      {m.runs > 0 && !m.wrapSince
         ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner → Updates.'
         : (m.checks ?? 0) > 0
           ? "To go ahead without waiting, use \"Stop the checks and update now\" on Settings → Server and runner → Updates: they restart from the beginning afterwards."

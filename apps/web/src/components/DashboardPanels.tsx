@@ -156,6 +156,24 @@ export function needsList(decisions: Decision[]): Decision[] {
   return decisions.filter((d) => !d.waiting).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 }
 
+function spanText(ms: number): string {
+  const m = Math.floor(Math.max(0, ms) / 60_000);
+  if (m < 1) return "under a minute";
+  if (m < 60) return m === 1 ? "1 minute" : `${m} minutes`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return h === 1 ? "1 hour" : `${h} hours`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? "1 day" : `${d} days`;
+}
+
+/** (BOS-2174) "Oldest waiting 3 days · usually answered in 5 hours"; a part the server couldn't work out is left out. */
+export function waitLine(tally: DecisionTally | null | undefined, now = Date.now()): string | null {
+  const parts: string[] = [];
+  if (tally?.oldestOpenAt) parts.push(`Oldest waiting ${spanText(now - new Date(tally.oldestOpenAt).getTime())}`);
+  if (tally?.medianAnswerMs != null) parts.push(`usually answered in ${spanText(tally.medianAnswerMs)}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 export function NeedsYou({ decisions, tally }: { decisions: Decision[] | null; tally: DecisionTally | null | undefined }) {
   if (!decisions) {
     return (
@@ -179,6 +197,7 @@ export function NeedsYou({ decisions, tally }: { decisions: Decision[] | null; t
         Needs you
         {open > 0 && <span className="dash-count" aria-label={figureText("decisions.needYou", open)}>{open}</span>}
       </h2>
+      {open > 0 && waitLine(tally) && <p className="muted dash-needs-wait">{waitLine(tally)}</p>}
       {shown.length === 0 && open === 0 ? (
         <p className="dash-calm">
           <span className="dash-sym" aria-hidden="true">✓</span>

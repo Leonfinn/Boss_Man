@@ -1,7 +1,7 @@
 // The owner chat (v1.1, R70), laid out like a messenger: the team on the left, the
 // conversation on the right. Most messages go to the CEO, but any agent can be messaged
 // directly. On a phone the list and the conversation take turns.
-import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
 import { NoCompany } from "../components/NoCompany";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
@@ -20,7 +20,7 @@ import { linkPieces, type LinkContext } from "../links";
 import type { TraceBody } from "@boss-man/shared";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
-type Chat = { agentId: string; items: Message[]; state: string; live?: TraceBody | null };
+type Chat = { agentId: string; items: Message[]; hasMore?: boolean; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
 type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
@@ -185,7 +185,40 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
   const [seen, setSeen] = useState(readSeen);
   const end = useRef<HTMLDivElement>(null);
   const state = chat.data?.state ?? "idle";
-  const items = chat.data?.items ?? [];
+  // Older pages the owner loaded (BOS-2167), kept apart from the polled newest 200 so a poll never drops them.
+  const [older, setOlder] = useState<{ key: string; items: Message[]; hasMore: boolean } | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const logRef = useRef<HTMLDivElement>(null);
+  const keep = useRef<{ height: number; top: number } | null>(null);
+  const convKey = `${company?.id ?? "none"}/${current?.id ?? "none"}`;
+  const olderHere = older?.key === convKey ? older : null;
+  const newest = chat.data?.items ?? [];
+  const seenIds = new Set(newest.map((m) => m.id));
+  const items = olderHere ? [...olderHere.items.filter((m) => !seenIds.has(m.id)), ...newest] : newest;
+  const hasMore = olderHere ? olderHere.hasMore : (chat.data?.hasMore ?? false);
+  const loadOlder = async () => {
+    const first = items[0];
+    if (!company || !current || !first || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await api<Chat>(`/api/companies/${company.id}/chat?agentId=${current.id}&before=${first.id}`);
+      const log = logRef.current;
+      keep.current = log ? { height: log.scrollHeight, top: log.scrollTop } : null;
+      setOlder({ key: convKey, items: [...page.items, ...(olderHere?.items ?? [])], hasMore: page.hasMore ?? false });
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+  // After older messages are added above, put the owner back on the message they were reading.
+  useLayoutEffect(() => {
+    const k = keep.current;
+    const log = logRef.current;
+    keep.current = null;
+    if (k && log) log.scrollTop = k.top + (log.scrollHeight - k.height);
+  }, [olderHere?.items.length]);
   const live = chat.data?.live ?? null;
   // Which traces and steps the owner has opened, kept by message (or the live run) so the 2 s poll
   // doesn't close them; not kept after a reload (BOS-1367). Keyed by message id, or `live:<agentId>`.
@@ -197,7 +230,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
-  }, [items.length, current?.id]);
+  }, [newest.length, newest.at(-1)?.id, current?.id]);
   useEffect(() => {
     if (!current || !latest) return;
     markSeen(current.id, latest);
@@ -299,7 +332,12 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                 </div>
                 {starred && <StarButton agent={starred} onToggle={() => void api(`/api/agents/${current.id}`, { method: "PATCH", body: { starred: !starred.starred } }).then(onChanged, (err: Error) => setError(err.message))} />}
               </header>
-              <div className="chat-log" role="log" aria-live="polite">
+              <div className="chat-log" role="log" aria-live="polite" ref={logRef}>
+                {hasMore && (
+                  <button type="button" className="btn" onClick={() => void loadOlder()} disabled={loadingOlder}>
+                    {loadingOlder ? "Loading…" : "Load older messages"}
+                  </button>
+                )}
                 {!chat.data && chat.error && <LoadError what="this conversation" message={chat.error.message} onRetry={chat.reload} />}
                 {!chat.data && !chat.error && <Loader label="Loading the conversation" size={16} />}
                 {items.length === 0 && chat.data && (
