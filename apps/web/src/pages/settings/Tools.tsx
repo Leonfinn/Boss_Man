@@ -344,16 +344,20 @@ export function DeployTargets({ company }: { company: Company }) {
       return `${what}.${form.tagOn ? ` After each successful deploy to ${form.name}, Boss Man moves the tag ${form.tagName.trim()}.` : ""}`;
     });
   };
-  const remove = (t: DeployTargetRow) =>
-    window.confirm(`Delete the deploy target ${t.name}? Agents can no longer deploy to it.`) &&
+  // BOS-2158: the target the server said has past deploys; "Remove anyway" is offered only for that. A live deploy only shows the message.
+  const [askAnyway, setAskAnyway] = useState<{ id: string; message: string } | null>(null);
+  const remove = (t: DeployTargetRow, force = false) =>
+    (force || window.confirm(`Delete the deploy target ${t.name}? Agents can no longer deploy to it.`)) &&
     void act.run(async () => {
+      setAskAnyway(null);
       try {
-        await api(`/api/deploy-targets/${t.id}`, { method: "DELETE" });
+        await api(`/api/deploy-targets/${t.id}${force ? "?force=1" : ""}`, { method: "DELETE" });
       } catch (err) {
-        // BOS-2158: a live deploy only shows the server's message; past deploys offer "Remove anyway".
-        if (!(err instanceof ApiError) || err.status !== 409 || err.field !== "has_history") throw err;
-        if (!window.confirm(`${err.message} Remove anyway?`)) return "Nothing was removed.";
-        await api(`/api/deploy-targets/${t.id}?force=1`, { method: "DELETE" });
+        if (err instanceof ApiError && err.status === 409 && err.field === "has_history") {
+          setAskAnyway({ id: t.id, message: err.message });
+          return;
+        }
+        throw err;
       }
       if (editing === t.id) cancel();
       targets.reload();
@@ -417,6 +421,14 @@ export function DeployTargets({ company }: { company: Company }) {
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(t)} aria-label={`Delete deploy target ${t.name}`}>
                       Delete
                     </button>
+                    {askAnyway?.id === t.id && (
+                      <div role="alert" className="error" style={{ fontSize: 14, whiteSpace: "normal" }}>
+                        {askAnyway.message}{" "}
+                        <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(t, true)}>
+                          Remove anyway
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

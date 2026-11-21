@@ -518,6 +518,17 @@ export function deploysService(
       const past = await db.select({ status: deploys.status }).from(deploys).where(eq(deploys.targetId, id));
       if (past.some((d) => d.status === "pending_approval" || d.status === "approved" || d.status === "running")) return "live";
       if (past.length > 0 && !force) return "has_history";
+      // No card may be left pointing at an erased deploy: close any still open with a plain reason.
+      const ids = (await db.select({ id: deploys.id }).from(deploys).where(eq(deploys.targetId, id))).map((d) => d.id);
+      if (ids.length) {
+        const at = now();
+        const open = await db.select({ id: decisions.id, context: decisions.context }).from(decisions).where(eq(decisions.status, "open"));
+        for (const d of open) {
+          const ctx = d.context as { type?: string; deployId?: string };
+          if (ctx.type !== "deploy" || !ctx.deployId || !ids.includes(ctx.deployId)) continue;
+          await db.update(decisions).set({ status: "withdrawn", answeredAt: at, dedupeKey: null, context: sql`${decisions.context} || ${JSON.stringify({ withdrawn: { by: "system", note: "The deploy target was removed, so this deploy no longer exists.", at: at.toISOString() } })}::jsonb` }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
+        }
+      }
       const rows = await db.delete(deployTargets).where(eq(deployTargets.id, id)).returning({ id: deployTargets.id, companyId: deployTargets.companyId, name: deployTargets.name });
       if (rows[0]) await record(db, { companyId: rows[0].companyId, kind: "settings", summary: `Owner removed deploy target ${rows[0].name}${past.length ? ` and its ${past.length} past deploy${past.length === 1 ? "" : "s"}` : ""}` });
       return rows.length > 0 ? "deleted" : "not_found";

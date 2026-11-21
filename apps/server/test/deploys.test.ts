@@ -95,6 +95,11 @@ describe("deploy targets (R14)", () => {
     expect(await c.db.select().from(deploys)).toHaveLength(1);
     expect((await c.req("DELETE", `/api/deploy-targets/${id}?force=1`)).statusCode).toBe(204);
     expect(await c.db.select().from(deploys)).toHaveLength(0);
+    // The approval card the deploy raised is closed with a reason, not left open pointing at nothing.
+    const cards = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ status: "withdrawn" });
+    expect(JSON.stringify(cards[0]!.context)).toContain("deploy target was removed");
   });
 
   it("checks the endpoint shape for each kind", () => {
