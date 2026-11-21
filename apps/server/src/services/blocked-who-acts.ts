@@ -2,7 +2,7 @@
 // (a date only wakes the ticket's own assignee), and a ticket parked by date again and again goes to the CEO.
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { activity, agents } from "../db/schema.js";
+import { activity, agents, companies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import type { BlockedHold } from "./ticket-links.js";
 
@@ -33,20 +33,33 @@ export async function refusalForNamedAgent(db: Db, input: { companyId: string; a
   if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live")) return null;
   // BOS-2141: "merged_watch" no longer exempts a note that names a colleague: the watch wakes the assignee, not them.
   const name = await namedColleague(db, input.companyId, input.agentId, input.text);
-  if (name) return NAMED_AGENT_REFUSAL(name);
-  // BOS-2141: on merged work a note that says it waits on another ticket (BOS-123) needs that ticket linked too.
-  if (input.holds.some((h) => h.kind === "merged_watch")) {
-    const ref = WAITS_ON_TICKET.exec(input.text)?.[1];
-    if (ref) return NAMED_TICKET_REFUSAL(ref);
-  }
-  return null;
+  return name ? NAMED_AGENT_REFUSAL(name) : null;
 }
 
-/** "waiting on Moony, BOS-2078", "blocked by BOS-12": a wait word, then a ticket number a few words later. */
-const WAITS_ON_TICKET = /\b(?:[Ww]ait(?:s|ing)?|[Bb]locked|[Hh]eld|[Pp]arked|[Ss]tuck)\b[^.\n]{0,60}?\b([A-Z]{2,6}-\d+)\b/;
+// BOS-2142: a note that waits on another ticket (BOS-123) needs that ticket linked, merged-watch or not (refusalForNamedTicket).
+const WAITS_ON_TICKET = /\b(?:waiting|waits?|blocked|held|holding|hold|pending|behind|until|once|after)\b[^.;\n]{0,40}?\b([A-Za-z]{2,10}-\d{1,9})\b/gi;
+
+/** Ticket references (PREFIX-number) the text says it waits on, other than the ticket's own. */
+export function ticketsWaitedOn(text: string, ownRef: string | null): string[] {
+  const found: string[] = [];
+  for (const m of text.matchAll(WAITS_ON_TICKET)) {
+    const ref = m[1]!;
+    if (!/^[A-Z]{2,10}-\d+$/.test(ref) || ref === ownRef || found.includes(ref)) continue;
+    found.push(ref);
+  }
+  return found;
+}
 
 export const NAMED_TICKET_REFUSAL = (ref: string) =>
-  `This note says the ticket waits on ${ref}, but nothing links it: a date only wakes you. Link ${ref} first (update_ticket waitsOn add, until merged or done), then move it to Blocked again. If ${ref} is not what holds it, leave it out of the note.`;
+  `This note says the ticket waits on ${ref}, but nothing links it: a date only wakes you, and nothing wakes anyone when ${ref} finishes. Link it first (update_ticket waitsOn add ${ref}, until merged or done), then move it to Blocked again. If ${ref} is not what holds it, leave it out of the note.`;
+
+/** Whether a Blocked move says it waits on another ticket and has no waits-on link (a date, or "Merged, watching", is not one). */
+export async function refusalForNamedTicket(db: Db, input: { companyId: string; ticketId: string; text: string; holds: BlockedHold[] }): Promise<string | null> {
+  if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live")) return null;
+  const [own] = await db.select({ number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, input.ticketId));
+  const ref = ticketsWaitedOn(input.text, own?.prefix ? `${own.prefix}-${own.number}` : null)[0];
+  return ref ? NAMED_TICKET_REFUSAL(ref) : null;
+}
 
 /**
  * Records how this Blocked move was held and says whether this is the 3rd date-only park in a row (no link or card between,
