@@ -1494,7 +1494,19 @@ export async function buildApp(opts: AppOptions) {
   const lockoutGate = lockoutNoticeGate(3, 60 * 60_000, () => (opts.now ? opts.now().getTime() : Date.now()));
   const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()), (e) => {
     const gate = lockoutGate.take();
-    if (!gate.send) return;
+    if (!gate.send) {
+      if (gate.summaryInMs !== undefined) {
+        // One summary when the window frees up: "N more locks", so the owner sees the size of a burst.
+        setTimeout(() => {
+          const n = lockoutGate.flush();
+          if (n === 0) return;
+          notes
+            .notify({ companyId: null, agentId: null, level: "flag", title: `${n} more sign-in lock${n === 1 ? "" : "s"} (addresses or usernames) in the last hour were not announced one by one`, body: "If this wasn't you, change your password in Settings → Account.", link: "#/settings" })
+            .catch((err) => app.log.warn({ err }, "sign-in lockout summary failed"));
+        }, gate.summaryInMs).unref();
+      }
+      return;
+    }
     const more = gate.held > 0 ? ` (${gate.held} more lock${gate.held === 1 ? "" : "s"} in the last hour were not announced)` : "";
     const limits = opts.loginLimits ?? DEFAULT_LOGIN_LIMITS;
     const address = e.ip.replace(/[^0-9a-fA-F.:%]/g, "").slice(0, 64) || "an unknown address";

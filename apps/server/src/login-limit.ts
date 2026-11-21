@@ -18,17 +18,24 @@ export function lockoutNoticeGate(max = 3, windowMs = 60 * 60_000, now: () => nu
   let held = 0;
   return {
     /** `send` says whether to raise this notice; `held` is how many were left out since the last one that went out. */
-    take(): { send: boolean; held: number } {
+    take(): { send: boolean; held: number; summaryInMs?: number } {
       const cutoff = now() - windowMs;
       sent = sent.filter((t) => t > cutoff);
       if (sent.length >= max) {
         held++;
-        return { send: false, held };
+        // The first held lock asks for one summary when the oldest sent notice leaves the window.
+        return { send: false, held, ...(held === 1 ? { summaryInMs: Math.max(1, sent[0]! + windowMs - now()) } : {}) };
       }
       sent.push(now());
       const earlier = held;
       held = 0;
       return { send: true, held: earlier };
+    },
+    /** Takes the held count for the summary notice (0 if a later notice already told it). */
+    flush(): number {
+      const n = held;
+      held = 0;
+      return n;
     },
   };
 }

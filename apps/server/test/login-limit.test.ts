@@ -171,6 +171,17 @@ describe("loginLimiter", () => {
       expect(gate.take()).toEqual({ send: true, held: 50 });
       expect(gate.take()).toEqual({ send: true, held: 0 });
     });
+
+    it("asks for one summary on the first held lock, and flush hands over the count once", () => {
+      let t = 0;
+      const gate = lockoutNoticeGate(1, 1000, () => t);
+      expect(gate.take().send).toBe(true);
+      t += 400;
+      expect(gate.take()).toEqual({ send: false, held: 1, summaryInMs: 600 });
+      expect(gate.take()).toEqual({ send: false, held: 2 });
+      expect(gate.flush()).toBe(2);
+      expect(gate.flush()).toBe(0);
+    });
   });
 
   it("defaults to 10 failures in 15 minutes", () => {
