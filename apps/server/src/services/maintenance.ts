@@ -434,7 +434,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
-    await deps.notify({ companyId: null, level, title, body, link: "#/settings" });
+    await deps.notify({ companyId: null, level, title, body, link: "#/settings/updates" });
     // The agents that wrapped up for the update are woken again, as they were told they would be (BOS-574).
     if (h && deps.afterHold) await deps.afterHold(new Date(h.since)).catch((err) => deps.log?.(`waking agents after the update failed: ${(err as Error).message}`));
     // Held wakes were only waiting; one pass starts them.
@@ -486,8 +486,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     const [card] = await db.select({ options: decisions.options }).from(decisions).where(and(eq(decisions.dedupeKey, `maintenance:${h.since}:${h.deadline}`), eq(decisions.status, "open")));
     const buttons = ((card?.options as string[] | undefined) ?? []).filter((o) => o !== WAIT_TEN_MORE);
     const ends = h.force ? "" : ` If the work is still going at ${fmtTime(drainGoAheadAt(h))}, the update goes ahead by itself then and stops it.`;
-    if (buttons.length) return `The owner has a card open in Settings > Server and runner with these options: ${buttons.map((b) => `"${b}"`).join(", ")}.${ends}`;
-    return `No question to the owner is open right now; the owner can cancel the update in Settings > Server and runner.${ends}`;
+    if (buttons.length) return `The owner has a card open in Settings > Server and runner > Updates with these options: ${buttons.map((b) => `"${b}"`).join(", ")}.${ends}`;
+    return `No question to the owner is open right now; the owner can cancel the update in Settings > Server and runner > Updates.${ends}`;
   }
 
   /**
@@ -573,7 +573,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // Nobody is told to stop: runs going carry on, only new starts wait. The deadline is the hold's own limit.
         const b: Hold = { reason: "building the new runner image", kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
         await save(b);
-        await deps.notify({ companyId: null, level: "note", title: "Runner update building: new work held", body: `The new runner image is being built and checked. New runs and checks wait from now, so the swap does not have to wait for work that starts during the build. Runs already going carry on. If the build fails the hold lifts by itself; it also lifts after ${minutes} minutes at the latest. You can cancel it in Settings > Server and runner.`, link: "#/settings" });
+        await deps.notify({ companyId: null, level: "note", title: "Runner update building: new work held", body: `The new runner image is being built and checked. New runs and checks wait from now, so the swap does not have to wait for work that starts during the build. Runs already going carry on. If the build fails the hold lifts by itself; it also lifts after ${minutes} minutes at the latest. You can cancel it in Settings > Server and runner > Updates.`, link: "#/settings/updates" });
         return b;
       }
       // BOS-2058: a wrap-up pressed while a server update waits for a quiet machine belongs to that update (it used to be a
@@ -591,7 +591,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           kind === "wrapup"
             ? `Every running agent was asked to finish its step and stop cleanly. Nothing new starts in any company until you cancel the wrap-up or the update it was for finishes. Runs still going after ${minutes} minutes are only flagged, never stopped for you.`
             : `Nothing new starts in any company. Each runner is ${kind === "settings" ? "recreated with the new settings" : "swapped"} as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`,
-        link: "#/settings",
+        link: "#/settings/updates",
       });
       return kind === "wrapup" ? { ...h, wrapSince: h.since, wrapNotRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES, wrapTold: told } : { ...h, startTold: told };
     },
@@ -840,7 +840,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const downSince = h.launcherDownSince ?? t.toISOString();
         if (t.getTime() - Date.parse(downSince) >= WAIT_RULES["runner-launcher"].endMin * 60_000) {
           const minutes = Math.round((t.getTime() - Date.parse(downSince)) / 60_000);
-          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Start the update again from Settings > Server and runner > Updates once the launcher is back.`);
+          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Once the launcher is back, start the update again from Settings > Server and runner > Updates.`);
           if (deps.wakeCeo) {
             for (const co of await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))) {
               await deps.wakeCeo(co.id, `The runner update gave up: the runner launcher did not answer for ${minutes} minutes, so the hold lifted and new runs start again on the old runner image. Nothing was stopped. The owner was told; the update needs starting again once the launcher answers.`).catch((e) => deps.log?.(`drain: waking the CEO failed: ${(e as Error).message}`));
@@ -887,7 +887,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const runLine = (r: (typeof going)[number]) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})${stoppedSet.has(r.runId) ? "" : " (could not be stopped; it ends with the swap)"}`;
         const checkLine = (c: (typeof checksNow)[number]) => `${c.kind} check${c.ticket ? ` for ${c.ticket}` : ""} (${c.scope})`;
         const parts = [going.length ? `stopped ${going.map(runLine).join(", ")}` : "", checksNow.length ? `restarts ${checksNow.map(checkLine).join(", ")} after the swap` : ""].filter(Boolean);
-        await deps.notify({ companyId: null, level: "note", title: "Runner update went ahead by itself", body: `The update waited ${minutes} minutes, its own limit, with work still going, so it went ahead without anyone pressing anything: it ${parts.join(" and ") || "stopped what was still going"}. Stopped tickets wake again after the update.`, link: "#/settings" });
+        await deps.notify({ companyId: null, level: "note", title: "Runner update went ahead by itself", body: `The update waited ${minutes} minutes, its own limit, with work still going, so it went ahead without anyone pressing anything: it ${parts.join(" and ") || "stopped what was still going"}. Stopped tickets wake again after the update.`, link: "#/settings/updates" });
         if (deps.wakeCeo) {
           const byCompany = new Map<string, string[]>();
           const add = (companyId: string, line: string) => byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), line]);
@@ -903,7 +903,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       // BOS-1807: the hard cap passed with work still going: new work is no longer held; say so once.
       if (!h.capNotified && total > 0 && !holdBlocksStarts(h, t)) {
         h = { ...h, capNotified: true };
-        await deps.notify({ companyId: null, level: "note", title: "Runner update: new work is no longer held", body: `The update waited for ${first.runsTotal} run${first.runsTotal === 1 ? "" : "s"} and ${first.checksTotal} check${first.checksTotal === 1 ? "" : "s"} and ${h.swapWhenDone ? `they did not finish within ${SWAP_WHEN_DONE_CAP_MINUTES} minutes of "${SWAP_WHEN_DONE}"` : `you did not answer within ${HOLD_CAP_MINUTES} minutes`}, so new runs and checks start again. The update still goes ahead by itself once a company has none going. Open Settings > Server and runner to hold again or cancel.`, link: "#/settings" });
+        await deps.notify({ companyId: null, level: "note", title: "Runner update: new work is no longer held", body: `The update waited for ${first.runsTotal} run${first.runsTotal === 1 ? "" : "s"} and ${first.checksTotal} check${first.checksTotal === 1 ? "" : "s"} and ${h.swapWhenDone ? `they did not finish within ${SWAP_WHEN_DONE_CAP_MINUTES} minutes of "${SWAP_WHEN_DONE}"` : `you did not answer within ${HOLD_CAP_MINUTES} minutes`}, so new runs and checks start again. The update still goes ahead by itself once a company has none going. Open Settings > Server and runner > Updates to hold again or cancel.`, link: "#/settings/updates" });
       }
 
       // BOS-1954: the swap waited past when it should have finished: wake the CEO once (not the owner), naming what it waits on.
@@ -1016,9 +1016,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           const idle = waiting.filter((r) => !busy(r));
           const busyList = waiting.filter(busy).map((r) => r.slug);
           if (!idle.length)
-            await deps.notify({ companyId: null, level: "page", title: "Runner update is waiting for running work", body: `No runner has been swapped for ${minutes} minutes because ${busyList.join(", ")} still ${busyList.length === 1 ? "has" : "have"} work runs or checks going. This wait is on purpose: each runner is swapped as soon as its runs finish, and at the deadline you are asked whether to stop them. New runs are held everywhere until then. To stop waiting, open Settings > Server and runner and cancel the update.`, link: "#/settings" });
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is waiting for running work", body: `No runner has been swapped for ${minutes} minutes because ${busyList.join(", ")} still ${busyList.length === 1 ? "has" : "have"} work runs or checks going. This wait is on purpose: each runner is swapped as soon as its runs finish, and at the deadline you are asked whether to stop them. New runs are held everywhere until then. To stop waiting, open Settings > Server and runner > Updates and cancel the update.`, link: "#/settings/updates" });
           else
-            await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${minutes} minutes. Still waiting on: ${idle.map((r) => r.slug).join(", ")}${busyList.length ? ` (and on ${busyList.join(", ")}, which still ${busyList.length === 1 ? "has" : "have"} work runs or checks going)` : ""}. New runs are held everywhere. Open Settings > Server and runner: wait for that company to finish, or cancel the update.`, link: "#/settings" });
+            await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${minutes} minutes. Still waiting on: ${idle.map((r) => r.slug).join(", ")}${busyList.length ? ` (and on ${busyList.join(", ")}, which still ${busyList.length === 1 ? "has" : "have"} work runs or checks going)` : ""}. New runs are held everywhere. Open Settings > Server and runner > Updates: wait for that company to finish, or cancel the update.`, link: "#/settings/updates" });
         }
       }
       await save(h);

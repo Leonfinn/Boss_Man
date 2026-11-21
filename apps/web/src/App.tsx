@@ -144,7 +144,7 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
       {m.overdue && m.phase === "waiting" ? (
         <>
           {m.unknownWait ? "It is running late: Boss Man cannot say what it is waiting for. " : "It is past the time given: "}
-          <a href="#/settings">choose in Settings → Server and runner → Updates</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
+          <a href="#/settings/updates">choose in Settings → Server and runner → Updates</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
         </>
       ) : null}
       {m.runs > 0

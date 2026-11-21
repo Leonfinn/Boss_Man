@@ -15,6 +15,8 @@ export function settingsRedirect(route: readonly string[], companyId: string | u
   const [page, ...rest] = route;
   if (page === "settings") {
     // The company's id is the first part after "settings"; the page is the second.
+    // A link without a company, such as #/settings/updates from a server notice, opens that page for the chosen company.
+    if (rest.length === 1 && (SETTINGS_PAGE_IDS as readonly string[]).includes(rest[0] ?? "") && companyId) return settingsPath(companyId, rest[0] as SettingsPage);
     if (rest.length <= 1) return null;
     const [company, tab] = [rest[0], rest[1]];
     if ((SETTINGS_PAGE_IDS as readonly string[]).includes(tab ?? "")) return null;
