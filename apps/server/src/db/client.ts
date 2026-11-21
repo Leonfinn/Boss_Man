@@ -33,7 +33,7 @@ export function dbPoolLimits(env: Record<string, string | undefined>): DbPoolLim
 
 /** Logs each kind of limit hit once per process (not per query), naming which one. Takes any error; ignores the rest. */
 export function makeLimitWatcher(limits: DbPoolLimits, log: (msg: string) => void = (m) => console.error(m)): (err: unknown) => void {
-  const seen = new Set<string>();
+  const seen = new Set<string>(); // lost on restart, harmless because it only limits repeat log lines to one per kind per process
   return (err) => {
     const e = err as { code?: string; message?: string } | null;
     const message = e?.message ?? "";
