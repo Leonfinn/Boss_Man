@@ -10,7 +10,7 @@ pnpm --filter @boss-man/site check      # links, images, titles, descriptions, o
 pnpm --filter @boss-man/site test
 ```
 
-`SITE_URL` (an https address such as `https://example.com`, no path; the build stops on anything else) turns on canonical links, absolute `og:` image URLs and `sitemap.xml`. Without it those are left out. Set it in the Cloudflare Pages build settings once the domain is chosen.
+`SITE_URL` (an https address such as `https://example.com`, no path; the build stops on anything else) turns on canonical links, absolute `og:` image URLs and `sitemap.xml`. Without it those are left out. For a publish it comes from Settings → Secrets (see "Publishing").
 
 `PORTAL_URL` (or `portalUrl` in `src/site.json`) is the public https address of Boss Man's own feedback portal. While it is empty, every roadmap link (menu, footer, home page box) is left out, so the site never carries a home-network address. The build refuses anything that is not a public https address with a domain name (no IP address, `.local`, `.lan`, `.ts.net`, `localhost` or login in the address). The links open the portal in the same tab. Never put the portal's secret link in the repo.
 
@@ -57,9 +57,108 @@ To change a Secrets value, the owner edits the entry in Settings → Secrets. Th
 
 Most common failure: the build stops with "UMAMI_SCRIPT_URL and UMAMI_WEBSITE_ID must be set together (or both left empty)". One of the pair is missing from Secrets: set both, or clear both.
 
+## Search engines and statistics: one-time setup
+
+This is for the owner of a new Boss Man website who wants Google and Bing to find it and wants visit figures. You do this once, top to bottom, in about 45 minutes. After that, every publish, notice and monthly report happens without you.
+
+The examples use `example.com`, with Cloudflare as the DNS host. Any domain and any DNS host work: where a step says Cloudflare, do the same thing on your DNS host's records page.
+
+Screens marked *(not checked)* have not been seen by anyone at Boss Man; the names may differ in your version.
+
+### Before you start
+
+- The site has been published at least once at its own https address. For that, `SITE_URL`, `CF_PAGES_PROJECT`, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` must be in Settings → Secrets (see "Where the publish settings come from").
+- You can sign in to your DNS host (for example Cloudflare), to a Google account that can use Google Cloud, to Bing Webmaster Tools (with a Microsoft, Google or Facebook account), and to your Umami as an admin.
+- You do not need to change or redeploy anything in Cloudflare. Boss Man builds the site itself and uploads it, so Cloudflare's own build settings and variables are not used.
+
+### What Boss Man does (you do nothing)
+
+- **Builds the sitemap** (`/sitemap.xml`) and `robots.txt` on every publish.
+- **Serves the IndexNow key file** at `https://example.com/<key>.txt` once the key is in Secrets.
+- **Tells IndexNow (Bing and others) about changed pages** after every publish. If the notice fails twice, the CEO gets a ticket. You do not.
+- **Submits the sitemap to Google and Bing** once, after your steps 4 to 6. Google and Bing then re-read it by themselves.
+- **Adds the Umami script and click events** (Install, GitHub, Roadmap) to every page, and stops a publish if a page is missing the script.
+- **Writes the monthly website report** from Google, Bing and Umami.
+
+### Step 1. IndexNow key
+
+1. In Boss Man, open Settings → Secrets and add an entry.
+2. Name: `INDEXNOW_KEY`. Value: 32 letters and digits you make up (8 to 128 letters, digits or dashes are accepted). You do not need to keep a copy.
+3. Save.
+
+**You should see:** the entry listed under Secrets. After the next publish, `https://example.com/<your key>.txt` shows the key. Boss Man checks this for you.
+
+**Undo:** delete the entry. The next publish removes the key file and sends no more notices.
+
+### Step 2. Umami: add the site
+
+1. Sign in to your Umami and open Settings → Websites → Add website. *(Not checked.)*
+2. Name: your site's name. Domain: `example.com`. Save.
+3. Open the new website's settings and copy its **Website ID** (a UUID such as `20c32c42-…`) and, from the tracking code, the **script address** (the `src` value, for example `https://stats.example.com/script.js`). *(Not checked.)*
+4. In Boss Man, open Settings → Secrets and add two entries: `UMAMI_WEBSITE_ID` with the Website ID, and `UMAMI_SCRIPT_URL` with the script address. Set both or neither.
+
+**You should see:** after the next publish, a visit to any page shows in Umami within a few seconds.
+
+**Most common failure:** the publish stops with "UMAMI_SCRIPT_URL and UMAMI_WEBSITE_ID must be set together (or both left empty)". One of the two is missing: add it. "UMAMI_WEBSITE_ID must be the site ID Umami shows (a UUID)" means something other than the Website ID was pasted.
+
+**Undo:** delete both entries. The next publish has no statistics script. Delete the website in Umami to remove its figures.
+
+### Step 3. Umami: read-only login for the monthly report
+
+1. In Umami, add a new user with a username and a long password you make up. Give it the view-only role, with access to this website only. *(Not checked.)*
+2. In Boss Man, open Settings → Secrets and add an entry. Name: `UMAMI_READER_LOGIN`. Value: the username and password joined by a colon, for example `report-reader:YourLongPassword`.
+3. Save.
+
+**You should see:** the entry listed under Secrets. The next monthly report has visit figures.
+
+**Undo:** delete the Secrets entry and the Umami user. The monthly report then has no visit figures.
+
+### Step 4. Google Cloud: a service account key for Boss Man
+
+Boss Man reads Search Console and submits the sitemap as a Google service account: a Google login for a program, not a person. You make it once.
+
+1. Open https://console.cloud.google.com and pick or create a project. *(Not checked.)*
+2. Turn on the **Google Search Console API** for that project: APIs & Services → Library, search for it, Enable. *(Not checked.)*
+3. Go to IAM & Admin → **Service accounts** and create a service account. Any name works, for example `boss-man-search`. It needs no project roles. *(Not checked.)*
+4. Click the new account's email address, open the **Keys** tab, click **Add key** → **Create new key**, choose **JSON**, then **Create**. A key file downloads. Google lets you download it only once.
+5. In Boss Man, open Settings → Secrets and add an entry. Name: `GOOGLE_SEARCH_CONSOLE_KEY`. Value: the whole contents of the key file. Save.
+6. Keep the key file open: you need its `client_email` value (it ends in `.iam.gserviceaccount.com`) in step 5. Then delete the file from your computer.
+
+**You should see:** a key listed on the Keys tab, and the entry under Secrets.
+
+**Most common failure:** "Create new key" is refused because your organisation blocks service account keys (`iam.disableServiceAccountKeyCreation`). Use a project outside that organisation, or ask its admin to allow keys for this project.
+
+**Undo:** delete the Secrets entry, then on the Keys tab click Delete for the key. A deleted key cannot be brought back.
+
+### Step 5. Google Search Console
+
+1. Open https://search.google.com/search-console and add a property. Choose **Domain** and type `example.com` (no `https://`).
+2. Google shows a TXT record starting `google-site-verification=`. Copy it.
+3. On your DNS host, add a record. Cloudflare: open the domain, DNS → Records → Add record. Type `TXT`, Name `@`, Content the value you copied. Save.
+4. Back in Search Console, click **Verify**.
+5. Open Settings → Users and permissions → Add user. Email: the `client_email` from the key file in step 4. Permission: **Full**. Full is needed so Boss Man can submit the sitemap; Restricted only lets it read.
+
+**You should see:** "Ownership verified", and the service account listed with Full permission. A new TXT record can take minutes, sometimes a day or two, to be seen. If Verify fails, wait and try again.
+
+**Undo:** remove the user in Users and permissions, remove the property, then delete the TXT record. Keep the TXT record for as long as you want the property: Google re-checks it.
+
+### Step 6. Bing Webmaster Tools
+
+1. Open https://www.bing.com/webmasters, sign in, and choose to import your site from Google Search Console. Allow access. Bing copies the verified site, so you add no file or record. *(Not checked.)*
+2. Click Settings (top right) → API Access. Accept the terms the first time, then click **Generate API Key**.
+3. In Boss Man, open Settings → Secrets and add an entry. Name: `BING_WEBMASTER_API_KEY`. Value: the key. Save.
+
+**You should see:** your site listed in Bing Webmaster Tools as verified. Bing makes one API key per user, and it works for all your sites; Boss Man reads only this site.
+
+**Undo:** delete the Secrets entry, delete the key on Bing's API Access page, and remove the site in Bing Webmaster Tools.
+
+### After setup
+
+Nothing more for you. Search engines take days to weeks to show pages; the monthly report says how many are indexed. You can see the IndexNow list yourself under Bing Webmaster Tools → IndexNow; Boss Man cannot read that screen.
+
 ## Cloudflare Pages settings
 
-Root directory `/`, build command `pnpm --filter @boss-man/site build`, output directory `apps/site/dist`, Node 22, environment variables `SITE_URL` and `PORTAL_URL`. Pages serves `guides/install-boss-man.html` at `/guides/install-boss-man` and `404.html` for unknown paths. `src/_headers` sets security and cache headers; its Content-Security-Policy allows only the site's own files, so no inline styles or scripts (the check fails on either). `src/_redirects` sends the old `/features`, `/how-it-works` and `/get-started` addresses to the home page and the new guides.
+These are used only by a build that Cloudflare runs itself (a Git-connected project). `scripts/publish-site.sh` builds on the runner and uploads the result, so it ignores them. Root directory `/`, build command `pnpm --filter @boss-man/site build`, output directory `apps/site/dist`, Node 22, environment variables `SITE_URL` and `PORTAL_URL`. Pages serves `guides/install-boss-man.html` at `/guides/install-boss-man` and `404.html` for unknown paths. `src/_headers` sets security and cache headers; its Content-Security-Policy allows only the site's own files, so no inline styles or scripts (the check fails on either). `src/_redirects` sends the old `/features`, `/how-it-works` and `/get-started` addresses to the home page and the new guides.
 
 ## Where things are
 
