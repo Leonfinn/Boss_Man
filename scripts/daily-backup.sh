@@ -54,6 +54,8 @@ prune() {
   [[ -z $old ]] || { say "Removing daily backups older than the newest $KEEP"; while IFS= read -r f; do say "  $f"; rm -f -- "$f"; done <<<"$old"; }
 }
 
+dump_to() { (set -o pipefail; pg_dump | gzip >"$1") 2>/dev/null; }
+
 pass() {
   local cur out
   mkdir -p "$BACKUP_DIR" || { record_failed "The backup folder cannot be created"; return 1; }
@@ -64,7 +66,7 @@ pass() {
   out="$BACKUP_DIR/daily-$(date +%F-%H%M).sql.gz"
   [[ ! -s $out ]] || { record_ok "$out" || true; return 0; }
   rm -f -- "$out.partial"
-  if ! (set -o pipefail; pg_dump | gzip >"$out.partial") 2>/dev/null; then
+  if ! dump_to "$out.partial"; then
     rm -f -- "$out.partial"; record_failed "The database dump failed"; return 1
   fi
   # An empty dump still gzips to about 20 bytes, so the size of the file proves nothing: look at what is inside.
