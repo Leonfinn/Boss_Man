@@ -44,6 +44,9 @@ describe("tool servers (MCP)", () => {
     const all = await lines();
     expect(all).toContain("Owner removed tool server scrapling");
     expect(all).toHaveLength(2);
+    // An unknown id is a 404 and adds no line.
+    expect((await c.req("DELETE", `/api/mcp-servers/${added.json().id}`)).statusCode).toBe(404);
+    expect(await lines()).toHaveLength(2);
     for (const l of all) expect(l).not.toMatch(/SCRAPLING_MCP_TOKEN|sekret|pw@/);
   });
 
