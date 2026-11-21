@@ -9,6 +9,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks, useTicketLinks } from "../components/TicketLinks";
+import { BranchOverlaps } from "../components/BranchOverlaps";
 import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
@@ -985,6 +986,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <DetailRow title="Roadmap and dependencies" count={links.data?.waitsOn.length ? `waits on ${links.data.waitsOn.length}` : links.error ? "couldn't load" : links.data ? "none" : ""}>
               <TicketLinks t={t} onChanged={ticket.reload} bare links={links} />
             </DetailRow>
+            <BranchOverlaps t={t} />
 
             {t.repoUrl && (
               <DetailRow title="Changes" count={buildWord(ci) ?? (t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "on its branch" : "")}>

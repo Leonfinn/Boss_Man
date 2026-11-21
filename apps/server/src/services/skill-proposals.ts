@@ -1,7 +1,8 @@
 // Skill proposals (BOS-86): the CEO proposes a skill (its own draft, or an internet link); the
 // Security Reviewer checks it where the owner's rule requires; the owner decides every one.
 // Nothing here writes to `skills`: only the install step (below, once decided) does.
-import { and, asc, desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lt, sql } from "drizzle-orm";
+import { olderThan, pageLimit, type Page } from "./list-page.js";
 import type { Db } from "../db/client.js";
 import { agentSkills, agents, decisions, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -668,10 +669,15 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       };
     },
 
-    /** Proposals without the file bytes, newest first. */
-    async list(companyId: string) {
-      const rows = await db.select().from(skillProposals).where(eq(skillProposals.companyId, companyId)).orderBy(desc(skillProposals.createdAt));
-      return rows.map(({ files, ...p }) => ({ ...p, fileCount: files.length }));
+    /** Proposals without the file bytes, newest first, one page at a time. The files (up to 1 MB each) are counted in SQL, never read. */
+    async list(companyId: string, page: Page = {}) {
+      const { files: _files, ...cols } = getTableColumns(skillProposals);
+      return db
+        .select({ ...cols, fileCount: sql<number>`jsonb_array_length(${skillProposals.files})`.mapWith(Number) })
+        .from(skillProposals)
+        .where(and(eq(skillProposals.companyId, companyId), page.before ? olderThan(skillProposals, skillProposals, page.before) : undefined))
+        .orderBy(desc(skillProposals.createdAt), desc(skillProposals.id))
+        .limit(pageLimit(page.limit));
     },
   };
 }

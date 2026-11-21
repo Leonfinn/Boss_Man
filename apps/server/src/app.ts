@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
@@ -59,6 +59,7 @@ import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
+import { PageQuery } from "./services/list-page.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { deploysService } from "./services/deploys.js";
 import { runsService } from "./services/runs.js";
@@ -73,6 +74,7 @@ import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { limitRequeue } from "./services/limit-requeue.js";
 import { record } from "./services/activity.js";
+import { branchOverlapView } from "./services/branch-overlaps.js";
 import { chooseFence, chooseGuard, closeFenceCard, closeFenceUnavailableCard, featureStates } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
 import { refreshBriefs } from "./services/project-brief.js";
@@ -963,7 +965,11 @@ export async function buildApp(opts: AppOptions) {
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
     // Back in review on code its last round already passed: that round stands, no new one (BOS-1173).
-    onReview: async (t) => ((await review.keptRound(t.id).catch(() => false)) ? undefined : scheduler.onTicketReview(t.id, null)),
+    onReview: async (t) => {
+      // BOS-2179: the overlap warning records the branch's files on every move to review; advisory, not awaited.
+      void review.recordFiles(t.id).catch(() => undefined);
+      return (await review.keptRound(t.id).catch(() => false)) ? undefined : scheduler.onTicketReview(t.id, null);
+    },
     onFeature: (id) => feedback.syncFeature(id),
     // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
     runningMerges: () => review.runningMerges(),
@@ -1535,6 +1541,39 @@ export async function buildApp(opts: AppOptions) {
       return o;
     });
 
+    // Account (BOS-2159): the owner changes their password and ends every other login. Only valid behind requireOwner.
+    /** Ends every login of this owner except the one in this request's cookie; returns how many it ended. */
+    async function endOtherSessions(req: FastifyRequest, ownerId: string) {
+      const keep = hashToken(req.cookies[SESSION_COOKIE] ?? "");
+      const gone = await db.delete(sessions).where(and(eq(sessions.ownerId, ownerId), ne(sessions.tokenHash, keep))).returning({ h: sessions.tokenHash });
+      return gone.length;
+    }
+    owner.post("/api/account/password", async (req, reply) => {
+      const body = z.object({ currentPassword: z.string().min(1).max(256), newPassword: Credentials.shape.password }).parse(req.body);
+      const ownerId = await currentOwnerId(req);
+      const [me] = ownerId ? await db.select().from(owners).where(eq(owners.id, ownerId)) : [];
+      if (!me) return reply.code(401).send({ error: "not_signed_in" });
+      // A guess at the current password is a login guess: same limiter as /api/login.
+      const wait = logins.retryAfter(req.ip, me.username);
+      if (wait > 0) {
+        const minutes = Math.ceil(wait / 60_000);
+        return reply.code(429).header("retry-after", String(Math.ceil(wait / 1000))).send({ error: "too_many_attempts", message: `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.` });
+      }
+      if (!(await verifyPassword(body.currentPassword, me.passwordHash))) {
+        logins.failed(req.ip, me.username);
+        return reply.code(403).send({ error: "wrong_current_password", message: "The current password is not right." });
+      }
+      if (body.newPassword === body.currentPassword) return reply.code(400).send({ error: "same_password", message: "Choose a password different from the current one." });
+      await db.update(owners).set({ passwordHash: await hashPassword(body.newPassword) }).where(eq(owners.id, me.id));
+      logins.succeeded(req.ip, me.username);
+      return { ok: true, signedOut: await endOtherSessions(req, me.id) };
+    });
+    owner.post("/api/account/sign-out-others", async (req, reply) => {
+      const ownerId = await currentOwnerId(req);
+      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
+      return { ok: true, signedOut: await endOtherSessions(req, ownerId) };
+    });
+
     // Device profiles (BOS-641): the owner's browsers report their measured screens.
     deviceRoutes(owner, { deviceProfiles, currentOwnerId });
 
@@ -2058,7 +2097,7 @@ export async function buildApp(opts: AppOptions) {
       // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
       const signoff = !!(await openSignoffCard(db, row.t.id));
       const liveNote = row.t.systemState !== "done" && row.t.goLiveWait ? goLiveNote(row.t.goLiveWait as GoLiveWait, await openUpdateCards(db, row.t.companyId)) : null;
-      return { ...row.t, goLiveNote: liveNote, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
+      return { ...row.t, goLiveNote: liveNote, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null, branchOverlaps: await branchOverlapView(db, row.t).catch(() => []) };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -2465,7 +2504,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits() });
+    serverAdminRoutes(owner, { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId), activeWaits: () => currentUpdateWaits() });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2543,7 +2582,7 @@ export async function buildApp(opts: AppOptions) {
       if (err instanceof EngagementError) return reply.code(err.status).send({ error: "engagement", message: err.message });
       throw err;
     };
-    owner.get("/api/engagements", async () => engagementsSvc.list());
+    owner.get("/api/engagements", async (req) => engagementsSvc.list(undefined, PageQuery.parse(req.query)));
     owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id, undefined, true).catch(engagementErrors(reply)));
     owner.post("/api/engagements", async (req, reply) => {
       const b = z
@@ -2702,5 +2741,7 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
+  const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
+  return { app, sweepExpiredSessions, mailer, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

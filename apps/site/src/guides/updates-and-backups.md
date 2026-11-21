@@ -10,6 +10,8 @@ lead: Boss Man backs up its database before every update. This guide covers upda
 
 ## Update the server
 
+To get agents to save their work and stop before you update, see [Stopping work](/guides/stopping-work#example-before-a-server-update).
+
 To see what an update brings before you run it, read [What's new](/whats-new). Before you update, check **Breaking changes** in [`docs/23-updating.md`](@repo/blob/main/docs/23-updating.md#breaking-changes): some updates need a step by hand.
 
 On a blue/green install, `scripts/deploy.sh` refuses to run. Update from the web page instead (see below).
@@ -40,7 +42,7 @@ It builds a new runner image and checks it with networking off. If the check fai
 - **Without the host deployer**, the runners stay on the old image until you start the swap. Open **Settings > Server and runner**, find **Updates**, and choose **Update runners (finish runs first)**.
 - **If no launcher is running**, the script restarts the runners at once. This cuts off any runs in progress.
 
-Follow the swap in **Updates**, which also has **Cancel the update**. To undo, run `scripts/update-runner.sh --rollback`.
+Follow the swap in **Updates**, which also has **Cancel the update**. While the swap waits for agents, **Ask agents to wrap up** asks them to save their work and stop sooner (see [Stopping work](/guides/stopping-work#ask-agents-to-wrap-up)). To undo, run `scripts/update-runner.sh --rollback`.
 
 ## Update from the web page (optional)
 

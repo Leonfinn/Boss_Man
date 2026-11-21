@@ -9,15 +9,12 @@
 // Nothing here links tickets, holds a card or changes a merge. The words a note ends with are waits-on advice
 // (the same suggestion the CEO would make by hand), so the two warnings and the tools tell one story.
 import { and, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, companies, tickets } from "../db/schema.js";
+import { activity, tickets } from "../db/schema.js";
+import { sharedWithOpenTickets, type BranchOverlap } from "./branch-overlaps.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
 
 type Ticket = typeof tickets.$inferSelect;
-
-/** State names as the merge line uses them: "in the line" is in progress, in review or blocked after a sign-off. */
-const OPEN_STATES = ["in_progress", "blocked", "review"] as const;
 
 const PLAN_CHARS = 20_000;
 const LINE_CHARS = 2_000;
@@ -71,37 +68,18 @@ export function planFiles(plan: string | null | undefined): string[] {
   return out;
 }
 
-/** The files a ticket's branch changed, from what its landing diff recorded (`diffFiles`, BOS-1411). No runner call. */
-async function changedFilesOf(db: Db, ticketId: string): Promise<string[]> {
-  const [row] = await db.select({ diffFiles: tickets.diffFiles }).from(tickets).where(eq(tickets.id, ticketId));
-  return row?.diffFiles ?? [];
-}
-
-export type PlanOverlap = { ticketId: string; ref: string | null; title: string; state: string; urgent: boolean; files: string[] };
+export type PlanOverlap = BranchOverlap;
 
 /**
- * The other open work whose files the plan shares (BOS-1411, warning 1). Files come from each ticket's state note
- * and its merge-line rows (the check that ran names the files), never from a runner call, so approving a plan
- * is still cheap and works with no runner connected. A ticket with no known files can't overlap.
+ * The other open work whose files the plan shares (BOS-1411, warning 1). Files come from what each ticket's branch
+ * recorded (`diffFiles`: on a move to review, an approval or a merge attempt), never from a runner call, so approving
+ * a plan is still cheap and works with no runner connected. A ticket with no known files can't overlap. Lock and
+ * generated files don't count (BOS-2179, one query and one list shared with the branch overlap warning).
  */
 export async function planOverlaps(db: Db, t: Ticket, plan: string): Promise<PlanOverlap[]> {
   const mine = planFiles(plan);
   if (!mine.length) return [];
-  const others = await db
-    .select({ id: tickets.id, number: tickets.number, title: tickets.title, systemState: tickets.systemState, urgent: tickets.urgent })
-    .from(tickets)
-    .where(and(eq(tickets.projectId, t.projectId), ne(tickets.id, t.id), inArray(tickets.systemState, [...OPEN_STATES])));
-  if (!others.length) return [];
-  const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
-  const out: PlanOverlap[] = [];
-  for (const o of others) {
-    const have = await changedFilesOf(db, o.id);
-    const shared = mine.filter((f) => have.includes(f));
-    if (shared.length) out.push({ ticketId: o.id, ref: ticketRef(c?.prefix, o.number), title: o.title, state: o.systemState, urgent: !!o.urgent, files: shared });
-  }
-  // Urgent first, then in the line ahead of the plan (review before in progress), then by ticket number.
-  const rank = (s: string) => (s === "review" ? 0 : s === "blocked" ? 1 : 2);
-  return out.sort((a, b) => Number(b.urgent) - Number(a.urgent) || rank(a.state) - rank(b.state));
+  return sharedWithOpenTickets(db, t, mine);
 }
 
 /**

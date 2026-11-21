@@ -8,8 +8,15 @@
 # ntfy gets a dynamic address from the front range, never the Caddy address the colours trust (BOSSMAN_FRONT_PROXY_IP).
 # Optional: NTFY_FRONT_NETWORK (default boss-man_front, the "front" network of deploy/truenas-bluegreen.yml;
 # set it only if Boss Man runs under another Compose project name: <project>_front).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 services:
   ntfy:
+    logging: *logging
     networks:
       front:
         aliases: [ntfy]

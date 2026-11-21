@@ -240,6 +240,8 @@ A good answer is a short line of JSON. The database tables are created by themse
 
 If you see `Connection refused`, the server has not started yet or the port is wrong. Wait a minute and run the command again, and check that the port matches `BOSSMAN_HOST_PORT` in your `.env`. If it still fails after a few minutes, run `docker compose ps` and `docker compose logs server` to see why the server is not running, and see [docs/29](29-tune-and-troubleshoot.md).
 
+Container logs are capped so they can't slowly fill the disk: each container keeps at most 3 files of 10 MB (`docker compose logs` shows what is kept). To change that, set `BOSSMAN_LOG_MAX_SIZE` and `BOSSMAN_LOG_MAX_FILE` in `.env` (compose services; runners the launcher starts keep the fixed 10m × 3). A new cap applies to a container when it is next recreated by an update.
+
 ## 6. Open the web page and make the owner account
 
 On your own computer, open `http://<host-ip>:3100` in a browser. Use the port from your `.env`.

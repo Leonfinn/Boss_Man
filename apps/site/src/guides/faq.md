@@ -3,7 +3,7 @@ path: /faq
 title: FAQ
 description: Short answers about what Boss Man is, what it costs, what you need to run it, and how safe it is.
 group: Questions
-order: 14
+order: 15
 lead: Short answers to the questions people ask first.
 ---
 
@@ -61,7 +61,7 @@ Boss Man runs on your machine. There is no hosted service, so nothing passes thr
 
 ## Can agents push code or delete things without me?
 
-Pushing, publishing and destructive commands come to you as a permission card. Deleting the agent's own entries in /tmp runs at once. Other clean-ups, and deletes in the agent's own folder, go to the CEO first, and the CEO can allow them without you. If the CEO does not settle one within five minutes, it comes to you. Approved work merges only after a review and any checks you set for the project. By default, high and critical work also waits for your sign-off.
+Pushing, publishing and destructive commands come to you as a permission card. Deleting the agent's own entries in /tmp runs at once. Other clean-ups, and deletes in the agent's own folder, go to the CEO first, and the CEO can allow them without you. If the CEO does not settle one within five minutes, it comes to you. Approved work merges only after a review and any checks you set for the project. By default, high and critical work also waits for your sign-off. For real stories of agents going wrong, and what Boss Man does about each, see [What can go wrong](/what-can-go-wrong).
 
 ## Can I use it from my phone?
 

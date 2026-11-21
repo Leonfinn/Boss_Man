@@ -840,7 +840,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         const downSince = h.launcherDownSince ?? t.toISOString();
         if (t.getTime() - Date.parse(downSince) >= WAIT_RULES["runner-launcher"].endMin * 60_000) {
           const minutes = Math.round((t.getTime() - Date.parse(downSince)) / 60_000);
-          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Start the update again from Settings > Server and runner once the launcher is back.`);
+          await end("Runner update gave up: the launcher does not answer", "page", `The runner launcher has not answered for ${minutes} minutes, so the update stopped waiting and new runs start again on the runners as they are. Start the update again from Settings > Server and runner > Updates once the launcher is back.`);
           if (deps.wakeCeo) {
             for (const co of await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))) {
               await deps.wakeCeo(co.id, `The runner update gave up: the runner launcher did not answer for ${minutes} minutes, so the hold lifted and new runs start again on the old runner image. Nothing was stopped. The owner was told; the update needs starting again once the launcher answers.`).catch((e) => deps.log?.(`drain: waking the CEO failed: ${(e as Error).message}`));

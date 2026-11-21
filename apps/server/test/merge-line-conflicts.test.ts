@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, reviewRequests, runners, runs, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { buildBrief } from "../src/services/brief.js";
 import { conflictNote, planFiles, planOverlapNote } from "../src/services/merge-line-conflicts.js";
@@ -179,6 +179,46 @@ describe("marking urgent warns too (BOS-1411)", () => {
     expect(res).toContain("Conflicts with");
     expect(res).toContain("ahead in the merge line");
     expect(await c.db.select().from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, mine.id), eq(ticketDependencies.blockerTicketId, ahead.id)))).toHaveLength(0);
+  });
+});
+
+describe("two open branches changing the same file (BOS-2179)", () => {
+  it("a move to review records the branch's files; both tickets get one note and the page names the other ticket", async () => {
+    const c = await setup();
+    // Another open ticket whose branch already recorded src/app.ts (the runner's diff below changes it too).
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Other work on the app", assigneeAgentId: c.senior.id })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "in_progress", branch: `bossman/${other.id}`, diffFiles: ["src/app.ts", "pnpm-lock.yaml"] }).where(eq(tickets.id, other.id));
+    const mine = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "My change", assigneeAgentId: c.worker.id })).json() as { id: string; version: number };
+    await c.db.update(tickets).set({ systemState: "in_progress", branch: `bossman/${mine.id}` }).where(eq(tickets.id, mine.id));
+    expect((await c.row(mine.id)).diffFiles).toEqual([]);
+    const worker = await c.mcp(c.worker.id);
+    const moved = textOf(await worker.callTool({ name: "set_ticket_state", arguments: { ticketId: mine.id, state: "review", summary: "Changed the app" } }));
+    expect(moved).toContain("review");
+    // Recorded after the move, without holding it up: wait for the note, with a deadline.
+    const systemNotes = async (id: string) => (await c.db.select().from(ticketMessages).where(and(eq(ticketMessages.ticketId, id), eq(ticketMessages.author, "system")))).map((m) => m.text).filter((t) => t.startsWith("Changes the same files"));
+    const deadline = Date.now() + 10_000;
+    while ((await systemNotes(other.id)).length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    expect((await c.row(mine.id)).diffFiles).toEqual(["src/app.ts"]);
+    expect(await systemNotes(mine.id)).toHaveLength(1);
+    expect((await systemNotes(mine.id))[0]).toContain('"Other work on the app" (in progress): src/app.ts.');
+    expect(await systemNotes(other.id)).toHaveLength(1);
+    expect((await systemNotes(other.id))[0]).toContain('"My change" (in review): src/app.ts.');
+    // The ticket page shows it on both sides.
+    const page = (await c.req("GET", `/api/tickets/${mine.id}`)).json() as { branchOverlaps: Array<{ ticketId: string; files: string[]; more: number }> };
+    expect(page.branchOverlaps).toEqual([expect.objectContaining({ ticketId: other.id, files: ["src/app.ts"], more: 0 })]);
+    const otherPage = (await c.req("GET", `/api/tickets/${other.id}`)).json() as { branchOverlaps: Array<{ ticketId: string }> };
+    expect(otherPage.branchOverlaps.map((o) => o.ticketId)).toEqual([mine.id]);
+    // Advisory: nothing linked either way, and the move went through.
+    expect((await c.row(mine.id)).systemState).toBe("review");
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, mine.id))).toHaveLength(0);
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, other.id))).toHaveLength(0);
+    // The review and the merge go ahead as before: an approval with the overlap still open merges the ticket.
+    const r = await c.review.submit(mine.id, { verdict: "approved", reviewer: "Sam", reviewerAgentId: c.senior.id });
+    expect(r.verdict).toBe("approved");
+    const mergeDeadline = Date.now() + 20_000;
+    while ((await c.row(mine.id)).systemState !== "done" && Date.now() < mergeDeadline) await new Promise((res) => setTimeout(res, 50));
+    expect((await c.row(mine.id)).systemState).toBe("done");
+    expect((await c.row(mine.id)).mergeCommit).toBe("c".repeat(40));
   });
 });
 

@@ -113,13 +113,13 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
   if (m.kind === "wrapup")
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-        Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner.
+        Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner → Updates.
       </p>
     );
   if (m.kind === "building")
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-        A runner update is being built. New runs wait until it has gone in; runs already going carry on. Cancel it on Settings → Server and runner if you need new work to start now.
+        A runner update is being built. New runs wait until it has gone in; runs already going carry on. Cancel it on Settings → Server and runner → Updates if you need new work to start now.
       </p>
     );
   const waiting = waitingFor(m);
@@ -127,14 +127,14 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
         {m.blocking === false
-          ? `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update, and new runs are not held while it waits for your answer in Settings → Server and runner.`
+          ? `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update, and new runs are not held while it waits for your answer in Settings → Server and runner → Updates.`
           : `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update: the runner image stays the same. Nothing new starts until it is done.`}
       </p>
     );
   if (m.blocking === false)
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-        Update pending: {waiting}. It is past its deadline and waits for your answer in Settings → Server and runner. New runs are not held for it.
+        Update pending: {waiting}. It is past its deadline and waits for your answer in Settings → Server and runner → Updates. New runs are not held for it.
       </p>
     );
   const timing = drainTiming(m);
@@ -144,13 +144,13 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
       {m.overdue && m.phase === "waiting" ? (
         <>
           {m.unknownWait ? "It is running late: Boss Man cannot say what it is waiting for. " : "It is past the time given: "}
-          <a href="#/settings">choose in Settings → Server and runner</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
+          <a href="#/settings">choose in Settings → Server and runner → Updates</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
         </>
       ) : null}
       {m.runs > 0
-        ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.'
+        ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner → Updates.'
         : (m.checks ?? 0) > 0
-          ? "To go ahead without waiting, use \"Stop the checks and update now\" on Settings → Server and runner: they restart from the beginning afterwards."
+          ? "To go ahead without waiting, use \"Stop the checks and update now\" on Settings → Server and runner → Updates: they restart from the beginning afterwards."
           : ""}
     </p>
   );
