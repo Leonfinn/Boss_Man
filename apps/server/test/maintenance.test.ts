@@ -1229,6 +1229,56 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(await c.titles()).toContain("note: Wrap-up lifted");
   });
 
+  // BOS-2056: the screen names which update a wrap-up is for, and the owner is told once that it ended with the update.
+  it("BOS-2056: the status says which update a wrap-up is for (none, server, runner)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ kind: "wrapup", wrapForUpdate: "none", wrapSince: expect.any(String) });
+    await c.req("POST", "/api/maintenance/cancel", {});
+    const wait = { decisionId: randomUUID(), commit: "b".repeat(40), fromCommit: "a".repeat(40), approvedAt: new Date().toISOString(), phase: "waiting", deadline: new Date().toISOString(), minutes: 30, origin: "approve" };
+    await c.db.insert(settings).values({ key: "deploy_wait", value: wait });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ kind: "wrapup", wrapForUpdate: "server" });
+    await c.req("POST", "/api/maintenance/cancel", {});
+    await c.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ kind: "update", wrapAsked: true, wrapForUpdate: "runner", wrapSince: expect.any(String) });
+  });
+
+  for (const how of ["swap", "cancel"] as const)
+    it(`BOS-2056: a wrap-up tied to a runner update lifts with it on a ${how}, and says so once`, async () => {
+      const c = (ctx = await setup());
+      const a = await c.company("App Co", "app-co");
+      await c.wake(a);
+      await c.scheduler.tick();
+      await c.maintenance.start();
+      await c.req("POST", "/api/maintenance/wrapup", {});
+      expect((await getHold(c.db))!.wrapSince).toBeTruthy();
+      if (how === "swap") {
+        await c.finish(a);
+        await c.maintenance.step();
+      } else await c.req("POST", "/api/maintenance/cancel", {});
+      expect(await getHold(c.db), how).toBeNull(); // no press needed to lift the wrap-up
+      const last = ((await c.maint()) as { last?: { body: string } }).last;
+      expect(last?.body.match(/wrap-up you asked for ended with it/g), how).toHaveLength(1);
+    });
+
+  it("BOS-2056: an update with no wrap-up asked does not mention one when it ends", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    await c.finish(a);
+    await c.maintenance.step();
+    const last = ((await c.maint()) as { last?: { body: string } }).last;
+    expect(last?.body).not.toContain("wrap-up");
+  });
+
   it("never stops a run by itself, even well past the not-responding time", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
