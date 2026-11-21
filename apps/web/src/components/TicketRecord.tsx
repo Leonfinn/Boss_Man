@@ -25,7 +25,7 @@ function showChanges() {
 export function TicketRecord({ ticketId }: { ticketId: string }) {
   const rec = usePoll((signal) => api<Record_>(`/api/tickets/${ticketId}/record`, { signal }), 60_000, `record-${ticketId}`);
   const r = rec.data;
-  if (!r) return rec.error ? <p className="muted" data-testid="ticket-record">What Boss Man recorded: couldn't load.</p> : null;
+  if (!r || !r.runs) return rec.error ? <p className="muted" data-testid="ticket-record">What Boss Man recorded: couldn't load.</p> : null;
   const over = r.capMicros != null && r.spendMicros >= r.capMicros;
   return (
     <section className="card" aria-label="What Boss Man recorded" data-testid="ticket-record">
