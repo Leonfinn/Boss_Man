@@ -2,7 +2,7 @@
 // rolling window. Past the limit, attempts are refused until the oldest counted failure leaves
 // the window, even with the right password. The injectable clock keeps this off real timers.
 import { describe, expect, it } from "vitest";
-import { DEFAULT_LOGIN_LIMITS, loginLimiter } from "../src/login-limit.js";
+import { DEFAULT_LOGIN_LIMITS, loginLimiter, lockoutNoticeGate } from "../src/login-limit.js";
 
 function setup(maxFailures = 3, windowMs = 60_000) {
   let t = 1_000_000;
@@ -92,7 +92,7 @@ describe("loginLimiter", () => {
   describe("lockout notice", () => {
     function withNotice(maxFailures = 3, windowMs = 60_000) {
       let t = 1_000_000;
-      const events: Array<{ ip: string; at: number; byAddress: boolean; byUsername: boolean }> = [];
+      const events: Array<{ ip: string; at: number; byAddress: boolean; byUsername: boolean; ownerUsername: boolean }> = [];
       const limiter = loginLimiter({ maxFailures, windowMs }, () => t, (e) => events.push(e));
       return { limiter, events, advance: (ms: number) => (t += ms) };
     }
@@ -140,7 +140,14 @@ describe("loginLimiter", () => {
       limiter.failed("192.168.1.52", "owner");
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ ip: "192.168.1.52", byAddress: false, byUsername: true });
-      expect(Object.keys(events[0]!).sort()).toEqual(["at", "byAddress", "byUsername", "ip"]);
+      expect(Object.keys(events[0]!).sort()).toEqual(["at", "byAddress", "byUsername", "ip", "ownerUsername"]);
+      expect(events[0]!.ownerUsername).toBe(false);
+    });
+
+    it("BOS-2207: says whether the locked username is an owner's, from what the caller passes", () => {
+      const { limiter, events } = withNotice();
+      for (let i = 0; i < 3; i++) limiter.failed(`192.168.1.${60 + i}`, "owner", true);
+      expect(events[0]).toMatchObject({ byUsername: true, ownerUsername: true });
     });
 
     it("a notice that throws doesn't change the lockout", () => {
@@ -150,6 +157,19 @@ describe("loginLimiter", () => {
       });
       expect(() => limiter.failed("192.168.1.50", "owner")).not.toThrow();
       expect(limiter.retryAfter("192.168.1.50", "owner")).toBe(1000);
+    });
+  });
+
+  // BOS-2207: a cap across addresses.
+  describe("lockoutNoticeGate", () => {
+    it("lets 3 notices through an hour, holds the rest and tells the count with the next one", () => {
+      let t = 0;
+      const gate = lockoutNoticeGate(3, 3_600_000, () => t);
+      for (let i = 0; i < 3; i++) expect(gate.take()).toEqual({ send: true, held: 0 });
+      for (let i = 0; i < 50; i++) expect(gate.take().send).toBe(false);
+      t += 3_600_001;
+      expect(gate.take()).toEqual({ send: true, held: 50 });
+      expect(gate.take()).toEqual({ send: true, held: 0 });
     });
   });
 

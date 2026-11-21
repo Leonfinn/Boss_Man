@@ -6,7 +6,32 @@ export type LoginLimits = { maxFailures: number; windowMs: number };
 export const DEFAULT_LOGIN_LIMITS: LoginLimits = { maxFailures: 10, windowMs: 15 * 60_000 };
 
 /** BOS-2177: told once when a failure takes an address and/or a username to the limit. Carries the address only, never a guessed username or password. */
-export type LoginLockout = { ip: string; at: number; byAddress: boolean; byUsername: boolean };
+export type LoginLockout = { ip: string; at: number; byAddress: boolean; byUsername: boolean; ownerUsername: boolean };
+
+/**
+ * BOS-2207: a cap across addresses. Lock notices are free for the attacker (made-up usernames, many addresses), so
+ * only `max` go out per `windowMs`; the rest are counted and the count is told with the next notice that goes out.
+ */
+export function lockoutNoticeGate(max = 3, windowMs = 60 * 60_000, now: () => number = () => Date.now()) {
+  // shortcut: lost on restart, which at worst lets a few more notices through.
+  let sent: number[] = [];
+  let held = 0;
+  return {
+    /** `send` says whether to raise this notice; `held` is how many were left out since the last one that went out. */
+    take(): { send: boolean; held: number } {
+      const cutoff = now() - windowMs;
+      sent = sent.filter((t) => t > cutoff);
+      if (sent.length >= max) {
+        held++;
+        return { send: false, held };
+      }
+      sent.push(now());
+      const earlier = held;
+      held = 0;
+      return { send: true, held: earlier };
+    },
+  };
+}
 
 export function loginLimiter(limits: LoginLimits = DEFAULT_LOGIN_LIMITS, now: () => number = () => Date.now(), onLocked?: (e: LoginLockout) => void) {
   // shortcut: lost on restart, harmless because a reboot only resets what it costs an attacker (see the header).
@@ -30,7 +55,8 @@ export function loginLimiter(limits: LoginLimits = DEFAULT_LOGIN_LIMITS, now: ()
       }
       return wait;
     },
-    failed(ip: string, username: string) {
+    /** `isOwnerName`: the submitted username matches an owner row (only then may a notice call it the owner's). */
+    failed(ip: string, username: string, isOwnerName = false) {
       // A key is newly locked when this failure is the one that takes it from below the limit to it; later
       // failures can't happen while it is locked (retryAfter refuses first), so one lock tells once.
       const [ipKey, userKey] = keys(ip, username) as [string, string];
@@ -41,7 +67,7 @@ export function loginLimiter(limits: LoginLimits = DEFAULT_LOGIN_LIMITS, now: ()
       });
       if (onLocked && (locked[0] || locked[1])) {
         try {
-          onLocked({ ip, at: now(), byAddress: !!locked[0], byUsername: !!locked[1] });
+          onLocked({ ip, at: now(), byAddress: !!locked[0], byUsername: !!locked[1], ownerUsername: isOwnerName });
         } catch {
           // Telling the owner must never change the answer to the sign-in.
         }
