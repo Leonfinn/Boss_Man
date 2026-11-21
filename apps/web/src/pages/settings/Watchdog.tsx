@@ -3,6 +3,7 @@ import { WATCHDOG_RULE_LABEL, type WatchdogRule, type WatchdogSettings } from "@
 import { api, type Company } from "../../api";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
+import { Loader } from "../../components/Loader";
 import { SaveButton } from "../../components/SaveButton";
 import { Advanced, PresetCards } from "../../components/PresetCards";
 import { limitsFromDraft, matchPreset, WATCHDOG_PRESETS, type WatchdogLimits } from "../../lib/presets";
@@ -45,6 +46,7 @@ export function Watchdog({ company }: { company: Company }) {
   const [sm, setSm] = useState("");
   const [bt, setBt] = useState<Backtest | null>(null);
   const [savedOk, setSavedOk] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const act = useAction();
   const test = useAction();
   const load = async () => {
@@ -54,9 +56,19 @@ export function Watchdog({ company }: { company: Company }) {
     setSm(s.scrumMaster?.id ?? "");
   };
   useEffect(() => {
-    void load().catch(() => setStatus(null));
+    setLoadError(null);
+    void load().catch((e: unknown) => {
+      setStatus(null);
+      setLoadError(e instanceof Error ? e.message : "Could not load the watchdog.");
+    });
   }, [company.id]);
-  if (!status) return null;
+  if (!status) {
+    return (
+      <Section id="watchdog-h" title="Watchdog">
+        {loadError ? <p className="error" role="alert">{loadError}</p> : <Loader label="Loading the watchdog" />}
+      </Section>
+    );
+  }
   const candidates = company.agents.filter((a) => a.role !== "ceo" && (!a.duty || a.duty === "scrum_master"));
   const save = (extra: Record<string, unknown>) =>
     act.run(async () => {
