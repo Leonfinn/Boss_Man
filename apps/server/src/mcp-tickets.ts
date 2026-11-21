@@ -809,6 +809,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (e instanceof WorkError) return fail(e.message);
         throw e;
       }
+      // BOS-2179: record the branch's files and post any overlap notes owed. Advisory, not awaited: the move never waits on the runner for it.
+      if (state === "review" && moved.changed) void review.recordFiles(ticketId).catch(() => undefined);
       // BOS-1209: Blocked on an open card needs a hold row, or answering the card has nothing to release.
       if (state === "blocked" && !sameState && !until) {
         for (const cardId of await openCardIds(db, ticketId)) {

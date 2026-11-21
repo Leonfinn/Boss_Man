@@ -22,6 +22,7 @@ import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, FULL_CHECK_NEX
 import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
 import { ciStep } from "./merge-ci-step.js";
+import { recordBranchFiles } from "./branch-overlaps.js";
 import { mergeRounds } from "./merge-rounds.js";
 
 type TicketRepo = Awaited<ReturnType<ReviewCtx["ticketWithRepo"]>>;
@@ -185,8 +186,8 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
   // files. Fail closed the way a runner that went away does: land() asks again, and raises its card only when
   // the retries fail too (BOS-1396).
   if (!changed && t.branch) throw new RunnerGone(`The runner couldn't say which files the ticket changes${diffError ? ` (${diffError})` : ""}.`);
-  // Keep the files it changes, so the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a merge.
-  if (changed?.files.length) await db.update(tickets).set({ diffFiles: changed.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
+  // Keep the files it changes, so the overlap warnings can read them without a runner call (BOS-1411, BOS-2179). Never fails a merge.
+  if (changed?.files.length) await recordBranchFiles(db, ticketId, changed.files.map((f) => f.path));
   const ownerFiles = ownerApprovedFiles(changed?.files.map((f) => f.path) ?? []);
   let because: string | undefined;
   if (ownerFiles.length) {
