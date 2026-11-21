@@ -39,13 +39,13 @@ const WAITS_ON_TICKET = /\b(?:waiting|waits?|blocked|held|holding|hold|pending|b
 
 /** Ticket references (PREFIX-number) the text says it waits on, other than the ticket's own. */
 export function ticketsWaitedOn(text: string, ownRef: string | null): string[] {
-  const found = new Set<string>();
+  const found: string[] = [];
   for (const m of text.matchAll(WAITS_ON_TICKET)) {
     const ref = m[1]!;
-    if (!/^[A-Z]{2,10}-\d+$/.test(ref) || ref === ownRef) continue;
-    found.add(ref);
+    if (!/^[A-Z]{2,10}-\d+$/.test(ref) || ref === ownRef || found.includes(ref)) continue;
+    found.push(ref);
   }
-  return [...found];
+  return found;
 }
 
 export const NAMED_TICKET_REFUSAL = (ref: string) =>
