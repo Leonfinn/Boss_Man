@@ -11,7 +11,7 @@ import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
 import { activity, checkJobs, settings, tickets } from "../src/db/schema.js";
-import { lineEvent, MERGE_LINE_KIND, type MergeLineEvent } from "../src/services/merge-line.js";
+import { clashWords, lineEvent, MERGE_LINE_KIND, type MergeLineEvent } from "../src/services/merge-line.js";
 import { buildBrief } from "../src/services/brief.js";
 import { approveAndWait } from "./helpers.js";
 
@@ -208,5 +208,33 @@ describe("the merge line's timeline (BOS-769)", () => {
     const brief = await buildBrief(c.db, { companyId: c.company.id, agentId: c.worker.id, role: "ceo", since: null, now: new Date() });
     expect(brief).toContain("Moved to in_progress by the owner");
     expect(brief).not.toContain("Merge line:");
+  });
+});
+
+describe("clashWords", () => {
+  it("says who clashed and nothing about files when there is no clash", () => {
+    expect(clashWords([], [])).toBe("the tickets ahead");
+    expect(clashWords([], [], 0)).toBe("the tickets ahead");
+  });
+
+  it("counts one file in the singular, naming the file", () => {
+    expect(clashWords(["BOS-1471"], ["src/limit.ts"])).toBe("BOS-1471 in 1 file (src/limit.ts)");
+  });
+
+  it("names several clashing tickets and files, counting and listing them", () => {
+    expect(clashWords(["BOS-1", "BOS-2"], ["a.ts", "b.ts"])).toBe("BOS-1, BOS-2 in 2 files (a.ts, b.ts)");
+  });
+
+  it("falls back to 'the tickets ahead' when no ticket is named, still counting the files", () => {
+    expect(clashWords([], ["a.ts", "b.ts", "c.ts"])).toBe("the tickets ahead in 3 files (a.ts, b.ts, c.ts)");
+  });
+
+  it("shows at most three files and marks the rest with an ellipsis", () => {
+    expect(clashWords(["main"], ["a.ts", "b.ts", "c.ts", "d.ts"])).toBe("main in 4 files (a.ts, b.ts, c.ts, …)");
+  });
+
+  it("uses the explicit total when only some files were kept, and counts even with none kept", () => {
+    expect(clashWords(["main"], ["a.ts", "b.ts"], 30)).toBe("main in 30 files (a.ts, b.ts, …)");
+    expect(clashWords(["main"], [], 7)).toBe("main in 7 files");
   });
 });
