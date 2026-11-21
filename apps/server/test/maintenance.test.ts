@@ -1519,6 +1519,75 @@ describe("Stop N and carry on with the update (BOS-1238)", () => {
   });
 });
 
+// BOS-2088: while a runner update held work, a wake about an urgent ticket, or about one that fixes a live problem, sat
+// "update pending" behind it, even when it was the fix the update waited to deliver. Now it passes, its run is marked, no
+// wait counts that run, and the swap cuts it off and the interrupted-run recovery picks it up again.
+describe("urgent and fixes-live wakes pass an update's hold (BOS-2088)", () => {
+  async function seed(c: Awaited<ReturnType<typeof setup>>) {
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    const ticket = async (co: { id: string; ceo: string }, number: number, o: Partial<typeof tickets.$inferInsert> = {}) => {
+      const [p] = await c.db.insert(projects).values({ companyId: co.id, name: `P${number}` }).returning();
+      const [t] = await c.db.insert(tickets).values({ companyId: co.id, projectId: p!.id, title: `T${number}`, number, systemState: "ready", assigneeAgentId: co.ceo, ...o }).returning();
+      return t!.id;
+    };
+    const urgent = await ticket(a, 1, { urgent: true });
+    const plain = await ticket(a, 2);
+    const fixes = await ticket(b, 3, { fixesLive: "server freezes as memory climbs" });
+    const merged = await ticket(b, 4, { fixesLive: "server freezes as memory climbs", systemState: "review", mergeCommit: "c".repeat(40) });
+    return { a, b, urgent, plain, fixes, merged };
+  }
+
+  it("starts the urgent and the fixes-live wake, marks their runs, and the swap does not wait for them; routine and merged-fix wakes stay held", async () => {
+    const c = (ctx = await setup());
+    const { a, b, urgent, plain, fixes, merged } = await seed(c);
+    await c.maintenance.start({ minutes: 30 });
+    await c.scheduler.wake({ agentId: a.ceo, reason: "assigned", ticketId: urgent });
+    await c.scheduler.wake({ agentId: a.ceo, reason: "nudge", ticketId: plain, note: "routine" });
+    await c.scheduler.wake({ agentId: b.ceo, reason: "assigned", ticketId: fixes });
+    await c.scheduler.wake({ agentId: b.ceo, reason: "live release", ticketId: merged });
+    await c.scheduler.tick();
+
+    const started = await c.db.select().from(runs);
+    expect(started.map((r) => [r.ticketId, r.passedUpdateHold]).sort()).toEqual([[urgent, true], [fixes, true]].sort());
+    expect(c.commands.every((x) => x.prompt.includes("This run started while an update holds other work"))).toBe(true);
+    const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
+    expect(held.map((w) => [w.ticketId, w.statusReason]).sort()).toEqual([[plain, HOLD_REASON], [merged, HOLD_REASON]].sort());
+
+    // No wait counts the marked runs: the banner shows none, and both runners are swapped on the next step.
+    expect(await c.maint()).toMatchObject({ on: true, runs: 0 });
+    await c.maintenance.step();
+    expect([...c.fake.runnersBySlug.values()].map((r) => r.current)).toEqual([true, true]);
+    expect(c.cancels).toEqual([]); // nothing was stopped by the go-ahead; the swap itself cuts them off
+
+    // A new update holds work again; the swap cut the urgent run off. Recovery queues "resume", which passes again.
+    if (!(await getHold(c.db))) await c.maintenance.start({ minutes: 30 });
+    const runA = started.find((r) => r.ticketId === urgent)!.id;
+    await a.event({ type: "run.ended", runId: runA, stopReason: null, error: "The runner restarted while this run was going.", interrupted: true });
+    const deadline = Date.now() + 10_000;
+    while (!(await c.db.select().from(wakes).where(and(eq(wakes.reason, "resume"), eq(wakes.ticketId, urgent)))).length) {
+      if (Date.now() > deadline) throw new Error("no resume wake was queued for the cut-off urgent run");
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await c.scheduler.tick();
+    const resumed = (await c.db.select().from(runs)).filter((r) => r.origin === "resume");
+    expect(resumed.map((r) => [r.ticketId, r.passedUpdateHold])).toEqual([[urgent, true]]);
+    // The routine wake is still held by the new hold.
+    expect((await c.db.select().from(wakes).where(and(eq(wakes.status, "queued"), eq(wakes.ticketId, plain)))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
+  });
+
+  it("a wrap-up with no update behind it still holds an urgent ticket's wake: the owner asked for quiet", async () => {
+    const c = (ctx = await setup());
+    const { a, urgent } = await seed(c);
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
+    await c.scheduler.wake({ agentId: a.ceo, reason: "assigned", ticketId: urgent });
+    await c.scheduler.tick();
+    expect(await c.db.select().from(runs)).toEqual([]);
+    expect((await c.db.select().from(wakes).where(eq(wakes.status, "queued"))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
+  });
+});
+
 describe("early building hold (BOS-1955)", () => {
   const drainFile = (dir: string, reason?: string) => writeFile(path.join(dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh", ...(reason ? { reason } : {}) }));
   const cancelFile = (dir: string) => writeFile(path.join(dir, "inbox", "drain-cancel.json"), "{}");

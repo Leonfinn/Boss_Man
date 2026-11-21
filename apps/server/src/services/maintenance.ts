@@ -12,7 +12,7 @@ import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UP
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 import { untrusted } from "@boss-man/shared";
-import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, type RunnerCheck } from "./runner-busy.js";
+import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, type RunnerCheck } from "./runner-busy.js";
 import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
@@ -325,7 +325,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .from(runs)
       .leftJoin(agents, eq(agents.id, runs.agentId))
       .leftJoin(tickets, eq(tickets.id, runs.ticketId))
-      .where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`))
+      // BOS-2088: only runs the update waits for (runner-busy.ts updateWaitCountsRun); a run that passed the hold is
+      // cut off by the swap and resumed, so it is not listed, stopped at the go-ahead or named to the CEO as late work.
+      .where(and(isNull(runs.endedAt), updateWaitCountsRun()))
       .orderBy(asc(runs.startedAt));
     // An open permission card names the run it holds (BOS-932/DR-048). One per run is enough to say it is waiting.
     const waiters = new Map<string, { question: string; tier: string | null }>();

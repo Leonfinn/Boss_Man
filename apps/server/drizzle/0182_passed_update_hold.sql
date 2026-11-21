@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "passed_update_hold" boolean DEFAULT false NOT NULL;
