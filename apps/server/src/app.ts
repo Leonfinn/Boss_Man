@@ -2089,7 +2089,10 @@ export async function buildApp(opts: AppOptions) {
       if (err instanceof TicketChatError) return reply.code(err.status).send({ error: "ticket_chat", message: err.message });
       throw err;
     };
-    owner.get("/api/tickets/:id/messages", async (req, reply) => ticketChat.list(IdParam.parse(req.params).id).catch(ticketChatErrors(reply)));
+    owner.get("/api/tickets/:id/messages", async (req, reply) => {
+      const { before } = z.object({ before: z.string().max(100).optional() }).parse(req.query);
+      return ticketChat.list(IdParam.parse(req.params).id, { before }).catch(ticketChatErrors(reply));
+    });
     owner.post("/api/tickets/:id/messages", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { text, interrupt, agentId } = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional(), agentId: z.string().uuid().optional() }).parse(req.body);

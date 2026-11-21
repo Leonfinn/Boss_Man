@@ -2,7 +2,7 @@
 // one feed, oldest first, like a chat. A run that's going shows what the agent is doing as it
 // happens; finished runs fold their steps away. The box at the bottom talks to the agent: into
 // its live run (after the current turn, or interrupting it), or as a new run.
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { systemAuthor, ticketRef } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
@@ -29,7 +29,11 @@ type Message = {
   replyClearedAt?: string | null;
   replyClearedBy?: string | null;
 };
-type Conversation = { items: Message[]; live: { id: string; agent: string | null } | null };
+/** One page of the conversation: the newest messages, or with `?before=` the ones before (BOS-2168). */
+type Conversation = { items: Message[]; hasMore?: boolean; live: { id: string; agent: string | null } | null };
+
+/** Oldest first, in the server's order: by time, then by id for messages sharing a time. */
+const byTime = (a: Message, b: Message) => a.createdAt.localeCompare(b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 type RunRow = { id: string; agent: string | null; startedAt: string; endedAt: string | null; outcome: string | null };
 
 const DELIVERY: Record<string, string> = {
@@ -155,15 +159,76 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   const working = live?.agent ?? assignee;
   useEffect(() => setBusy(live !== null), [live]);
 
+  // Older pages loaded with "Load older messages" (BOS-2168), kept apart from the poll, which only
+  // ever asks for the newest page. Once any are loaded, each polled page is folded in as well, so
+  // a message that slides out of the newest page as new ones arrive stays on screen too.
+  const [kept, setKept] = useState<ReadonlyMap<string, Message>>(() => new Map());
+  const [olderMore, setOlderMore] = useState<boolean | null>(null);
+  const [older, setOlder] = useState<{ loading: boolean; error: string | null }>({ loading: false, error: null });
+  const shownTicket = useRef(ticketId);
+  shownTicket.current = ticketId;
+  useEffect(() => {
+    setKept(new Map());
+    setOlderMore(null);
+    setOlder({ loading: false, error: null });
+  }, [ticketId]);
+  useEffect(() => {
+    const items = convo.data?.items;
+    if (items) setKept((prev) => (prev.size ? new Map([...prev, ...items.map((m) => [m.id, m] as const)]) : prev));
+  }, [convo.data]);
+  // The polled page wins over a kept copy: it carries the latest reply state (BOS-425).
+  const messages = kept.size ? [...new Map([...kept, ...(convo.data?.items ?? []).map((m) => [m.id, m] as const)]).values()].sort(byTime) : (convo.data?.items ?? []);
+  const hasOlder = olderMore ?? convo.data?.hasMore ?? false;
+  const feedBox = useRef<HTMLDivElement>(null);
+  // Where the oldest message sat on screen before the older page went in above it.
+  const anchor = useRef<{ key: string; top: number } | null>(null);
+  const loadOlder = async () => {
+    const oldest = messages[0];
+    if (!oldest || older.loading) return;
+    const key = `m${oldest.id}`;
+    const el = feedBox.current?.querySelector<HTMLElement>(`[data-key="${key}"]`);
+    anchor.current = el ? { key, top: el.getBoundingClientRect().top } : null;
+    setOlder({ loading: true, error: null });
+    const id = ticketId;
+    try {
+      const page = await api<Conversation>(`/api/tickets/${id}/messages?before=${encodeURIComponent(oldest.id)}`);
+      if (shownTicket.current !== id) return;
+      const newest = convo.data?.items ?? [];
+      setKept((prev) => new Map([...page.items.map((m) => [m.id, m] as const), ...prev, ...newest.map((m) => [m.id, m] as const)]));
+      setOlderMore(page.hasMore ?? false);
+      setOlder({ loading: false, error: null });
+    } catch (err) {
+      anchor.current = null;
+      if (shownTicket.current === id) setOlder({ loading: false, error: (err as Error).message });
+    }
+  };
+  // Keep the message the owner was reading where it was: move the scroll by however far the older
+  // page pushed it down. The feed scrolls itself on a wide screen and the page does on a phone.
+  useLayoutEffect(() => {
+    const a = anchor.current;
+    const box = feedBox.current;
+    if (!a || !box) return;
+    anchor.current = null;
+    const el = box.querySelector<HTMLElement>(`[data-key="${a.key}"]`);
+    if (!el) return;
+    const shift = el.getBoundingClientRect().top - a.top;
+    if (!shift) return;
+    if (box.scrollHeight > box.clientHeight) box.scrollTop += shift;
+    else window.scrollBy(0, shift);
+  }, [kept]);
+
   const feed = [
-    ...(convo.data?.items ?? []).map((m) => ({ at: m.createdAt, key: `m${m.id}`, m, r: null as RunRow | null, mark: null })),
+    ...messages.map((m) => ({ at: m.createdAt, key: `m${m.id}`, m, r: null as RunRow | null, mark: null })),
     ...(runs.data ?? []).map((r) => ({ at: r.startedAt, key: `r${r.id}`, m: null as Message | null, r, mark: null })),
     ...reviewMarks(reviews ?? []).map((mark) => ({ at: mark.at, key: mark.key, m: null as Message | null, r: null as RunRow | null, mark })),
   ].sort((a, b) => a.at.localeCompare(b.at));
+  // Follow the newest item down. Keyed on the last item, not the count, so older messages added
+  // above (BOS-2168) don't throw the owner to the bottom.
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
+  const lastKey = feed.at(-1)?.key;
   useEffect(() => {
     end.current?.scrollIntoView({ block: "nearest" });
-  }, [feed.length]);
+  }, [lastKey]);
 
   const send = async (interrupt = false) => {
     const outgoing = withAttachments(text, img.attached);
@@ -232,7 +297,19 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   return (
     <section className="card activity" aria-labelledby="activity-h">
       <h2 id="activity-h">Activity</h2>
-      <div className="activity-feed" role="log" aria-live="polite">
+      <div className="activity-feed" role="log" aria-live="polite" ref={feedBox}>
+        {hasOlder && messages.length > 0 && (
+          <div style={{ textAlign: "center" }}>
+            <button className="btn" type="button" disabled={older.loading} onClick={() => void loadOlder()}>
+              {older.loading ? "Loading older messages…" : "Load older messages"}
+            </button>
+            {older.error && (
+              <p className="error" role="alert" style={{ fontSize: 13 }}>
+                {older.error}
+              </p>
+            )}
+          </div>
+        )}
         {feed.length === 0 && convo.data && <p className="muted">No activity yet. When an agent works on this task, you'll see what it's doing here, and you can talk to it below.</p>}
         {feed.map(({ key, m, r, mark }) =>
           mark ? (
@@ -242,7 +319,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           ) : r ? (
             <RunBlock key={key} run={r} />
           ) : (
-            <div key={key} className={`chat-msg ${m!.author === "agent" ? "assistant" : m!.author}`}>
+            <div key={key} data-key={key} className={`chat-msg ${m!.author === "agent" ? "assistant" : m!.author}`}>
               {(() => {
                 const { summary, details } = m!.author === "agent" ? splitDetails(m!.text) : { summary: m!.text, details: null };
                 return (

@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, runs as runsTable, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
+import { decisions, ownerReplies, runners, runs as runsTable, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -85,10 +85,60 @@ describe("ticket conversation (R65)", () => {
     await c.db.insert(ticketMessages).values(
       Array.from({ length: 505 }, (_, i) => ({ companyId: c.company.id, ticketId: t.id, author: "owner" as const, text: `m${i}`, delivery: "unassigned", createdAt: new Date(base + i * 60_000) })),
     );
-    const list = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json() as { items: { text: string }[] };
+    const list = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json() as { items: { text: string }[]; hasMore: boolean };
     expect(list.items).toHaveLength(500);
     expect(list.items[0]!.text).toBe("m5");
     expect(list.items[499]!.text).toBe("m504");
+    expect(list.hasMore).toBe(true);
+  });
+
+  it("pages back through 620 messages with before, keeping each owner message's reply state (BOS-2168)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Standing ticket" })).json() as { id: string };
+    const base = Date.UTC(2026, 0, 1);
+    // Messages 300 and 301 share a timestamp, and the page boundary (the 500th from the end is
+    // m120) is checked below too, so a cursor on time alone would show up as a skip or a repeat.
+    const rows = Array.from({ length: 620 }, (_, i) => ({ companyId: c.company.id, ticketId: t.id, author: "owner" as const, text: `m${i}`, delivery: "woken", createdAt: new Date(base + (i === 301 ? 300 : i) * 60_000) }));
+    const inserted = await c.db.insert(ticketMessages).values(rows).returning({ id: ticketMessages.id, text: ticketMessages.text });
+    const m3 = inserted.find((r) => r.text === "m3")!;
+    await c.db.insert(ownerReplies).values({ companyId: c.company.id, ticketId: t.id, messageId: m3.id, agentId: c.worker.id, state: "delivered", reminders: 2 });
+    type Page = { items: { id: string; text: string; replyState: string | null; replyReminders: number | null }[]; hasMore: boolean };
+    const first = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json() as Page;
+    expect(first.items).toHaveLength(500);
+    expect(first.hasMore).toBe(true);
+    expect(first.items[0]!.text).toBe("m120");
+    expect(first.items[499]!.text).toBe("m619");
+    const older = (await c.req("GET", `/api/tickets/${t.id}/messages?before=${first.items[0]!.id}`)).json() as Page;
+    expect(older.items).toHaveLength(120);
+    expect(older.hasMore).toBe(false);
+    // Oldest first, and together the two pages are every message once, in order.
+    const all = [...older.items, ...first.items].map((m) => m.text);
+    const order = [...rows.keys()].map((i) => `m${i}`);
+    expect(new Set(all).size).toBe(620);
+    expect(all.filter((x) => x !== "m300" && x !== "m301")).toEqual(order.filter((x) => x !== "m300" && x !== "m301"));
+    expect(older.items.find((m) => m.text === "m3")).toMatchObject({ replyState: "delivered", replyReminders: 2 });
+    // A page boundary on the shared timestamp: before m301's id (or m300's) gives the rest, no repeat.
+    const tieA = first.items.find((m) => m.text === "m300")!;
+    const tieB = first.items.find((m) => m.text === "m301")!;
+    const [hi, lo] = tieA.id > tieB.id ? [tieA, tieB] : [tieB, tieA];
+    const fromHi = (await c.req("GET", `/api/tickets/${t.id}/messages?before=${hi.id}`)).json() as Page;
+    expect(fromHi.items.at(-1)!.id).toBe(lo.id);
+    expect(fromHi.items).toHaveLength(301);
+    const fromLo = (await c.req("GET", `/api/tickets/${t.id}/messages?before=${lo.id}`)).json() as Page;
+    expect(fromLo.items).toHaveLength(300);
+    expect(fromLo.items.at(-1)!.text).toBe("m299");
+  });
+
+  it("answers an unknown before with a plain 404 (BOS-2168)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "A" })).json() as { id: string };
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "B" })).json() as { id: string };
+    const [m] = await c.db.insert(ticketMessages).values({ companyId: c.company.id, ticketId: other.id, author: "owner", text: "elsewhere", delivery: "unassigned" }).returning({ id: ticketMessages.id });
+    for (const before of [randomUUID(), m!.id, "not-an-id"]) {
+      const res = await c.req("GET", `/api/tickets/${t.id}/messages?before=${before}`);
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: "ticket_chat", message: "No message with that ID on this ticket." });
+    }
   });
 
   it("sends into the live run, records its last message, then wakes the agent once for later messages", async () => {
