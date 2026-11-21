@@ -351,7 +351,7 @@ export function DeployTargets({ company }: { company: Company }) {
     void act.run(async () => {
       setAskAnyway(null);
       try {
-        await api(`/api/deploy-targets/${t.id}${force ? "?force=1" : ""}`, { method: "DELETE" });
+        await api(`/api/deploy-targets/${t.id}${force ? "?force=true" : ""}`, { method: "DELETE" });
       } catch (err) {
         if (err instanceof ApiError && err.status === 409 && err.field === "has_history") {
           setAskAnyway({ id: t.id, message: err.message });

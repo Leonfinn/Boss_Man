@@ -33,13 +33,13 @@ function stub(onDelete: (url: string) => Response) {
 describe("removing a deploy target", () => {
   it("shows the server's message with Remove anyway for past deploys, and removes with force", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    const calls = stub((url) => (url.includes("force=1") ? reply(204, null) : reply(409, { error: "has_history", field: "has_history", message: "This target has past deploys." })));
+    const calls = stub((url) => (url.includes("force=true") ? reply(204, null) : reply(409, { error: "has_history", field: "has_history", message: "This target has past deploys." })));
     render(<DeployTargets company={company} />);
     fireEvent.click(await screen.findByRole("button", { name: "Delete deploy target Staging" }));
     expect((await screen.findByRole("alert")).textContent).toContain("This target has past deploys.");
     fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }));
     await screen.findByText("Deleted Staging.");
-    expect(calls).toEqual(["/api/deploy-targets/t1", "/api/deploy-targets/t1?force=1"]);
+    expect(calls).toEqual(["/api/deploy-targets/t1", "/api/deploy-targets/t1?force=true"]);
   });
 
   it("shows a live deploy's message with no Remove anyway", async () => {

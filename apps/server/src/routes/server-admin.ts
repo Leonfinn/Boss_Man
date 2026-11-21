@@ -191,11 +191,11 @@ export function serverAdminRoutes(
     deploysSvc.updateTarget(IdParam.parse(req.params).id, TargetInput.partial().parse(req.body)).catch(deployErrors(reply)),
   );
   owner.delete("/api/deploy-targets/:id", async (req, reply) => {
-    const force = z.object({ force: z.enum(["1"]).optional() }).parse(req.query).force === "1";
+    const force = z.object({ force: z.enum(["1", "true"]).optional() }).parse(req.query).force !== undefined;
     const r = await deploysSvc.deleteTarget(IdParam.parse(req.params).id, force);
-    if (r === "deleted") return reply.code(204).send();
-    if (r === "live") return reply.code(409).send({ error: "live", message: "A deploy to this target is waiting for approval, approved or running. Let it finish or reject it in Decisions, then remove the target." });
-    if (r === "has_history") return reply.code(409).send({ error: "has_history", field: "has_history", message: "This target has past deploys, and removing it would erase them and its secret grants." });
+    if (r.result === "deleted") return reply.code(204).send();
+    if (r.result === "live") return reply.code(409).send({ error: "live", message: `${r.detail} Let it finish or reject it in Decisions, then remove the target.` });
+    if (r.result === "has_history") return reply.code(409).send({ error: "has_history", field: "has_history", message: `This target has ${r.count} past deploy${r.count === 1 ? "" : "s"}, and removing it would erase ${r.count === 1 ? "it" : "them"} and the target's secret grants.` });
     return reply.code(404).send({ error: "not_found" });
   });
   owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
