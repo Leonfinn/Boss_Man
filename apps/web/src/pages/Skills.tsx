@@ -571,9 +571,9 @@ const PROPOSAL_STATUS: Record<string, string> = {
 /** Skills the CEO proposed, and where each one stands. The decision itself is answered in Decisions. */
 function Proposals({ companyId }: { companyId: string }) {
   // The newest PROPOSALS_PAGE, then older ones on "Show older" (BOS-2165): the server never sends the files here.
-  const base = `/api/companies/${companyId}/skill-proposals?limit=${PROPOSALS_PAGE}`;
-  const list = usePoll((signal) => api<ProposalRow[]>(base, { signal }), 30_000, companyId);
-  const older = useOlder(list.data, PROPOSALS_PAGE, (before) => api<ProposalRow[]>(`${base}&before=${before}`), companyId);
+  // Paths written out inside api(…): the screen inventory (screen-scan.ts) only sees a read written there.
+  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals?limit=${PROPOSALS_PAGE}`, { signal }), 30_000, companyId);
+  const older = useOlder(list.data, PROPOSALS_PAGE, (before) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals?limit=${PROPOSALS_PAGE}&before=${before}`), companyId);
   const rows = older.rows ?? [];
   if (!rows.length) return null;
   return (
