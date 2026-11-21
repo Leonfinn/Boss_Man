@@ -165,6 +165,17 @@ describe("when a retro starts", () => {
     expect((await c.req("PUT", `/api/companies/${c.company.id}/retro-settings`, { agentId: foreign!.id })).statusCode).toBe(404);
   });
 
+  it("logs who runs retros, and refuses an unknown company", async () => {
+    const c = (ctx = await setup());
+    await c.req("PUT", `/api/companies/${c.company.id}/retro-settings`, { agentId: c.eng.id });
+    await c.req("PUT", `/api/companies/${c.company.id}/retro-settings`, { agentId: null });
+    const rows = (await c.db.select().from(activity).where(eq(activity.kind, "settings"))).map((r) => r.summary);
+    expect(rows).toContain(`Owner set Eve to run workflow retros`);
+    expect(rows).toContain("Owner set no one to run workflow retros");
+    const missing = await c.req("PUT", `/api/companies/00000000-0000-4000-8000-000000000000/retro-settings`, { agentId: null });
+    expect(missing.statusCode).toBe(404);
+  });
+
   it("isn't held back by the limit on wakes with no ticket", async () => {
     const c = (ctx = await setup());
     for (let i = 0; i < 9; i++) await c.scheduler.wake({ agentId: c.pm!.id, reason: "retro", note: "go" });
