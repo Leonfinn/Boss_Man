@@ -73,6 +73,13 @@ export const DEFAULT_WATCHDOG: WatchdogSettings = {
   spareCapacityMinutes: 20,
 };
 
+/** The allowed range of one numeric limit, read from the schema above so a form never copies the numbers. */
+export function watchdogLimitRule(key: keyof WatchdogSettings): { min: number; max: number; whole: boolean } | null {
+  const s = WatchdogSettings.shape[key] as unknown as { minValue?: number | null; maxValue?: number | null; isInt?: boolean };
+  if (typeof s.minValue !== "number" || typeof s.maxValue !== "number") return null;
+  return { min: s.minValue, max: s.maxValue, whole: !!s.isInt };
+}
+
 /** Reads a stored value defensively: unknown or bad fields fall back to the defaults. */
 export function readWatchdogSettings(v: unknown): WatchdogSettings {
   const out = { ...DEFAULT_WATCHDOG };
