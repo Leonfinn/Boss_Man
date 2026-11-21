@@ -692,3 +692,66 @@ describe("BOS-89 blockers", () => {
     expect([...mcp.matchAll(/\bskills\.(write|upload|fromLink|copyFrom|remove|save|setHolders|refresh\w*)\(/g)]).toEqual([]);
   });
 });
+
+// BOS-2165: the list is polled every 30 s, so it never carries the files and comes 50 at a time, newest first.
+describe("proposal list paging", () => {
+  // 55 proposals, i files each; every third pair shares a created time, as rows saved in one batch do.
+  const seed = async (c: Awaited<ReturnType<typeof setup>>) => {
+    const t0 = Date.parse("2026-11-01T00:00:00Z");
+    const rows = Array.from({ length: 55 }, (_, i) => ({
+      companyId: c.company.id,
+      name: `p${i}`,
+      source: "draft" as const,
+      files: Array.from({ length: (i % 4) + 1 }, (_, k) => ({ path: `f${k}.md`, content: b64("x".repeat(1000)) })),
+      fileHashes: {},
+      bundleHash: `h${i}`,
+      why: "w",
+      hasScripts: false,
+      reviewRequired: true,
+      createdAt: new Date(t0 + Math.floor(i / 2) * 1000),
+    }));
+    await c.db.insert(skillProposals).values(rows);
+    return rows;
+  };
+
+  it("sends no file contents, counts the files, and pages newest first with no row twice or missed", async () => {
+    const c = (ctx = await setup());
+    await seed(c);
+    const first = (await c.req("GET", `/api/companies/${c.company.id}/skill-proposals`)).json() as Array<Record<string, unknown>>;
+    expect(first).toHaveLength(50);
+    expect(first[0]).not.toHaveProperty("files");
+    expect(first[0]!.name).toBe("p54");
+    for (const p of first) expect(p.fileCount).toBe((Number(String(p.name).slice(1)) % 4) + 1);
+    const times = first.map((p) => Date.parse(String(p.createdAt)));
+    expect([...times].sort((a, b) => b - a)).toEqual(times);
+    // Walk the whole list two at a time: the cursor is the row id, so rows sharing a created time are neither skipped nor repeated.
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 40; page++) {
+      const res = await c.req("GET", `/api/companies/${c.company.id}/skill-proposals?limit=2${before ? `&before=${before}` : ""}`);
+      const rows = res.json() as Array<{ id: string; name: string }>;
+      seen.push(...rows.map((r) => r.name));
+      if (rows.length < 2) break;
+      before = rows.at(-1)!.id;
+    }
+    expect(seen).toHaveLength(55);
+    expect(new Set(seen).size).toBe(55);
+    // Capped at 200, and a bad cursor is refused rather than ignored.
+    expect((await c.req("GET", `/api/companies/${c.company.id}/skill-proposals?limit=100000`)).json()).toHaveLength(55);
+    expect((await c.req("GET", `/api/companies/${c.company.id}/skill-proposals?before=nope`)).statusCode).toBe(400);
+  });
+
+  it("gives an agent 50 with a note on how to see older ones", async () => {
+    const c = (ctx = await setup());
+    await seed(c);
+    const asCeo = await c.mcp(c.ceo.id);
+    const page = JSON.parse(txt(await asCeo.callTool({ name: "skills", arguments: { action: "proposals" } }))) as { proposals: Array<{ id: string; name: string }>; more: string };
+    expect(page.proposals).toHaveLength(50);
+    expect(page.proposals[0]!.name).toBe("p54");
+    const last = page.proposals.at(-1)!.id;
+    expect(page.more).toBe(`Showing the 50 newest. For older ones, call proposals again with before: "${last}".`);
+    const rest = JSON.parse(txt(await asCeo.callTool({ name: "skills", arguments: { action: "proposals", before: last } }))) as Array<{ name: string }>;
+    expect(rest).toHaveLength(5);
+    expect(new Set([...page.proposals, ...rest].map((p) => p.name)).size).toBe(55);
+  });
+});

@@ -2,7 +2,10 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
+import { issueRunToken } from "../src/mcp.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, costEvents, decisions, ticketDependencies, engagements, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
@@ -226,5 +229,62 @@ describe("charge-back (R26)", () => {
     const all = await ctx.engagements.view(e.id, ctx.homelab.company.id, true);
     expect(all.thread).toHaveLength(25);
     expect(all).not.toHaveProperty("earlierNotShown");
+  });
+});
+
+// BOS-2165: the page polls the list every 15 s and an agent's list goes into its context, so both come 50 at a time, newest first.
+describe("engagement list paging", () => {
+  // 55 engagements; pairs share a created time, as rows saved in one batch can.
+  const seed = async (c: Awaited<ReturnType<typeof setup>>) => {
+    const t0 = Date.parse("2026-11-01T00:00:00Z");
+    await c.db.insert(engagements).values(
+      Array.from({ length: 55 }, (_, i) => ({ requesterCompanyId: c.appCo.company.id, providerCompanyId: c.homelab.company.id, title: `e${i}`, scope: "s", createdAt: new Date(t0 + Math.floor(i / 2) * 1000) })),
+    );
+  };
+
+  it("pages newest first for the owner, with no row twice or missed", async () => {
+    ctx = await setup();
+    await seed(ctx);
+    const first = (await ctx.req("GET", "/api/engagements")).json() as Array<{ id: string; title: string }>;
+    expect(first).toHaveLength(50);
+    expect(first[0]!.title).toBe("e54");
+    // e4 and e5 share a created time, so either is the 50th.
+    expect(["e4", "e5"]).toContain(first.at(-1)!.title);
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 40; page++) {
+      const rows = (await ctx.req("GET", `/api/engagements?limit=2${before ? `&before=${before}` : ""}`)).json() as Array<{ id: string; title: string }>;
+      seen.push(...rows.map((r) => r.title));
+      if (rows.length < 2) break;
+      before = rows.at(-1)!.id;
+    }
+    expect(seen).toHaveLength(55);
+    expect(new Set(seen).size).toBe(55);
+    expect((await ctx.req("GET", "/api/engagements?limit=100000")).json()).toHaveLength(55);
+    expect((await ctx.req("GET", "/api/engagements?limit=0")).statusCode).toBe(400);
+  });
+
+  it("gives an agent 50 with a note on how to see older ones", async () => {
+    ctx = await setup();
+    await seed(ctx);
+    await ctx.app.listen({ host: "127.0.0.1", port: 0 });
+    const token = await issueRunToken(ctx.db, { companyId: ctx.homelab.company.id, agentId: ctx.homelab.ceo.id, runId: randomUUID() });
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(ctx.app.server.address() as { port: number }).port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    try {
+      const txt = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]!.text;
+      const page = JSON.parse(txt(await client.callTool({ name: "engagement", arguments: { action: "list" } }))) as { engagements: Array<{ id: string; title: string }>; more: string };
+      expect(page.engagements).toHaveLength(50);
+      expect(page.engagements[0]!.title).toBe("e54");
+      const last = page.engagements.at(-1)!.id;
+      expect(page.more).toBe(`Showing the 50 newest. For older ones, list again with before: "${last}".`);
+      const rest = JSON.parse(txt(await client.callTool({ name: "engagement", arguments: { action: "list", before: last } }))) as Array<{ title: string }>;
+      // A plain array once nothing is left: no "more" note.
+      expect(Array.isArray(rest)).toBe(true);
+      expect(rest).toHaveLength(5);
+      expect(new Set([...page.engagements, ...rest].map((e) => e.title)).size).toBe(55);
+    } finally {
+      await client.close();
+    }
   });
 });
