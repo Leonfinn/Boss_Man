@@ -1471,6 +1471,12 @@ describe("the owner's watchdog changes leave activity lines (BOS-2150)", () => {
     await patch({ scrumMasterAgentId: ctx.sm.id, enabled: true, recordOnly: false });
     expect(await lines()).toHaveLength(2);
 
+    // Changing one field leaves every other stored setting as it was.
+    const stored = async () => (await ctx.db.select({ watchdog: companies.watchdog }).from(companies).where(eq(companies.id, ctx.companyId)))[0]!.watchdog;
+    const before = await stored();
+    await patch({ inProgressHours: 3 });
+    expect(await stored()).toEqual({ ...readWatchdogSettings(before), inProgressHours: 3 });
+
     await ctx.db.delete(activity).where(eq(activity.companyId, ctx.companyId));
     await patch({ recordOnly: true, reviewHours: 5, blockedHours: 9, progressContract: false });
     expect(await lines()).toEqual(["Owner changed the watchdog limits", "Owner switched the progress contract off", "Owner switched the watchdog's record-only mode on"]);
