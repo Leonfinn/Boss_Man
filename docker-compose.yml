@@ -35,7 +35,17 @@
 # own apps (which are named ix-<app>).
 name: boss-man
 
+# Container logs are capped (BOS-2161): Docker's default keeps every line forever and slowly fills the host's disk.
+# Each file of this stack repeats this block (an anchor can't cross files). Change the cap in .env with
+# BOSSMAN_LOG_MAX_SIZE and BOSSMAN_LOG_MAX_FILE; it applies to a container when it is next recreated.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 x-runner: &runner
+  logging: *logging
   # scripts/update-runner.sh builds this tag and only promotes a build that passes the
   # canary (R52); `docker compose build` also works but skips that check.
   image: boss-man-runner:current
@@ -85,6 +95,7 @@ services:
   # It is a top-level service, NOT part of the x-runner anchor above: runner-app-co depends on it, and a
   # service can only depend on another real service (BOS-972, Dougal).
   claude-pack:
+    logging: *logging
     image: boss-man-runner:current
     build:
       context: .
@@ -110,6 +121,7 @@ services:
     pids_limit: 512
 
   db:
+    logging: *logging
     image: pgvector/pgvector:0.8.7-pg17-bookworm
     restart: unless-stopped
     environment:
@@ -131,6 +143,7 @@ services:
       retries: 10
 
   server:
+    logging: *logging
     build:
       context: .
       dockerfile: apps/server/Dockerfile
@@ -187,6 +200,7 @@ services:
       - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:${BOSSMAN_PORTAL_HOST_PORT:-3101}:3101"
 
   launcher:
+    logging: *logging
     build:
       context: .
       dockerfile: apps/launcher/Dockerfile

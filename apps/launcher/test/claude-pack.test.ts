@@ -85,6 +85,7 @@ describe("the pack installer spec (DR-050)", () => {
     expect(spec.Cmd).toEqual(["node_modules/.bin/tsx", "src/claude-pack-main.ts"]);
     expect(spec.HostConfig.Mounts).toEqual([{ Type: "volume", Source: "boss-man-claude-pack", Target: "/opt/bossman-claude" }]);
     expect(spec.HostConfig.CapDrop).toEqual(["ALL"]);
+    expect((spec.HostConfig as { LogConfig?: unknown }).LogConfig).toEqual({ Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } });
     expect(spec.Labels["boss-man.claude-pack"]).toBe("1");
     expect(packVolume()).toBe("boss-man-claude-pack");
     expect(packVolume("staging")).toBe("boss-man-staging-claude-pack");

@@ -8,8 +8,15 @@
 
 name: boss-man-check-worker
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 services:
   check-worker:
+    logging: *logging
     # No image to download or build by hand: Compose builds it from Boss Man's source (the `main` branch). It is the
     # runner image without Claude Code and OpenCode, because a worker never runs an agent. `pull_policy: build` makes
     # every `up -d` look at the source again; when the tools have not changed, Docker reuses its cache and rebuilds nothing.

@@ -35,7 +35,13 @@ x-database: &database
   PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
   PENPOT_DATABASE_USERNAME: penpot
   PENPOT_DATABASE_PASSWORD: ${PENPOT_DB_PASSWORD:?Set PENPOT_DB_PASSWORD in .env}
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
 x-common: &common
+  logging: *logging
   profiles: ["penpot"]
   restart: unless-stopped
   networks: [penpot]
