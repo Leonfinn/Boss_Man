@@ -151,7 +151,7 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
           </button>
         ) : (
           <p style={{ margin: 0 }}>
-            To connect it, open <a href={`#/settings/${company.id}/runner`}>Settings → Server and runner</a> and follow the steps there.
+            To connect it, open <a href={`#/settings/${company.id}/runner`}>Settings → Server and runner → Runner</a> and follow the steps there.
           </p>
         ))}
       {act.view}
