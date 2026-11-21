@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { apiOnce } from "../api";
 import { MoreAbout } from "./MoreAbout";
 
-// BOS-2199: Settings → Notifications → "Other places to send alerts". The address is a secret: it is typed here once,
+// BOS-2199: the Notifications page, "Other places to send alerts". The address is a secret: it is typed here once,
 // sent to the server and never shown again; the page only ever holds the last 4 characters the server returns.
 
 type Kind = "decision_waiting" | "merge_stuck" | "spend_alert" | "run_failed" | "daily_summary";

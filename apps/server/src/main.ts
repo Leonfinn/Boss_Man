@@ -37,7 +37,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, webhooks, mailer, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, webhooks, sweepExpiredSessions, mailer, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -96,6 +96,8 @@ const bg = createBackground(
     // BOS-1472: the host's staging lane: offers the staging target and records each staging deploy's result. // leader-only
     { name: "staging sync", everyMs: Number(env.BOSSMAN_STAGING_SYNC_MS ?? 30_000), run: async () => { await deploys.syncStaging(); await selfDeploy.stagingTick(); } },
     { name: "deploy tags", everyMs: Number(env.BOSSMAN_DEPLOY_TAGS_MS ?? 60_000), run: () => deploys.resumeTags() },
+    // Expired owner logins (BOS-2159): refused already; this deletes the rows so the table doesn't grow. // leader-only
+    { name: "expired sessions", everyMs: Number(env.BOSSMAN_SESSION_SWEEP_MS ?? 60 * 60_000), run: async () => { await sweepExpiredSessions(); } },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
     { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: async () => { await notes.markAnsweredRead(); await notes.clearSettledPushes(); } },
     // BOS-2199: the one retry, a minute later, of an alert that failed to reach a Slack, Discord or webhook destination. Kept in the database, so a restart doesn't lose it.

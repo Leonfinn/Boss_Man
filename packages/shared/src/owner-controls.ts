@@ -56,7 +56,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -134,7 +134,7 @@ export const OWNER_CONTROLS = {
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
   Settings: [
     // "Server and runner" is the name of the last group, not a page (BOS-1492); its pages are Updates … Devices and privacy.
-    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
     "Server and runner",
     "Run the setup wizard",
@@ -182,6 +182,8 @@ export const OWNER_CONTROLS = {
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
+  // The owner's password and other logins (BOS-2159).
+  Account: ["Change password", "Sign out other devices"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
   Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
@@ -221,6 +223,7 @@ export const OWNER_FIELDS = {
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
     "Offer an Approve button on simple agent questions", "My phone",
+    "Type", "Name", "Webhook address", "This is on my own network", "New address (leave empty to keep the one saved)",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
@@ -333,6 +336,7 @@ export const OWNER_FIELDS = {
     "Rules for", "What should this rule do", "New rule", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",
     "Ask a model for a second opinion", "Provider address", "Model", "API key", "Fence", "Advice",
   ],
+  Account: ["Current password", "New password", "New password again"],
   "Import and export": [
     "Include the wiki", "Tickets", "Package", "Company name", "Funding for every agent",
     // The import preview's opt-in for a tool server that reaches the stack or the private network (BOS-335 follow-up).
@@ -360,7 +364,7 @@ export const OWNER_MENU = [
 /** The tabs along the top of a screen (Settings.tsx TABS, Board.tsx PROJECT_TABS). */
 export const OWNER_TABS = {
   Settings: [
-    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
   ],
   Board: ["Kanban", "Budget", "Config"],
@@ -390,5 +394,6 @@ export const OWNER_SECTIONS = {
   "This server": ["Server", "This host", "Facts only you can give", "Network guard", "Allowed automatically", "Extra lines from your .env"],
   "Devices and privacy": ["Your devices", "Private details to block"],
   "Import and export": ["Import a company"],
+  Account: ["Change password", "Sign out other devices"],
   Budget: ["Spending limit", "Pay-as-you-go spend", "On your subscriptions", "Tokens", "Costliest tasks"],
 } as const satisfies Record<string, readonly string[]>;

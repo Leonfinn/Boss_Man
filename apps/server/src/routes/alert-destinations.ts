@@ -1,4 +1,4 @@
-// Settings → Notifications → "Other places to send alerts" (BOS-2199). Owner-only. The webhook address is a secret:
+// The Notifications page, "Other places to send alerts" (BOS-2199). Owner-only. The webhook address is a secret:
 // it is stored in the secrets store, and no answer here ever carries it, only its last 4 characters.
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";

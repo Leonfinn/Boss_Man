@@ -98,7 +98,7 @@ afterAll(async () => {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Wait until the Settings menu has drawn all its links (the event the old fixed sleeps stood in for).
-async function menuReady(page: any, links = 14): Promise<void> {
+async function menuReady(page: any, links = 15): Promise<void> {
   await page.waitForFunction((n: number) => document.querySelectorAll("nav[aria-label='Settings'] a").length >= n, links, { timeout: 15_000 });
 }
 async function launchChromium(): Promise<any | null> {
@@ -149,7 +149,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         const navHtml = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.outerHTML.slice(0, 400));
         // (BOS-1655: the one-row fold links for the other groups are not pages, so they are not counted.)
-        expect(await page.locator("nav[aria-label='Settings'] a:not(.set-group-fold)").count(), `${vp.name}: 14 menu links ${navHtml}`).toBe(14);
+        expect(await page.locator("nav[aria-label='Settings'] a:not(.set-group-fold)").count(), `${vp.name}: 15 menu links ${navHtml}`).toBe(15);
         expect(await page.locator("[role='tablist']").count(), `${vp.name}: no tab row`).toBe(0);
         // The current page is marked, and shown by weight and a bar as well as colour.
         const cur = page.locator("nav[aria-label='Settings'] a[aria-current='page']");
@@ -211,7 +211,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       const phone = await browser.newPage({ viewport: { width: 380, height: 800 }, deviceScaleFactor: 1, hasTouch: true });
       await phone.goto(`${base}/#/settings`);
       await menuReady(phone);
-      expect(await phone.locator("nav[aria-label='Settings'] a").count(), "phone menu: 14 rows").toBe(14);
+      expect(await phone.locator("nav[aria-label='Settings'] a").count(), "phone menu: 15 rows").toBe(15);
       expect(await phone.locator("nav[aria-label='Settings'] .set-item-hint").first().isVisible(), "phone menu: hints show").toBe(true);
       expect(await phone.getByText("Run the setup wizard").count(), "phone menu: the wizard button").toBeGreaterThanOrEqual(1);
       expect(await phone.locator(".set-page").count(), "phone menu: no page shown yet").toBe(0);
@@ -280,7 +280,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         const a = await lists.nth(0).locator("a").first().boundingBox();
         const b = await lists.nth(1).locator("a").first().boundingBox();
         const c = await lists.nth(2).locator("a").first().boundingBox();
-        expect(await links.count(), `${vp.name}: all 14 pages are in the menu`).toBe(14);
+        expect(await links.count(), `${vp.name}: all 15 pages are in the menu`).toBe(15);
         expect(b!.x, `${vp.name}: second group sits in a second column`).toBeGreaterThan(a!.x + a!.width - 1);
         expect(c!.x, `${vp.name}: third group sits in a third column`).toBeGreaterThan(b!.x + b!.width - 1);
         expect(Math.abs(b!.y - a!.y), `${vp.name}: same row`).toBeLessThan(2);

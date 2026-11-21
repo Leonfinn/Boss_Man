@@ -1,4 +1,4 @@
-// Alerts to Slack, Discord or any webhook (BOS-2199). The owner adds a destination in Settings → Notifications;
+// Alerts to Slack, Discord or any webhook (BOS-2199). The owner adds a destination on the Notifications page;
 // each alert of a kind it ticked is sent after the alert is saved, never before and never awaited by it. The
 // address is a secret: it lives in the secrets store, and nothing here logs it, puts it in an error note or
 // returns it to the page. A failed send is tried once more a minute later (durable, so a restart keeps it), then
@@ -117,7 +117,7 @@ export function webhookDeliveryService(
     await db.update(alertDestinations).set({ lastFailureNote: note.slice(0, 200), lastFailedAt: t, failingSince: since, ...(off ? { enabled: false } : {}) }).where(eq(alertDestinations.id, d.id));
     if (off && d.enabled) {
       deps.log?.(`alert destination ${d.id} switched off after 3 days of failures`);
-      await deps.notifyOwner?.({ title: `Alerts to "${d.name}" switched off`, body: `Boss Man couldn't reach "${d.name}" for 3 days (last answer: ${note}). Open Settings > Notifications, check the address, then switch it back on.` }).catch(() => undefined);
+      await deps.notifyOwner?.({ title: `Alerts to "${d.name}" switched off`, body: `Boss Man couldn't reach "${d.name}" for 3 days (last answer: ${note}). Open the Notifications page, check the address, then switch it back on.` }).catch(() => undefined);
     }
   }
 
