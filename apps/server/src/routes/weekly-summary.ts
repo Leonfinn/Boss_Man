@@ -1,4 +1,4 @@
-// Settings → Notifications → "Weekly summary by email" (BOS-2195), owner only. Off until the owner switches it on.
+// The Notifications page's "Weekly summary by email" section (BOS-2195), owner only. Off until the owner switches it on.
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { mailerService } from "../services/mailer.js";
