@@ -1472,7 +1472,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const checks = Object.keys(st)
       .filter((k) => k.startsWith("check_"))
       .map((k) => ({ name: k.slice(6), result: st[k] as string, why: (st[`why_${k.slice(6)}`] as string | undefined) ?? "" }));
-    return { configured, pending: pend, last: { id: st.id, result: st.result, message: st.message, commit: st.to_commit, runnerImage: st.runner_image ?? null, smoke: st.smoke ?? null, failedChecks: st.failed_checks ?? null, checks, at: st.at } };
+    return { configured, pending: pend, last: { id: st.id, result: st.result, message: st.message, commit: st.to_commit, runnerImage: st.runner_image ?? null, smoke: st.smoke ?? null, failedChecks: st.failed_checks ?? null, logTail: st.log_tail ?? null, checks, at: st.at } };
   }
 
   return {
