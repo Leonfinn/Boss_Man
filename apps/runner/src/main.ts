@@ -10,6 +10,7 @@ import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTes
 import { harnessVersions } from "./harness-versions.js";
 import { readToolchain } from "./toolchain.js";
 import { CheckJobs } from "./check-jobs.js";
+import { DiskGuard, levelsFromEnv } from "./disk-guard.js";
 import { Journal } from "./journal.js";
 import { DEFAULT_VACUUM_TIMEOUT_MS, keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
 import { RunnerConnection } from "./connection.js";
@@ -89,7 +90,10 @@ if (sandbox.level !== "unavailable") workspaces.checkFence = { home: path.join(d
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
-const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
+// BOS-2182: free space on the workspaces volume. Below the floor new runs and checks wait; running ones are left alone.
+const diskLevels = levelsFromEnv(env);
+const diskGuard = new DiskGuard(workspacesRoot, diskLevels);
+const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log, undefined, diskGuard);
 // The Claude pack (DR-050, BOS-972): the image ships no Anthropic code, so Claude Code and its ACP adapter
 // come from a ready folder on the bossman-claude volume, mounted read-only. The launcher's installer container
 // (or the compose claude-pack service) fills it before this process starts; here we only read it. Without a
@@ -140,6 +144,7 @@ const sessions = new SessionManager({
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
   checkJobs,
+  diskGuard,
   // The Claude adapter comes from the ready pack, not the runner's node_modules (DR-050).
   ...(claudePack.ready && claudePack.dir ? { adapterBins: { claude: adapterBin(claudePack.dir) } } : {}),
   fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot), pnpmStore: storeDir },
@@ -198,16 +203,28 @@ setInterval(() => void reportGuard(), 5 * 60_000).unref();
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled
 // like any event, so it reaches the server once the connection is up.
+let lastDiskReport: Awaited<ReturnType<typeof workspaces.housekeeping>> | null = null;
+/** The report with the volume's free space, measured now. */
+const withFreeSpace = (report: NonNullable<typeof lastDiskReport>) => {
+  const space = diskGuard.read();
+  return { ...report, ...(space ? { freeBytes: space.freeBytes, totalBytes: space.totalBytes } : {}), holding: diskGuard.hold() !== null };
+};
 const housekeeping = async () => {
   try {
     const report = await workspaces.housekeeping();
     if (report.removed.length) log(`removed ${report.removed.length} orphaned workspace folder(s)`);
-    connection.emit({ type: "runner.disk", ...report });
+    lastDiskReport = report;
+    connection.emit({ type: "runner.disk", ...withFreeSpace(report) });
   } catch (err) {
     log(`workspace clean-up failed: ${(err as Error).message}`);
   }
   await pruneOpencode();
 };
+// While space is low the report is repeated every 5 minutes with fresh free-space figures (no clean-up pass again),
+// so the server can warn the owner, and sees when space comes back.
+setInterval(() => {
+  if (lastDiskReport && diskGuard.state() !== "ok") connection.emit({ type: "runner.disk", ...withFreeSpace(lastDiskReport) });
+}, 5 * 60_000).unref();
 
 // OpenCode never deletes its old sessions (BOS-616): drop ones untouched for
 // BOSSMAN_OPENCODE_SESSION_DAYS (default 14, 0 = off), 50 per database per pass, then give the

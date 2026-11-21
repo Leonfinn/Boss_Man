@@ -1,10 +1,13 @@
 import { api, type EngagementRow, type EngagementView } from "../api";
-import { usePoll } from "../hooks";
+import { useOlder, usePoll } from "../hooks";
+
+const PAGE = 50;
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
+import { ShowOlder } from "../components/ShowOlder";
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   requested: { label: "Requested", tone: "blue" },
@@ -21,8 +24,10 @@ const STEPS = ["requested", "accepted", "in_progress", "delivered", "signed_off"
 const STEP_LABEL: Record<(typeof STEPS)[number], string> = { requested: "Requested", accepted: "Accepted", in_progress: "In progress", delivered: "Delivered", signed_off: "Signed off" };
 
 export function Engagements() {
-  const list = usePoll((signal) => api<EngagementRow[]>("/api/engagements", { signal }), 15_000, "engagements");
-  const rows = [...(list.data ?? [])].reverse();
+  // The server sends the newest PAGE; older ones come on "Show older" (BOS-2165).
+  const list = usePoll((signal) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}`, { signal }), 15_000, "engagements");
+  const older = useOlder(list.data, PAGE, (before) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}&before=${before}`), "engagements");
+  const rows = older.rows ?? [];
   return (
     <>
       <header className="page-head">
@@ -69,6 +74,7 @@ export function Engagements() {
           </table>
         </div>
       )}
+      <ShowOlder older={older} />
     </>
   );
 }

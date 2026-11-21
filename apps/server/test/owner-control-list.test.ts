@@ -94,6 +94,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/Sidebar.tsx": "Any screen",
   // The page-intro fold, on four screens (P7, BOS-1278).
   "components/MoreAbout.tsx": "Any screen",
+  // The "Show older" button under a paged list (BOS-2165): Skills and Engagements render it.
+  "components/ShowOlder.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   "components/TicketActivity.tsx": "Ticket",
@@ -145,6 +147,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/ThisHost.tsx": "Server and runner",
   "pages/settings/Tools.tsx": "Tools and deploys",
   "pages/settings/Transfer.tsx": "Import and export",
+  "pages/settings/Account.tsx": "Account",
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
@@ -182,6 +185,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>EmailSetting": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
+  "pages/Settings.tsx>Account": "Account",
   "pages/Settings.tsx>ToolServers": "Tools and deploys",
   "pages/Settings.tsx>DeployTargets": "Tools and deploys",
   "pages/Settings.tsx>PenpotSettings": "Tools and deploys",
