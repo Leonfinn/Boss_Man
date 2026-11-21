@@ -379,6 +379,12 @@ reads:
   - /api/companies/:id/skills/:id
   - /api/companies/:id/skills/elsewhere
 
+## #/spend
+sections: 
+  - Spend
+reads: 
+  - /api/companies/:id/spend-report
+
 ## #/tickets
 sections: 
   - About

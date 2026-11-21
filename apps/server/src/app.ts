@@ -137,6 +137,7 @@ import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
 import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
+import { spendReportRoutes } from "./routes/spend-report.js";
 import { featureRoutes } from "./routes/features.js";
 import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
@@ -1986,6 +1987,9 @@ export async function buildApp(opts: AppOptions) {
 
     // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
     projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch, now: opts.now });
+
+    // The Spend page's read (BOS-2194): routes/spend-report.ts.
+    spendReportRoutes(owner, db, { now: opts.now });
 
     owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
 
