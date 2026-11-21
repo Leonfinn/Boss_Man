@@ -139,6 +139,12 @@ services:
   backup:
     image: pgvector/pgvector:0.8.7-pg17-bookworm
     restart: unless-stopped
+    # Same cap as the other services (BOS-2161); written out here because this branch has no shared anchor yet.
+    logging:
+      driver: json-file
+      options:
+        max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+        max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
     depends_on:
       db:
         condition: service_healthy
