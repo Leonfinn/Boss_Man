@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { and, eq, like } from "drizzle-orm";
+import { and, desc, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, companies, decisions, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
 import { openReviewLines, requestReviews, wakeReviewers } from "../src/services/review-kinds.js";
 import type { Leader } from "../src/leader.js";
@@ -329,6 +329,41 @@ describe("unmerged approvals sweep", () => {
     expect((await ctx.decisions.queue({ companyId: ctx.company.id })).map((d) => d.id)).not.toContain(card!.id);
     const [ceo] = await ctx.db.select().from(agents).where(and(eq(agents.companyId, ctx.company.id), eq(agents.role, "ceo")));
     expect((await ctx.db.select().from(wakes).where(eq(wakes.agentId, ceo!.id))).some((w) => w.note?.includes(card!.id))).toBe(true);
+  });
+
+  it("the sweep's own card names the merge's recorded failure, and says when none was recorded (BOS-2210)", async () => {
+    ctx = await setup();
+    const id = await ctx.forgotten("Ship the API", { systemState: "review" });
+    const p2 = (await ctx.req("POST", `/api/companies/${ctx.company.id}/projects`, { name: "API" })).json() as { id: string };
+    await ctx.db.update(projects).set({ repoUrl: "https://github.com/Leonfinn/api.git" }).where(eq(projects.id, p2.id));
+    await ctx.db.update(tickets).set({ projectId: p2.id }).where(eq(tickets.id, id));
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved", createdAt: new Date(Date.now() - 4 * HOUR), decidedAt: new Date(Date.now() - 3 * HOUR) });
+    const cards = () => ctx.db.select().from(decisions).where(and(like(decisions.dedupeKey, "merge-stuck:%"), eq(decisions.status, "open")));
+    // The sweep's one retry fails (no runner) and the landing raises its own card; answer it so the sweep's card is next.
+    await ctx.sweeps.run();
+    await vi.waitFor(async () => expect(await cards()).toHaveLength(1));
+    const clear = () => ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(like(decisions.dedupeKey, "merge-stuck:%"));
+    await clear();
+    const later = async () => {
+      // The retry's heartbeat has gone quiet by now (a merge that is alive holds the sweep back).
+      const spy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2 * HOUR);
+      try {
+        expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+      } finally {
+        spy.mockRestore();
+      }
+      const [card] = await cards();
+      return card!.question;
+    };
+    const [failed] = await ctx.db.select().from(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "merge_failed"))).orderBy(desc(activity.at)).limit(1);
+    expect(failed).toBeDefined();
+    const named = await later();
+    expect(named).toContain(`the merge stopped: ${failed!.summary.replace(/\.$/, "")}`);
+    expect(named).not.toContain("may have restarted");
+    // Nothing recorded since the approval (a restart cut the merge before it could say): the old wording, saying so.
+    await clear();
+    await ctx.db.delete(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "merge_failed")));
+    expect(await later()).toContain("no merge result was recorded; the server may have restarted part-way");
   });
 
   it("a server that handed over mid-merge leaves it to the one now in charge, without asking the owner", async () => {
