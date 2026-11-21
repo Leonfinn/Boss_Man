@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  brakeOffSummary,
+  brakeOffText,
   heldSummary,
   heldText,
+  pausedWaitText,
   slowSummary,
   slowText,
   stuckSummary,
@@ -9,6 +12,7 @@ import {
   type HeldFix,
   type MergeHealthView,
   type MergeLine,
+  type PausedSummary,
 } from "../src/components/MergesStuckBanner";
 
 // BOS-1765: the plain-word helpers behind the merge-line banner (BOS-1507, BOS-1594, BOS-1652).
@@ -187,5 +191,71 @@ describe("slowText", () => {
     expect(slowText({ ...base, inQueue: 17 })).toBe("Merging, but slowly: 17 for Boss Man to merge, estimating the time to clear….");
     expect(slowText({ ...base, inQueue: 5 })).toBe("Merging, but slowly: 17 for Boss Man to merge, estimating the time to clear….");
     expect(slowText({ ...base, waiting: 0, inQueue: 0 })).toBe("Merging, but slowly: 0 for Boss Man to merge, estimating the time to clear….");
+  });
+});
+
+// R47 (start brake) and BOS-1800 (what the pause waits for): the remaining plain-word helpers.
+
+describe("brakeOffSummary", () => {
+  it("is null when the server says nothing: no read, or no start-brake-off row", () => {
+    expect(brakeOffSummary({})).toBeNull();
+    expect(brakeOffSummary({ startBrakeOff: null })).toBeNull();
+  });
+
+  it("copies the start-brake-off row when the server gives one", () => {
+    expect(brakeOffSummary({ startBrakeOff: { waiting: 12, suggestedLimit: 6 } })).toEqual({ waiting: 12, suggestedLimit: 6 });
+  });
+});
+
+describe("brakeOffText", () => {
+  it("says the brake is off, how many wait, and the suggested limit", () => {
+    expect(brakeOffText({ waiting: 12, suggestedLimit: 6 })).toBe("Start brake off, 12 waiting; suggested limit 6");
+  });
+
+  it("keeps the figures as given, for one waiting and for none", () => {
+    expect(brakeOffText({ waiting: 1, suggestedLimit: 1 })).toBe("Start brake off, 1 waiting; suggested limit 1");
+    expect(brakeOffText({ waiting: 0, suggestedLimit: 3 })).toBe("Start brake off, 0 waiting; suggested limit 3");
+  });
+
+  it("stays one line with a longer line and limit", () => {
+    expect(brakeOffText({ waiting: 140, suggestedLimit: 20 })).toBe("Start brake off, 140 waiting; suggested limit 20");
+  });
+});
+
+const paused = (over: Partial<PausedSummary> = {}): PausedSummary => ({
+  reason: "a server update",
+  since: "2026-11-17T08:52:00Z",
+  until: "2026-11-17T11:52:00Z",
+  inUse: 2,
+  slots: 5,
+  ...over,
+});
+
+describe("pausedWaitText", () => {
+  it("says nothing is running when no check is in use", () => {
+    expect(pausedWaitText(paused({ inUse: 0 }))).toBe(
+      "Nothing is running, so a server update can start now. No new merge starts until it is done.",
+    );
+  });
+
+  it("waits for one running check in the singular", () => {
+    expect(pausedWaitText(paused({ inUse: 1 }))).toBe(
+      "A server update is waiting for the 1 running check to finish; no new merges start until it's done. Nothing needs stopping.",
+    );
+  });
+
+  it("waits for several running checks in the plural", () => {
+    expect(pausedWaitText(paused({ inUse: 2 }))).toBe(
+      "A server update is waiting for these 2 running checks to finish; no new merges start until it's done. Nothing needs stopping.",
+    );
+    expect(pausedWaitText(paused({ inUse: 7 }))).toBe(
+      "A server update is waiting for these 7 running checks to finish; no new merges start until it's done. Nothing needs stopping.",
+    );
+  });
+
+  it("capitalises a longer reason at the start of the sentence", () => {
+    expect(pausedWaitText(paused({ inUse: 3, reason: "the nightly backup" }))).toBe(
+      "The nightly backup is waiting for these 3 running checks to finish; no new merges start until it's done. Nothing needs stopping.",
+    );
   });
 });
