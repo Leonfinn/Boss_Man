@@ -13,7 +13,7 @@ import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
-import { LiveState, atTime, historyTag, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { LiveState, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -307,7 +307,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
           <NowRunning v={v} report={report.data} progress={progress} />
         </div>
-        <RecentUpdates rows={history.data} progress={progress} />
+        <RecentUpdates rows={history.data} progress={progress} wait={wait.data} maint={maint.data} queued={!!v?.runnerQueue} />
       </div>
       {v && (
         <div className="upd-other" data-testid="other-actions">
@@ -494,7 +494,7 @@ function NowRunning({ v, report, progress }: { v: SelfDeployView | null; report:
 }
 
 /** Recent updates: the last 5 server updates and runner rebuilds, newest first (BOS-1238). */
-function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress: RunnerProgress }) {
+function RecentUpdates({ rows, progress, wait, maint, queued }: { rows: HistoryRow[] | null; progress: RunnerProgress; wait: DeployWaitView | null; maint: MaintenanceView | null; queued: boolean }) {
   // Only the newest runner row can be mid-swap; older ones are history.
   const newestRunner = rows?.find((r) => r.target === "runner")?.id;
   return (
@@ -508,11 +508,14 @@ function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress
         <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
           {rows.map((r) => {
             const t = historyTag(r, r.id === newestRunner ? progress : null);
+            // BOS-2056: only the newest row of each kind can be the one that is live; older "Waiting" rows are history.
+            const waitsOn = r.id === newestRunner || r.id === rows.find((x) => x.target !== "runner")?.id ? historyWaitingOn(r, wait, maint, queued) : null;
             return (
               <li key={r.id} className="upd-row" style={{ listStyle: "none" }}>
                 <span>{when(r.at)}</span>
                 <span>{historyWhat(r)}</span>
                 <span className={`tag ${t.tone}`}>{t.tag}</span>
+                {waitsOn && <span className="muted" style={{ fontSize: 13, gridColumn: "1 / -1" }} data-testid="waiting-on">{waitsOn}</span>}
               </li>
             );
           })}

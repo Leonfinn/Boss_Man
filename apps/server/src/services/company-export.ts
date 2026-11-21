@@ -5,7 +5,8 @@ import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { strToU8, zipSync } from "fflate";
 import { readWatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentAvatars, agentSkills, agents, companies, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
+import { liveTagOf, type TargetRules } from "./deploys.js";
+import { agentAvatars, agentSkills, agents, companies, deployTargets, policyRules, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { liveWikiPage, slugify } from "./wiki.js";
 
 export const EXPORT_FORMAT = "bossman-company/1";
@@ -109,10 +110,37 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
     .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
     .where(eq(secretGrants.companyId, companyId));
   const grantAgents = grants.length ? await db.select().from(secretGrantAgents).where(inArray(secretGrantAgents.grantId, grants.map((g) => g.id))) : [];
-  files["secrets.json"] = json(
-    grants
-      .filter((g) => !g.deployTargetId)
-      .map((g) => ({ name: g.name, kind: g.kind, envName: g.envName, agents: grantAgents.filter((x) => x.grantId === g.id).map((x) => agentSlug.get(x.agentId)).filter(Boolean) })),
+  const grantView = (g: (typeof grants)[number]) => ({ name: g.name, kind: g.kind, envName: g.envName, agents: grantAgents.filter((x) => x.grantId === g.id).map((x) => agentSlug.get(x.agentId)).filter(Boolean) });
+  files["secrets.json"] = json(grants.filter((g) => !g.deployTargetId).map(grantView));
+
+  // Deploy targets (BOS-2169), with the secrets granted to each by name only. The host's own staging lane is left
+  // out: the host creates it. A live tag's project id means nothing on another server, so it travels as the project's folder name.
+  const targetRows = await db.select().from(deployTargets).where(eq(deployTargets.companyId, companyId)).orderBy(asc(deployTargets.name));
+  files["deploy-targets.json"] = json(
+    targetRows
+      .filter((t) => (t.rules as TargetRules | null)?.hostStaging !== true)
+      .map((t) => {
+        const r = (t.rules ?? {}) as TargetRules;
+        const lt = liveTagOf(t);
+        return {
+          name: t.name,
+          kind: t.kind,
+          endpoint: t.endpoint,
+          isProduction: t.isProduction,
+          rules: { ...(r.requiresApproval === true ? { requiresApproval: true } : {}), ...(lt && projectSlug.has(lt.projectId) ? { liveTag: { project: projectSlug.get(lt.projectId), name: lt.name } } : {}) },
+          secrets: grants.filter((g) => g.deployTargetId === t.id).map(grantView),
+        };
+      }),
+  );
+
+  // The company's own permission rules, in their order. Global rules (no company) never leave; a rule limited to agents names them, not their ids.
+  const ruleRows = await db.select().from(policyRules).where(eq(policyRules.companyId, companyId)).orderBy(asc(policyRules.position), asc(policyRules.name));
+  const agentName = new Map(team.map((a) => [a.id, a.name]));
+  files["permission-rules.json"] = json(
+    ruleRows.map((r) => {
+      const { agentIds, ...rest } = (r.condition ?? {}) as Record<string, unknown> & { agentIds?: string[] };
+      return { name: r.name, trigger: r.trigger, condition: { ...rest, ...(Array.isArray(agentIds) ? { agents: agentIds.map((id) => agentName.get(id) ?? "(unknown agent)") } : {}) }, outcome: r.outcome, position: r.position };
+    }),
   );
 
   if (opts.wiki) {

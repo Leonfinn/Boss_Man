@@ -428,8 +428,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: in its compose.yaml, replace the 40-character commit on the two lines marked "CHANGE THIS (commit)" with the new runner commit, and run docker compose up -d next to it (it rebuilds the worker by itself). The steps are in docs/34-check-workers.md; the Checks panel shows which workers are out of date.`;
   }
 
-  async function end(title: string, level: NotifyInput["level"], body: string) {
+  async function end(title: string, level: NotifyInput["level"], bodyIn: string) {
+    let body = bodyIn;
     const h = await getHold(db);
+    // BOS-2056: a wrap-up that joined this update's hold ends with it, and the owner is told so once, here.
+    if (h && h.kind !== "wrapup" && h.wrapSince) body = `${body} The wrap-up you asked for ended with it: work has restarted.`;
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
     await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
@@ -647,6 +650,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       return {
         ...base,
         wrapAsked: true,
+        // BOS-2056: which update the wrap-up is for, and since when, so the banner and status box can name it.
+        wrapSince,
+        wrapForUpdate: h.kind === "wrapup" ? (h.forUpdate ?? "none") : "runner",
         ...(h.kind === "wrapup" ? { minutes: h.minutes } : {}),
         notRespondingAfter: h.wrapNotRespondingAfter ?? WRAPUP_NOT_RESPONDING_MINUTES,
         runsList: list,
