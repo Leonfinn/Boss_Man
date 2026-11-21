@@ -3,6 +3,7 @@ import { api, usd, type BudgetRow, type Company, type FundingSource, type Fundin
 import { usePoll } from "../hooks";
 import { windowHasReset, windowLabel } from "@boss-man/shared";
 import { ageLabel } from "../age";
+import { Loader } from "../components/Loader";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
 /** "Thu 29 Oct at 14:04": day, date and time in the same style as the reset line. */
@@ -373,7 +374,18 @@ export function FundingCards() {
     30_000,
     "sources-status",
   );
-  return <div className="grid-cards">{sources.data?.map((s) => <SourceCard key={s.source.id} s={s} />)}</div>;
+  return (
+    <>
+      {sources.error ? <p className="error" role="alert">{sources.error.message}</p> : null}
+      {sources.data === null ? (
+        <Loader label="Loading funding sources" />
+      ) : sources.data.length === 0 ? (
+        <p className="muted">No funding sources yet.</p>
+      ) : (
+        <div className="grid-cards">{sources.data.map((s) => <SourceCard key={s.source.id} s={s} />)}</div>
+      )}
+    </>
+  );
 }
 
 /** The budget policies (scope, window, used, what happens at the limit), shown on Settings → Funding. */
