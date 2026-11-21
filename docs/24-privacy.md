@@ -11,7 +11,7 @@ Only what you set up yourself:
 | Where it goes | What goes there | When |
 |---|---|---|
 | Your AI accounts (Claude, OpenAI, OpenRouter, Ollama Cloud or Synthetic) | Prompts, and the code and text your agents work on | Every agent run |
-| Your git host (GitHub or Gitea) | Your project's code, with the token you made | When agents fetch and push, and when Boss Man reads the CI results on your main branch (on unless you switch off **Main's CI** under Settings → Server and runner) |
+| Your git host (GitHub or Gitea) | Your project's code, with the token you made | When agents fetch and push, and when Boss Man reads the CI results on your main branch (on unless you switch off **Main's CI** under Settings → Server and runner → Email) |
 | Your ntfy server | Your notifications | Only if you set up phone notifications |
 | ntfy.sh | A wake-up with the message ID only, never its text | Only if you added `NTFY_UPSTREAM_BASE_URL` for an iPhone |
 | Synthetic | A check of your remaining credit | Only if you use a Synthetic account |
