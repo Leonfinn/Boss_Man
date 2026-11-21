@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, decisions, deploys, runners, secretAccessLog, wakes } from "../src/db/schema.js";
+import { activity, decisions, deploys, deployTargets, runners, secretAccessLog, wakes } from "../src/db/schema.js";
 import { endpointProblem, liveTagOf } from "../src/services/deploys.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -72,6 +72,39 @@ describe("deploy targets (R14)", () => {
 
     expect((await c.req("DELETE", `/api/deploy-targets/${id}`)).statusCode).toBe(204);
     expect((await lines()).at(-1)).toBe("Owner removed deploy target Production");
+  });
+
+  it("refuses to remove a target with a live deploy, and asks before erasing past deploys (BOS-2158)", async () => {
+    const c = (ctx = await setup());
+    const id = (await c.target({ name: "Production", kind: "ssh", endpoint: "deploy@nas.lan", isProduction: true })).json().id as string;
+    const r = await c.deploys.request(c.actor, { target: "Production", ref: "v1.0.0" });
+    expect(r.deploy.status).toBe("pending_approval");
+
+    // Live: refused, even with force; nothing erased.
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}`)).statusCode).toBe(409);
+    const forced = await c.req("DELETE", `/api/deploy-targets/${id}?force=1`);
+    expect(forced.statusCode).toBe(409);
+    expect(forced.json().error).toBe("live");
+    expect(forced.json().message).toContain("v1.0.0");
+    expect(await c.db.select().from(deploys)).toHaveLength(1);
+    expect(await c.db.select().from(deployTargets)).toHaveLength(1);
+
+    // Finished: history needs the owner's confirmation.
+    await c.db.update(deploys).set({ status: "succeeded" }).where(eq(deploys.id, r.deploy.id));
+    const ask = await c.req("DELETE", `/api/deploy-targets/${id}`);
+    expect(ask.statusCode).toBe(409);
+    expect(ask.json().error).toBe("has_history");
+    expect(ask.json().message).toContain("1 past deploy");
+    expect(await c.db.select().from(deploys)).toHaveLength(1);
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}?force=true`)).statusCode).toBe(204);
+    expect(await c.db.select().from(deployTargets)).toHaveLength(0);
+    expect((await c.db.select().from(activity).where(eq(activity.kind, "settings"))).map((a) => a.summary)).toContain("Owner removed deploy target Production");
+    expect(await c.db.select().from(deploys)).toHaveLength(0);
+    // The approval card the deploy raised is closed with a reason, not left open pointing at nothing.
+    const cards = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ status: "withdrawn" });
+    expect(JSON.stringify(cards[0]!.context)).toContain("deploy target was removed");
   });
 
   it("checks the endpoint shape for each kind", () => {

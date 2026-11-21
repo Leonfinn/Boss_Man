@@ -507,10 +507,31 @@ export function deploysService(
       return row!;
     },
 
-    async deleteTarget(id: string) {
+    /**
+     * BOS-2158: removing a target erases its deploys and secret grants (cascade). A deploy that is waiting, approved or
+     * running is never wiped ("live"); past deploys are only erased when the owner confirmed (`force`).
+     */
+    async deleteTarget(id: string, force = false): Promise<{ result: "not_found" | "deleted" } | { result: "live"; detail: string } | { result: "has_history"; count: number }> {
+      const [target] = await db.select({ id: deployTargets.id }).from(deployTargets).where(eq(deployTargets.id, id));
+      if (!target) return { result: "not_found" };
+      const past = await db.select({ id: deploys.id, ref: deploys.ref, status: deploys.status }).from(deploys).where(eq(deploys.targetId, id));
+      const live = past.find((d) => d.status === "pending_approval" || d.status === "approved" || d.status === "running");
+      if (live) return { result: "live", detail: `The deploy of ${live.ref} to this target is ${live.status === "pending_approval" ? "waiting for approval" : live.status}.` };
+      if (past.length > 0 && !force) return { result: "has_history", count: past.length };
+      // No card may be left pointing at an erased deploy: close any still open with a plain reason.
+      const ids = past.map((d) => d.id);
+      if (ids.length) {
+        const at = now();
+        const open = await db.select({ id: decisions.id, context: decisions.context }).from(decisions).where(eq(decisions.status, "open"));
+        for (const d of open) {
+          const ctx = d.context as { type?: string; deployId?: string };
+          if (ctx.type !== "deploy" || !ctx.deployId || !ids.includes(ctx.deployId)) continue;
+          await db.update(decisions).set({ status: "withdrawn", answeredAt: at, dedupeKey: null, context: sql`${decisions.context} || ${JSON.stringify({ withdrawn: { by: "system", note: "The deploy target was removed, so this deploy no longer exists.", at: at.toISOString() } })}::jsonb` }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
+        }
+      }
       const rows = await db.delete(deployTargets).where(eq(deployTargets.id, id)).returning({ id: deployTargets.id, companyId: deployTargets.companyId, name: deployTargets.name });
       if (rows[0]) await record(db, { companyId: rows[0].companyId, kind: "settings", summary: `Owner removed deploy target ${rows[0].name}` });
-      return rows.length > 0;
+      return { result: rows.length > 0 ? "deleted" : "not_found" };
     },
 
     async listTargets(companyId: string) {
