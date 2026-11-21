@@ -759,6 +759,21 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     expect(flags.some((f) => f.rule === "owner_decision_waiting")).toBe(false);
   });
 
+  // BOS-2141: the agent's own blocked-until date on a merged, watching ticket still trips blocked_until_passed.
+  it("a watching ticket with its own blocked-until date is flagged once that date has passed, and stays quiet before it", async () => {
+    await ctx.switchOn();
+    const days = (n: number) => new Date(ctx.now().getTime() + n * 24 * H);
+    const base = { systemState: "blocked" as const, stateChangedAt: ctx.ago(60 * 24 * 2), mergeCommit: "a".repeat(40), mergedAt: days(-2), liveAt: days(-2), watchingFor: "a week of real use", watchUntil: days(10) };
+    const passed = await ctx.ticket({ ...base, title: "Date passed", blockedUntil: days(-1), blockedUntilReason: "waiting for the check" });
+    const ahead = await ctx.ticket({ ...base, title: "Date ahead", blockedUntil: days(1), blockedUntilReason: "waiting for the check" });
+    const noDate = await ctx.ticket({ ...base, title: "No date" });
+    await ctx.watchdog.run();
+    const flags = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.status, "open"));
+    expect(flags.filter((f) => f.ticketId === passed.id).map((f) => f.rule)).toEqual(["blocked_until_passed"]);
+    expect(flags.some((f) => f.ticketId === ahead.id)).toBe(false);
+    expect(flags.some((f) => f.ticketId === noDate.id)).toBe(false);
+  });
+
   it("the backtest gives an idle ticket at most two hand-offs in four hours", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
     const t = await ctx.stalled({ stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });

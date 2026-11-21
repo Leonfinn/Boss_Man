@@ -213,6 +213,43 @@ describe("Blocked on an open card is freed when the card is answered (BOS-1209)"
     expect(await c.block(agent, u.id, { blocked_until: tomorrow(), blocked_reason: "72h of data", summary: "Collecting data." })).toContain("is now blocked");
   });
 
+  it("BOS-2141: a merged ticket in its watch is refused a note that names a colleague without a link, but a quiet watch note is accepted", async () => {
+    const c = await setup();
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Brian - Release Manager" })).json();
+    const crit = [{ text: "Panel shows the host", after: "merge" as const }];
+    const agent = await c.mcp(c.worker.id);
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress", mergeCommit: "d".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
+    expect(await c.block(agent, t.id, { summary: "Waiting on Brian's check." })).toMatch(/waits on Brian/);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+    // No name, no date: still "Merged, watching" (BOS-1907).
+    expect(await c.block(agent, t.id, { summary: "Watching for a week of real use." })).toContain("is now blocked");
+    // Named and linked: accepted.
+    const u = await c.ticket();
+    await c.put(u.id, { systemState: "in_progress", mergeCommit: "e".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
+    const theirs = await c.ticket({ assigneeAgentId: other.id });
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: u.id, blockerTicketId: theirs.id, until: "done" });
+    expect(await c.block(agent, u.id, { summary: "Waiting on Brian's check." })).toContain("is now blocked");
+  });
+
+  it("BOS-2141: a merged ticket in its watch is refused a note that waits on a ticket number without a link", async () => {
+    const c = await setup();
+    const crit = [{ text: "Panel shows the host", after: "merge" as const }];
+    const agent = await c.mcp(c.worker.id);
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress", mergeCommit: "f".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
+    expect(await c.block(agent, t.id, { summary: "Waiting on the check in BOS-2078." })).toMatch(/waits on BOS-2078/);
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+    // A ticket number that is only history, not a wait: still a quiet watch.
+    expect(await c.block(agent, t.id, { summary: "Merged as BOS-2078's follow-up; watching a week of real use." })).toContain("is now blocked");
+    // Waits on it and links it: accepted.
+    const u = await c.ticket();
+    await c.put(u.id, { systemState: "in_progress", mergeCommit: "1".repeat(40), goLiveWait: null, acceptanceCriteria: crit });
+    const theirs = await c.ticket();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: u.id, blockerTicketId: theirs.id, until: "done" });
+    expect(await c.block(agent, u.id, { summary: "Waiting on the check in BOS-2078." })).toContain("is now blocked");
+  });
+
   it("wakes the CEO once on the third date-only park in a row (R36)", async () => {
     const c = await setup();
     const t = await c.ticket();
