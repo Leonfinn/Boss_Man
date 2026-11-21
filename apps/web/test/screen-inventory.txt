@@ -135,7 +135,9 @@ sections:
   - How you're told
   - Notifications
   - Set up your phone
+  - Weekly summary
 reads: 
+  - /api/companies/:id/weekly-summary
   - /api/host-facts
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
@@ -186,6 +188,12 @@ reads:
 ## #/settings
 sections: 
   - Settings
+reads: (none)
+
+## #/settings/<company>/account
+sections: 
+  - Change password
+  - Sign out other devices
 reads: (none)
 
 ## #/settings/<company>/devices

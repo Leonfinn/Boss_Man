@@ -96,7 +96,7 @@ export type WeeklyFacts = {
 
 /** Plain text only: the mailer sends text. */
 export function weeklyText(f: WeeklyFacts): { subject: string; text: string } {
-  const groups = new Map<string, string[]>();
+  const groups = new Map<string, string[]>(); // shortcut: lost on restart, harmless because it is a local built and dropped inside this call.
   for (const m of f.merged) groups.set(m.feature ?? "Other work", [...(groups.get(m.feature ?? "Other work") ?? []), m.title]);
   const lines: string[] = [];
   lines.push(`Merged this week: ${plural(f.merged.length, "ticket")}`);

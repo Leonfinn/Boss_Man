@@ -130,6 +130,36 @@ export function usePoll<T>(load: (signal: AbortSignal) => Promise<T>, everyMs: n
   return { data, error, reload };
 }
 
+/**
+ * "Show older" under a polled, newest-first first page (BOS-2165). `load(beforeId)` fetches the page older than a row;
+ * the rows it brings are kept for `key` (a new key drops them) and follow the first page without repeats, so a poll
+ * that shifts the first page never shows a row twice. More is offered while the last page came back full.
+ */
+export function useOlder<T extends { id: string }>(first: T[] | null, pageSize: number, load: (before: string) => Promise<T[]>, key: string) {
+  const [older, setOlder] = useState<{ key: string; rows: T[]; done: boolean }>({ key, rows: [], done: false });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mine = older.key === key ? older : { key, rows: [] as T[], done: false };
+  const seen = new Set((first ?? []).map((r) => r.id));
+  const rows = first ? [...first, ...mine.rows.filter((r) => !seen.has(r.id))] : null;
+  const canMore = !!first && first.length >= pageSize && !mine.done;
+  const more = async () => {
+    const last = rows?.at(-1);
+    if (!last || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const page = await load(last.id);
+      setOlder({ key, rows: [...mine.rows, ...page], done: page.length < pageSize });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { rows, canMore, more, busy, error };
+}
+
 /** True while the window matches a media query; false on the server or in an old browser. */
 export function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => (typeof window === "undefined" || !window.matchMedia ? false : window.matchMedia(query).matches));
