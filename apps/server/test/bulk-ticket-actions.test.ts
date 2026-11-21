@@ -43,6 +43,39 @@ describe("bulk ticket actions", () => {
     }
   });
 
+  it("moves 5 tickets to Backlog with the same history line a single move gives", async () => {
+    const c = (ctx = await setup());
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) ids.push((await c.ticket()).id);
+    const body = (await c.bulk(ids, { type: "move", state: "backlog" })).json() as { done: unknown[]; refused: unknown[] };
+    expect(body.done).toHaveLength(5);
+    const single = await c.ticket();
+    await c.req("POST", `/api/tickets/${single.id}/state`, { state: "backlog" });
+    const lineOf = async (id: string) => (await c.db.select().from(activity).where(eq(activity.ticketId, id))).map((l) => l.summary).filter((s) => /moved it to Backlog/.test(s));
+    for (const id of ids) expect(await lineOf(id)).toEqual(await lineOf(single.id));
+  });
+
+  it("a signed-out request is refused and changes nothing", async () => {
+    const c = (ctx = await setup());
+    const a = await c.ticket();
+    const r = await c.app.inject({ method: "POST", url: "/api/tickets/bulk", payload: { ids: [a.id], action: { type: "move", state: "blocked" } } });
+    expect(r.statusCode).toBeGreaterThanOrEqual(400);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, a.id)))[0]!.systemState).not.toBe("blocked");
+  });
+
+  it("refuses an agent of another company for 2 tickets and leaves them unchanged", async () => {
+    const c = (ctx = await setup());
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+    const foreign = (await c.req("POST", `/api/companies/${other.company.id}/agents`, { name: "Stranger" })).json() as { id: string };
+    const a = await c.ticket();
+    const b = await c.ticket();
+    const body = (await c.bulk([a.id, b.id], { type: "assign", assigneeAgentId: foreign.id })).json() as { done: unknown[]; refused: { id: string; reason: string }[] };
+    expect(body.done).toEqual([]);
+    expect(body.refused.map((x) => x.id).sort()).toEqual([a.id, b.id].sort());
+    expect(body.refused.every((x) => x.reason.length > 0)).toBe(true);
+    for (const id of [a.id, b.id]) expect((await c.db.select().from(tickets).where(eq(tickets.id, id)))[0]!.assigneeAgentId).toBeNull();
+  });
+
   it("refuses an unknown ticket for that ticket only", async () => {
     const c = (ctx = await setup());
     const a = await c.ticket();
