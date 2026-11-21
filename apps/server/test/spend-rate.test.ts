@@ -73,6 +73,24 @@ describe("spend rate alert", () => {
     expect((await sweep(NOW, raised).run()).raised).toBe(0);
   });
 
+  it("stays quiet at 2.5 times the usual", async () => {
+    await history(10, 7);
+    await spend(25, daysAgo(0));
+    const raised: Array<Record<string, unknown>> = [];
+    expect((await sweep(NOW, raised).run()).raised).toBe(0);
+  });
+
+  it("alerts at 3.5 times and judges two companies separately", async () => {
+    await history(10, 7);
+    await spend(35, daysAgo(0));
+    const [c2] = await db.insert(companies).values({ name: "Other", ticketPrefix: "OT" }).returning();
+    for (let d = 1; d <= 7; d++) await db.insert(costEvents).values({ fundingSourceId: sourceId, companyId: c2!.id, costMicros: 10_000_000, occurredAt: daysAgo(d) });
+    await db.insert(costEvents).values({ fundingSourceId: sourceId, companyId: c2!.id, costMicros: 20_000_000, occurredAt: daysAgo(0) });
+    const raised: Array<Record<string, unknown>> = [];
+    expect((await sweep(NOW, raised).run()).raised).toBe(1);
+    expect(raised[0]).toMatchObject({ companyId });
+  });
+
   it("raises nothing with fewer than 3 days of history", async () => {
     await history(1, 2);
     await spend(100, daysAgo(0));
