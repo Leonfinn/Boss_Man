@@ -54,64 +54,6 @@ describe("R20 prose branching: passing rows", () => {
   });
 });
 
-describe("whenKey", () => {
-  it("lower-cases a plain fact key and trims it", () => {
-    expect(whenKey("  Network Guard allow line can go  ")).toBe("network guard allow line can go");
-  });
-
-  it("collapses runs of spaces, underscores and hyphens to single spaces", () => {
-    expect(whenKey("network__guard   allow-line CAN go")).toBe("network guard allow line can go");
-    expect(whenKey("network_guard_allow_line_can_go")).toBe("network guard allow line can go");
-  });
-
-  it("a fact in a [when …] step normalises the same as a bare one", () => {
-    const m = WHEN_MARKER.exec("[when  Network  Guard allow-line CAN go ] Remove the line.");
-    expect(m).not.toBeNull();
-    expect(whenKey(m![1]!)).toBe(whenKey("network guard allow line can go"));
-    expect(WHEN_FACT_KEYS).toContain(whenKey(m![1]!));
-  });
-
-  it("the marker only matches at the start of a step", () => {
-    expect(WHEN_MARKER.exec("Press Save [when network guard allow line can go]")).toBeNull();
-    expect(WHEN_MARKER.exec("[when the moon is full] Press Save.")![1]).toBe("the moon is full");
-  });
-});
-
-describe("branchingFindings", () => {
-  it("a clean list has no findings", () => {
-    expect(branchingFindings(["Open Settings → Server and runner and press Save.", "Restart the tunnel from the same page."])).toEqual([]);
-  });
-
-  it.each([
-    ["If …", "If the old address is still listed, delete it."],
-    ["Only if …", "Only if the entry is marked can go, remove the line from Settings → Server and runner."],
-    ["Unless …", "Unless the owner already did this, press Save."],
-    ["nothing to do", "Open Settings → Server and runner. Otherwise there is nothing to do."],
-  ])("%s is refused with step 1 and R20", (_name, step) => {
-    const found = branchingFindings([step]);
-    expect(found).toHaveLength(1);
-    expect(found[0]).toMatchObject({ step: 1, rule: "R20" });
-    expect(found[0]!.problem).toMatch(/\[when <fact>\]/);
-    expect(found[0]!.problem).toContain(WHEN_FACT_KEYS[0]!);
-  });
-
-  it("reports one finding per branching step, numbered as written", () => {
-    const found = branchingFindings([
-      "Open Settings → Server and runner.",
-      "If the line is empty, press Save.",
-      "Restart the tunnel.",
-      "Unless the tunnel is already running, start it.",
-    ]);
-    expect(found.map((f) => f.step)).toEqual([2, 4]);
-    expect(found.every((f) => f.rule === "R20")).toBe(true);
-  });
-
-  it("an if inside a command block is not prose and passes", () => {
-    const step = "Run this. It prints nothing.\n```sh host=\"nas01\" as=\"login\"\nif [ -f /opt/example/x ]; then echo ok; fi\n```";
-    expect(branchingFindings([step])).toEqual([]);
-  });
-});
-
 describe("whenKey (BOS-2135)", () => {
   it.each([
     ["already normal", "network guard allow line can go"],
