@@ -115,6 +115,11 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     repos: z.array(z.object({ projectId: z.string(), bytes: z.number().nonnegative() })),
     /** Each ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592); absent from an older runner. */
     scratch: z.array(z.object({ ticketId: Uuid, bytes: z.number().nonnegative() })).optional(),
+    /** Free and total bytes on the workspace volume (BOS-2182); absent from an older runner. */
+    freeBytes: z.number().nonnegative().optional(),
+    totalBytes: z.number().nonnegative().optional(),
+    /** True when the runner is holding new runs and checks for lack of space. */
+    holding: z.boolean().optional(),
     /** Ticket folders git no longer knew about (or scratch folders past their keep), removed in this pass. */
     removed: z.array(z.string()),
   }),
