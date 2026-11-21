@@ -47,6 +47,10 @@ describe("Needs you", () => {
     cleanup();
     render(<NeedsYou decisions={[]} tally={{ open: 0, waiting: 0, oldestOpenAt: null, medianAnswerMs: 3_600_000 }} />);
     expect(screen.queryByText(/usually answered/)).toBeNull();
+    cleanup();
+    // An older server sends neither figure: the panel is as before, no line, no error.
+    const { container } = render(<NeedsYou decisions={[card(1)]} tally={{ open: 1, waiting: 0 }} />);
+    expect(container.querySelector(".dash-needs-wait")).toBeNull();
   });
 
   it("keeps its size while loading", () => {
