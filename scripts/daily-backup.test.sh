@@ -78,7 +78,8 @@ for k in bossman-a.sql.gz rebuild-a.sql.gz restore-test-a.sql.gz penpot-a.tar; d
 
 # A failed dump says so in plain words on the way out.
 rm -f "$t"/backups/daily-*
-FAKE_DUMP=fail "$here/daily-backup.sh" --once 2>&1 | grep -q "FAILED: The database dump failed" || fail "no plain failure message"
+out="$(FAKE_DUMP=fail "$here/daily-backup.sh" --once 2>&1 || true)"
+[[ $out == *"FAILED: The database dump failed"* ]] || fail "no plain failure message: $out"
 
 # A status-row failure never loses the file.
 rm -f "$t"/backups/daily-*
