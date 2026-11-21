@@ -17,6 +17,8 @@ export const SEARCH_DEBOUNCE_MS = 200;
 export const SEARCH_MIN = 2;
 
 const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+/** The key hint shown on the button (a hint, not a label: the owner-control list leaves it out). */
+const keyHint = () => (isMac() ? "⌘K" : "Ctrl K");
 
 /** The search button for the sidebar: works with a touch or a mouse, no keyboard needed. */
 export function SearchButton() {
@@ -24,7 +26,7 @@ export function SearchButton() {
     <button type="button" className="side-search" onClick={() => window.dispatchEvent(new Event(OPEN_SEARCH))} title={`Search (${isMac() ? "⌘" : "Ctrl"}+K)`} aria-label="Search tickets, wiki and chats">
       <Search size={18} strokeWidth={1.75} aria-hidden="true" />
       <span className="nav-label">Search</span>
-      <kbd className="side-search-key" aria-hidden="true">{isMac() ? "⌘K" : "Ctrl K"}</kbd>
+      <kbd className="side-search-key" aria-hidden="true">{keyHint()}</kbd>
     </button>
   );
 }

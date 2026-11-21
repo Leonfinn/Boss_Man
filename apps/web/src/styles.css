@@ -1788,6 +1788,12 @@ details.pushes[open] > summary { margin-bottom: 8px; }
   .side .side-search .nav-label, .side-search-key { display: none; }
 }
 @media (min-width: 641px) {
+  /* Open sidebar: an icon beside the company switcher, not a row of its own, so the menu is no taller
+     and still fits a 724 px window with nothing to scroll (main-menu-shots, BOS-1506). */
+  .side:not(.collapsed) .side-bar { display: flex; align-items: stretch; gap: 8px; }
+  .side:not(.collapsed) .side-bar .switcher { flex: 1; min-width: 0; }
+  .side:not(.collapsed) .side-search { width: 44px; flex: none; margin-top: 0; padding: 0; justify-content: center; }
+  .side:not(.collapsed) .side-search .nav-label, .side:not(.collapsed) .side-search-key { display: none; }
   .side.collapsed .side-search { margin-top: 0; justify-content: center; padding: 8px; }
   .side.collapsed .side-search .nav-label, .side.collapsed .side-search-key { display: none; }
 }
