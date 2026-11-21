@@ -3,7 +3,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { checkDoneOnText, runningOnText } from "../src/check-place";
+import { checkDoneOnText, runningOnText, slotSplitText } from "../src/check-place";
 import { MergeQueue } from "../src/pages/MergeQueue";
 
 afterEach(() => {
@@ -24,6 +24,33 @@ describe("checkPlace helper (BOS-1942)", () => {
     expect(runningOnText("company runner", null)).toBe("Running on this server.");
     expect(runningOnText(null, "docker-01")).toBeNull();
     expect(checkDoneOnText("company runner", "docker-01")).toBe("Check done on this server (docker-01).");
+  });
+});
+
+describe("slotSplitText (BOS-1942, BOS-2129)", () => {
+  it("names each place and its slot count for a mix of server and worker", () => {
+    const split = [{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }];
+    expect(slotSplitText(split, "docker-01")).toBe("3 on this server (docker-01), 2 on the check worker Truenas");
+  });
+
+  it("says this server with no host name by default", () => {
+    const split = [{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }];
+    expect(slotSplitText(split)).toBe("3 on this server, 2 on the check worker Truenas");
+    expect(slotSplitText(split, null)).toBe("3 on this server, 2 on the check worker Truenas");
+  });
+
+  it("keeps the order and the counts it is given, including zero", () => {
+    const split = [{ ranOn: "Truenas", slots: 1 }, { ranOn: "company runner", slots: 0 }, { ranOn: "Docker", slots: 4 }];
+    expect(slotSplitText(split, "docker-01")).toBe(
+      "1 on the check worker Truenas, 0 on this server (docker-01), 4 on the check worker Docker",
+    );
+  });
+
+  it("says nothing when all slots are one kind or there is no split", () => {
+    expect(slotSplitText([{ ranOn: "company runner", slots: 5 }], "docker-01")).toBeNull();
+    expect(slotSplitText([{ ranOn: "Truenas", slots: 2 }], "docker-01")).toBeNull();
+    expect(slotSplitText([])).toBeNull();
+    expect(slotSplitText(undefined)).toBeNull();
   });
 });
 
