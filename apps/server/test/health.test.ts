@@ -56,3 +56,13 @@ it("blue/green status is for the owner, off on a single server, and reads the ot
     vi.unstubAllGlobals();
   }
 });
+
+// BOS-2176: the backup line in Settings → Server is for the owner, and reads the rows the backup service writes.
+it("the daily backup status is for the owner and says no backup yet until the service has written one", async () => {
+  const { app } = await setup();
+  expect((await app.inject({ method: "GET", url: "/api/daily-backup" })).statusCode).toBe(401);
+  const s = await app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const get = async () => (await app.inject({ method: "GET", url: "/api/daily-backup", headers: { cookie } })).json();
+  expect(await get()).toMatchObject({ lastAt: null, failed: null, stale: false });
+});

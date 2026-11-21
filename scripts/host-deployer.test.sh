@@ -706,6 +706,7 @@ case "$a" in
     [[ -z ${FAKE_NO_RENDER:-} ]] || exit 1
     echo "name: p"; echo "services:"; for f in svc-*; do [[ ! -f $f ]] || { echo "  ${f#svc-}:"; echo "    image: $(cat "$f")"; }; done; echo "volumes:"; echo "  data: {}" ;;
   "exec -T db pg_dump"*) echo dump ;;
+  "up -d --no-deps backup") echo "ensure backup service" >>"$DL" ;; # BOS-2176
   "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; [[ -z ${FAKE_BUILD_HANG:-} ]] || exec sleep 30; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
   "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
@@ -803,7 +804,7 @@ bgreq "$b1"; bg
 [[ $(status result) == deployed && $(status to_commit) == "$b1" ]] || fail "bg status: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "green is live"
 has "$D/outbox/status.json" '"soak_seconds": "900"' # the host's own window rides in the status file (BOS-401)
-order "$DL" "pg_dump" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
+order "$DL" "pg_dump" "ensure backup service" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
 ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"
 for f in "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz; do [[ $(stat -c %a "$f") == 600 ]] || fail "backup $f is not mode 600"; done
@@ -916,13 +917,13 @@ has "$T/hook.out" '"result": "failed"'
 # A failed migration stops before anything starts.
 reset_world blue "$cur"; bgreq "$b4"
 FAKE_MIGRATE_RC=1 bg
-has "$D/outbox/status.json" "migration failed"; hasnt "$DL" "up -d"; hasnt "$DL" "signal"
+has "$D/outbox/status.json" "migration failed"; hasnt "$DL" "up -d --no-deps server";hasnt "$DL" "signal"
 # BOS-2058 (rule b): a build that hangs is stopped at BG_BUILD_SECONDS; the update fails, nothing starts, the live colour stays.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
 FAKE_BUILD_HANG=1 BG_BUILD_SECONDS=1 bg
 [[ $(status result) == failed ]] || fail "hung build: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "did not finish within"
-hasnt "$DL" "migrate"; hasnt "$DL" "up -d"; hasnt "$DL" "signal"; live_is blue
+hasnt "$DL" "migrate"; hasnt "$DL" "up -d --no-deps server"; hasnt "$DL" "signal"; live_is blue
 [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "hung build: checkout not put back"
 # A proxy that is not running changes nothing.
 reset_world blue "$cur"; rm "$W/running.proxy"; bgreq "$b4"; bg
@@ -1098,7 +1099,7 @@ for f in host-deployer.sh rebuild-live.sh deploy.sh; do
   # `up -d` or `restart` therefore fails here.
   if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b' "$here/$f" \
     | grep -vE '^[0-9]+:\s*#|exec -T |rm -f |^[0-9]+:\s*finish (partial|failed) ' \
-    | grep -vE '(up|run)\b.*--no-deps .*(server|launcher|migrate|\$\{svcs\[@\]\})|(stop|kill)\b.*"?server' ; then
+    | grep -vE '(up|run)\b.*--no-deps .*(server|launcher|migrate|backup|\$\{svcs\[@\]\})|(stop|kill)\b.*"?server' ; then
     fail "$f has a compose up/run/restart/stop/kill/rm/create/down that is not limited to the server services"
   fi
   if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b[^#]*\b(db|proxy)\b' "$here/$f" | grep -vE '^[0-9]+:\s*#|exec -T (db|proxy)|--no-deps migrate'; then

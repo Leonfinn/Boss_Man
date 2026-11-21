@@ -1092,6 +1092,15 @@ backup_database() {
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
   old="$(find "$dir" -maxdepth 1 -type f -name 'bossman-*.sql.gz' -printf '%T@ %p\n' | sort -rn | tail -n +15 | cut -d' ' -f2-)"
   [[ -z $old ]] || while IFS= read -r f; do rm -f -- "$f"; done <<<"$old"
+  ensure_daily_backup
+}
+
+# The daily backup service (BOS-2176). Swaps name the services they start and use --no-deps, so an install made before
+# that service existed would never start it: every swap and rollback starts it here, right after its own backup. A no-op
+# when it already runs; a failure (an older Compose file without the service, a Docker hiccup) never stops the swap.
+ensure_daily_backup() {
+  compose up -d --no-deps backup >>"$LOG" 2>&1 || log "Note: the daily backup service did not start (docker compose up -d backup); the swap goes on."
+  return 0
 }
 
 BG_RESULT="" BG_MSG="" BG_BACKUP="" BG_LIVE="" BG_IDLE="" BG_PREV=""

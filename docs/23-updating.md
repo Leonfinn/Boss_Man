@@ -89,6 +89,8 @@ A runner update takes no backup. Runners hold no database.
 
 A server update always takes a backup first. `scripts/deploy.sh`, the host deployer and `scripts/rebuild-live.sh` each write one to the install folder, the folder above the checkout. The file is named `bossman-YYYY-MM-DD-HHMM.sql.gz`. `scripts/deploy.sh` keeps the newest 14. `BOSSMAN_BACKUP_DIR` and `BOSSMAN_BACKUP_KEEP` change the folder and the number.
 
+Between updates the `backup` service in the Compose stack makes one more backup a day, named `daily-YYYY-MM-DD-HHMM.sql.gz`, and keeps the newest 14 of those. It needs no setup: an update starts it if your install does not have it yet. The update's own backups and the daily ones are kept apart; neither is ever deleted by the other. See [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md#backups-where-they-are-saved).
+
 Keep a copy of `secrets/master.key` on another machine. Boss Man encrypts stored secrets with this key, so a backup is no use without it.
 
 ### Check that a backup restores

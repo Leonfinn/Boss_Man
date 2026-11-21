@@ -41,7 +41,8 @@ import { raiseCostAlert } from "./services/cost-check.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
-import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
+import { dailyBackupService } from "./services/daily-backup.js";
+import { serverHealthService,type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { deployWaitService } from "./services/deploy-wait.js";
@@ -1080,6 +1081,18 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   const serverHealth = health;
+  // The daily database backup (BOS-2176): the status line in Settings → Server and the one overdue alert. main.ts runs check() on the leader.
+  const dailyBackup = dailyBackupService(db, {
+    now: opts.now ?? (() => new Date()),
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
+    isOpen: async (dedupeKey) => (await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open"))).limit(1)).length > 0,
+    raise: async (input) => {
+      const r = await alerts.raise(input as Parameters<typeof alerts.raise>[0]);
+      if (r) await notes.syncDecisions();
+      return r;
+    },
+    log: (m) => app.log.warn(m),
+  });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const gitTokenProbe = gitTokenActionsProbe({ db, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN, now: opts.now });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
@@ -1514,6 +1527,8 @@ export async function buildApp(opts: AppOptions) {
     owner.addHook("preHandler", requireOwner);
     /** Blue/green at a glance: each colour's own /api/health over the compose network, or down when it doesn't answer. */
     owner.get("/api/bluegreen", async () => probeColours(colour(), build));
+    /** The daily database backup (BOS-2176): when the newest automatic backup was saved, for Settings → Server. */
+    owner.get("/api/daily-backup", async () => dailyBackup.status());
 
     owner.get("/api/me", async () => {
       const [o] = await db.select({ username: owners.username }).from(owners);
@@ -2687,5 +2702,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, dailyBackup, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

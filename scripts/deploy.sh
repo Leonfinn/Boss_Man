@@ -129,6 +129,15 @@ wait_healthy() {
   return 1
 }
 
+# The daily backup service (BOS-2176) is started here too: an update names the services it restarts and uses --no-deps,
+# so an install made before that service existed would never start it otherwise. A no-op when it already runs. It never
+# stops an update: the daily backup is a safety net, and the update has just made its own backup.
+ensure_daily_backup() {
+  if ((DRY)); then say "[dry-run] docker compose up -d --no-deps backup (daily backup service, if the stack has one)"; return 0; fi
+  docker compose config --services 2>/dev/null | grep -qx backup || return 0
+  docker compose up -d --no-deps backup || say "Warning: the daily backup service did not start. Start it by hand: docker compose up -d backup"
+}
+
 rebuild_and_start() {
   local svcs=(server)
   # The launcher is only part of the stack when its profile is on.
@@ -141,6 +150,7 @@ rebuild_and_start() {
   # With --force and nothing new the image is unchanged, so `up -d` leaves the running server alone: recreate it, or
   # "restart" would do nothing (BOS-647). Only the server: the launcher is left as it is.
   if ((RECREATE)); then run docker compose up -d --no-deps --force-recreate server; fi
+  ensure_daily_backup
   step "Waiting for the server to be healthy (up to ${HEALTH_TIMEOUT}s)"
   wait_healthy
 }

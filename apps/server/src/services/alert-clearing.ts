@@ -16,6 +16,7 @@ import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
 import { backInBandReason } from "./cost-check.js";
 import { idleSlotsGoneReason } from "./idle-slots-alert.js";
+import { backupFreshReason } from "./daily-backup.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -74,7 +75,9 @@ export type ClearWhen =
   /** The cost sanity check's card (BOS-1866): the company's latest checked runs are all in band. */
   | { kind: "costBackInBand"; companyId: string }
   /** The idle-slots alert's card (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
-  | { kind: "idleSlotsGone"; companyId: string };
+  | { kind: "idleSlotsGone"; companyId: string }
+  /** The daily-backup card (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
+  | { kind: "backupFresh" };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -131,6 +134,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "serverCalm":
         if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
+        break;
+      case "backupFresh":
+        out.push({ kind: "backupFresh" });
         break;
       case "featurePortalSettled":
         if (typeof c.featureId === "string") out.push({ kind: "featurePortalSettled", featureId: c.featureId });
@@ -302,6 +308,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "serverCalm":
         return deps.serverCalm?.(c.rule) ?? null;
+      case "backupFresh":
+        return backupFreshReason(db, (deps.now ?? (() => new Date()))());
       case "costBackInBand":
         return backInBandReason(db, c.companyId, card.createdAt);
       case "idleSlotsGone":

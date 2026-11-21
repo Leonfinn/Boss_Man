@@ -32,7 +32,9 @@ export type ClearWhen =
   /** The cost sanity check's card (BOS-1866): the company's latest checked runs are all in band. */
   | { kind: "costBackInBand"; companyId: string }
   /** The idle-slots alert (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
-  | { kind: "idleSlotsGone"; companyId: string };
+  | { kind: "idleSlotsGone"; companyId: string }
+  /** The daily-backup alert (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
+  | { kind: "backupFresh" };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -242,6 +244,12 @@ export const ALERT_KINDS = {
   // minutes. Stops at the CEO, never the owner; one card per company, closes by itself (idleSlotsGone).
   idle_slots: {
     topRung: "ceo",
+  },
+  // daily-backup.ts (BOS-2176): the newest automatic database backup is over 36 hours old. Only the owner can start the
+  // backup service or free the disk on the host, so it starts with them: one card, closed by itself (backupFresh).
+  daily_backup_stale: {
+    topRung: "owner",
+    clearWhen: () => [{ kind: "backupFresh" }],
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
