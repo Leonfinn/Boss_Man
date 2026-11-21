@@ -17,7 +17,7 @@ vi.hoisted(() => {
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, checkJobs, checkResults, decisions, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, checkJobs, checkResults, decisions, reviewRequests, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { createLeader } from "../src/leader.js";
 import { CANT_RERUN_EXIT, FLAKE_RETRY_KIND, GATE_RERUN_MARK } from "../src/services/ci-flake.js";
 import { landingTurns } from "../src/services/landing-turn.js";
@@ -167,7 +167,12 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRe
         else queueMicrotask(answer);
       }
       if (c.type === "workspace.merge") {
-        if (c.phase === "prepare" && opts.prepare) reply(c, opts.prepare(c));
+        if (c.phase === "prepare" && opts.prepare) {
+          const a = opts.prepare(c) as { runnerError?: string } | null;
+          // BOS-2119: a runner that fails the request (the merge attempt throws).
+          if (a && typeof a === "object" && a.runnerError) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: a.runnerError }));
+          else reply(c, a);
+        }
         else if (c.phase === "prepare") reply(c, opts.prepares?.length ? opts.prepares.shift() : { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN });
         else if (c.phase === "publish") reply(c, { status: "published", branch: `bossman-ci/${c.ticketId}`, commit: c.commit, hasWorkflows: opts.workflows !== false });
         else if (c.phase === "unpublish") reply(c, { status: "unpublished", branch: `bossman-ci/${c.ticketId}` });
@@ -1104,6 +1109,224 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         } finally {
           spy.mockRestore();
           landingTurns.done(c.project.id, other.id);
+        }
+      });
+    });
+
+    // BOS-2119: on 19 Nov eight tickets went "landing_turn queued" behind 0e87d19a and each built and queued a new check at
+    // once. 0e87d19a's own landing then moved main under them: c5008b3b and 9c9b4596 were rebuilt a third time and ran out
+    // of rounds (main_moved). A merge in line for the turn now waits for it before it builds its next round.
+    // GitHub CI gating is off; every turn-wait ask (carryFrom) is refused, so each wait to push ends in a rebuild.
+    describe("a ticket queued for the landing turn waits to re-prepare (BOS-2119)", () => {
+      const REFRESH = ["carried-check", "ci-publish", "merge-carry", "merge-refresh"];
+      const HOUR = 60 * 60_000;
+      const refused = { ok: false, why: "main changed files this ticket changes", files: ["src/a.ts"] };
+      type MergeCmd = Extract<RunnerCommand, { type: "workspace.merge" }>;
+      type C = Awaited<ReturnType<typeof setup>>;
+      const mergeCmds = (c: C) => c.sent.filter((m): m is MergeCmd => m.type === "workspace.merge");
+      const plainPrepares = (c: C) => mergeCmds(c).filter((m) => m.phase === "prepare" && !m.carryFrom);
+      const finishes = (c: C) => mergeCmds(c).filter((m) => m.phase === "finish");
+      const lineEvents = async (c: C) =>
+        (await c.db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, MERGE_LINE_KIND)))).map((r) => r.detail as { event: string; [k: string]: unknown });
+      const jobs = (c: C) => c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      const landing = async (c: C) => (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing as { state?: string; outcome?: string } | undefined;
+      const finished = async (c: C) => {
+        await vi.waitFor(async () => expect((await landing(c))?.state).toBe("finished"), { timeout: 20_000 });
+        return (await landing(c))!;
+      };
+      const tree = (k: number) => `${k}`.repeat(39) + "f";
+      const commit = (k: number) => `${k}`.repeat(39) + "e";
+      /**
+       * The runner: main moves under the merge on every turn-wait ask (the carry is refused, with the next merge's tree); a
+       * plain prepare builds the merge for the main of the latest refusal. While `fail()` says so, a plain prepare is a runner error.
+       */
+      const runner = (fail?: () => boolean) => {
+        let refusals = 0;
+        return (m: MergeCmd) => {
+          if (m.carryFrom) {
+            refusals++;
+            return { status: "prepared", commit: commit(refusals), tree: tree(refusals), targetSha: MAIN, carry: refused };
+          }
+          if (fail?.()) return { runnerError: "the runner lost its workspace" };
+          return { status: "prepared", commit: commit(refusals), tree: tree(refusals), targetSha: MAIN };
+        };
+      };
+      const newTicket = async (c: C, title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+      /** A ticket earns the turn: its second rebuild. */
+      const earn = (c: C, id: string) => [landingTurns.rebuilt(c.project.id, id, HOUR), landingTurns.rebuilt(c.project.id, id, HOUR)][1]!.turn;
+      /** Approves; the check passes and the push waits behind the turn twice, each wait ending in a rebuild; the second queues it. */
+      const rebuildTwiceIntoLine = async (c: C) => {
+        await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        await vi.waitFor(async () => expect(await jobs(c)).toHaveLength(2), { timeout: 20_000 });
+        await finishJob(c, { state: "passed", exitCode: 0 });
+        await vi.waitFor(async () => expect((await lineEvents(c)).some((e) => e.event === "landing_turn" && e.action === "queued")).toBe(true), { timeout: 20_000 });
+        expect(landingTurns.queued(c.project.id, c.ticket.id)).toBe(true);
+      };
+      /** The wait loop goes round `n` more times (it reads the turn on every round): a deadline poll, not a fixed sleep. */
+      const rounds = async (spy: { mock: { calls: unknown[] } }, n: number) => {
+        const from = spy.mock.calls.length;
+        await vi.waitFor(() => expect(spy.mock.calls.length).toBeGreaterThanOrEqual(from + n), { timeout: 20_000 });
+      };
+      /** The words the Merges tab, the ticket's merge line and server_status give the wait: they must be one. */
+      const threeViews = async (c: C) => {
+        const row = (await c.mergeQueue.get(c.company.id)).waiting.find((w) => w.ticketId === c.ticket.id);
+        const state = await c.review.mergeState(c.ticket.id);
+        const status = (await c.serverStatus.status(c.company.id)) as { landingTurns: Array<{ projectId: string; holder: { ticketId: string } | null; line: Array<{ ticketId: string; label: string | null }> }> };
+        const turn = status.landingTurns.find((p) => p.projectId === c.project.id);
+        return { row, state, turn, waiter: turn?.line.find((l) => l.ticketId === c.ticket.id) };
+      };
+      const cleanUp = (c: C, ...ids: string[]) => {
+        for (const id of [...ids, c.ticket.id]) landingTurns.done(c.project.id, id);
+      };
+
+      it("in line behind another ticket: nothing is built or checked until it holds the turn, then it builds once and lands", async () => {
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner() }));
+        await serverMode(c);
+        const x = await newTicket(c, "Holder change");
+        const y = await newTicket(c, "First in line");
+        expect(earn(c, x.id)).toBe("taken");
+        expect(earn(c, y.id)).toBe("queued");
+        const spy = vi.spyOn(landingTurns, "check");
+        try {
+          await rebuildTwiceIntoLine(c);
+          expect(landingTurns.line(c.project.id)).toEqual([y.id, c.ticket.id]);
+          const built = plainPrepares(c).length;
+          // The proof: while X holds the turn, no third merge is built and no third check queued (on main both happened at once).
+          await rounds(spy, 10);
+          expect(plainPrepares(c)).toHaveLength(built);
+          expect(await jobs(c)).toHaveLength(2);
+          expect((await lineEvents(c)).filter((e) => e.event === "hold_started" && e.hold === "turn").at(-1)).toMatchObject({ note: expect.stringContaining("Holder change") });
+          // R43: one line, read from one marker, on all three screens; never "next in line for a check".
+          // The Merges tab lists approved work only: its review round, as a reviewer would leave it.
+          await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", round: 1, status: "approved" });
+          const v = await threeViews(c);
+          expect(v.row).toMatchObject({ state: "waiting_for_turn", label: expect.stringMatching(/^waiting for \S+ to land, then re-checks$/) });
+          expect(v.state?.startsWith(`merge ${v.row!.label} (since `)).toBe(true);
+          expect(v.turn?.holder?.ticketId).toBe(x.id);
+          expect(v.waiter?.label).toBe(v.row!.label);
+          // X lands: Y takes the turn, and this ticket still waits, now for Y.
+          landingTurns.landed(c.project.id);
+          landingTurns.done(c.project.id, x.id);
+          expect(landingTurns.holds(c.project.id, y.id)).toBe(true);
+          await rounds(spy, 10);
+          expect(plainPrepares(c)).toHaveLength(built);
+          expect(await jobs(c)).toHaveLength(2);
+          const v2 = await threeViews(c);
+          expect(v2.row!.label).not.toBe(v.row!.label);
+          expect(v2.waiter?.label).toBe(v2.row!.label);
+          // Y lands: this ticket holds the turn, builds once on that main, checks it and lands.
+          landingTurns.landed(c.project.id);
+          landingTurns.done(c.project.id, y.id);
+          await vi.waitFor(async () => expect(await jobs(c)).toHaveLength(3), { timeout: 20_000 });
+          // (More plain prepares may follow: the queued job's BOS-1344 refresh polls find the same tree.)
+          expect(plainPrepares(c).length).toBeGreaterThan(built);
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          expect(await finished(c)).toMatchObject({ outcome: "merged" });
+          expect(finishes(c).map((f) => f.commit)).toEqual([commit(2)]);
+          const ev = await lineEvents(c);
+          expect(ev.filter((e) => e.event === "rebuilt").map((e) => e.rebuilds)).toEqual([1, 2]);
+          expect(ev.filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual(["queued", "ended"]);
+          expect(landingTurns.check(c.project.id).holder).toBeNull();
+        } finally {
+          spy.mockRestore();
+          cleanUp(c, x.id, y.id);
+        }
+      });
+
+      it.each([
+        ["the holder leaves review", "holder_left"],
+        ["the holder's turn runs out its cap", "expired"],
+      ] as const)("in line: the wait ends when %s, and it builds and lands", async (_what, how) => {
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner() }));
+        await serverMode(c);
+        const x = await newTicket(c, "Holder change");
+        expect(earn(c, x.id)).toBe("taken");
+        try {
+          await rebuildTwiceIntoLine(c);
+          expect(await jobs(c)).toHaveLength(2);
+          if (how === "holder_left") await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, x.id));
+          // The turn's clock is the module's own (no injection on the shared instance): move its start back past the cap.
+          else (landingTurns as unknown as { turns: Map<string, { since: number }> }).turns.get(c.project.id)!.since -= 2 * HOUR;
+          await vi.waitFor(async () => expect(await jobs(c)).toHaveLength(3), { timeout: 20_000 });
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          expect(await finished(c)).toMatchObject({ outcome: "merged" });
+          const turnRows = (await c.db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, x.id), eq(activity.kind, MERGE_LINE_KIND)))).map((r) => r.detail as { event: string; action?: string });
+          expect(turnRows.filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual([how === "holder_left" ? "ended" : "expired"]);
+        } finally {
+          cleanUp(c, x.id);
+        }
+      });
+
+      it.each([
+        ["this ticket leaves review", "left"],
+        ["this copy hands over", "handover"],
+      ] as const)("in line: when %s it stops waiting, builds nothing and gives up its place", async (_what, how) => {
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner() }));
+        await serverMode(c);
+        const x = await newTicket(c, "Holder change");
+        expect(earn(c, x.id)).toBe("taken");
+        try {
+          await rebuildTwiceIntoLine(c);
+          const built = plainPrepares(c).length;
+          if (how === "left") await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, c.ticket.id));
+          else c.lead.on = false;
+          expect(await finished(c)).toMatchObject({ outcome: "check_stuck" });
+          expect(plainPrepares(c)).toHaveLength(built);
+          expect(await jobs(c)).toHaveLength(2);
+          expect(finishes(c)).toEqual([]);
+          expect(landingTurns.holds(c.project.id, x.id)).toBe(true);
+          expect(landingTurns.queued(c.project.id, c.ticket.id)).toBe(false);
+          expect((await c.review.runningMerges()).find((m) => m.ticketId === c.ticket.id)).toBeUndefined();
+        } finally {
+          cleanUp(c, x.id);
+        }
+      });
+
+      it("promoted, then main moves once more: the round cap doesn't end it, it gets the turn's round and lands", async () => {
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner(), finishes: [{ status: "main_moved", notCarried: { why: "main changed files this ticket changes" } }] }));
+        await serverMode(c);
+        const x = await newTicket(c, "Holder change");
+        expect(earn(c, x.id)).toBe("taken");
+        try {
+          await rebuildTwiceIntoLine(c);
+          landingTurns.done(c.project.id, x.id);
+          await vi.waitFor(async () => expect(await jobs(c)).toHaveLength(3), { timeout: 20_000 });
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          // The first finish finds main moved again (rebuild 3): a fourth round, since it holds the turn. The runner builds
+          // the same tree again, so that round reuses the passed check and finishes.
+          expect(await finished(c)).toMatchObject({ outcome: "merged" });
+          expect((await lineEvents(c)).filter((e) => e.event === "rebuilt").map((e) => e.rebuilds)).toEqual([1, 2, 3]);
+          expect(finishes(c)).toHaveLength(2);
+        } finally {
+          cleanUp(c, x.id);
+        }
+      });
+
+      it("a holder whose attempt throws gives the turn to the next in line at once, not at the cap", async () => {
+        // This ticket takes the turn (no holder), then its next build fails on the runner: the attempt throws.
+        let broken = false;
+        const c = (ctx = await setup({ features: REFRESH, switchOn: false, prepare: runner(() => broken) }));
+        await serverMode(c);
+        const y = await newTicket(c, "Next in line");
+        const x = await newTicket(c, "Earlier holder");
+        try {
+          // The ticket has one rebuild from an earlier attempt; its push waits behind X; the ask refuses: rebuild 2 queues it.
+          expect(earn(c, x.id)).toBe("taken");
+          landingTurns.rebuilt(c.project.id, c.ticket.id, HOUR);
+          await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+          await finishJob(c, { state: "passed", exitCode: 0 });
+          await vi.waitFor(async () => expect(landingTurns.queued(c.project.id, c.ticket.id)).toBe(true), { timeout: 20_000 });
+          // Y earns the turn after it: next in line behind this ticket.
+          expect(earn(c, y.id)).toBe("queued");
+          // X lands: this ticket holds the turn, and its build fails.
+          broken = true;
+          landingTurns.done(c.project.id, x.id);
+          await finished(c);
+          expect(landingTurns.holds(c.project.id, y.id)).toBe(true);
+          expect((await lineEvents(c)).filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual(["queued", "ended"]);
+        } finally {
+          cleanUp(c, x.id, y.id);
         }
       });
     });

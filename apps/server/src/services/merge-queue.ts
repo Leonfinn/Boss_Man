@@ -158,8 +158,11 @@ export type RunningNow = {
  */
 export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
 
-/** waiting_for_ci (BOS-1871): its landing is under way, its check holds no slot any more, and it waits only for GitHub CI on its merge copy. */
-export type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held" | "waiting_for_ci";
+/**
+ * waiting_for_ci (BOS-1871): its landing is under way, its check holds no slot any more, and it waits only for GitHub CI on its merge copy.
+ * waiting_for_turn (BOS-2119): its landing is under way and waits for another ticket's landing turn (to re-check, or to push).
+ */
+export type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held" | "waiting_for_ci" | "waiting_for_turn";
 
 /** Approved work held by the carried-work guard (BOS-130): the ticket(s) it waits for, by ref and title. */
 export type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
@@ -347,6 +350,26 @@ export function ciWaitLabel(ci: { minutes: number; waiting: string[] }): string 
   return `waiting for GitHub CI on its merge copy${ci.waiting.length ? ` (${ci.waiting.join(", ")})` : ""}, ${waitedText(Math.max(0, ci.minutes))} so far`;
 }
 
+/**
+ * BOS-2119 (R43): a merge waiting for another ticket's landing turn. "rebuild": it is in line for the turn and builds and
+ * checks its merge again once the turn is its own; "push": its check passed and only the push waits.
+ */
+export type TurnWait = { holderId: string; since: number; then: "rebuild" | "push" };
+
+/** The one line for a landing-turn wait, e.g. "waiting for BOS-12 to land, then re-checks". */
+export function turnWaitLabel(holder: string, then: TurnWait["then"]): string {
+  return then === "rebuild" ? `waiting for ${holder} to land, then re-checks` : `check passed; waiting for ${holder} to land, then pushes`;
+}
+
+/**
+ * turnWaitLabel with the holder named the way every screen names a ticket (its reference, else its title). The Merges tab,
+ * mergeState and server_status all call this, so the three can't disagree.
+ */
+export async function turnWaitWords(db: Db, w: TurnWait): Promise<string> {
+  const [h] = await db.select({ number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, w.holderId));
+  return turnWaitLabel(ticketRef(h?.prefix ?? null, h?.number) ?? (h ? `"${h.title}"` : "another ticket"), w.then);
+}
+
 /** One plain duration for the owner, e.g. "1 h 10 min". */
 export function waitedText(minutes: number): string {
   if (minutes < 60) return `${minutes} min`;
@@ -414,7 +437,7 @@ export function mergeQueueService(
   db: Db,
   deps: {
     /** This process's running merges, from the review service's own markers. */
-    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] } }>;
+    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] }; turn?: TurnWait }>;
     /** The check slot limit: how many merge checks run at once. */
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
@@ -594,6 +617,8 @@ export function mergeQueueService(
     // BOS-1871: landings whose check holds no slot (it has ended) but whose wait for GitHub CI is still open. They are
     // not running a check, so they stay out of Running now, but they are not waiting for one either.
     const ciWait = new Map<string, { since: string; waiting: string[] }>();
+    // BOS-2119 (R43): landings waiting for another ticket's landing turn, holding no slot. Like ciWait: under way, not waiting for a check.
+    const turnWait = new Map<string, TurnWait>(); // not state: local to this call
     // BOS-1942: where each running merge check runs, from its check job.
     const ranOnOf = new Map<string, string>();
     const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
@@ -602,6 +627,7 @@ export function mergeQueueService(
       held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); if (j.ranOn) ranOnOf.set(j.ticketId, j.ranOn); } });
       for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
       for (const l of live) if (!slotOf.has(l.ticketId) && l.ci) ciWait.set(l.ticketId, l.ci);
+      for (const l of live) if (!slotOf.has(l.ticketId) && l.turn) turnWait.set(l.ticketId, l.turn);
       live = live.filter((l) => slotOf.has(l.ticketId));
       // BOS-1757: a running merge job is what holds a slot, so it is listed even when no landing marker owns it (the ticket
       // was sent back, or the server restarted). The Checks panel counts the same rows, so the two screens can't disagree.
@@ -612,7 +638,7 @@ export function mergeQueueService(
         live.push({ ticketId: j.ticketId, startedAt: (j.startedAt ?? new Date(0)).toISOString(), startedBy: "the merge gate (no landing is waiting on it)" });
       }
     }
-    return { live, slotOf, restarted, checkStart, ciWait, ranOnOf };
+    return { live, slotOf, restarted, checkStart, ciWait, turnWait, ranOnOf };
   }
 
   return {
@@ -636,7 +662,7 @@ export function mergeQueueService(
       const [company] = await db.select({ prefix: companies.ticketPrefix, brakeLimit: companies.holdStartsMergesWaiting }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
-      const { live, slotOf, restarted, checkStart, ciWait, ranOnOf } = await liveMerges(companyId);
+      const { live, slotOf, restarted, checkStart, ciWait, turnWait, ranOnOf } = await liveMerges(companyId);
       const limit = await deps.limit();
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
@@ -718,6 +744,29 @@ export function mergeQueueService(
             label: words,
             stuck: false,
             next: "It merges by itself once GitHub CI passes.",
+            actor: "system",
+            decisionId: null,
+          });
+          continue;
+        }
+        // BOS-2119 (R43): its landing is under way and waits for another ticket's landing turn, holding no slot. Said from the
+        // landing's own marker, so it can't fall through to "next in line for a check… a slot is free".
+        const turn = turnWait.get(r.id);
+        if (turn) {
+          const since = new Date(turn.since);
+          sinceOf.set(r.id, since.toISOString());
+          waiting.push({
+            ticketId: r.id,
+            ref: ticketRef(prefix, r.number),
+            title: r.title,
+            minutes: mins(t.getTime() - since.getTime()),
+            risk: riskOf(r.risk),
+            urgent: r.urgent,
+            failedCheck: false,
+            state: "waiting_for_turn",
+            label: await turnWaitWords(db, turn),
+            stuck: false,
+            next: "It goes on by itself when that ticket lands or its turn ends.",
             actor: "system",
             decisionId: null,
           });
