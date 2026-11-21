@@ -2343,8 +2343,8 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/chat/threads", async (req) => chat.threads(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { agentId } = z.object({ agentId: Uuid.optional() }).parse(req.query);
-      return chat.list(id, agentId).catch(chatErrors(reply));
+      const { agentId, before } = z.object({ agentId: Uuid.optional(), before: Uuid.optional() }).parse(req.query);
+      return chat.list(id, agentId, before).catch(chatErrors(reply));
     });
     owner.post("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
