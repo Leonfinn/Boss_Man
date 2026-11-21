@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
@@ -1511,6 +1511,39 @@ export async function buildApp(opts: AppOptions) {
       return o;
     });
 
+    // Account (BOS-2159): the owner changes their password and ends every other login. Only valid behind requireOwner.
+    /** Ends every login of this owner except the one in this request's cookie; returns how many it ended. */
+    async function endOtherSessions(req: FastifyRequest, ownerId: string) {
+      const keep = hashToken(req.cookies[SESSION_COOKIE] ?? "");
+      const gone = await db.delete(sessions).where(and(eq(sessions.ownerId, ownerId), ne(sessions.tokenHash, keep))).returning({ h: sessions.tokenHash });
+      return gone.length;
+    }
+    owner.post("/api/account/password", async (req, reply) => {
+      const body = z.object({ currentPassword: z.string().min(1).max(256), newPassword: Credentials.shape.password }).parse(req.body);
+      const ownerId = await currentOwnerId(req);
+      const [me] = ownerId ? await db.select().from(owners).where(eq(owners.id, ownerId)) : [];
+      if (!me) return reply.code(401).send({ error: "not_signed_in" });
+      // A guess at the current password is a login guess: same limiter as /api/login.
+      const wait = logins.retryAfter(req.ip, me.username);
+      if (wait > 0) {
+        const minutes = Math.ceil(wait / 60_000);
+        return reply.code(429).header("retry-after", String(Math.ceil(wait / 1000))).send({ error: "too_many_attempts", message: `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.` });
+      }
+      if (!(await verifyPassword(body.currentPassword, me.passwordHash))) {
+        logins.failed(req.ip, me.username);
+        return reply.code(403).send({ error: "wrong_current_password", message: "The current password is not right." });
+      }
+      if (body.newPassword === body.currentPassword) return reply.code(400).send({ error: "same_password", message: "Choose a password different from the current one." });
+      await db.update(owners).set({ passwordHash: await hashPassword(body.newPassword) }).where(eq(owners.id, me.id));
+      logins.succeeded(req.ip, me.username);
+      return { ok: true, signedOut: await endOtherSessions(req, me.id) };
+    });
+    owner.post("/api/account/sign-out-others", async (req, reply) => {
+      const ownerId = await currentOwnerId(req);
+      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
+      return { ok: true, signedOut: await endOtherSessions(req, ownerId) };
+    });
+
     // Device profiles (BOS-641): the owner's browsers report their measured screens.
     deviceRoutes(owner, { deviceProfiles, currentOwnerId });
 
@@ -2675,5 +2708,7 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
+  const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
+  return { app, sweepExpiredSessions, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }
