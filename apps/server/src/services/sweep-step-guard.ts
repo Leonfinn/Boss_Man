@@ -37,8 +37,8 @@ export type StepGuardOpts = {
 /** One guard per sweep pass: wrap each step with `step`, then call `finish` once. */
 export async function sweepStepGuard(db: Db, opts: StepGuardOpts) {
   const before = await readCounts(db).catch(() => ({}) as Record<string, number>);
-  const failed = new Set<string>();
-  const seen = new Set<string>();
+  const failed = new Set<string>(); // lost on restart, harmless because it lives for one pass and the counts are in settings
+  const seen = new Set<string>(); // lost on restart, harmless because it lives for one pass and the counts are in settings
   return {
     failed: () => [...failed],
     /** Runs the step. A throw is logged, recorded and answered with `fallback`; a step that is skipped is neither a success nor a failure. */
