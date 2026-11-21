@@ -24,7 +24,7 @@ import type { MergeAttempt } from "./merge-attempt.js";
 import type { CiStepParts, Early } from "./merge-ci-step.js";
 
 export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt, c: CiStepParts) {
-  const { db, deps, gate, queue, phases, clashOnMain, namedTickets, prTarget, mergeCarry, mergeRetarget, mergeTurnMinutes, holdForWaits, refuseIfHeld } = ctx;
+  const { db, deps, gate, queue, phases, clashOnMain, namedTickets, prTarget, mergeCarry, mergeRetarget, mergeTurnMinutes, holdForWaits, refuseIfHeld, turnWaits } = ctx;
   const { t, ticketId, opts, runner, repoUrl, defaultBranch, landing, gitHost, gitApiBase, touch, inReview, leftReview, whileActive, askMerge, checks, combinedCommand, named, kindOf, timedCheck, checkPrio, serverChecks, checkMerged, ci } = a;
   const { publishAndWait, ciVerdict, alongsideCi, legacyChecks } = c;
   // A pull request: the host must be known and reachable before anything is pushed (R59).
@@ -65,14 +65,55 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
   const ciRefreshOn = async () => !!ci && carryOn && deps.runners.can(runner.id, "merge-refresh") && (await retargetSwitch());
   const turnCapMs = (await mergeTurnMinutes()) * 60_000;
   const inReviewNow = async (id: string) => (await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, id)))[0]?.state === "review";
+  type WaitEnd = { status: "left_review" } | { status: "handed_over" };
+  /**
+   * The wait while another ticket holds the project's landing turn (BOS-1762), shared by the push of a passed merge
+   * (landPassed, then "push") and, since BOS-2119, by a merge in line for the turn before it builds its next round
+   * (then "rebuild"). It ends (null) once no other ticket holds the turn: the holder landed or failed (done), left review
+   * (its turn ends here), or ran out its cap (expired, written here); a promoted ticket in line then holds it itself. It
+   * stops early when this ticket leaves review or this copy hands over. `onPoll` runs once per poll after those checks:
+   * a result ends the wait with it, "break" ends it as if the turn were free. While it waits, `turnWaits` says so (R43).
+   */
+  const waitForTurn = async <R>(then: "rebuild" | "push", note: (holder: string) => string, onPoll?: () => Promise<R | "break" | undefined>): Promise<R | WaitEnd | null> => {
+    let waiting = false;
+    const since = Date.now();
+    try {
+      for (;;) {
+        const c = landingTurns.check(t.projectId);
+        if (c.expired) await lineEvent(db, { id: c.expired.ticketId, companyId: t.companyId }, { event: "landing_turn", action: "expired", capMin: Math.round(c.expired.capMs / 60_000) });
+        if (!c.holder || c.holder.ticketId === ticketId) return null;
+        if (!(await inReviewNow(c.holder.ticketId))) {
+          // The holder was sent back or moved by hand while its merge waited: its turn ends here.
+          if (landingTurns.done(t.projectId, c.holder.ticketId)) await lineEvent(db, { id: c.holder.ticketId, companyId: t.companyId }, { event: "landing_turn", action: "ended" });
+          continue;
+        }
+        turnWaits.set(ticketId, { holderId: c.holder.ticketId, since, then });
+        if (!waiting) {
+          waiting = true;
+          const [h] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, c.holder.ticketId));
+          await lineEvent(db, t, { event: "hold_started", hold: "turn", note: note(h?.title ?? c.holder.ticketId) });
+        }
+        // BOS-1769: also an out-and-back move since this attempt began, like every other wait in the landing.
+        if (await leftReview()) return { status: "left_review" };
+        // BOS-1752: a copy that handed over while it waited for the turn must not push or prepare; the server now in charge restarts it.
+        if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
+        const r = onPoll ? await onPoll() : undefined;
+        if (r === "break") return null;
+        if (r !== undefined) return r;
+        await touch();
+        await new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
+      }
+    } finally {
+      turnWaits.delete(ticketId);
+    }
+  };
   /**
    * BOS-1762: the push after both checks passed. Waits while another ticket holds the project's landing turn (its checks
    * and GitHub run are done; only the push waits), then finishes, carrying across a file-disjoint main move when allowed.
    * A carry that lost a push race is tried again on the newer tip without preparing (three times at most). A main move it
    * can't carry counts as a rebuild, and the second one takes the landing turn.
    */
-  const landPassed = async (prep: Prepared, fin0?: () => Promise<MergeResult | null>): Promise<MergeResult | { status: "left_review" } | { status: "handed_over" } | null> => {
-    let waiting = false;
+  const landPassed = async (prep: Prepared, fin0?: () => Promise<MergeResult | null>): Promise<MergeResult | WaitEnd | null> => {
     // BOS-1821: while it waits for another ticket's turn, the merge asks the runner (BOS-1820's carry question) whether its
     // pass could still be carried onto today's main: at the start of the wait, whenever the gate pushes to main, and every
     // WAIT_RECHECK_MS for pushes from elsewhere. A refusal is the rebuild finish would have ordered when the turn ended, so
@@ -80,25 +121,9 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
     let waitCheck: boolean | undefined;
     let askedEpoch = -1;
     let askedAt = 0;
-    let early: Extract<MergeResult, { status: "main_moved" }> | null = null;
-    for (;;) {
-      const c = landingTurns.check(t.projectId);
-      if (c.expired) await lineEvent(db, { id: c.expired.ticketId, companyId: t.companyId }, { event: "landing_turn", action: "expired", capMin: Math.round(c.expired.capMs / 60_000) });
-      if (!c.holder || c.holder.ticketId === ticketId) break;
-      if (!(await inReviewNow(c.holder.ticketId))) {
-        // The holder was sent back or moved by hand while its merge waited: its turn ends here.
-        if (landingTurns.done(t.projectId, c.holder.ticketId)) await lineEvent(db, { id: c.holder.ticketId, companyId: t.companyId }, { event: "landing_turn", action: "ended" });
-        continue;
-      }
-      if (!waiting) {
-        waiting = true;
-        const [h] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, c.holder.ticketId));
-        await lineEvent(db, t, { event: "hold_started", hold: "turn", note: `"${h?.title ?? c.holder.ticketId}" has the landing turn; this merge pushes when it lands or the turn ends` });
-      }
-      // BOS-1769: also an out-and-back move since this attempt began, like every other wait in the landing.
-      if (await leftReview()) return { status: "left_review" };
-      // BOS-1752: a copy that handed over while it waited for the turn must not push; the server now in charge restarts it.
-      if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
+    // An object, not a `let`: TypeScript doesn't follow a `let` assigned inside the callback.
+    const st: { early: Extract<MergeResult, { status: "main_moved" }> | null } = { early: null };
+    const waited = await waitForTurn("push", (h) => `"${h}" has the landing turn; this merge pushes when it lands or the turn ends`, async () => {
       waitCheck ??= carryOn && deps.runners.can(runner.id, "merge-refresh") && (await retargetSwitch());
       const epoch = landingTurns.mainEpoch(t.projectId);
       if (waitCheck && (epoch !== askedEpoch || Date.now() - askedAt >= WAIT_RECHECK_MS)) {
@@ -111,13 +136,14 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
         });
         if (fresh?.status === "conflicts" || fresh?.status === "migration_journal" || fresh?.status === "branch_moved") return fresh;
         if (fresh?.status === "prepared" && fresh.tree !== prep.tree && fresh.carry?.ok === false) {
-          early = { status: "main_moved", notCarried: { why: fresh.carry.why, ...(fresh.carry.files ? { files: fresh.carry.files } : {}) } };
-          break;
+          st.early = { status: "main_moved", notCarried: { why: fresh.carry.why, ...(fresh.carry.files ? { files: fresh.carry.files } : {}) } };
+          return "break" as const;
         }
       }
-      await touch();
-      await new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
-    }
+      return undefined;
+    });
+    if (waited) return waited;
+    const early = st.early;
     if (early) {
       const files = early.notCarried?.files;
       await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Main changed ${files?.length ? files.slice(0, 3).join(", ") + (files.length > 3 ? ", …" : "") : "shared files"} while this merge waited for another ticket's landing turn, so it is rebuilt and checked again now rather than when that turn ends. Nothing to do.` });
@@ -137,6 +163,31 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
     if (r.status !== "main_moved" && landingTurns.done(t.projectId, ticketId)) await lineEvent(db, t, { event: "landing_turn", action: "ended" });
     return r;
   };
+  /**
+   * BOS-2119: so does one that throws ("Passed, held", a lost runner). Before this it kept the turn until the cap, and every
+   * ticket in line, which now waits to re-prepare, waited that long for nothing. The error goes on unchanged.
+   */
+  const withTurn = <R extends { status: string }>(p: Promise<R>): Promise<R> =>
+    p.then(turnOver, async (err: unknown) => {
+      if (landingTurns.done(t.projectId, ticketId)) await lineEvent(db, t, { event: "landing_turn", action: "ended" }).catch(() => undefined);
+      throw err;
+    });
+  /**
+   * BOS-2119: a merge in line for the landing turn waits for it before it builds its next round. Built at once (as before),
+   * it was checked on a main the holder's own landing then moved, and rebuilt a third time (19 Nov: c5008b3b, 9c9b4596
+   * ran out of rounds that way). Nothing is prepared or queued while it waits, so it holds no slot. Runs after
+   * heldBeforeRebuild, and again after a wait (a hold set meanwhile still stops the rebuild). Null: build now.
+   */
+  const beforeRebuild = async (round: number): Promise<WaitEnd | null> => {
+    await heldBeforeRebuild(round);
+    if (!landingTurns.queued(t.projectId, ticketId)) return null;
+    const w = await waitForTurn<never>("rebuild", (h) => `"${h}" has the landing turn and this merge is in line for it; it builds and checks again once that ticket lands or the turn ends`);
+    if (w) return w;
+    await heldBeforeRebuild(round);
+    return null;
+  };
+  /** BOS-1762, BOS-2119: a ticket that holds the landing turn, or is in line for it, gets one more round, so its turn isn't lost to the round cap. */
+  const roundsLeft = (round: number) => round < 3 || (round < 4 && (landingTurns.holds(t.projectId, ticketId) || landingTurns.queued(t.projectId, ticketId)));
   /**
    * One round: the merge's check job(s) on one prepared tree (BOS-316), waited on through their rows. `ref.prep` is that tree;
    * the BOS-1344 refresh may move it while the round's first job is still queued. `stale` (merge train, BOS-1366) is asked on
@@ -297,9 +348,11 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
     // isn't counted: nothing was checked or landed, so it is no rebuild and earns no landing turn.
     let refreshed: Prepared | undefined;
     let refreshes = 0;
-    // BOS-1762: a ticket that took the landing turn gets one more round, so the turn it earned isn't wasted on the round cap.
-    for (let round = 0; round < 3 || (round < 4 && landingTurns.holds(t.projectId, ticketId)); round++) {
-      if (!refreshed) await heldBeforeRebuild(round);
+    for (let round = 0; roundsLeft(round); round++) {
+      if (!refreshed) {
+        const w = await beforeRebuild(round);
+        if (w) return w;
+      }
       const prep: MergeResult = refreshed ?? (adopted ? { status: "prepared", commit: adopted.commit, tree: adopted.tree, targetSha: "" } : await prepare());
       refreshed = undefined;
       if (prep.status !== "prepared") return prep;
@@ -335,8 +388,9 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
   // Legacy mode with CI gating (BOS-1070): the same split merge, with the branch's own checks beside the CI wait. Legacy
   // checks test the branch, not the merge, so a rebuilt merge (main moved) doesn't run them again.
   const legacyCiMerge = async (): Promise<MergeResult | Early | { status: "left_review" } | { status: "handed_over" }> => {
-    for (let round = 0; round < 3 || (round < 4 && landingTurns.holds(t.projectId, ticketId)); round++) {
-      await heldBeforeRebuild(round);
+    for (let round = 0; roundsLeft(round); round++) {
+      const w = await beforeRebuild(round);
+      if (w) return w;
       const prep = await prepare();
       if (prep.status !== "prepared") return prep;
       const r = await alongsideCi(prep, async (stop): Promise<Early | null> => {
@@ -459,7 +513,7 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
           // The owner turned the train off meanwhile: land the way it did before.
           if (!(await queue.train())) {
             train.leave(ticketId);
-            return serverMerge().then(turnOver);
+            return withTurn(serverMerge());
           }
         }
         // A stacked prepare that came back main_moved: its base isn't on main any more. Wait for a new base rather than spin.
@@ -471,7 +525,7 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
           // until the cap (with the back-off, up to ~20 min). A member with a passed check never gets here, so it keeps its base.
           if (again && !(await queue.train())) {
             train.leave(ticketId);
-            return serverMerge().then(turnOver);
+            return withTurn(serverMerge());
           }
           again = true;
           // BOS-1604: a member restacking again and again before any check could run backs off instead of re-preparing
@@ -617,13 +671,13 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
     deps.runners.can(runner.id, "merge-base") &&
     (await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, t.projectId)))[0]?.s !== "red";
   const m1: MergeResult | PushResult | ServerMergeEnd | Early = serverChecks
-    ? await whileActive(trainMode ? trainMerge : () => serverMerge().then(turnOver))
+    ? await whileActive(trainMode ? trainMerge : () => withTurn(serverMerge()))
     : pr
     ? await whileActive(() => askMerge<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
     : ci && checkMerged
     ? await whileActive(ciThenChecked)
     : ci
-    ? await whileActive(() => legacyCiMerge().then(turnOver))
+    ? await whileActive(() => withTurn(legacyCiMerge()))
     : await plainOrChecked();
   return { m1, pr };
 }

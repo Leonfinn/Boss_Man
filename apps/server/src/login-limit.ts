@@ -5,7 +5,10 @@
 export type LoginLimits = { maxFailures: number; windowMs: number };
 export const DEFAULT_LOGIN_LIMITS: LoginLimits = { maxFailures: 10, windowMs: 15 * 60_000 };
 
-export function loginLimiter(limits: LoginLimits = DEFAULT_LOGIN_LIMITS, now: () => number = () => Date.now()) {
+/** BOS-2177: told once when a failure takes an address and/or a username to the limit. Carries the address only, never a guessed username or password. */
+export type LoginLockout = { ip: string; at: number; byAddress: boolean; byUsername: boolean };
+
+export function loginLimiter(limits: LoginLimits = DEFAULT_LOGIN_LIMITS, now: () => number = () => Date.now(), onLocked?: (e: LoginLockout) => void) {
   // shortcut: lost on restart, harmless because a reboot only resets what it costs an attacker (see the header).
   const failures = new Map<string, number[]>();
   const recent = (key: string) => {
@@ -28,7 +31,21 @@ export function loginLimiter(limits: LoginLimits = DEFAULT_LOGIN_LIMITS, now: ()
       return wait;
     },
     failed(ip: string, username: string) {
-      for (const key of keys(ip, username)) failures.set(key, [...recent(key), now()]);
+      // A key is newly locked when this failure is the one that takes it from below the limit to it; later
+      // failures can't happen while it is locked (retryAfter refuses first), so one lock tells once.
+      const [ipKey, userKey] = keys(ip, username) as [string, string];
+      const locked = [ipKey, userKey].map((key) => {
+        const next = [...recent(key), now()];
+        failures.set(key, next);
+        return next.length === limits.maxFailures;
+      });
+      if (onLocked && (locked[0] || locked[1])) {
+        try {
+          onLocked({ ip, at: now(), byAddress: !!locked[0], byUsername: !!locked[1] });
+        } catch {
+          // Telling the owner must never change the answer to the sign-in.
+        }
+      }
       // Bounded memory under a flood of made-up usernames.
       if (failures.size > 10_000) failures.delete(failures.keys().next().value!);
     },

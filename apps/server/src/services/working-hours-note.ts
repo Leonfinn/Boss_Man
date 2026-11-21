@@ -7,6 +7,7 @@ import type { Db } from "../db/client.js";
 import { agents, wakes } from "../db/schema.js";
 
 export async function workingHoursNotes(db: Db, tickets: Array<{ id: string; assigneeAgentId: string | null }>, now: Date = new Date()): Promise<Map<string, string>> {
+  // lost on restart, harmless because it is built fresh inside each call and returned, never kept between calls
   const out = new Map<string, string>();
   if (!tickets.length) return out;
   const assigneeIds = [...new Set(tickets.map((t) => t.assigneeAgentId).filter((x): x is string => !!x))];

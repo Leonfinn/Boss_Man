@@ -16,7 +16,7 @@ import { figureText, type OwnerFigureName } from "@boss-man/shared";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; ranOn?: string | null; statusLine?: StatusLine };
-type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held" | "waiting_for_ci";
+type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held" | "waiting_for_ci" | "waiting_for_turn";
 /** Approved work held by the carried-work guard (BOS-130, BOS-766): the ticket(s) it waits for. */
 type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
 /** The card a waiting merge is held by (BOS-1078): named, with who raised it and a link straight to it. */

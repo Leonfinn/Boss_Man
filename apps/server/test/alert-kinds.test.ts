@@ -60,7 +60,7 @@ const UNTIERED_INSERTS: Record<string, number> = {
   // now names its tier: owner-only kinds stay with the owner, the rest go to the CEO first, BOS-1318.)
   "services/decisions.ts": 2,
   // Disk, runner update, self-deploy, budget and cost-cap cards are the owner's own to answer.
-  "services/disk.ts": 1,
+  "services/disk.ts": 2,
   // An engagement's "approve the work?" card: the owner's to answer (it was hidden by the old scan's loose spread test).
   "services/engagements.ts": 1,
   "services/maintenance.ts": 1,

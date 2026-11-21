@@ -5,9 +5,10 @@
 import { eq } from "drizzle-orm";
 import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
-import { columnProblems, DEFAULT_REVIEW_POLICY, noLooserThan, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret,THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
+import { ruleProblems, RuleMatchSchema,type PolicyMatch, type PolicyOutcome, columnProblems, DEFAULT_REVIEW_POLICY, noLooserThan, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret,THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
+import { endpointProblem } from "./deploys.js";
+import { agentAvatars, agentSkills, agents, companies, deployTargets, features, fundingSources, policyRules, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
 import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
@@ -83,6 +84,15 @@ const Plan = z.object({
 });
 const ToolServer = z.object({ name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/).refine((n) => n !== "bossman"), url: str(500).refine((u) => /^https?:\/\//.test(u)), transport: z.enum(["http", "sse"]), headerName: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/).default("Authorization"), headerValue: str(200).default("Bearer {secret}"), secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).refine((n) => !isDaemonOnlySecret(n), DAEMON_ONLY_SECRET_REFUSAL).nullable().optional() }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), "the header value must contain {secret}");
 const Secret = z.object({ name: z.string().trim().min(1).max(200), kind: str(64), envName: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), agents: z.array(str(120)).max(500).default([]) });
+const DeployTarget = z.object({
+  name: z.string().trim().min(1).max(120),
+  kind: z.enum(["ssh", "docker", "git"]),
+  endpoint: str(500),
+  isProduction: z.boolean().default(false),
+  rules: z.object({ requiresApproval: z.boolean().optional(), liveTag: z.object({ project: str(120), name: str(200) }).nullable().optional() }).partial().default({}),
+  secrets: z.array(Secret).max(100).default([]),
+});
+const PermissionRule = z.object({ name: z.string().trim().min(1).max(200), trigger: str(64).default("permission"), condition: z.record(z.string(), z.unknown()).default({}), outcome: z.enum(["allow", "ceo", "owner", "deny"]), position: z.number().int().min(0).max(100_000).default(0) });
 const WikiMeta = z.object({ slug: z.string().min(1).max(300), title: z.string().trim().min(1).max(300), folder: str(300).default(""), ticket: opt(100) });
 const Ticket = z.object({
   ref: z.string().min(1).max(100),
@@ -113,6 +123,9 @@ export type Package = {
   plan: z.infer<typeof Plan>;
   toolServers: Array<z.infer<typeof ToolServer>>;
   secrets: Array<z.infer<typeof Secret>>;
+  /** BOS-2169: absent in packages made before it. */
+  deployTargets: Array<z.infer<typeof DeployTarget>>;
+  permissionRules: Array<z.infer<typeof PermissionRule>>;
   wiki: Array<z.infer<typeof WikiMeta> & { body: string }>;
   tickets: Array<z.infer<typeof Ticket>>;
   /** What an adapter changed or left out on the way in. */
@@ -269,20 +282,101 @@ export function readPackage(zip: Uint8Array): Package {
     plan: parse(Plan, json("plan.json") ?? {}, "plan.json"),
     toolServers: parse(z.array(ToolServer).max(100), json("tool-servers.json") ?? [], "tool-servers.json"),
     secrets: parse(z.array(Secret).max(500), json("secrets.json") ?? [], "secrets.json"),
+    deployTargets: parse(z.array(DeployTarget).max(100), json("deploy-targets.json") ?? [], "deploy-targets.json"),
+    permissionRules: parse(z.array(PermissionRule).max(500), json("permission-rules.json") ?? [], "permission-rules.json"),
     wiki,
     tickets: pkgTickets,
     notes,
   };
 }
 
+/**
+ * What of the package's deploy targets and permission rules can be imported (BOS-2169), and what the owner is told
+ * about the rest. Pure, so the preview and the apply agree. An Allow rule comes in as "Ask me" (owner), a rule that
+ * names agents the package doesn't hold is left out rather than widened to every agent, and an endpoint the deploy
+ * target form would refuse is skipped.
+ */
+export function screenExtras(pkg: Package) {
+  const lines: string[] = [];
+  const seenTargets = new Set<string>(); // shortcut: local to one call, gone when it returns, so nothing to lose on restart
+  const targets: Array<z.infer<typeof DeployTarget>> = [];
+  for (const t of pkg.deployTargets) {
+    const problem = endpointProblem(t.kind, t.endpoint);
+    if (problem) {
+      lines.push(`Deploy target "${t.name}" was not imported: ${problem}`);
+      continue;
+    }
+    if (seenTargets.has(t.name.toLowerCase())) {
+      lines.push(`Deploy target "${t.name}" appears twice in the package; only the first was imported.`);
+      continue;
+    }
+    seenTargets.add(t.name.toLowerCase());
+    const lt = t.rules.liveTag ?? null;
+    // The live tag is not carried: saving one makes Boss Man check the tag name against the repo's branches through a runner,
+    // and an import has no runner yet. The owner sets it again once the company's runner is up.
+    if (lt) lines.push(`Deploy target "${t.name}" had a live tag "${lt.name}" for project "${lt.project}"; it was not carried over. Set it again on the target once the company's runner is running.`);
+    targets.push(t);
+    for (const s of t.secrets) lines.push(`Add the secret "${s.name}" and grant it as ${s.envName} to deploy target "${t.name}"${s.agents.length ? `, for ${s.agents.map((slug) => pkg.agents.find((a) => a.slug === slug)?.name ?? slug).join(", ")}` : ""}.`);
+  }
+  const agentNames = new Set(pkg.agents.map((a) => a.name));
+  const rules: Array<{ name: string; match: PolicyMatch; outcome: PolicyOutcome; agentNames: string[] | null }> = [];
+  for (const r of [...pkg.permissionRules].sort((a, b) => a.position - b.position)) {
+    if (r.trigger !== "permission") {
+      lines.push(`Rule "${r.name}" was not imported: it is a "${r.trigger}" rule and only permission rules are carried.`);
+      continue;
+    }
+    const { agents: named, ...rest } = r.condition as Record<string, unknown> & { agents?: unknown };
+    // Agent ids from another server mean nothing here; a rule that carries them can't be placed, and dropping them would widen it.
+    if ("agentIds" in rest) {
+      lines.push(`Rule "${r.name}" was not imported: it names agents by id, which can't be placed in this company.`);
+      continue;
+    }
+    let wanted: string[] | null = null;
+    if (named !== undefined) {
+      wanted = Array.isArray(named) ? named.filter((n): n is string => typeof n === "string") : [];
+      const missing = wanted.filter((n) => !agentNames.has(n));
+      const kept = wanted.filter((n) => agentNames.has(n));
+      if (!kept.length) {
+        lines.push(`Rule "${r.name}" names ${wanted.length ? `${listJoin(wanted)}, who ${wanted.length > 1 ? "aren't" : "isn't"}` : "agents that aren't"} in this company; it was not imported.`);
+        continue;
+      }
+      if (missing.length) lines.push(`Rule "${r.name}" also named ${listJoin(missing)}, who ${missing.length > 1 ? "aren't" : "isn't"} in this company; it applies to ${listJoin(kept)} only.`);
+      wanted = kept;
+    }
+    // Only what the owner's rule form can set; the schema strips anything else, so a package can't carry built-in-only
+    // conditions (bossmanCall, destructive, pushing, ...), and a wrong type fails here.
+    const unknownKeys = Object.keys(rest).filter((k) => !(k in RuleMatchSchema.shape));
+    const parsed = RuleMatchSchema.safeParse(rest);
+    if (unknownKeys.length || !parsed.success) {
+      lines.push(`Rule "${r.name}" was not imported: its condition isn't one the rule form can set${unknownKeys.length ? ` (${unknownKeys.join(", ")})` : ""}.`);
+      continue;
+    }
+    const match: PolicyMatch = parsed.data;
+    const problems = ruleProblems({ ...match, ...(wanted ? { agentIds: ["x"] } : {}) });
+    if (problems.length) {
+      lines.push(`Rule "${r.name}" was not imported: ${problems.join(" ")}`);
+      continue;
+    }
+    // A package can't hand out permissions or move the owner's approvals to the CEO (a CEO routing rule beats the built-in
+    // owner gates for destructive requests and pushes), so Allow and Ask-the-CEO both come in as Ask me.
+    const softened = r.outcome === "allow" || r.outcome === "ceo";
+    if (softened) lines.push(`Rule "${r.name}" was ${r.outcome === "allow" ? "Allow" : "Ask the CEO"} in the export; it asks you now. If you trust it, change it back in Settings → Permissions.`);
+    rules.push({ name: r.name, match, outcome: softened ? "owner" : r.outcome, agentNames: wanted });
+  }
+  return { targets, rules, lines };
+}
+const listJoin = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]!);
+
 /** What applying the package would create, and what the owner should look at first. */
 export async function previewPackage(db: Db, pkg: Package, name = pkg.company.name) {
   const [taken] = await db.select({ id: companies.id }).from(companies).where(eq(companies.name, name));
   const warnings: string[] = [...pkg.notes];
   if (!pkg.agents.some((a) => a.role === "ceo")) warnings.push("The package has no CEO; hire one after importing.");
+  const extras = screenExtras(pkg);
+  warnings.push(...extras.lines.filter((l) => !l.startsWith("Add the secret")));
   return {
     company: { name, nameTaken: !!taken },
-    counts: { agents: pkg.agents.length, skills: pkg.skills.length, projects: pkg.projects.length, objectives: pkg.plan.objectives.length, features: pkg.plan.features.length, toolServers: pkg.toolServers.length, wikiPages: pkg.wiki.length, tickets: pkg.tickets.length },
+    counts: { agents: pkg.agents.length, skills: pkg.skills.length, projects: pkg.projects.length, objectives: pkg.plan.objectives.length, features: pkg.plan.features.length, toolServers: pkg.toolServers.length, wikiPages: pkg.wiki.length, tickets: pkg.tickets.length, deployTargets: extras.targets.length, permissionRules: extras.rules.length },
     agents: pkg.agents.map((a) => ({ name: a.name, role: a.role, title: a.title ?? null, agentKind: a.agentKind, model: a.model ?? null, instructions: a.instructions ?? null })),
     skills: pkg.skills.map((s) => ({ name: s.name, renamedFrom: s.name !== s.folder ? s.folder : null, description: s.description, scripts: s.files.map((f) => f.path).filter((p) => SCRIPT.test(p)) })),
     secrets: pkg.secrets.map((s) => ({ name: s.name, envName: s.envName, agents: s.agents })),
@@ -448,6 +542,18 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // (BOS-708): the guard keeps its private addresses instead of dropping them when its name is re-pointed.
     if (pkg.toolServers.length) await tx.insert(mcpServers).values(pkg.toolServers.map((t, i) => ({ companyId, ...t, secretEnv: t.secretEnv ?? null, allowPrivate: trustPrivate[i] === true })));
 
+    // Deploy targets and the company's own permission rules (BOS-2169). No secret is created or granted; the checklist lists them.
+    const extras = screenExtras(pkg);
+    if (extras.targets.length)
+      await tx.insert(deployTargets).values(
+        extras.targets.map((t) => ({ companyId, name: t.name, kind: t.kind, endpoint: t.endpoint.trim(), isProduction: t.isProduction, rules: t.rules.requiresApproval === true ? { requiresApproval: true } : {} })),
+      );
+    const agentByName = new Map(pkg.agents.map((a) => [a.name, agentId.get(a.slug)!]));
+    if (extras.rules.length)
+      await tx.insert(policyRules).values(
+        extras.rules.map((r, i) => ({ companyId, name: r.name, trigger: "permission", condition: { ...r.match, ...(r.agentNames ? { agentIds: r.agentNames.map((n) => agentByName.get(n)!) } : {}) }, outcome: r.outcome, position: i, createdAt: new Date(), createdBy: "import" })),
+      );
+
     for (const t of pkg.tickets) {
       const project = projectId.get(t.project);
       if (!project) throw new ImportError(400, `Ticket "${t.title}" is in project "${t.project}", which isn't in the package.`);
@@ -505,6 +611,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     const checklist = [
       ...(pkg.company.standingRules ? [`Standing rules came in as plain notes every run reads (they grant no permissions). Read them in Settings and change what doesn't fit:\n${pkg.company.standingRules}`] : []),
       ...pkg.secrets.map((s) => `Add the secret "${s.name}" and grant it as ${s.envName}${s.agents.length ? ` to ${s.agents.map(slugName).join(", ")}` : ""}.`),
+      ...extras.lines,
       ...(opts.fundingSourceId ? [] : ["Give each agent a funding source."]),
       ...pkg.skills.filter((s) => s.files.some((f) => SCRIPT.test(f.path))).map((s) => `Read the scripts in the skill ${s.name} before agents use it.`),
       "Every imported agent is paused: check its model and instructions, then unpause it.",

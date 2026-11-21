@@ -63,6 +63,7 @@ describe("agent working hours", () => {
     const [w] = (await heldWakes()).filter((x) => x.ticketId === t.id);
     expect(w).toMatchObject({ status: "deferred", statusReason: "working hours" });
     const expected = nextWorkingStart(new Date(), hours)!;
+    // test-lines-ok: compares two computed instants (not elapsed wall time); the 2-minute slack only absorbs the clock moving between the two calls
     expect(Math.abs(w!.notBefore!.getTime() - expected.getTime())).toBeLessThan(120_000);
     expect(await ctx.scheduler.tick()).toMatchObject({ launched: 0 });
     expect(ctx.commands).toHaveLength(0);

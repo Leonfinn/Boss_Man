@@ -2,6 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
+import { z } from "zod";
 import { commandRisks, type Risk } from "./destructive.js";
 import { autoTempCleanup, cleanupScope, explainCommand, readPush, removesReservedTmpEntry, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
@@ -159,6 +160,16 @@ export const PERMISSION_TABLE: ReadonlyArray<{ row: number; name: string; why: s
 
 /** ACP tool kinds a rule can match on. */
 export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"] as const;
+
+/** The conditions the owner's rule form can set (the POST/PATCH /api/policy-rules body); also what a package's rule may carry. */
+export const RuleMatchSchema = z.object({
+  kinds: z.array(z.string()).max(10).optional(),
+  commandPattern: z.string().min(1).max(500).optional(),
+  titlePattern: z.string().min(1).max(500).optional(),
+  safeOnly: z.boolean().optional(),
+  scratchOnly: z.boolean().optional(),
+  agentIds: z.array(z.string().min(1).max(64)).min(1).max(50).optional(),
+});
 
 /** What's wrong with a rule's match, if anything: it needs a condition, and its patterns must compile. */
 export function ruleProblems(match: PolicyMatch): string[] {
