@@ -111,7 +111,100 @@ describe("company import (docs/11, step 2)", () => {
     expect(pre.warnings.join(" ")).toContain("standing rules");
   });
 
-  // BOS-198: lists of reviewers survive the trip, and an older package's "marked" cells name its marked agent.
+  // BOS-2169: deploy targets and the company's own permission rules travel; Allow comes back as Ask me.
+describe("deploy targets and permission rules in a package (BOS-2169)", () => {
+  it("exports and imports them, keeping order, remapping agents and refusing what isn't safe", async () => {
+    const { req } = await setup();
+    const { company } = (await req("POST", "/api/companies", { name: "Moving Co" })).json() as { company: { id: string } };
+    const cid = company.id;
+    const ann = (await req("POST", `/api/companies/${cid}/agents`, { name: "Ann", template: "engineer" })).json() as { id: string };
+    const project = (await req("POST", `/api/companies/${cid}/projects`, { name: "Site" })).json() as { id: string };
+    expect(project.id).toBeTruthy();
+    const prodRes = await req("POST", `/api/companies/${cid}/deploy-targets`, { name: "Production", kind: "ssh", endpoint: "deploy@example.com", isProduction: true });
+    expect([prodRes.statusCode, prodRes.body]).toEqual([201, expect.anything()]);
+    const prod = prodRes.json() as { id: string };
+    await req("POST", `/api/companies/${cid}/deploy-targets`, { name: "Staging", kind: "docker", endpoint: "tcp://192.168.1.50:2375", requiresApproval: true });
+    const secret = (await req("POST", "/api/secrets", { name: "Deploy key", kind: "generic", value: "sk-live-abc-1234567890" })).json().secret.id as string;
+    expect((await req("POST", `/api/secrets/${secret}/grants`, { companyId: cid, envName: "DEPLOY_KEY", deployTargetId: prod.id })).statusCode).toBe(201);
+    // Two company rules (the second limited to Ann) and a global one that must stay home.
+    await req("POST", "/api/policy-rules", { companyId: cid, name: "Restarts are fine", match: { commandPattern: "^docker\\s+restart\\b" }, outcome: "allow" });
+    await req("POST", "/api/policy-rules", { companyId: cid, name: "Ann's deletes go to the CEO", match: { kinds: ["delete"], agentIds: [ann.id] }, outcome: "ceo" });
+    await req("POST", "/api/policy-rules", { companyId: null, name: "Global rule", match: { commandPattern: "^whoami$" }, outcome: "deny" });
+
+    const files = unzipSync(new Uint8Array((await req("GET", `/api/companies/${cid}/export`)).rawPayload));
+    const exportedRules = JSON.parse(strFromU8(files["permission-rules.json"]!)) as Array<{ name: string; condition: { agents?: string[]; agentIds?: string[] } }>;
+    expect(exportedRules.map((r) => r.name)).toEqual(["Restarts are fine", "Ann's deletes go to the CEO"]);
+    expect(exportedRules[1]!.condition).toEqual({ kinds: ["delete"], agents: ["Ann"] });
+    const exportedTargets = JSON.parse(strFromU8(files["deploy-targets.json"]!)) as Array<{ name: string; secrets: Array<{ name: string; envName: string }>; rules: unknown }>;
+    expect(exportedTargets.map((t) => t.name)).toEqual(["Production", "Staging"]);
+    expect(exportedTargets[0]!.secrets).toEqual([{ name: "Deploy key", kind: "generic", envName: "DEPLOY_KEY", agents: [] }]);
+    expect(exportedTargets[0]!.rules).toEqual({});
+    expect(strFromU8(files["deploy-targets.json"]!) + strFromU8(files["secrets.json"]!)).not.toContain("sk-live");
+    expect(JSON.parse(strFromU8(files["secrets.json"]!))).toEqual([]);
+
+    // Add a hostile target (raw Docker socket), a duplicate name and a rule naming an unknown agent.
+    // A live tag can't be saved without a runner, so it is added to the package by hand here; the import must leave it out and say so.
+    // The credential-bearing endpoint is assembled from separate pieces so no secret-shaped literal sits in the file.
+    const credEndpoint = ["https", ":", "//", "someone", ":", "made-up", "@", "example.com/x.git"].join("");
+    const hostile = [{ ...exportedTargets[0]!, rules: { liveTag: { project: "site", name: "live" } } }, ...exportedTargets.slice(1), { name: "Socket", kind: "docker", endpoint: "unix:///var/run/docker.sock", isProduction: false, rules: {}, secrets: [] }, { name: "Cred", kind: "git", endpoint: credEndpoint, isProduction: false, rules: {}, secrets: [] }];
+    const rules = [...exportedRules, { name: "Ghost's rule", trigger: "permission", condition: { kinds: ["edit"], agents: ["Nobody"] }, outcome: "owner", position: 9 }, { name: "Raw ids", trigger: "permission", condition: { kinds: ["edit"], agentIds: ["x"] }, outcome: "deny", position: 10 },
+      // Built-in-only conditions and wrong types can't come in from a package (a CEO rule on destructive/push would take the owner's gates).
+      { name: "Destructive to CEO", trigger: "permission", condition: { destructive: true }, outcome: "ceo", position: 11 },
+      { name: "Deny all Boss Man", trigger: "permission", condition: { bossmanCall: true }, outcome: "deny", position: 12 },
+      { name: "Bad type", trigger: "permission", condition: { commandPattern: 5 }, outcome: "deny", position: 13 }];
+    const zip = Buffer.from(zipSync({ ...files, "deploy-targets.json": strToU8(JSON.stringify(hostile)), "permission-rules.json": strToU8(JSON.stringify(rules)) })).toString("base64");
+    const pre = (await req("POST", "/api/companies/import/preview", { zip })).json();
+    expect(pre.counts).toMatchObject({ deployTargets: 2, permissionRules: 2 });
+    const res = await req("POST", "/api/companies/import", { zip, name: "Moved Co" });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+
+    const targets = (await req("GET", `/api/companies/${companyId}/deploy-targets`)).json() as Array<{ name: string; endpoint: string; isProduction: boolean; rules: { requiresApproval?: boolean; liveTag?: { projectId: string; name: string } } }>;
+    expect(targets.map((t) => [t.name, t.endpoint, t.isProduction])).toEqual([["Production", "deploy@example.com", true], ["Staging", "tcp://192.168.1.50:2375", false]]);
+    expect(targets[1]!.rules.requiresApproval).toBe(true);
+    expect(targets[0]!.rules.liveTag).toBeUndefined();
+
+    const newAgents = (await req("GET", `/api/companies/${companyId}/agents`)).json() as Array<{ id: string; name: string }>;
+    const imported = (await req("GET", `/api/policy-rules?companyId=${companyId}`)).json().company as Array<{ name: string; outcome: string; position: number; match: { agentIds?: string[] } }>;
+    expect(imported.map((r) => [r.name, r.outcome, r.position])).toEqual([["Restarts are fine", "owner", 0], ["Ann's deletes go to the CEO", "owner", 1]]);
+    expect(imported[1]!.match.agentIds).toEqual([newAgents.find((a) => a.name === "Ann")!.id]);
+    // The global rule is not in the new company's own rules, and the source's is untouched.
+    expect(imported.some((r) => r.name === "Global rule")).toBe(false);
+
+    expect(checklist).toEqual(expect.arrayContaining([
+      'Rule "Restarts are fine" was Allow in the export; it asks you now. If you trust it, change it back in Settings → Permissions.',
+      'Add the secret "Deploy key" and grant it as DEPLOY_KEY to deploy target "Production".',
+      expect.stringContaining('Deploy target "Production" had a live tag "live"'),
+      expect.stringContaining('Deploy target "Socket" was not imported'),
+      expect.stringContaining('Deploy target "Cred" was not imported'),
+      "Rule \"Ghost's rule\" names Nobody, who isn't in this company; it was not imported.",
+      expect.stringContaining('Rule "Raw ids" was not imported'),
+      'Rule "Ann\'s deletes go to the CEO" was Ask the CEO in the export; it asks you now. If you trust it, change it back in Settings → Permissions.',
+      expect.stringContaining('Rule "Destructive to CEO" was not imported'),
+      expect.stringContaining('Rule "Deny all Boss Man" was not imported'),
+      expect.stringContaining('Rule "Bad type" was not imported'),
+    ]));
+    expect(imported.map((r) => r.name)).toEqual(["Restarts are fine", "Ann's deletes go to the CEO"]);
+    // No secret was created or granted for the new company.
+    expect(((await req("GET", "/api/secrets")).json() as unknown[]).length).toBe(1);
+  });
+
+  it("imports a package made before these files existed exactly as before", async () => {
+    const { req } = await setup();
+    const { company } = (await req("POST", "/api/companies", { name: "Old Co" })).json() as { company: { id: string } };
+    const files = unzipSync(new Uint8Array((await req("GET", `/api/companies/${company.id}/export`)).rawPayload));
+    delete files["deploy-targets.json"];
+    delete files["permission-rules.json"];
+    const res = await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(files)).toString("base64"), name: "Old Copy" });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    expect(checklist.filter((l) => /Deploy target|Rule "|deploy target/.test(l))).toEqual([]);
+    expect(((await req("GET", `/api/companies/${companyId}/deploy-targets`)).json() as unknown[]).length).toBe(0);
+    expect((await req("GET", `/api/policy-rules?companyId=${companyId}`)).json().company).toEqual([]);
+  });
+});
+
+// BOS-198: lists of reviewers survive the trip, and an older package's "marked" cells name its marked agent.
   it("remaps reviewer lists and an older package's marked reviewers", async () => {
     const { req } = await setup();
     const { company } = (await req("POST", "/api/companies", { name: "Lists Co" })).json() as { company: { id: string } };
