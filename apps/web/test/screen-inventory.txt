@@ -291,6 +291,7 @@ sections:
   - This host
 reads: 
   - /api/bluegreen
+  - /api/daily-backup
   - /api/health
   - /api/host-facts
   - /api/netguard-allow
