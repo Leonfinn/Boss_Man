@@ -30,11 +30,13 @@ export const NAMED_AGENT_REFUSAL = (name: string) =>
 
 /** Whether a Blocked move names a colleague and has nothing but a date (or nothing) behind it. Go-live and checks holds don't need a name. */
 export async function refusalForNamedAgent(db: Db, input: { companyId: string; agentId: string | null | undefined; text: string; holds: BlockedHold[] }): Promise<string | null> {
-  if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live" || h.kind === "merged_watch")) return null;
+  if (input.holds.some((h) => h.kind === "blocker" || h.kind === "card" || h.kind === "go_live")) return null;
+  // BOS-2141: "merged_watch" no longer exempts a note that names a colleague: the watch wakes the assignee, not them.
   const name = await namedColleague(db, input.companyId, input.agentId, input.text);
   return name ? NAMED_AGENT_REFUSAL(name) : null;
 }
 
+// BOS-2142: a note that waits on another ticket (BOS-123) needs that ticket linked, merged-watch or not (refusalForNamedTicket).
 const WAITS_ON_TICKET = /\b(?:waiting|waits?|blocked|held|holding|hold|pending|behind|until|once|after)\b[^.;\n]{0,40}?\b([A-Za-z]{2,10}-\d{1,9})\b/gi;
 
 /** Ticket references (PREFIX-number) the text says it waits on, other than the ticket's own. */
