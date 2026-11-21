@@ -1209,7 +1209,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   // shortcut: a 5-second copy, cleared on every answer; lost on restart, harmless because the next
   // read simply walks the queue again.
   const TALLY_CACHE_MS = 5_000;
-  const tallyCache = new Map<string, { tally: { open: number; waiting: number }; until: number }>();
+  type QueueTally = { open: number; waiting: number; oldestOpenAt: string | null; medianAnswerMs: number | null };
+  const tallyCache = new Map<string, { tally: QueueTally; until: number }>();
   const clearTallyCache = () => tallyCache.clear();
 
   /** What the owner needs to judge a stalled run, worked out when asked (not stored). The last steps come from the run's own transcript. */
@@ -2374,16 +2375,37 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * "need your answer" figure, polling together, share one walk of the ranked queue rather than
      * three. `now()` is the service's clock, so a test can step past the window.
      */
-    async queueTally(opts: { includeAll?: boolean; companyId?: string } = {}): Promise<{ open: number; waiting: number }> {
+    async queueTally(opts: { includeAll?: boolean; companyId?: string } = {}): Promise<QueueTally> {
       const key = opts.includeAll ? "*" : (opts.companyId ?? "");
       const hit = tallyCache.get(key);
       if (hit && hit.until > now().getTime()) return hit.tally;
       const query: { includeAll?: boolean; companyId?: string } = {};
       if (opts.includeAll) query.includeAll = true;
       if (opts.companyId) query.companyId = opts.companyId;
-      const rows = (await this.queue(query)) as unknown as Array<{ waiting?: string | null }>;
+      const rows = (await this.queue(query)) as unknown as Array<{ waiting?: string | null; createdAt: Date }>;
       const waiting = rows.filter((r) => !!r.waiting).length;
-      const tally = { open: rows.length - waiting, waiting };
+      // (BOS-2174) The oldest card that needs the owner now, and the median time cards took to be answered over 14 days.
+      const needing = rows.filter((r) => !r.waiting);
+      const oldest = needing.reduce<Date | null>((m, r) => (m === null || r.createdAt < m ? r.createdAt : m), null);
+      const since = new Date(now().getTime() - 14 * 24 * 3600_000);
+      const answered = await db
+        .select({ createdAt: decisions.createdAt, answeredAt: decisions.answeredAt })
+        .from(decisions)
+        .where(
+          and(
+            eq(decisions.status, "answered"),
+            isNotNull(decisions.answeredAt),
+            sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`,
+            ...(opts.companyId ? [eq(decisions.companyId, opts.companyId)] : []),
+            ...(opts.includeAll
+              ? []
+              : [sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`, sql`coalesce(${decisions.context}->>'type', '') not in ('lesson', 'lesson_replace')`]),
+          ),
+        );
+      const waits = answered.map((a) => Math.max(0, a.answeredAt!.getTime() - a.createdAt.getTime())).sort((a, b) => a - b);
+      const mid = Math.floor(waits.length / 2);
+      const medianAnswerMs = waits.length < 3 ? null : waits.length % 2 ? waits[mid]! : Math.round((waits[mid - 1]! + waits[mid]!) / 2);
+      const tally: QueueTally = { open: rows.length - waiting, waiting, oldestOpenAt: oldest ? oldest.toISOString() : null, medianAnswerMs };
       tallyCache.set(key, { tally, until: now().getTime() + TALLY_CACHE_MS });
       return tally;
     },

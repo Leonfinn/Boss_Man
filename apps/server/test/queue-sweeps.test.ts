@@ -213,11 +213,38 @@ describe("ranked decision queue (R20)", () => {
 
       const row = (await ordered()).find((r) => r.id === asked.id)!;
       expect(row.waiting).toBeUndefined();
-      expect((await ctx.req("GET", "/api/decisions/tally")).json()).toEqual({ open: 1, waiting: 0 });
+      expect((await ctx.req("GET", "/api/decisions/tally")).json()).toMatchObject({ open: 1, waiting: 0 });
 
       // The Board's button names the card, not just the page.
       const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ id: string; ownerQuestionId: string | null }>;
       expect(board.find((x) => x.id === ticket.id)!.ownerQuestionId).toBe(asked.id);
+    });
+
+    it("tells the oldest open card's time and the 14-day median wait, null under 3 answers (BOS-2174)", async () => {
+      ctx = await setup();
+      const tally = async () => (await ctx.req("GET", "/api/decisions/tally")).json() as { open: number; oldestOpenAt: string | null; medianAnswerMs: number | null };
+      // The setup leaves one open card; nothing answered yet, so no median.
+      const first = await tally();
+      expect(first.oldestOpenAt).not.toBeNull();
+      expect(first.medianAnswerMs).toBeNull();
+      const hour = 3_600_000;
+      const t0 = ctx.clock().getTime();
+      const answered = async (waitH: number, ageDays: number) => {
+        const answeredAt = new Date(t0 - ageDays * 24 * hour);
+        await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "owner", status: "answered", answer: "Yes", question: `Done in ${waitH}h`, options: ["Yes", "No"], recommendedOption: "Yes", createdAt: new Date(answeredAt.getTime() - waitH * hour), answeredAt });
+      };
+      await answered(2, 1);
+      await answered(4, 2);
+      ctx.advance(6_000);
+      expect((await tally()).medianAnswerMs).toBeNull(); // only 2 answered
+      await answered(10, 3);
+      await answered(100, 20); // older than 14 days: left out
+      ctx.advance(6_000);
+      expect((await tally()).medianAnswerMs).toBe(4 * hour);
+      // With nothing open the oldest is null.
+      await ctx.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.status, "open"));
+      ctx.advance(6_000);
+      expect((await tally()).oldestOpenAt).toBeNull();
     });
 
     it("puts a card whose ticket is back with an agent into the waiting group, with the reason", async () => {
@@ -347,7 +374,10 @@ describe("ranked decision queue (R20)", () => {
       expect(rows).not.toContain(ceoTier!.id);
       expect(rows).not.toContain(lesson!.id);
       // The one shared count: the menu badge and the page heading come from it.
-      const tally = async (query = "") => (await ctx.req("GET", `/api/decisions/tally${query}`)).json() as { open: number; waiting: number };
+      const tally = async (query = "") => {
+        const t = (await ctx.req("GET", `/api/decisions/tally${query}`)).json() as { open: number; waiting: number };
+        return { open: t.open, waiting: t.waiting };
+      };
       expect(await tally()).toEqual({ open: 2, waiting: 2 });
       expect(await tally(`?companyId=${ctx.company.id}`)).toEqual({ open: 2, waiting: 2 });
       // A company with no cards of its own reads zero, whatever this one holds.
@@ -388,7 +418,7 @@ describe("ranked decision queue (R20)", () => {
         return { body: r.json() as { open: number; waiting: number; stats?: { decisionsWaiting: number } }, queueRows: ctx.reads.byTable.decisions ?? 0 };
       };
       const first = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
-      expect(first.body).toEqual({ open: 1, waiting: 0 });
+      expect(first.body).toMatchObject({ open: 1, waiting: 0 });
       expect(first.queueRows).toBeGreaterThan(0);
       // The page heading, the menu badge and the dashboard all read one company's view, polling
       // together a moment later: they share the kept tally, so the queue is not walked again.
@@ -401,7 +431,7 @@ describe("ranked decision queue (R20)", () => {
       ctx.advance(6_000);
       await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
       const later = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
-      expect(later.body).toEqual({ open: 0, waiting: 1 });
+      expect(later.body).toMatchObject({ open: 0, waiting: 1 });
       expect(later.queueRows).toBeGreaterThan(0);
     });
   });
