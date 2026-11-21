@@ -119,6 +119,29 @@ describe("alert destinations: delivery", () => {
     expect((await c.db.select().from(notifications)).length).toBe(1);
   });
 
+  it("a waiting decision reaches a Slack, a Discord and a plain webhook destination, each in its own format, with a link back", async () => {
+    const c = await setup();
+    await c.add({ type: "slack", name: "S", address: "https://hooks.example.com/slack" });
+    await c.add({ type: "discord", name: "D", address: "https://hooks.example.com/discord" });
+    await c.add({ type: "webhook", name: "W", address: "https://hooks.example.com/plain" });
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Ship the beta?", options: ["Yes", "No"], recommendedOption: "Yes", context: { type: "question" } });
+    await c.notes.syncDecisions();
+    await vi.waitFor(() => expect(c.calls.length).toBe(3));
+    const by = (u: string) => c.calls.find((x) => x.url.endsWith(u))!.body;
+    expect(by("/slack")).toEqual({ text: "*App Co needs a decision*\nShip the beta?\n<https://bossman.example.ts.net/#/decisions|Open in Boss Man>" });
+    expect(by("/discord")).toMatchObject({ content: "**App Co needs a decision**\nShip the beta?\n<https://bossman.example.ts.net/#/decisions>" });
+    expect(by("/plain")).toMatchObject({ kind: "decision_waiting", title: "App Co needs a decision", text: "Ship the beta?", url: "https://bossman.example.ts.net/#/decisions" });
+  });
+
+  it("an existing install with no destinations sends nothing after the migration, and alerts are saved as before", async () => {
+    const c = await setup();
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Ship the beta?", options: ["Yes", "No"], recommendedOption: "Yes", context: { type: "question" } });
+    await c.notes.syncDecisions();
+    expect((await c.db.select().from(notifications)).length).toBe(1);
+    expect(c.calls).toEqual([]);
+    expect((await c.req("GET", "/api/alert-destinations")).json().destinations).toEqual([]);
+  });
+
   it("works out the kind from the card: a stalled run is run_failed, an explicit kind wins, a plain note goes nowhere", async () => {
     const c = await setup();
     await c.add({ type: "webhook", name: "All", kinds: ["run_failed", "daily_summary", "decision_waiting", "merge_stuck", "spend_alert"] });

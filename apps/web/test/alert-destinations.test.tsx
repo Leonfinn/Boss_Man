@@ -62,6 +62,18 @@ describe("Other places to send alerts", () => {
     expect(await screen.findByText("The other side answered 404.")).toBeTruthy();
   });
 
+  it("edits the kinds and the address of a destination, and removes it", async () => {
+    const calls = stub((_u, init) => (init?.method === "DELETE" ? json({ ok: true }) : init?.method === "PUT" ? json(dest()) : json({ destinations: [dest()] })));
+    render(<AlertDestinations />);
+    fireEvent.click(await screen.findByRole("button", { name: "Change" }));
+    fireEvent.click(screen.getAllByLabelText("A spend alert")[0]!);
+    fireEvent.change(screen.getByLabelText(/New address/), { target: { value: "https://hooks.example.com/new1234" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ kinds: ["decision_waiting", "merge_stuck", "spend_alert"], address: "https://hooks.example.com/new1234" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/alert-destinations/d1")).toBe(true));
+  });
+
   it("says when a destination was switched off, and switching it on sends enabled true", async () => {
     const calls = stub(() => json({ destinations: [dest({ enabled: false, lastFailureNote: "410" })] }));
     render(<AlertDestinations />);
