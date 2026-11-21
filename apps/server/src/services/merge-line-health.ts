@@ -209,7 +209,7 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
   const eta = gap === null ? null : Math.round(mergeable.length * gap);
   if (mergeable.length && ((eta !== null && eta > SLOW_AFTER_MIN) || oldestWait >= SLOW_AFTER_MIN)) {
     // Capacity is only advised when it would add something: a check worker, on an install with none connected.
-    const advice = opts.workerReady === false ? "A check worker would add check slots: Settings → Server and runner → Checks → Check workers." : null;
+    const advice = opts.workerReady === false ? "A check worker would add check slots: Settings → Server and runner → Limits and checks → Check workers." : null;
     // inQueue: the sidebar badge's figure, mergeQueue.inLine (R43: everything on the Merges tab, waiting or running);
     // `waiting` is mergeQueue.forBossMan, only those Boss Man itself has to move.
     const inLine = waiting.length + (view.running ?? []).length;

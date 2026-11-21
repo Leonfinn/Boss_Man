@@ -7,8 +7,8 @@ import type { DiskReport, RunnerCommand } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, runners, tickets } from "../db/schema.js";
 
-export type DiskLimits = { defaultCapBytes: number; retentionDays: number };
-export const DEFAULT_DISK_LIMITS: DiskLimits = { defaultCapBytes: 20 * 1024 ** 3, retentionDays: 7 };
+export type DiskLimits = { defaultCapBytes: number; retentionDays: number; warnPercent: number; warnBytes: number };
+export const DEFAULT_DISK_LIMITS: DiskLimits = { defaultCapBytes: 20 * 1024 ** 3, retentionDays: 7, warnPercent: 0.1, warnBytes: 5 * 1024 ** 3 };
 
 const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 
@@ -68,7 +68,40 @@ export function diskService(db: Db, deps: { send: (runnerId: string, command: Ru
           .returning({ id: decisions.id });
         alerted = rows.length > 0;
       }
-      return { released, alerted, capBytes: cap };
+      // BOS-2182: the host's disk, not the cap. Warn below 10% free or 5 GB (the runner's own levels, via env), once a day.
+      let lowSpaceAlerted = false;
+      if (company && report.freeBytes !== undefined && report.totalBytes !== undefined && report.totalBytes > 0) {
+        const warnAt = Math.max(report.totalBytes * limits.warnPercent, limits.warnBytes);
+        if (report.freeBytes < warnAt) {
+          const users: { label: string; bytes: number }[] = [
+            ...report.tickets.map((t) => ({ label: `ticket workspace ${t.ticketId.slice(0, 8)}`, bytes: t.bytes })),
+            ...report.repos.map((r) => ({ label: `shared repo ${r.projectId.slice(0, 8)}`, bytes: r.bytes })),
+            ...(report.scratch ?? []).map((s) => ({ label: `kept scratch of ticket ${s.ticketId.slice(0, 8)}`, bytes: s.bytes })),
+          ]
+            .sort((a, b) => b.bytes - a.bytes)
+            .slice(0, 3);
+          const mb = Math.floor(report.freeBytes / 1024 ** 2);
+          const rows = await db
+            .insert(decisions)
+            .values({
+              companyId: runner.companyId,
+              kind: "question",
+              question:
+                `The runner's disk is running low: ${mb < 1024 ? `${mb} MB` : gb(report.freeBytes)} free of ${gb(report.totalBytes)}.` +
+                (users.length ? ` Of Boss Man's own files, the biggest are ${users.map((u) => `${u.label} (${gb(u.bytes)})`).join(", ")}.` : "") +
+                (report.holding ? ` New agent runs and checks are being held now (running ones carry on); they start again by itself once space is free.` : ` If it falls under the floor (1 GB by default), the runner holds new agent runs and checks (running ones carry on) and starts them again by itself once space is free.`) +
+                ` Free space on the host's disk (old Docker images, logs or other files) and it recovers with nothing to press.`,
+              options: ["Got it"],
+              recommendedOption: "Got it",
+              dedupeKey: `diskfree:${runner.companyId}:${at.toISOString().slice(0, 10)}`,
+              context: { type: "question" },
+            })
+            .onConflictDoNothing()
+            .returning({ id: decisions.id });
+          lowSpaceAlerted = rows.length > 0;
+        }
+      }
+      return { released, alerted, capBytes: cap, lowSpaceAlerted };
     },
   };
 }

@@ -97,6 +97,8 @@ export type SessionManagerOptions = {
   coordDir?: string;
   /** Runs and stops server-queued check jobs (BOS-316). */
   checkJobs?: import("./check-jobs.js").CheckJobs;
+  /** BOS-2182: holds a new run while the workspace volume is almost full. */
+  diskGuard?: import("./disk-guard.js").DiskGuard;
   log?: (msg: string) => void;
 };
 
@@ -1040,6 +1042,22 @@ export class SessionManager {
     if (cmd.fence && !cmd.boardToolsOnly && (this.opts.fence?.level ?? "unavailable") === "unavailable") {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: FENCE_UNAVAILABLE_ERROR });
       return;
+    }
+
+    // BOS-2182: no new run while the disk is almost full; it starts by itself once space is back. Runs already going are left alone.
+    if (this.opts.diskGuard) {
+      const room = await this.opts.diskGuard.waitForRoom({
+        cancelled: () => this.cancelledEarly.has(cmd.runId),
+        onHold: (reason) => {
+          emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: reason } });
+          emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId} is held: ${reason}` });
+        },
+      });
+      if (!room) {
+        this.cancelledEarly.delete(cmd.runId);
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: "cancelled", error: null });
+        return;
+      }
     }
 
     let env: NodeJS.ProcessEnv;

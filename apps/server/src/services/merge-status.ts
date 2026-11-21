@@ -16,6 +16,8 @@ import { CHECK_MERGED_KEY, MERGE_CARRY_KEY, MERGE_RETARGET_KEY, MERGE_TURN_KEY, 
 import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
 import { landingsThatCount } from "./update-waits.js";
+import { landingTurns } from "./landing-turn.js";
+import { turnWaitWords, type TurnWait } from "./merge-queue.js";
 
 function landingStartMs(ctx: ReviewCtx, id: string): number {
   const l = ctx.landings.get(id);
@@ -78,6 +80,9 @@ export async function mergeState(this: ReviewSelf, ctx: ReviewCtx, ticketId: str
   const at = (iso: string) => new Date(iso).toISOString().slice(11, 16) + " UTC";
   if (l.state === "finished") return `merge finished: ${l.text}`;
   if (l.stale) return `merge looks stuck since ${at(l.startedAt)}; nothing is running now`;
+  // BOS-2119 (R43): waiting for another ticket's landing turn: the Merges tab's words, not a bare "merging".
+  const turn = ctx.turnWaits.get(ticketId);
+  if (turn) return `merge ${await turnWaitWords(ctx.db, turn)} (since ${at(new Date(turn.since).toISOString())})`;
   const word = { queued: "queued for a check slot", checking: "checking", merging: "merging", waiting_to_retry: "waiting to try again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" }[l.phase ?? "checking"];
   return `merge ${word} (since ${at(l.startedAt)})`;
 }
@@ -129,13 +134,46 @@ export async function branchChecksLine(this: ReviewSelf, ctx: ReviewCtx, ticketI
 }
 
 /** Every merge this process has running, with its phase, for the merge queue screen (BOS-587). */
-export function runningMerges(this: ReviewSelf, ctx: ReviewCtx): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git"; ci?: { since: string; waiting: string[] } }> {
-  const { landings, phases, ciWaits } = ctx;
+export function runningMerges(this: ReviewSelf, ctx: ReviewCtx): Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git"; ci?: { since: string; waiting: string[] }; turn?: TurnWait }> {
+  const { landings, phases, ciWaits, turnWaits } = ctx;
   return [...landings.entries()].flatMap(([ticketId, l]) => {
     if (l.state !== "running") return [];
     const ci = ciWaits.get(ticketId);
-    return [{ ticketId, startedAt: l.startedAt, startedBy: l.startedBy, phase: phases.get(ticketId) ?? ("checking" as const), ...(ci ? { ci: { since: new Date(ci.since).toISOString(), waiting: ci.waiting } } : {}) }];
+    const turn = turnWaits.get(ticketId);
+    return [{ ticketId, startedAt: l.startedAt, startedBy: l.startedBy, phase: phases.get(ticketId) ?? ("checking" as const), ...(ci ? { ci: { since: new Date(ci.since).toISOString(), waiting: ci.waiting } } : {}), ...(turn ? { turn } : {}) }];
   });
+}
+
+/**
+ * BOS-2119: server_status landingTurns. Per project of the company with a landing turn held or a line for it: the holder,
+ * since when, its cap and when the cap ends, and the line in order. Each ticket waiting for the turn carries the same words
+ * the Merges tab and its ticket's merge line show (turnWaitWords). Read only; empty on a server whose merges aren't running here.
+ */
+export async function landingTurnStatus(this: ReviewSelf, ctx: ReviewCtx, companyId: string) {
+  const { db, turnWaits } = ctx;
+  const snap = landingTurns.snapshot();
+  if (!snap.length) return [];
+  const mine = new Set((await db.select({ id: projects.id }).from(projects).where(and(eq(projects.companyId, companyId), inArray(projects.id, snap.map((s) => s.projectId))))).map((p) => p.id));
+  const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+  const out = [];
+  for (const s of snap) {
+    if (!mine.has(s.projectId)) continue;
+    const ids = [...(s.holder ? [s.holder.ticketId] : []), ...s.line, ...[...turnWaits].filter(([, w]) => w.holderId === s.holder?.ticketId).map(([id]) => id)];
+    const named = new Map((await db.select({ id: tickets.id, number: tickets.number, title: tickets.title }).from(tickets).where(inArray(tickets.id, [...new Set(ids)]))).map((r) => [r.id, r]));
+    const who = (id: string) => ({ ticketId: id, ref: ticketRef(co?.prefix ?? null, named.get(id)?.number), title: named.get(id)?.title ?? null });
+    const waiting = async (id: string) => {
+      const w = turnWaits.get(id);
+      return w ? { ...who(id), since: new Date(w.since).toISOString(), then: w.then, label: await turnWaitWords(db, w) } : null;
+    };
+    out.push({
+      projectId: s.projectId,
+      holder: s.holder ? { ...who(s.holder.ticketId), since: new Date(s.holder.since).toISOString(), capMin: Math.round(s.holder.capMs / 60_000), capEndsAt: new Date(s.holder.since + s.holder.capMs).toISOString() } : null,
+      line: await Promise.all(s.line.map(async (id) => (await waiting(id)) ?? { ...who(id), label: null })),
+      // Merges whose check passed and whose push waits for this holder (not in the line: they earned no turn).
+      pushWaiting: (await Promise.all([...turnWaits].filter(([id, w]) => w.then === "push" && w.holderId === s.holder?.ticketId && !s.line.includes(id)).map(([id]) => waiting(id)))).filter((x) => x !== null),
+    });
+  }
+  return out;
 }
 
 /**

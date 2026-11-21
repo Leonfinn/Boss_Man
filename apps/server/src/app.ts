@@ -144,12 +144,13 @@ import { featureRoutes } from "./routes/features.js";
 import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
+import { ticketRecordRoutes } from "./routes/ticket-record.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
-import { loginLimiter, type LoginLimits } from "./login-limit.js";
+import { DEFAULT_LOGIN_LIMITS, loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
@@ -664,6 +665,8 @@ export async function buildApp(opts: AppOptions) {
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
     mergeTrain: (id) => mergeTrainStatus(db, id),
+    // BOS-2119: read when server_status is asked, after `review` below is built.
+    landingTurns: (id) => review.landingTurnStatus(id),
     idleCheckSlots: async (id) => (await checkIdle.view(id)).map(idleView),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
@@ -880,6 +883,9 @@ export async function buildApp(opts: AppOptions) {
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    // BOS-2160: a background step that throws is logged (the error buffer reads app.log.error) and, if it keeps failing, raises one owner card.
+    log: (message) => app.log.error(message),
+    homeCompany: async () => (await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1))[0]?.id ?? null,
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
@@ -1492,7 +1498,27 @@ export async function buildApp(opts: AppOptions) {
     return reply.code(201).send({ username: owner!.username });
   });
 
-  const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()));
+  // BOS-2177: the first time sign-in locks, tell the owner once (an alert and one activity line, on the oldest
+  // company, as sign-in belongs to no company). The text carries the address only: never a guessed name or password.
+  const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()), (e) => {
+    const limits = opts.loginLimits ?? DEFAULT_LOGIN_LIMITS;
+    const address = e.ip.replace(/[^0-9a-fA-F.:%]/g, "").slice(0, 64) || "an unknown address";
+    const at = new Date(e.at);
+    void (async () => {
+      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+      await notes.notify({
+        companyId: null,
+        agentId: null,
+        level: "flag",
+        title: e.byAddress
+          ? `Sign-in was locked after ${limits.maxFailures} wrong passwords from ${address}`
+          : `Sign-in for the owner's username was locked after ${limits.maxFailures} wrong passwords from several addresses, the latest ${address}`,
+        body: "If this wasn't you, change your password in Settings → Account.",
+        link: "#/settings",
+      });
+      if (home) await record(db, { companyId: home.id, kind: "security", summary: `Sign-in locked after ${limits.maxFailures} failed attempts from ${address} at ${at.toISOString()}`, detail: { address, at: at.toISOString(), byAddress: e.byAddress, byUsername: e.byUsername }, at });
+    })().catch((err) => app.log.warn({ err }, "sign-in lockout alert failed"));
+  });
   app.post("/api/login", async (req, reply) => {
     const body = Credentials.parse(req.body);
     const wait = logins.retryAfter(req.ip, body.username);
@@ -2032,7 +2058,7 @@ export async function buildApp(opts: AppOptions) {
     // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
     projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch, now: opts.now });
 
-    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all" }));
 
     owner.post("/api/projects/:id/tickets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2384,6 +2410,7 @@ export async function buildApp(opts: AppOptions) {
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
+    ticketRecordRoutes(owner, db, { filesChanged: (tid) => review.diff(tid).then((d) => d.files.length) });
 
     // The owner chat (v1.1, R70): the CEO or any agent, in plain language; tickets and links out.
     const chatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -2393,8 +2420,8 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/chat/threads", async (req) => chat.threads(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { agentId } = z.object({ agentId: Uuid.optional() }).parse(req.query);
-      return chat.list(id, agentId).catch(chatErrors(reply));
+      const { agentId, before } = z.object({ agentId: Uuid.optional(), before: Uuid.optional() }).parse(req.query);
+      return chat.list(id, agentId, before).catch(chatErrors(reply));
     });
     owner.post("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

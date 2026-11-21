@@ -102,4 +102,31 @@ describe("landing turns (BOS-1762)", () => {
     t.done(P, "a");
     expect(t.mainEpoch(P)).toBe(2);
   });
+
+  // BOS-2119: a merge in line waits to re-prepare until it holds the turn, so it must be able to ask whether it is in line.
+  it("queued() and line() follow the line through promote, expire and done", () => {
+    const { t, advance } = turns();
+    const earn = (id: string) => [t.rebuilt(P, id, HOUR), t.rebuilt(P, id, HOUR)][1]!.turn;
+    expect(earn("a")).toBe("taken");
+    expect(earn("b")).toBe("queued");
+    expect(earn("c")).toBe("queued");
+    expect(t.line(P)).toEqual(["b", "c"]);
+    expect([t.queued(P, "a"), t.queued(P, "b"), t.queued(P, "c"), t.queued("project-2", "b")]).toEqual([false, true, true, false]);
+    expect(t.snapshot()).toEqual([{ projectId: P, holder: expect.objectContaining({ ticketId: "a", capMs: HOUR }), line: ["b", "c"] }]);
+    // a lands: b is promoted and leaves the line.
+    t.done(P, "a");
+    expect([t.holds(P, "b"), t.queued(P, "b")]).toEqual([true, false]);
+    expect(t.line(P)).toEqual(["c"]);
+    // b's turn runs out: c is promoted.
+    advance(HOUR);
+    expect(t.check(P)).toMatchObject({ holder: { ticketId: "c" }, expired: { ticketId: "b" } });
+    expect(t.line(P)).toEqual([]);
+    expect(t.queued(P, "c")).toBe(false);
+    // A ticket that leaves the line while in it (done) is no longer queued.
+    expect(earn("d")).toBe("queued");
+    t.done(P, "d");
+    expect(t.queued(P, "d")).toBe(false);
+    t.done(P, "c");
+    expect(t.snapshot()).toEqual([]);
+  });
 });
