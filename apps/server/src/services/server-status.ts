@@ -62,6 +62,8 @@ export type ServerStatusDeps = {
   mergeFailures?: (companyId: string) => Promise<unknown>;
   /** The merge train per project on this server: seats, who is seated and waits, tickets held to land alone, stall clocks (merge-stall.ts, BOS-1515). Absent: null. */
   mergeTrain?: (companyId: string) => Promise<unknown>;
+  /** BOS-2119: each project's landing turn on this server: holder, cap, the line in order, and what each waiter shows (merge-status.ts). Absent: null. */
+  landingTurns?: (companyId: string) => Promise<unknown>;
   /** R46: free check slots not taking a queued job, each with its reason ("free, not taking X because …"). */
   idleCheckSlots?: (companyId: string) => unknown[] | Promise<unknown[]>;
   commit: string;
@@ -246,6 +248,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         runLimits: deps.runLimits ? await deps.runLimits(companyId).catch(() => null) : null,
         mergeFailures: deps.mergeFailures ? await deps.mergeFailures(companyId).catch(() => null) : null,
         mergeTrain: deps.mergeTrain ? await deps.mergeTrain(companyId).catch(() => null) : null,
+        landingTurns: deps.landingTurns ? await deps.landingTurns(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
         // BOS-2058: every update wait that is on (what it waits on, since when, when it ends): the owner's screens read the same list.
         updateWaits: deps.updateWaits ? await deps.updateWaits().catch(() => null) : null,

@@ -655,6 +655,8 @@ export async function buildApp(opts: AppOptions) {
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
     mergeTrain: (id) => mergeTrainStatus(db, id),
+    // BOS-2119: read when server_status is asked, after `review` below is built.
+    landingTurns: (id) => review.landingTurnStatus(id),
     idleCheckSlots: async (id) => (await checkIdle.view(id)).map(idleView),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
