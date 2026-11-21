@@ -68,6 +68,24 @@ describe("answered cards list (BOS-2187)", () => {
     expect(bad.statusCode).toBe(200);
   });
 
+  it("pages through cards answered in the same millisecond with no repeat or gap", async () => {
+    ctx = await setup();
+    const at = new Date("2026-11-02T09:00:00.000Z");
+    await ctx.db.insert(decisions).values(
+      [1, 2, 3, 4, 5].map((n) => ({ companyId: ctx!.companyId, kind: "question" as const, question: `Same ms ${n}`, options: [], recommendedOption: "a", status: "answered" as const, answer: "a", answeredAt: at })),
+    );
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let i = 0; i < 5; i++) {
+      const r = (await ctx.get(`/api/decisions/answered?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)).json() as { items: Array<{ id: string }>; next: string | null };
+      seen.push(...r.items.map((x) => x.id));
+      cursor = r.next;
+      if (!cursor) break;
+    }
+    expect(seen).toHaveLength(5);
+    expect(new Set(seen).size).toBe(5);
+  });
+
   it("is refused without the owner's session", async () => {
     ctx = await setup();
     const r = await ctx.app.inject({ method: "GET", url: "/api/decisions/answered" });
