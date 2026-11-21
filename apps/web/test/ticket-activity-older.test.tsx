@@ -41,6 +41,12 @@ function server(total: { n: number }) {
   return calls;
 }
 
+// Each step renders 500 to 621 messages in jsdom, which takes about 1 s on a dev runner and
+// several on GitHub's slower machines, so Testing Library's 1 s default for findBy* failed there
+// (the merge bounce on c8a95a5f). This is a deadline, not a speed limit: a page that never shows
+// the message still fails, just later.
+const RENDER = { timeout: 20_000 };
+
 const shown = (c: HTMLElement) => [...c.querySelectorAll(".chat-msg > p:first-child")].map((p) => p.textContent);
 
 describe("ticket conversation: Load older messages (BOS-2168)", () => {
@@ -48,10 +54,10 @@ describe("ticket conversation: Load older messages (BOS-2168)", () => {
     const total = { n: 620 };
     const calls = server(total);
     const { container } = render(<TicketActivity ticketId="t1" assignee="Engineer" />);
-    await screen.findByText("message 619");
+    await screen.findByText("message 619", undefined, RENDER);
     expect(shown(container)).toHaveLength(500);
     fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
-    await screen.findByText("message 0");
+    await screen.findByText("message 0", undefined, RENDER);
     expect(shown(container)).toEqual(Array.from({ length: 620 }, (_, i) => `message ${i}`));
     expect(calls).toContain(`GET /api/tickets/t1/messages?before=${msg(120).id}`);
     // Nothing older is left, so the button goes.
@@ -60,15 +66,15 @@ describe("ticket conversation: Load older messages (BOS-2168)", () => {
     // it, and the older pages must stay on screen all the same, with the new one at the bottom.
     fireEvent.change(screen.getByLabelText("Message to the agent"), { target: { value: "One more" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await screen.findByText("message 620");
+    await screen.findByText("message 620", undefined, RENDER);
     expect(shown(container)).toEqual(Array.from({ length: 621 }, (_, i) => `message ${i}`));
-  });
+  }, 90_000);
 
   it("shows no Load older button on a ticket with under 500 messages", async () => {
     server({ n: 40 });
     const { container } = render(<TicketActivity ticketId="t1" assignee="Engineer" />);
-    await screen.findByText("message 39");
-    await waitFor(() => expect(shown(container)).toHaveLength(40));
+    await screen.findByText("message 39", undefined, RENDER);
+    await waitFor(() => expect(shown(container)).toHaveLength(40), RENDER);
     expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull();
   });
 });
