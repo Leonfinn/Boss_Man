@@ -256,12 +256,13 @@ describe("the Finish setting up card and the first merge", () => {
   it("stays while only the merge is left", async () => {
     show(false);
     expect(await screen.findByText(/First ticket merged/)).toBeTruthy();
-    expect(screen.getByText(/8 of 9 done|Finish setting up/)).toBeTruthy();
+    expect(screen.getByText("Finish setting up")).toBeTruthy();
   });
 
-  it("hides once the merge is done", async () => {
+  it("stays once the merge is done, showing how long it took", async () => {
     show(true);
-    await new Promise((r) => setTimeout(r, 50)); // test-lines-ok: waiting for a card that must NOT appear
-    expect(screen.queryByText(/after setup started/)).toBeNull();
+    expect(await screen.findByText(/First ticket merged: BOS-12, 2 h 40 min after setup started/)).toBeTruthy();
+    expect(screen.getByText("Setup finished")).toBeTruthy();
+    expect(screen.getByText("Dismiss")).toBeTruthy();
   });
 });
