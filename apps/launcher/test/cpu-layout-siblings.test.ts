@@ -23,6 +23,11 @@ describe("siblingsFromSysfs", () => {
     expect(fs.readFileSync).toHaveBeenCalledWith("/sys/devices/system/cpu/cpu5/topology/thread_siblings_list", "utf8");
   });
 
+  it("returns an empty list for an empty file", () => {
+    fs.readFileSync.mockReturnValue("");
+    expect(siblingsFromSysfs(2)).toEqual([]);
+  });
+
   it("returns null when the sysfs file can't be read", () => {
     fs.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
