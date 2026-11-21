@@ -24,6 +24,17 @@ services:
       TS_SERVE_CONFIG: /config/serve.json
       # Userspace networking: no /dev/net/tun and no extra capabilities, so it also runs in a Proxmox LXC. Serve only proxies to the server over Docker's network.
       TS_USERSPACE: "true"
+      # containerboot answers /healthz on this local address only (never published): 200 while connected, an error otherwise (BOS-2155).
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: 127.0.0.1:9002
+    # Same timing as deploy/cloudflared.yml, so a failed login or a restart loop shows "unhealthy" in `docker ps` instead of "Up".
+    # The image is Alpine, so busybox wget does the probe.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9002/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     volumes:
       - ${BOSSMAN_DATA:-/srv/boss-man/data}/tailscale:/var/lib/tailscale
       - ./deploy/tailscale:/config:ro
