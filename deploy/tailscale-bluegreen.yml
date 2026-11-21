@@ -14,7 +14,6 @@ x-logging: &logging
 
 services:
   proxy:
-    logging: *logging
     networks:
       # Merged with the host file's networks (default, front); only edge is added here.
       edge:
@@ -23,6 +22,7 @@ services:
         aliases: [server]
     environment:
       BOSSMAN_CADDY_TRUSTED_PROXIES: ${BOSSMAN_EDGE_IP:-172.30.0.2}/32
+    logging: *logging
 
   tailscale:
     logging: *logging
