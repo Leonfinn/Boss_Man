@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isInfiniteModel } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { away } from "../server-watch";
+import { stopRun } from "../stop-run";
 import { useDraft } from "../drafts";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
@@ -52,8 +53,8 @@ function Steer({ runId, companyId, ticketId }: { runId: string; companyId: strin
   const stop = async () => {
     setBusy(true);
     try {
-      const r = await api<{ endedHere?: boolean }>(`/api/runs/${runId}/cancel`, { method: "POST" });
-      setNote({ ok: true, text: r.endedHere ? "The runner is offline, so Boss Man marked the run as stopped." : "Stopping the run." });
+      const said = await stopRun(runId);
+      if (said) setNote({ ok: true, text: said });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
     } finally {

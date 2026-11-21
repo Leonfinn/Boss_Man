@@ -14,6 +14,7 @@ import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
 import { Loader } from "./Loader";
+import { stopRun } from "../stop-run";
 
 type Message = {
   id: string;
@@ -141,6 +142,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   // Ticket references in the feed link to their ticket; this ticket is BOS-n (BOS-358).
   const refCtx = { prefix, selfId: ticketId, tickets: ticketNumber ? [{ id: ticketId, number: ticketNumber, prefix }] : [] };
   const [busy, setBusy] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
   // The ticket's reply box, kept while the server is away or the page reloads (BOS-637).
@@ -197,11 +199,14 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   };
   const stop = async () => {
     if (!live) return;
+    setStopping(true);
     try {
-      await api(`/api/runs/${live.id}/cancel`, { method: "POST" });
-      setNote({ ok: true, text: "Stopping the run." });
+      const said = await stopRun(live.id, live.agent);
+      if (said) setNote({ ok: true, text: said });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setStopping(false);
     }
   };
   // A phone keyboard has no Shift, so there Return adds a line and Send sends.
@@ -312,7 +317,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
               <button className="btn" type="button" disabled={(!text.trim() && !img.attached.length) || !!other} onClick={() => void send(true)} title="Stops the agent's current turn, then gives it your message">
                 Interrupt and send
               </button>
-              <button className="btn" type="button" onClick={() => void stop()} style={{ color: "var(--red-ink)" }}>
+              <button className="btn" type="button" disabled={stopping} onClick={() => void stop()} style={{ color: "var(--red-ink)" }}>
                 Stop
               </button>
             </>
