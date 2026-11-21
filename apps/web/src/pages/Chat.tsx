@@ -94,7 +94,7 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
     <p className="banner" role="status">
       {m.chatOpen
         ? m.runs === 0 && m.unknownWait
-          ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner to stop waiting or cancel."
+          ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner → Updates to stop waiting or cancel."
           : m.runs === 0 && (m.merges ?? 0) > 0 && !(m.checks ?? 0)
             ? `Update waiting for ${m.merges === 1 ? "a merge" : `${m.merges} merges`} being pushed to main${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
           : m.runs === 0
