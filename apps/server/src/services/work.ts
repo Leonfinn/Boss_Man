@@ -303,7 +303,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const openRows = await boardRows(and(eq(tickets.projectId, projectId), ne(tickets.systemState, "done")));
       const doneRows = opts.doneAll
         ? await boardRows(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done")))
-        : (await boardRows(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done"), inArray(tickets.id, db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt)).limit(BOARD_DONE_LIMIT)))));
+        : (await boardRows(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done"), inArray(tickets.id, db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.projectId, projectId), eq(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt), desc(tickets.id)).limit(BOARD_DONE_LIMIT)))));
       const rows = [...openRows, ...doneRows].sort((a, b) => a.t.createdAt.getTime() - b.t.createdAt.getTime());
       // Parents, blockers and the checked ticket may be old done tickets outside the rows sent; look them up by id.
       const sent = new Set(rows.map((r) => r.t.id));
