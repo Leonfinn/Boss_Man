@@ -28,11 +28,18 @@
 # `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set by default, so
 # nothing is relayed anywhere (unless you set NTFY_UPSTREAM_BASE_URL for an iPhone). Messages are kept for NTFY_CACHE_DURATION, then dropped.
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 services:
   # BOS-1581: hands the data folder to ntfy's user before ntfy starts, so nobody runs chown by hand on any host. Docker
   # makes a missing folder owned by root, which ntfy (uid 1000) cannot write to. Runs once, then exits; the same image and
   # the same mount as ntfy, no network, only the one capability a chown needs.
   ntfy-init:
+    logging: *logging
     profiles: ["ntfy"]
     image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
     entrypoint: ["chown", "-R", "1000:1000", "/var/lib/ntfy"]
@@ -50,6 +57,7 @@ services:
     pids_limit: 16
 
   ntfy:
+    logging: *logging
     profiles: ["ntfy"]
     image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
     depends_on:
