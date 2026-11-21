@@ -22,13 +22,17 @@ describe("wiki version compare line diff (BOS-2198)", () => {
     expect(d.filter((l) => l.kind !== "del").map((l) => l.text).join("\n")).toBe(b);
   });
 
-  it("folds long unchanged runs, keeping three lines beside a change", () => {
+  it("folds unchanged runs longer than 6 lines, and leaves 6 or fewer showing", () => {
     const body = Array.from({ length: 20 }, (_, i) => `line ${i}`);
     const changed = [...body];
     changed[10] = "changed";
     const blocks = foldDiff(diffLines(body.join("\n"), changed.join("\n")));
-    const folded = blocks.filter((b) => b.kind === "folded");
-    expect(folded.map((b) => b.lines.length)).toEqual([7, 6]);
+    expect(blocks.filter((b) => b.kind === "folded").map((b) => b.lines.length)).toEqual([10, 9]);
+    const short = [...body.slice(0, 13)];
+    const shortChanged = [...short];
+    shortChanged[6] = "changed";
+    const sb = foldDiff(diffLines(short.join("\n"), shortChanged.join("\n")));
+    expect(sb.some((b) => b.kind === "folded")).toBe(false);
   });
 
   // The limit is generous for slow CI machines; it catches an accidental quadratic walk, which takes many seconds here.

@@ -92,7 +92,7 @@ export function WikiCompare({ companyId, versions, from, to, onRestore, onClose 
               {blocks.map((blk, i) =>
                 blk.kind === "folded" && !open.has(i) ? (
                   <div key={i} className="muted" style={{ padding: "2px 6px", fontSize: 13 }}>
-                    {blk.lines.length} unchanged lines{" "}
+                    {`${blk.lines.length} unchanged lines `}
                     <button type="button" className="link" onClick={() => setOpen((s) => new Set(s).add(i))}>Show</button>
                   </div>
                 ) : (

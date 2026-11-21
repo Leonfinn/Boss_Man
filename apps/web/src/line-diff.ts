@@ -88,8 +88,8 @@ export function diffCounts(lines: DiffLine[]): { added: number; removed: number 
   return { added, removed };
 }
 
-/** Group lines so a run of more than `min` unchanged lines (beyond `context` lines kept beside a change) is folded. */
-export function foldDiff(lines: DiffLine[], context = 3, min = 4): DiffBlock[] {
+/** Group lines so a run of unchanged lines longer than 6 is folded whole (`context` lines can be kept beside a change). */
+export function foldDiff(lines: DiffLine[], context = 0, min = 7): DiffBlock[] {
   const blocks: DiffBlock[] = [];
   let i = 0;
   const push = (kind: DiffBlock["kind"], ls: DiffLine[]) => {
