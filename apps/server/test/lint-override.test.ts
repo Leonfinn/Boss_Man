@@ -1,9 +1,9 @@
 // BOS-2067 (background lane): the pure helpers behind the CEO's lint override. A stored override is either the old
 // plain reason or a JSON list, the list is cleaned (steps de-duplicated and sorted, rules de-duplicated, reason
-// whitespace collapsed), and the covered findings are shown one "Step 3 (R19): reason" line per entry. No database
-// and no network.
+// whitespace collapsed), and the covered findings are shown one "Step 3 (R19): reason" line per entry. An override
+// reason under 10 characters is refused (overrideTooShort, BOS-2127). No database and no network.
 import { describe, expect, it } from "vitest";
-import { type CoveredOverride, overrideLines, parseStoredOverride } from "../src/services/lint-override.js";
+import { type CoveredOverride, overrideLines, overrideTooShort, parseStoredOverride } from "../src/services/lint-override.js";
 
 describe("parseStoredOverride", () => {
   it("has nothing for a missing, empty or whitespace-only value", () => {
@@ -67,5 +67,28 @@ describe("overrideLines", () => {
       { reason: "second", findings: [finding(5, "R19")] },
     ];
     expect(overrideLines(covered)).toBe("Step 2 (R17): first\nStep 5 (R19): second");
+  });
+});
+
+describe("overrideTooShort", () => {
+  it("refuses a plain reason shorter than 10 characters", () => {
+    expect(overrideTooShort("short")).toBe(true);
+    expect(overrideTooShort("123456789")).toBe(true);
+    expect(overrideTooShort("")).toBe(true);
+  });
+
+  it("accepts a plain reason of exactly 10 characters or more", () => {
+    expect(overrideTooShort("1234567890")).toBe(false);
+    expect(overrideTooShort("this one is long enough")).toBe(false);
+  });
+
+  it("refuses a list when any entry's reason is too short", () => {
+    expect(overrideTooShort([{ steps: [1], reason: "long enough reason" }, { steps: [2], reason: "too short" }])).toBe(true);
+    expect(overrideTooShort([{ steps: [1], reason: "short" }])).toBe(true);
+  });
+
+  it("accepts a list whose reasons are all long enough, and an empty list", () => {
+    expect(overrideTooShort([{ steps: [1], reason: "long enough reason" }, { steps: [2], reason: "1234567890" }])).toBe(false);
+    expect(overrideTooShort([])).toBe(false);
   });
 });
