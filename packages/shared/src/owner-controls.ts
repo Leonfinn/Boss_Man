@@ -170,6 +170,8 @@ export const OWNER_CONTROLS = {
     "Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel",
     // The Penpot form (BOS-1582).
     "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
+    // Removing a deploy target that has past deploys (BOS-2158).
+    "Remove anyway",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
