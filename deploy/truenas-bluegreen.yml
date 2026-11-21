@@ -14,7 +14,14 @@
 # The single "server" service of docker-compose.yml is parked behind a profile nobody turns on.
 name: boss-man
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 x-server: &server
+  logging: *logging
   build:
     context: .
     dockerfile: apps/server/Dockerfile
@@ -121,6 +128,7 @@ services:
     command: ["node", "dist/migrate.js"]
 
   proxy:
+    logging: *logging
     # Change version and digest together (the digest is the multi-arch index of the tag).
     image: caddy:2.11.7@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
     restart: unless-stopped

@@ -10,8 +10,15 @@
 #
 # Serve (not Funnel): serve.json has no AllowFunnel, so nothing is published on the public internet. It fronts
 # only the owner's web/login port (server:3100), never the feedback portal (3101).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 services:
   tailscale:
+    logging: *logging
     image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c
     restart: unless-stopped
     hostname: ${TS_HOSTNAME:-boss-man}

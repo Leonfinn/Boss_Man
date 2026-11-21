@@ -169,6 +169,7 @@ describe("the runner launcher (R55)", () => {
         Memory: 4294967296,
         MemorySwap: 4294967296,
         OomScoreAdj: 500,
+        LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
         CpuShares: 512,
         RestartPolicy: { Name: "unless-stopped" },
       },

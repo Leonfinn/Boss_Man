@@ -7,8 +7,15 @@
 #   BOSSMAN_TOOLSERVER_PIDS     processes and threads, default 512
 # Already running by hand? `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>`
 # applies a limit without recreating it (it does not survive a recreate: put it in compose).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 services:
   tool-server-example:
+    logging: *logging
     image: ${BOSSMAN_TOOLSERVER_IMAGE:?Set BOSSMAN_TOOLSERVER_IMAGE to the tool server image you run}
     restart: unless-stopped
     profiles: ["tool-servers"]

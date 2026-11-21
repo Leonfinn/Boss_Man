@@ -6,6 +6,12 @@
 # the Tailscale container (BOSSMAN_EDGE_IP); the colours believe them only from Caddy (BOSSMAN_FRONT_PROXY_IP, set in the host file).
 # serve.json is unchanged: it proxies to http://server:3100, and on the edge network the name "server" is Caddy's alias,
 # so Tailscale reaches the owner's port only, never the feedback portal (3101).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
+
 services:
   proxy:
     networks:
@@ -16,7 +22,9 @@ services:
         aliases: [server]
     environment:
       BOSSMAN_CADDY_TRUSTED_PROXIES: ${BOSSMAN_EDGE_IP:-172.30.0.2}/32
+    logging: *logging
 
   tailscale:
+    logging: *logging
     # The parked "server" sits behind a profile, so wait for Caddy instead.
     depends_on: !override [proxy]
