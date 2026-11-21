@@ -10,6 +10,25 @@ import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, ty
 import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, settings } from "../db/schema.js";
 import type { DecisionContext } from "./decisions.js";
+import type { AlertKind } from "./webhook-delivery.js";
+
+/** Which alert kind an owner card is, from its type (BOS-2199). Everything else on the owner's tier is a decision waiting. */
+export function alertKindOfCard(ctx: { type?: string } | null): AlertKind {
+  switch (ctx?.type) {
+    case "stalled_run":
+    case "run_time_limit":
+      return "run_failed";
+    case "budget_limit":
+      return "spend_alert";
+    case "check_stuck":
+      return "merge_stuck";
+    default:
+      return "decision_waiting";
+  }
+}
+
+/** Handed each saved alert for Slack, Discord and webhook delivery; must return at once and never throw. */
+export type AlertHook = (alert: { kind: AlertKind; title: string; text: string; link: string; publicUrl: string | null }) => void;
 
 /**
  * The ntfy server's address. Pushes go to it with its path kept (BOS-243 rule 8), so one served under
@@ -134,7 +153,7 @@ export const ROUTINE_PRIORITY = 3;
  * whatever the owner's push levels say: it is not urgent, and the owner should see it when they next look, not be
  * buzzed for it.
  */
-export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** Why the card is urgent (BOS-1097): a live-fix deploy or the CEO's urgent mark. Set, it goes to the phone whatever the setting; the text is shown on the Notifications page. */ urgentReason?: string };
+export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; /** Which alert kind this is for the owner's Slack, Discord and webhook destinations (BOS-2199). Unset: a card's own type decides, and anything else goes to none. */ kind?: AlertKind; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** Why the card is urgent (BOS-1097): a live-fix deploy or the CEO's urgent mark. Set, it goes to the phone whatever the setting; the text is shown on the Notifications page. */ urgentReason?: string };
 
 /** What the CEO sets to mark an owner card urgent (BOS-1097): decisions escalate with urgent true; stored on the card's context. */
 export type UrgentPush = { by: string; at: string; why: string };
@@ -181,6 +200,22 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     }
   };
   let approveHook: ApproveHook | null = null;
+  let alertHook: AlertHook | null = null;
+
+  /** After the card is saved and the phone push is done: hand it to the owner's other destinations. Never blocks, never throws. */
+  async function toDestinations(s: NotifySettings, input: NotifyInput, row: { title: string; body: string | null; link: string; decisionId: string | null }, level: NotifyLevel) {
+    if (!alertHook) return;
+    try {
+      let kind = input.kind ?? null;
+      if (!kind && row.decisionId && level !== "note") {
+        const [d] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, row.decisionId));
+        kind = alertKindOfCard(d?.context as { type?: string } | null);
+      }
+      if (kind) alertHook({ kind, title: row.title, text: row.body ?? row.title, link: row.link, publicUrl: s.publicUrl });
+    } catch (err) {
+      deps.log?.(`alert destinations skipped: ${(err as Error).name}`);
+    }
+  }
 
   async function getSettings(): Promise<NotifySettings> {
     const [row] = await db.select().from(settings).where(eq(settings.key, KEY));
@@ -274,6 +309,8 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         await db.update(notifications).set({ pushError: msg.slice(0, 500) }).where(eq(notifications.id, row.id));
       }
     }
+    // BOS-2199: the owner's other destinations (Slack, Discord, webhook), after the card is saved and the phone push is done.
+    await toDestinations(s, input, row, level);
     return row;
   }
 
@@ -385,6 +422,10 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
 
     setApproveHook(hook: ApproveHook) {
       approveHook = hook;
+    },
+
+    setAlertHook(hook: AlertHook) {
+      alertHook = hook;
     },
 
     /**

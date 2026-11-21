@@ -1344,6 +1344,36 @@ export const notifications = pgTable(
 );
 
 /**
+ * Other places to send alerts (BOS-2199): a Slack, Discord or plain webhook address. The address is a secret
+ * (`secretId`, encrypted in the secrets store); nothing here holds it. Off until the owner adds one.
+ */
+export const alertDestinations = pgTable("alert_destinations", {
+  id: id(),
+  type: text("type").notNull(),
+  name: text("name").notNull(),
+  secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Which alert kinds go here: decision_waiting, merge_stuck, spend_alert, run_failed, daily_summary. */
+  kinds: jsonb("kinds").$type<string[]>().notNull(),
+  /** The owner ticked "this is on my own network": private addresses are allowed. */
+  allowPrivate: boolean("allow_private").notNull().default(false),
+  enabled: boolean("enabled").notNull().default(true),
+  /** The newest failure as the owner reads it ("404", "timed out"): never the address. */
+  lastFailureNote: text("last_failure_note"),
+  lastFailedAt: timestamp("last_failed_at", { withTimezone: true }),
+  /** When the unbroken run of failures began; cleared by a success. Three days switches the destination off. */
+  failingSince: timestamp("failing_since", { withTimezone: true }),
+  createdAt: createdAt(),
+});
+
+/** One retry per failed send, a minute later; durable so a restart doesn't lose it (BOS-2199). */
+export const alertRetries = pgTable("alert_retries", {
+  id: id(),
+  destinationId: uuid("destination_id").notNull().references(() => alertDestinations.id, { onDelete: "cascade" }),
+  payload: jsonb("payload").notNull(),
+  dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+});
+
+/**
  * Single-use links behind a phone push's Approve button (BOS-243). Only the SHA-256 of the token is
  * kept; the token itself lives only in the push. `decisionRev` pins the card as it was when the push
  * went out, so a rewritten card refuses the tap. At most one live token per decision.

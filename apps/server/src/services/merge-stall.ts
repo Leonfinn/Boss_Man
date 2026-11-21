@@ -119,7 +119,7 @@ export function mergeStallService(
   deps: {
     /** Wakes the company's CEO on the ticket, on a wake that is never dropped. */
     tellCeo: (input: { companyId: string; ticketId: string; note: string }) => Promise<unknown>;
-    notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string }) => Promise<{ id: string; level: string } | null>;
+    notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string; kind?: "merge_stuck" }) => Promise<{ id: string; level: string } | null>;
     now?: () => Date;
     /** The trains to watch; the live ones by default (tests pass their own, on a fake clock). */
     trains?: () => Array<{ projectId: string; facts: TrainFacts }>;
@@ -216,7 +216,7 @@ export function mergeStallService(
             out.told++;
           } else if (!e.ownerTold && at - new Date(e.toldAt).getTime() >= OWNER_AFTER_MS) {
             const body = `${await describe(s.cause, s.facts, s.since, n, at)} The CEO was told ${ageWords(at - new Date(e.toldAt).getTime())} ago and it has not moved.`;
-            const sent = await deps.notify({ companyId, level: "flag", title: s.cause === "empty_seat" ? "The merge line has an empty seat it isn't using" : s.cause === "thrash" ? "The merge line is stuck in a loop" : "Nothing has merged for a long time", body, link: `#/merge-queue/${companyId}` }).catch(() => null);
+            const sent = await deps.notify({ companyId, level: "flag", title: s.cause === "empty_seat" ? "The merge line has an empty seat it isn't using" : s.cause === "thrash" ? "The merge line is stuck in a loop" : "Nothing has merged for a long time", body, link: `#/merge-queue/${companyId}`, kind: "merge_stuck" }).catch(() => null);
             e = { ...e, ownerTold: true, ownerNotificationId: sent?.id ?? null };
             out.ownerTold++;
           } else continue;

@@ -149,6 +149,8 @@ import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
+import { webhookDeliveryService } from "./services/webhook-delivery.js";
+import { alertDestinationRoutes } from "./routes/alert-destinations.js";
 import { phoneApproveService } from "./services/phone-approve.js";
 import { phoneLoginService } from "./services/phone-login.js";
 
@@ -345,6 +347,9 @@ export async function buildApp(opts: AppOptions) {
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
+  // BOS-2199: Slack, Discord and webhook destinations. The hook returns at once; a send never holds up an alert.
+  const webhooks = webhookDeliveryService(db, { reveal: (id) => secretsSvc.reveal(id), notifyOwner: (n) => notes.notify({ companyId: null, level: "flag", link: "#/notifications", ...n }), fetch: opts.fetch, lookup: opts.lookup, now: opts.now, log: (m) => app.log.warn(m) });
+  notes.setAlertHook((a) => webhooks.onAlert(a));
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
   // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
   const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), phoneTest: () => notes.testStatus(), now: opts.now });
@@ -1705,6 +1710,8 @@ export async function buildApp(opts: AppOptions) {
     });
     // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
     notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin: phoneLoginService({ dir: opts.deployerDir, fact: (k) => hostFacts.value(k), now: () => (opts.now ? opts.now().getTime() : Date.now()), saveSetup: ntfySetupSaver({ notes, secretsSvc }) }) });
+    // BOS-2199: Settings → Notifications → other places to send alerts.
+    alertDestinationRoutes(owner, { db, secretsSvc, webhooks, notes });
     // BOS-1387: Settings → Outgoing email.
     emailSettingsRoutes(owner, { mailer, secretsSvc });
     // BOS-1582: Settings → Tools → Penpot, one form for the four Penpot secrets.
@@ -2692,5 +2699,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, webhooks, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }
