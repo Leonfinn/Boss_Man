@@ -81,6 +81,8 @@ export const OWNER_CONTROLS = {
     "Try again",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
+    // Past the newest 500 messages, the conversation's older pages (BOS-2168).
+    "Load older messages", "Loading older messages",
     // The Scrum Master's log of this ticket.
     "Undo", "Undoing", "Scrum Master", "Show all …",
   ],
