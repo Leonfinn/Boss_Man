@@ -15,6 +15,8 @@ export type SummaryInput = {
   recordOnly?: boolean;
   /** Open owner decisions that hold tickets back. */
   decisions: Array<{ question: string; blocks: string[]; askedAt: Date }>;
+  /** BOS-2195: what merged, what it cost and how many cards wait, from `dayLines`; goes on top. A day with only these still sends. */
+  dayLines?: string[];
 };
 
 export type Summary = { title: string; body: string; stuck: number; oldestRef: string | null };
@@ -47,14 +49,15 @@ const RECORD_WORDS: Record<string, string> = {
 export function buildSummary(i: SummaryInput): Summary | null {
   const acted = Object.entries(i.actions).filter(([k, n]) => n > 0 && ACTION_WORDS[k]);
   const recorded = Object.entries(i.actions).filter(([k, n]) => n > 0 && RECORD_WORDS[k]);
-  if (!i.caught && !i.fixed && !acted.length && !recorded.length && !i.recordOnly) return null;
+  const top = i.dayLines ?? [];
+  if (!i.caught && !i.fixed && !acted.length && !recorded.length && !i.recordOnly && !top.length) return null;
 
   // Owner decisions are the owner's to answer, not "stuck" work, so they stay out of the headline.
   const stuck = i.open.filter((o) => o.rule !== "owner_decision_waiting").sort((a, b) => a.openedAt.getTime() - b.openedAt.getTime());
   const oldest = stuck[0];
   const headline = stuck.length ? `${stuck.length} ticket${stuck.length === 1 ? " is" : "s are"} stuck past the limit; the oldest is ${oldest!.ref}, for ${age(i.now.getTime() - oldest!.openedAt.getTime())}.` : "No tickets are stuck past their limit.";
 
-  const lines = [headline, ""];
+  const lines = [...top, ...(top.length ? [""] : []), headline, ""];
   if (i.recordOnly) lines.push("Record only: the watchdog is rehearsing. Everything below was written down, and nothing was sent to anyone.");
   lines.push(`Caught ${i.caught} problem${i.caught === 1 ? "" : "s"}; ${i.fixed} cleared since.`);
   if (acted.length) lines.push(`Actions: ${acted.map(([k, n]) => `${n} ${ACTION_WORDS[k]}`).join(", ")}.`);
