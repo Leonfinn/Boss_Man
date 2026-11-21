@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actingText, ciWaitText, clockText, emptyQuickChecksSlotText, freeSlotsText, rowState } from "../src/pages/MergeQueue";
+import { actingText, ciWaitText, clockText, emptyQuickChecksSlotText, freeSlotsText, quickChecksOf, rowState } from "../src/pages/MergeQueue";
 
 // BOS-1846: the sentences the owner reads on the Merge queue page, pinned with a fixed clock. Clock times are built
 // from the reader's own locale in the test, so the pin holds on any runner's time zone and language.
@@ -104,5 +104,71 @@ describe("rowState", () => {
   });
   it("anything else reads Waiting", () => {
     expect(rowState(row({ actor: "ceo" }))).toEqual({ word: "Waiting", tone: "grey" });
+  });
+});
+
+// BOS-2128: the Quick checks tab lists and counts everything in the check queue except merge checks,
+// whose rows belong to the Merges tab. Rows are made up; no clock or server is involved.
+type CheckRow = Parameters<typeof quickChecksOf>[0][number];
+
+const check = (over: Partial<CheckRow> & { id: string }): CheckRow => ({
+  ticketId: `ticket-${over.id}`,
+  ref: "BOS-1",
+  title: `Made-up ticket ${over.id}`,
+  kind: "quick",
+  requestedBy: "an agent",
+  state: "waiting",
+  position: null,
+  minutes: 3,
+  fixesMain: false,
+  heldBy: null,
+  heldByMain: false,
+  ...over,
+});
+
+describe("quickChecksOf", () => {
+  it("returns nothing for an empty queue", () => {
+    expect(quickChecksOf([])).toEqual([]);
+  });
+
+  it("keeps a quick check and a full check but drops a merge check", () => {
+    const rows = [check({ id: "q" }), check({ id: "m", kind: "merge" }), check({ id: "f", kind: "full" })];
+    expect(quickChecksOf(rows).map((r) => r.id)).toEqual(["q", "f"]);
+  });
+
+  it("drops a merge check when it is the only row", () => {
+    expect(quickChecksOf([check({ id: "m", kind: "merge" })])).toEqual([]);
+  });
+
+  it("keeps a held or waiting quick check as it was", () => {
+    const waiting = check({ id: "w", state: "waiting", heldByMain: true, heldBy: "a merge check" });
+    const running = check({ id: "r", state: "running", fixesMain: true, heldByMain: true });
+    const out = quickChecksOf([waiting, running]);
+    expect(out).toEqual([waiting, running]);
+    expect(out[0]).toBe(waiting);
+    expect(out[1]).toBe(running);
+  });
+
+  it("still drops a merge check that is held or fixes main", () => {
+    const rows = [check({ id: "m", kind: "merge", heldByMain: true, fixesMain: true }), check({ id: "q" })];
+    expect(quickChecksOf(rows).map((r) => r.id)).toEqual(["q"]);
+  });
+
+  it("keeps the checks in their original order", () => {
+    const rows = [
+      check({ id: "m1", kind: "merge" }),
+      check({ id: "q1" }),
+      check({ id: "f1", kind: "full" }),
+      check({ id: "q2" }),
+    ];
+    expect(quickChecksOf(rows).map((r) => r.id)).toEqual(["q1", "f1", "q2"]);
+  });
+
+  it("leaves the queue it is given untouched", () => {
+    const rows = [check({ id: "q" }), check({ id: "m", kind: "merge" })];
+    const before = [...rows];
+    quickChecksOf(rows);
+    expect(rows).toEqual(before);
+    expect(rows).toHaveLength(2);
   });
 });
