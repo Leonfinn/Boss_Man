@@ -507,10 +507,20 @@ export function deploysService(
       return row!;
     },
 
-    async deleteTarget(id: string) {
+    /**
+     * BOS-2158: removing a target erases its deploys and secret grants (cascade). A deploy that is waiting, approved or
+     * running is never wiped ("live"); past deploys are only erased when the owner confirmed (`force`).
+     * Returns "not_found", "live", "has_history" or "deleted".
+     */
+    async deleteTarget(id: string, force = false): Promise<"not_found" | "live" | "has_history" | "deleted"> {
+      const [target] = await db.select({ id: deployTargets.id }).from(deployTargets).where(eq(deployTargets.id, id));
+      if (!target) return "not_found";
+      const past = await db.select({ status: deploys.status }).from(deploys).where(eq(deploys.targetId, id));
+      if (past.some((d) => d.status === "pending_approval" || d.status === "approved" || d.status === "running")) return "live";
+      if (past.length > 0 && !force) return "has_history";
       const rows = await db.delete(deployTargets).where(eq(deployTargets.id, id)).returning({ id: deployTargets.id, companyId: deployTargets.companyId, name: deployTargets.name });
-      if (rows[0]) await record(db, { companyId: rows[0].companyId, kind: "settings", summary: `Owner removed deploy target ${rows[0].name}` });
-      return rows.length > 0;
+      if (rows[0]) await record(db, { companyId: rows[0].companyId, kind: "settings", summary: `Owner removed deploy target ${rows[0].name}${past.length ? ` and its ${past.length} past deploy${past.length === 1 ? "" : "s"}` : ""}` });
+      return rows.length > 0 ? "deleted" : "not_found";
     },
 
     async listTargets(companyId: string) {

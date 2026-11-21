@@ -190,6 +190,13 @@ export function serverAdminRoutes(
   owner.patch("/api/deploy-targets/:id", async (req, reply) =>
     deploysSvc.updateTarget(IdParam.parse(req.params).id, TargetInput.partial().parse(req.body)).catch(deployErrors(reply)),
   );
-  owner.delete("/api/deploy-targets/:id", async (req, reply) => ((await deploysSvc.deleteTarget(IdParam.parse(req.params).id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" })));
+  owner.delete("/api/deploy-targets/:id", async (req, reply) => {
+    const force = z.object({ force: z.enum(["1"]).optional() }).parse(req.query).force === "1";
+    const r = await deploysSvc.deleteTarget(IdParam.parse(req.params).id, force);
+    if (r === "deleted") return reply.code(204).send();
+    if (r === "live") return reply.code(409).send({ error: "live", message: "A deploy to this target is waiting for approval, approved or running. Let it finish or reject it in Decisions, then remove the target." });
+    if (r === "has_history") return reply.code(409).send({ error: "has_history", field: "has_history", message: "This target has past deploys, and removing it would erase them and its secret grants." });
+    return reply.code(404).send({ error: "not_found" });
+  });
   owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
 }

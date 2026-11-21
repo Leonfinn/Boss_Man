@@ -74,6 +74,29 @@ describe("deploy targets (R14)", () => {
     expect((await lines()).at(-1)).toBe("Owner removed deploy target Production");
   });
 
+  it("refuses to remove a target with a live deploy, and asks before erasing past deploys (BOS-2158)", async () => {
+    const c = (ctx = await setup());
+    const id = (await c.target({ name: "Production", kind: "ssh", endpoint: "deploy@nas.lan", isProduction: true })).json().id as string;
+    const r = await c.deploys.request(c.actor, { target: "Production", ref: "v1.0.0" });
+    expect(r.deploy.status).toBe("pending_approval");
+
+    // Live: refused, even with force; nothing erased.
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}`)).statusCode).toBe(409);
+    const forced = await c.req("DELETE", `/api/deploy-targets/${id}?force=1`);
+    expect(forced.statusCode).toBe(409);
+    expect(forced.json().error).toBe("live");
+    expect(await c.db.select().from(deploys)).toHaveLength(1);
+
+    // Finished: history needs the owner's confirmation.
+    await c.db.update(deploys).set({ status: "succeeded" }).where(eq(deploys.id, r.deploy.id));
+    const ask = await c.req("DELETE", `/api/deploy-targets/${id}`);
+    expect(ask.statusCode).toBe(409);
+    expect(ask.json().error).toBe("has_history");
+    expect(await c.db.select().from(deploys)).toHaveLength(1);
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}?force=1`)).statusCode).toBe(204);
+    expect(await c.db.select().from(deploys)).toHaveLength(0);
+  });
+
   it("checks the endpoint shape for each kind", () => {
     expect(endpointProblem("ssh", "deploy@nas.lan")).toBeNull();
     expect(endpointProblem("ssh", "ssh://deploy@192.168.1.10:22")).toBeNull();

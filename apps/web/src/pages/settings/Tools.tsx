@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { api, type Company, type Project } from "../../api";
+import { api, ApiError, type Company, type Project } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
@@ -345,9 +345,16 @@ export function DeployTargets({ company }: { company: Company }) {
     });
   };
   const remove = (t: DeployTargetRow) =>
-    window.confirm(`Delete the deploy target ${t.name}? Agents can no longer deploy to it, and its deploy history goes with it.`) &&
+    window.confirm(`Delete the deploy target ${t.name}? Agents can no longer deploy to it.`) &&
     void act.run(async () => {
-      await api(`/api/deploy-targets/${t.id}`, { method: "DELETE" });
+      try {
+        await api(`/api/deploy-targets/${t.id}`, { method: "DELETE" });
+      } catch (err) {
+        // BOS-2158: a live deploy only shows the server's message; past deploys offer "Remove anyway".
+        if (!(err instanceof ApiError) || err.status !== 409 || err.field !== "has_history") throw err;
+        if (!window.confirm(`${err.message} Remove anyway?`)) return "Nothing was removed.";
+        await api(`/api/deploy-targets/${t.id}?force=1`, { method: "DELETE" });
+      }
       if (editing === t.id) cancel();
       targets.reload();
       return `Deleted ${t.name}.`;
