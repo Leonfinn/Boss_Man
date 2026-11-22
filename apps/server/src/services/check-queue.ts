@@ -669,7 +669,20 @@ export function checkQueue(db: Db) {
   async function end(jobId: string, state: "stuck" | "cancelled", reason: string, now = new Date()): Promise<CheckJob | null> {
     if (!reason.trim()) throw new Error("A check job can't be ended without a reason.");
     const [row] = await db.update(checkJobs).set({ state, reason, endedAt: now }).where(and(eq(checkJobs.id, jobId), inArray(checkJobs.state, [...LIVE]))).returning();
+    if (row && state === "stuck") await keepStuckTail(row, now).catch(() => {});
     return row ?? null;
+  }
+
+  /**
+   * BOS-2219: a stuck job never reports, so before this it kept no log and a hang could not be told from a slow run. Its last
+   * output (the tail progress kept, up to 8 KB) becomes its kept log, redacted and pruned like a failed job's, so check_log shows it.
+   */
+  async function keepStuckTail(job: CheckJob, now: Date): Promise<void> {
+    const tail = job.logTail ?? "";
+    if (!tail.trim()) return;
+    const at = job.lastOutputAt ? ` (its last output, at ${job.lastOutputAt.toISOString()})` : "";
+    const { log } = prepareFullLog(`[${job.reason ?? "The check was marked stuck."} This is the end of the log that reached the server${at}.]\n${tail}`);
+    await db.insert(checkJobLogs).values({ jobId: job.id, log, chars: log.length, createdAt: now }).onConflictDoNothing();
   }
   const cancel = (jobId: string, reason: string) => end(jobId, "cancelled", reason);
   const markStuck = (jobId: string, reason: string) => end(jobId, "stuck", reason);
@@ -695,11 +708,13 @@ export function checkQueue(db: Db) {
   /** Running jobs that printed nothing for too long become stuck, each with its reason. */
   async function sweepStuck(now = new Date(), minutes = DEFAULT_NO_OUTPUT_MINUTES): Promise<CheckJob[]> {
     const cutoff = new Date(now.getTime() - minutes * 60_000);
-    return db
+    const stuck = await db
       .update(checkJobs)
       .set({ state: "stuck", reason: `No output for ${minutes} minutes while running, so the check was marked stuck.`, endedAt: now })
       .where(and(eq(checkJobs.state, "running"), lt(checkJobs.lastOutputAt, cutoff)))
       .returning();
+    for (const job of stuck) await keepStuckTail(job, now).catch(() => {}); // a lost log must not stop the stuck jobs being stopped
+    return stuck;
   }
 
   /** Main's state for a project, set by the merge gate: red when a check of main's own tip fails, green on its first pass. */

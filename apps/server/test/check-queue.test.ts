@@ -387,6 +387,32 @@ describe("check queue", () => {
       await s.close();
     });
 
+    // BOS-2219: a stuck job never reports; its last output is kept as its log (redacted), so check_log shows where it stopped.
+    it("keeps a stuck job's last output as its log, redacted, listed and readable", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "st1" })).job;
+      await s.q.claimNext(null, T(0));
+      await s.q.progress(j.id, null, `PASS  typecheck @boss-man/server\n      tests related to @boss-man/server changes: 3m, still running (41 test files done)\n${FAKES.join("\n")}`, T(1));
+      expect(await s.q.sweepStuck(T(30), 20)).toHaveLength(1);
+      const kept = await s.q.readLog(s.companyId, j.ticketId, j.id);
+      expect(kept?.log).toContain("still running (41 test files done)");
+      expect(kept!.log).toMatch(/No output for 20 minutes/);
+      expect(kept!.log).not.toMatch(/hunter2fakevalue|fakebearer1234567890|fakepassw0rd|Zq8Lm2Xv9Rt4Bn7Cw3Dk6Fh1Jg5Ps0Aa/);
+      expect((await s.q.failedJobs(s.companyId, j.ticketId)).find((f) => f.jobId === j.id)).toMatchObject({ state: "stuck", logChars: kept!.chars });
+
+      // Marked stuck by hand (markStuck) keeps it the same way; a job that printed nothing keeps none (nothing to show).
+      const h = (await s.req({ tree: "st2" })).job;
+      await s.q.claimNext(null, T(31));
+      await s.q.progress(h.id, null, "FAIL  heavy phase: last line", T(32));
+      await s.q.markStuck(h.id, "Stopped by hand: no output.");
+      expect((await s.q.readLog(s.companyId, h.ticketId, h.id))?.log).toContain("FAIL  heavy phase: last line");
+      const quiet = (await s.req({ tree: "st3" })).job;
+      await s.q.claimNext(null, T(33));
+      await s.q.markStuck(quiet.id, "Stopped by hand: no output.");
+      expect(await s.q.logChars(quiet.id)).toBeNull();
+      await s.close();
+    });
+
     it("redacts again on the server even when the runner sent the secrets as they were", async () => {
       const s = await setup();
       const j = (await s.req({ tree: "l3" })).job;
