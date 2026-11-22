@@ -1400,6 +1400,7 @@ export async function buildApp(opts: AppOptions) {
       if (!runner || !runners.can(runner.id, "ci-publish") || !runners.can(runner.id, "ci-publish-scan")) return null;
       const token = (await secretsSvc.resolveCompanyEnv(t.companyId, "pull_request")).GIT_TOKEN;
       if (!token) return null;
+      const mainWorkflows = runners.can(runner.id, "ci-publish-main-workflows");
       const merge = (phase: "prepare" | "publish" | "unpublish", extra: Record<string, unknown> = {}) =>
         runners.request<MergeResult>(runner.id, (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId: t.id, target: p.defaultBranch, message: phase === "prepare" ? "GitHub CI before review" : phase === "publish" ? "publish for CI" : "unpublish", phase, ...extra }) as never, MERGE_WAIT_MS);
       return {
@@ -1409,8 +1410,11 @@ export async function buildApp(opts: AppOptions) {
           const scanList = await preflightScanList.forScan();
           // A list that is set but can't be read is not skipped: the push can't be taken back.
           if (!scanList && (await privateDetails.isSet().catch(() => true))) throw new Error("Not pushed to GitHub: the owner's private-details list couldn't be read, so the scan before the push couldn't run in full. Saving the list again in Settings fixes it.");
-          return merge("publish", { commit, ...(scanList ? { scanList } : {}) });
+          // BOS-2300: the early run always pushes main's workflow files (the branch's are the same unless it edits them), so an
+          // edit to a workflow never reaches GitHub before review. Only a runner that says so honours the field.
+          return merge("publish", { commit, ...(scanList ? { scanList } : {}), ...(mainWorkflows ? { mainWorkflows: true } : {}) });
         },
+        mainWorkflows,
         unpublish: () => merge("unpublish"),
       };
     },

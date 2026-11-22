@@ -217,6 +217,39 @@ describe("publishing the merge commit for the git host's CI (BOS-1070)", () => {
     expect(await ws.merge(spec, "main", "x", {}, null, { phase: "unpublish" })).toEqual({ status: "unpublished", branch: ciBranch });
   });
 
+  it("with mainWorkflows pushes the branch's code under main's workflow files, never the branch's own (BOS-2300)", async () => {
+    const o = origin();
+    withWorkflow(o);
+    const { ws, spec, w } = await ticketWithCommit(o, ".github/workflows/ci.yml", "on: pull_request_target\n");
+    writeFileSync(path.join(w.path, "feature.txt"), "new\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "more ticket work");
+    const prep = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { commit: string };
+    const r = await ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep.commit, mainWorkflows: true });
+    expect(r).toMatchObject({ status: "published", branch: ciBranch, hasWorkflows: true });
+    const pushed = git(o.url, "rev-parse", `refs/heads/${ciBranch}`);
+    expect((r as { commit: string }).commit).toBe(pushed);
+    expect(pushed).not.toBe(prep.commit);
+    expect(git(o.url, "show", `${pushed}:.github/workflows/ci.yml`)).toBe("on: push");
+    expect(git(o.url, "show", `${pushed}:feature.txt`)).toBe("new");
+    // Same parents as the prepared merge, which is still the one kept for the gate.
+    const repo = path.join(ws.root, "repos", `${ids.project}.git`);
+    expect(git(repo, "rev-list", "--parents", "-n", "1", pushed).split(" ").slice(1)).toEqual(git(repo, "rev-list", "--parents", "-n", "1", prep.commit).split(" ").slice(1));
+    expect(git(repo, "rev-parse", `refs/bossman/merge/${ids.t}`)).toBe(prep.commit);
+  });
+
+  it("with mainWorkflows and no workflows on main, pushes nothing and says there are none (BOS-2300)", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    mkdirSync(path.join(w.path, ".github/workflows"), { recursive: true });
+    writeFileSync(path.join(w.path, ".github/workflows/x.yml"), "on: push\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "adds a workflow");
+    const prep = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { commit: string };
+    expect(await ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep.commit, mainWorkflows: true })).toMatchObject({ status: "published", hasWorkflows: false });
+    expect(() => git(o.url, "rev-parse", "--verify", "--quiet", `refs/heads/${ciBranch}`)).toThrow();
+  });
+
   it("refuses to publish any commit but the one prepare built", async () => {
     const o = origin();
     withWorkflow(o);

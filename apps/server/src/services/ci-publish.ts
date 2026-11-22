@@ -120,6 +120,8 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
   const pub = await deps.publish(prep.commit);
   if (pub.status !== "published") throw new CiPublishError(`The runner answered the CI publish with "${pub.status}"; nothing was merged.`);
   if (!pub.hasWorkflows) return { kind: "no_workflows" };
+  // BOS-2300: the pre-review push may be a rebuilt commit (main's workflows); GitHub's run is on the commit pushed.
+  const pushed = pub.commit || prep.commit;
   await deps.announce(pub.branch);
   const since = Date.now();
   deps.onWait?.({ since, waiting: [] });
@@ -134,7 +136,7 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
   try {
     for (;;) {
       if (stop.stopped) return { kind: "stopped" };
-      const s = await readCi(deps.hosts, deps.target, prep.commit, stop, deps.timing);
+      const s = await readCi(deps.hosts, deps.target, pushed, stop, deps.timing);
       if ("kind" in s) return s;
       if (s.state === "passed") return flaky ? { kind: "passed", flaky, ...(slow ? { slow } : {}), ...(retryRunUrl ? { retryRunUrl } : {}) } : { kind: "passed" };
       // Right after the retry GitHub may still show the old failed attempt for a moment: read it as pending, as for rerunAt.
@@ -166,13 +168,13 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
         const branchRuns = await deps.hosts.workflowRuns(deps.target.cfg, deps.target.token, pub.branch).catch(() => []);
         const own = branchRuns.find((r) => r.id === mine.id);
         // A run for another commit, started after this one: the branch was pushed again and that push replaced this run.
-        const newer = branchRuns.find((r) => r.headSha !== prep.commit && (!own || r.createdAt > own.createdAt));
+        const newer = branchRuns.find((r) => r.headSha !== pushed && (!own || r.createdAt > own.createdAt));
         if (newer) return { kind: "superseded", newerSha: newer.headSha };
         const runs = s.cancelled!.map((r) => r.name);
         if (rerunAt !== null) return { kind: "cancelled", runs, rerunTried: true };
         if (!(await deps.hosts.rerunRun(deps.target.cfg, deps.target.token, mine.id))) return { kind: "cancelled", runs, rerunTried: false };
         rerunAt = Date.now();
-        await deps.announceRerun?.(prep.commit);
+        await deps.announceRerun?.(pushed);
       }
       const waited = Date.now() - since;
       if (s.state === "none" && waited >= deps.timing.graceMs) return { kind: "none" };
@@ -192,8 +194,10 @@ export const CI_IMAGES_PATHS = /(^|\/)Dockerfile|^docker-compose|^deploy\/|^scri
 export const touchesGithubOnlyJobs = (files: string[]) => files.some((f) => CI_IMAGES_PATHS.test(f));
 /**
  * BOS-1664 (security, F1): GitHub runs the workflow files of whatever commit is pushed, with a token the workflow can widen, so
- * a branch that edits workflows is NOT pushed before review: its GitHub run happens only at the gate, after the reviews.
+ * a branch that edits workflows is NOT pushed before review with its own workflows. BOS-2300: when the runner can push the
+ * commit with main's workflows ("ci-publish-main-workflows", `mainWorkflows`), the early run happens on the branch's code under
+ * main's workflow files, which are already trusted; the branch's own workflow edit still runs first at the gate, after the reviews.
  */
 export const touchesWorkflows = (files: string[]) => files.some((f) => /^\.github\/workflows\//.test(f));
 /** Whether the pre-review GitHub run (and the hold on the move to review) applies to these changed files. */
-export const needsEarlyGithubRun = (files: string[]) => touchesGithubOnlyJobs(files) && !touchesWorkflows(files);
+export const needsEarlyGithubRun = (files: string[], mainWorkflows = false) => touchesGithubOnlyJobs(files) && (mainWorkflows || !touchesWorkflows(files));

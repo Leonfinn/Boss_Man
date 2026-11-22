@@ -23,6 +23,11 @@ export type PreflightContext = {
   prepare: () => Promise<MergeResult>;
   /** workspace.merge phase "publish": push that commit to bossman-ci/<ticket>. */
   publish: (commit: string) => Promise<MergeResult>;
+  /**
+   * BOS-2300: the runner pushes the commit with main's workflow files (feature "ci-publish-main-workflows"), so a branch that
+   * edits workflows can have its early run too. Absent: such a branch gets none before review.
+   */
+  mainWorkflows?: boolean;
   /** Phase "unpublish", best effort. */
   unpublish: () => Promise<unknown>;
 };
@@ -204,9 +209,9 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     async start(t: { id: string; companyId: string; projectId: string }, agentId: string, d: Pick<WorkspaceDiff, "head" | "files">, notApplicable?: string): Promise<string | null> {
       const paths = d.files.map((f) => f.path);
       if (!touchesGithubOnlyJobs(paths)) return null;
-      if (touchesWorkflows(paths)) return "This branch edits GitHub workflow files. Those are not pushed to GitHub before review (GitHub would run an unreviewed workflow with its own token); they run once, at the merge gate, after the reviews. Nothing is held for them.";
       const ctx = await deps.context(t);
       if (!ctx) return null;
+      if (touchesWorkflows(paths) && !ctx.mainWorkflows) return "This branch edits GitHub workflow files. Those are not pushed to GitHub before review (GitHub would run an unreviewed workflow with its own token); they run once, at the merge gate, after the reviews. Nothing is held for them.";
       const reason = notApplicable?.trim();
       if (reason) {
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: d.head, kind: PREFLIGHT_NA_KIND, passed: true, detail: reason.slice(0, 500) });
@@ -217,7 +222,7 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       const done = await latest(t.id, PREFLIGHT_KIND, d.head);
       if (done?.passed) return `GitHub's CI jobs already passed on this commit, so none were started.`;
       launch(t, agentId, d.head, ctx);
-      return "This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well (this can take a while). The ticket can't move to review until they pass. You will be woken with the result; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.";
+      return `This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well${touchesWorkflows(paths) ? " (with main's workflow files, not yours: your workflow edit is first run by the merge gate after the reviews)" : ""} (this can take a while). The ticket can't move to review until they pass. You will be woken with the result; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.`;
     },
 
     /** The move to review: a reason to refuse it (plain words), or null. `diff` reads the branch from the runner. */
@@ -225,14 +230,15 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) return null;
       // Cheap database checks first: a project that can't run GitHub jobs never costs a runner round trip.
-      if (!(await deps.context(t))) return null;
+      const ctx = await deps.context(t);
+      if (!ctx) return null;
       let d: Pick<WorkspaceDiff, "head" | "files">;
       try {
         d = await diff(t);
       } catch {
         return null; // can't tell: carry on, the gate's own run at landing still stands
       }
-      if (!needsEarlyGithubRun(d.files.map((f) => f.path))) return null;
+      if (!needsEarlyGithubRun(d.files.map((f) => f.path), !!ctx.mainWorkflows)) return null;
       // The mark covers this commit only: a later commit re-arms the hold.
       if (await latest(t.id, PREFLIGHT_NA_KIND, d.head)) return null;
       const r = await latest(t.id, PREFLIGHT_KIND, d.head);

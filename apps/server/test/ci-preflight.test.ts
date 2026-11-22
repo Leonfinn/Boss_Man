@@ -20,7 +20,7 @@ const wf = { path: "apps/runner/Dockerfile", added: 1, removed: 0 };
 const wfEdit = { path: ".github/workflows/ci.yml", added: 1, removed: 0 };
 const diff = (files: WorkspaceDiff["files"], head = "headcommit1"): WorkspaceDiff => ({ baseCommit: "b", head, tree: `tree-${head}`, commits: [{ sha: head, subject: "x" }], files, diff: "", truncated: false });
 
-async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "failed"; head?: string; context?: boolean }) {
+async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "failed"; head?: string; context?: boolean; mainWorkflows?: boolean }) {
   const { db } = await shared;
   await db.delete(checkJobs);
   await db.delete(settings);
@@ -47,7 +47,7 @@ async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "fai
     context: async () =>
       opts.context === false
         ? null
-        : { target: { cfg, token: "made-up-token" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "mergetree1", targetSha: "mainhead1" }), publish, unpublish },
+        : { target: { cfg, token: "made-up-token" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "mergetree1", targetSha: "mainhead1" }), publish, unpublish, ...(opts.mainWorkflows ? { mainWorkflows: true } : {}) },
   });
   const raw = checkRequestService(db, { diff: async () => d, preflight });
   // These tests are about the CI hold; the quick check hold (BOS-1922) is tested in check-request.test.ts, so a queued quick job counts as passed here.
@@ -112,6 +112,19 @@ describe("GitHub CI before review (BOS-1664)", () => {
     expect(msg).toMatch(/not pushed to GitHub before review/);
     expect(s.publish).not.toHaveBeenCalled();
     expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+
+  it("a workflow edit gets its early run when the runner pushes main's workflows, and holds the move to review (BOS-2300)", async () => {
+    const s = await setup({ files: [wfEdit, wf], ci: "passed", mainWorkflows: true });
+    const msg = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(msg).toMatch(/main's workflow files, not yours/);
+    await settled(s);
+    expect(s.publish).toHaveBeenCalledWith("mergecommit1");
+    expect(s.wakes[0]!.note).toMatch(/passed/);
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+    // Before the run ends on a new head the move to review is held.
+    const s2 = await setup({ files: [wfEdit], mainWorkflows: true });
+    expect(await s2.svc.reviewRefusal(s2.co, s2.ticket)).toMatch(/request_check/);
   });
 
   it("with the check queue off the move to review is not held (request_check would refuse)", async () => {
