@@ -10,7 +10,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, notifications, secrets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { fitBytes } from "../src/services/notifications.js";
+import { appUrl, fitBytes } from "../src/services/notifications.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -432,5 +432,23 @@ describe("notification ladder (R44)", () => {
     // The counts are unread notices by level and company, whatever the filters say (BOS-1277).
     const filtered = (await c.req("GET", "/api/notifications?level=flag&status=read")).json();
     expect(filtered.counts).toEqual({ level: { note: 1, flag: 1 }, company: { [c.company.id]: 1, none: 1 } });
+  });
+});
+
+describe("appUrl: a link in the app as the phone opens it", () => {
+  it("joins a base and a link with exactly one slash, with or without a trailing slash on the base", () => {
+    expect(appUrl("https://app.example.com", "#/notifications")).toBe("https://app.example.com/#/notifications");
+    expect(appUrl("https://app.example.com/", "#/notifications")).toBe("https://app.example.com/#/notifications");
+  });
+
+  it("expects the link without a leading slash: a leading slash is kept as given", () => {
+    expect(appUrl("https://app.example.com", "settings/updates")).toBe("https://app.example.com/settings/updates");
+    // The callers pass fragment links like "#/..." with no leading slash; one is not stripped, so it doubles the join.
+    expect(appUrl("https://app.example.com", "/settings/updates")).toBe("https://app.example.com//settings/updates");
+  });
+
+  it("with no base set falls back to a root-relative link", () => {
+    expect(appUrl("", "#/notifications")).toBe("/#/notifications");
+    expect(appUrl("", "settings/updates")).toBe("/settings/updates");
   });
 });
