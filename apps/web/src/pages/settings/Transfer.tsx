@@ -14,6 +14,8 @@ type ImportPreview = {
   projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
   gitHosts: Array<{ project: string; url: string; opens: string | null; stackService: boolean }>;
+  /** BOS-2242: one plain line per company setting the package carries (agent approvals, templates, retro, second opinion). */
+  settings: string[];
   warnings: string[];
 };
 
@@ -24,7 +26,7 @@ export function ExportCompany({ company }: { company: Company }) {
   return (
     <Section id="export-h" title={`Export ${company.name}`}>
       <p className="muted" style={{ fontSize: 14 }}>
-        One zip with the company's agents and their instructions, skills, projects, plan and tool servers. Secrets are listed by name and who has them; their values never leave Boss Man.
+        One zip with the company's agents and their instructions, skills, projects, plan, tool servers, deploy targets, permission rules and the company's own settings. Secrets are listed by name and who has them; their values never leave Boss Man.
       </p>
       <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <input type="checkbox" checked={wiki} onChange={(e) => setWiki(e.target.checked)} /> Include the wiki
@@ -128,6 +130,16 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                   <li key={s.name}>
                     {s.name}: {s.scripts.join(", ")}
                   </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {preview.settings.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>The company's own settings.</strong> These come in with it:
+              <ul>
+                {preview.settings.map((s) => (
+                  <li key={s}>{s}</li>
                 ))}
               </ul>
             </div>
