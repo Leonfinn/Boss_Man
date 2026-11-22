@@ -1,7 +1,8 @@
 // Runner daemon: one per company. Dials out to the Boss Man server, runs agents over ACP
 // on its commands, and journals every event until the server has it (R31).
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { machineMemoryMb, startupMemoryWarning } from "./machine-memory.js";
 import { checkClaude } from "./claude-check.js";
 import { adapterBin, claudeBin, lockHash, PACK_SOURCE, readPack } from "./claude-pack.js";
 import { probeGuardWhenReady } from "./guard-probe.js";
@@ -56,14 +57,9 @@ const sandbox = { ...sandboxSelfTest(), platform: platformReport(env) };
 const checkSlots = applyCheckSlots(coordDir, env.BOSSMAN_CHECK_SLOTS);
 if (checkSlots > 1) console.log(`[runner] full checks: ${checkSlots} at a time (BOSSMAN_CHECK_SLOTS)`);
 if (checkSlots > 1) {
-  // Each extra full check peaks near 3 GB; warn when the container limit (cgroup v2 or v1) is lower than that.
-  for (const f of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
-    if (!existsSync(f)) continue;
-    const limit = Number(readFileSync(f, "utf8").trim());
-    if (Number.isFinite(limit) && limit < checkSlots * 3 * 1024 ** 3 + 2 * 1024 ** 3 && limit < 2 ** 50)
-      console.warn(`[runner] warning: memory limit is ${Math.round(limit / 1024 ** 3)} GB but ${checkSlots} full checks at once need about ${checkSlots * 3 + 2} GB; raise BOSSMAN_RUNNER_MEMORY or checks may be OOM-killed`);
-    break;
-  }
+  // BOS-2217: each full check peaks near 5 GB (measured 3.8 to 4.7 GB); warn when the machine has less than that.
+  const warning = startupMemoryWarning(checkSlots, machineMemoryMb());
+  if (warning) console.warn(`[runner] ${warning}`);
 }
 // One pnpm store for every install an agent's checks make (BOS-568): on the workspaces volume by default,
 // or at PNPM_STORE_DIR. Without it pnpm starts a fresh store in each agent's $HOME (on the root disk) and

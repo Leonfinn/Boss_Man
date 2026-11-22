@@ -2,6 +2,7 @@
 // company runner's slots are full. The owner adds one (its token is shown once), sets its slots and per-check caps, and
 // can turn it off or remove it. Each worker says, per company, whether it takes checks and if not, why.
 import { useState } from "react";
+import { checkMemoryWarning } from "@boss-man/shared";
 import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
@@ -19,6 +20,10 @@ export type CheckWorkerView = {
   connected: boolean;
   slots: number;
   reportedSlots: number | null;
+  /** BOS-2217: the machine's memory for checks, in MB; absent or null from an older worker or server. */
+  reportedMemoryMb?: number | null;
+  /** BOS-2217: set when checks at once × memory per check is more than the machine has. */
+  memoryWarning?: string | null;
   limit: number;
   /** BOS-1602; absent from a server older than this page. */
   takes?: MachineTakes;
@@ -53,7 +58,10 @@ function valid(d: Draft, maxSlots: number) {
   return !!b.name && Number.isInteger(b.slots) && b.slots >= 1 && b.slots <= maxSlots && (b.checkThreads === null || (Number.isInteger(b.checkThreads) && b.checkThreads >= 1 && b.checkThreads <= 256)) && (b.checkMemoryMb === null || (b.checkMemoryMb >= 256 && b.checkMemoryMb <= 1_048_576)) && policyValid(d.policy, b.slots);
 }
 
-function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix }: { draft: Draft; setDraft: (d: Draft) => void; companies: Company[]; maxSlots: number; idPrefix: string }) {
+function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix, machineMb }: { draft: Draft; setDraft: (d: Draft) => void; companies: Company[]; maxSlots: number; idPrefix: string; machineMb?: number | null }) {
+  // BOS-2217: as the owner types, say when the numbers need more than the machine has. Only a worker that has connected reports its memory.
+  const slotsNow = Number(draft.slots);
+  const warning = machineMb && Number.isInteger(slotsNow) && slotsNow >= 1 ? checkMemoryWarning({ slots: slotsNow, perCheckMb: draft.memoryGb.trim() ? Math.round(Number(draft.memoryGb) * 1024) : null, machineMb }) : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <label htmlFor={`${idPrefix}-name`}>Name</label>
@@ -78,6 +86,11 @@ function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix }: { draft:
       <input id={`${idPrefix}-threads`} type="number" min={1} max={256} value={draft.threads} onChange={(e) => setDraft({ ...draft, threads: e.target.value })} style={{ width: 80 }} />
       <label htmlFor={`${idPrefix}-memory`}>Memory per check, in GB (optional)</label>
       <input id={`${idPrefix}-memory`} type="number" min={0.25} step={0.5} value={draft.memoryGb} onChange={(e) => setDraft({ ...draft, memoryGb: e.target.value })} style={{ width: 80 }} />
+      {warning && (
+        <p role="alert" className="tag red" style={{ fontSize: 14 }} data-testid="check-worker-memory-warning">
+          {warning}
+        </p>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         Leave the optional fields empty to let the machine decide. A machine never runs more checks than it says it can, whatever the number here.
       </p>
@@ -118,6 +131,11 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               {w.toolchain?.node ? ` · Node ${w.toolchain.node}` : w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
             </span>
           </div>
+          {w.memoryWarning && (
+            <p style={{ fontSize: 14, margin: 0 }} className="tag red" data-testid="check-worker-memory-card-warning">
+              Memory: {w.memoryWarning}
+            </p>
+          )}
           {w.reason ? (
             <p style={{ fontSize: 14, margin: 0 }} data-testid="check-worker-reason">
               Takes no checks: {w.reason}
@@ -134,7 +152,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
           )}
           {editing?.id === w.id ? (
             <>
-              <WorkerForm draft={editing.draft} setDraft={(draft) => setEditing({ id: w.id, draft })} companies={list} maxSlots={maxSlots} idPrefix={`cw-${w.id}`} />
+              <WorkerForm draft={editing.draft} setDraft={(draft) => setEditing({ id: w.id, draft })} companies={list} maxSlots={maxSlots} idPrefix={`cw-${w.id}`} machineMb={w.reportedMemoryMb} />
               <div style={{ display: "flex", gap: 8 }}>
                 <SaveButton
                   dirty={JSON.stringify(editing.draft) !== JSON.stringify(draftOf(w))}

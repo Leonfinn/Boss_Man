@@ -38,7 +38,7 @@ export type ConnectionOptions = {
    * BOS-1435: this process is a check worker (BOSSMAN_ROLE=check-worker). Its hello carries only what the worker socket
    * reads (check features, its slot count, running checks), and it keeps no journal: the worker socket takes no events.
    */
-  checkWorker?: { slots: number; features: readonly string[]; /** BOS-1436: the commits it holds per project, for thin bundles. */ repos?: () => WorkerRepos };
+  checkWorker?: { slots: number; /** BOS-2217: the machine's memory for checks, in MB. */ memoryMb?: number; features: readonly string[]; /** BOS-1436: the commits it holds per project, for thin bundles. */ repos?: () => WorkerRepos };
 };
 
 /**
@@ -140,7 +140,7 @@ export class RunnerConnection {
 
   private helloAsWorker(w: NonNullable<ConnectionOptions["checkWorker"]>) {
     const repos = w.repos?.();
-    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), features: [...w.features], bootId: this.bootId, checkSlots: w.slots, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(repos?.length ? { repos } : {}) });
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), features: [...w.features], bootId: this.bootId, checkSlots: w.slots, ...(w.memoryMb ? { memoryMb: w.memoryMb } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(repos?.length ? { repos } : {}) });
   }
 
   private helloAsRunner() {

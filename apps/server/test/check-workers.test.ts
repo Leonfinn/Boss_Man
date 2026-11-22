@@ -436,3 +436,43 @@ describe("check workers: scheduling (BOS-1435)", () => {
     await expect(s.workers.register({ ...base, slots: 1, checkMemoryMb: 10 })).rejects.toThrow(/Memory/);
   });
 });
+
+describe("check workers: memory the machine reports (BOS-2217)", () => {
+  const add = async (s: Awaited<ReturnType<typeof setup>>, o: { slots: number; memoryMb: number | null; reported?: number }) => {
+    const { worker } = await s.workers.register({ name: `W${Math.random()}`, companyIds: [s.co.id], slots: o.slots, checkThreads: null, checkMemoryMb: o.memoryMb, enabled: true });
+    await s.workers.touch(worker.id, { imageCommit: COMMIT, imageVersion: "1", checkSlots: o.slots, memoryMb: o.reported, features: ["check-jobs", BUNDLE_FEATURE] });
+    return worker.id;
+  };
+
+  it("warns on 2 checks at once × 12,544 MB for a worker that reports 8 GB, and names a fix", async () => {
+    const s = await setup();
+    const id = await add(s, { slots: 2, memoryMb: 12_544, reported: 8192 });
+    const row = (await s.workers.list()).find((w) => w.id === id)!;
+    expect(row.reportedMemoryMb).toBe(8192);
+    expect(row.memoryWarning).toMatch(/2 checks at once/);
+    expect(row.memoryWarning).toMatch(/24\.5 GB/);
+    expect(row.memoryWarning).toMatch(/8 GB/);
+    expect(row.memoryWarning).toMatch(/lower/);
+  });
+
+  it("says nothing when it fits, when the machine has not reported, or when the memory per check is unset and the real peak fits", async () => {
+    const s = await setup();
+    const fits = await add(s, { slots: 2, memoryMb: 4096, reported: 8192 });
+    const silent = await add(s, { slots: 2, memoryMb: 12_544 });
+    const unset = await add(s, { slots: 2, memoryMb: null, reported: 16_384 });
+    const unsetTight = await add(s, { slots: 2, memoryMb: null, reported: 8192 });
+    const list = await s.workers.list();
+    const w = (id: string) => list.find((x) => x.id === id)!;
+    expect(w(fits).memoryWarning).toBeNull();
+    expect(w(silent).memoryWarning).toBeNull();
+    expect(w(unset).memoryWarning).toBeNull();
+    expect(w(unsetTight).memoryWarning).toMatch(/lower the checks at once to 1/);
+  });
+
+  it("uses the checks the worker will really run (its own slot count lowers the owner's)", async () => {
+    const s = await setup();
+    const { worker } = await s.workers.register({ name: "W", companyIds: [s.co.id], slots: 4, checkThreads: null, checkMemoryMb: 6144, enabled: true });
+    await s.workers.touch(worker.id, { imageCommit: COMMIT, imageVersion: "1", checkSlots: 1, memoryMb: 8192, features: ["check-jobs", BUNDLE_FEATURE] });
+    expect((await s.workers.list()).find((x) => x.id === worker.id)!.memoryWarning).toBeNull();
+  });
+});
