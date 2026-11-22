@@ -3374,7 +3374,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ctx.type !== "permission") {
         try {
           const about = await decisionTicketIds(db, d);
-          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId], notify: feed });
+          // BOS-2291: only a ticket the card blocks (a dependency row), or one a sign-off or review-loop card is about, has its assignee woken for a stale note.
+          const blockedRows = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+          const ownTicket = (ctx as { type?: string; ticketId?: unknown }).ticketId;
+          const assigneeWakeOnly = new Set<string>([...blockedRows.map((r) => r.id), ...((ctx.type === "risk_review" || ctx.type === "review_loop") && typeof ownTicket === "string" ? [ownTicket] : [])]);
+          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId], assigneeWakeOnly, notify: feed });
         } catch (err) {
           log(`answering decision ${id} was saved, but marking related cards out of date failed: ${(err as Error).message}`);
         }
