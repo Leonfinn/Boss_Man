@@ -97,8 +97,8 @@ services:
       BOSSMAN_DATA: /data
       BOSSMAN_DATA_HOST: auto
       # The runner and guard images are pulled by `--profile images pull`; the launcher never pulls.
-      BOSSMAN_RUNNER_IMAGE: ${BOSSMAN_REGISTRY:?}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
-      BOSSMAN_NETGUARD_IMAGE: ${BOSSMAN_REGISTRY:?}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
+      BOSSMAN_RUNNER_IMAGE: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
+      BOSSMAN_NETGUARD_IMAGE: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
       BOSSMAN_RUNNER_NETWORK: ${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
       BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-}
@@ -130,11 +130,11 @@ services:
   # Only here so `--profile images pull` fetches the images the launcher starts beside each company's runner. Never started
   # (the "images" profile is off in `up`), so it leaves no stopped container in your dashboard.
   runner-image:
-    image: ${BOSSMAN_REGISTRY:?}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
     profiles: ["images"]
     restart: "no"
   netguard:
-    image: ${BOSSMAN_REGISTRY:?}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
     profiles: ["images"]
     restart: "no"
     command: ["--build-only"]

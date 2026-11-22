@@ -99,7 +99,7 @@ echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up an
 
 # Ask the launcher, from inside its container, to start a runner from the published runner image (it will not get a real token, so it cannot connect; starting is the point).
 tok="bmr_$(printf 'x%.0s' {1..43})"
-call() { dc exec -T launcher node -e '
+call() { dc exec -T --user 1000:1000 launcher node -e '
 const fs=require("fs");const [m,p,b]=process.argv.slice(1);
 fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
  .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
