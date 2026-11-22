@@ -43,17 +43,25 @@ mkdir paperclip-export && cd paperclip-export
    b. **Find the Paperclip container.**
 
 ```sh
-CONTAINER=$(docker ps --filter name=paperclip --format '{{.Names}}' | head -n 1)
-echo "$CONTAINER"
+docker ps --filter name=paperclip --format '{{.Names}}  {{.Image}}'
 ```
 
-   This should print one name, such as `paperclip` or `paperclip-server-1`. If it prints nothing, list every running container and find Paperclip's by its image:
+   This lists running containers with `paperclip` in their name, with their images. If it prints nothing, list every running container and find Paperclip's by its image:
 
 ```sh
 docker ps --format '{{.Names}}  {{.Image}}'
 ```
 
-   Then set the name by hand, for example `CONTAINER=my-paperclip`. If the first command found a container that isn't Paperclip's server (a separate database container, say), set the right name the same way.
+   Pick the Paperclip **app** container (the one running the Paperclip image), not a database container. If your install has a separate database container, such as `paperclip-db` running a `postgres` image, Paperclip uses that database rather than the built-in one: follow "Paperclip uses an external database" below.
+
+   Then put the app container's name into `CONTAINER`, typing it yourself, and check it:
+
+```sh
+CONTAINER=paperclip-server-1
+echo "$CONTAINER"
+```
+
+   Replace `paperclip-server-1` with the name from the list. Don't go on until `echo` prints that name: with an empty name, step d fails.
 
    c. **Create `paperclip-issues.sql`.** Copy the whole block, from `cat` to the final `SQL` line, and paste it into the shell. The one value to change is `HOL` on the marked line: replace it with your company's issue prefix (the letters before the number in an issue ID such as `HOL-123`), keeping the quotes.
 
@@ -120,7 +128,7 @@ docker exec -i -w /tmp -e PGPASSWORD=paperclip -e PGOPTIONS='-c default_transact
   -f paperclip-issues.sql > paperclip-issues.json
 ```
 
-   - **Paperclip uses an external database** (its own Postgres server, not the built-in one on `127.0.0.1:54329`). Point `psql` at that database instead: in step d, replace the `postgres://…` address and `PGPASSWORD` with that database's own host, port, user, password and database name, for example `postgres://paperclip@192.168.1.50:5432/paperclip`. If the database is reachable from the host, you can drop `--network container:"$CONTAINER"`.
+   - **Paperclip uses an external database** (a separate database container such as `paperclip-db`, or its own Postgres server, not the built-in one on `127.0.0.1:54329`). Point `psql` at that database instead: in step d, replace the `postgres://…` address and `PGPASSWORD` with that database's own host, port, user, password and database name, for example `postgres://paperclip@192.168.1.50:5432/paperclip`. If the database is reachable from the host, you can drop `--network container:"$CONTAINER"`.
 
 3. **Put `paperclip-issues.json` next to `COMPANY.md`** in the export folder, then zip the folder.
 
