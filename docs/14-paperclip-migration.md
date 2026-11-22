@@ -25,7 +25,7 @@ Paperclip's `cancelled` has no Boss Man state, so those tickets arrive as done w
 
    Paperclip's built-in database listens on `127.0.0.1:54329` inside the Paperclip container's network (user and password `paperclip`, database `paperclip`). The standard Paperclip image has no `psql`, so running the query inside that container fails with `sh: 1: psql: not found`. Instead, run `psql` from a throwaway Postgres container that joins the Paperclip container's network. It changes nothing in Paperclip: the session is read-only and the container deletes itself when it ends.
 
-   > **Not yet confirmed on a real install.** This method has not yet been run end to end on an owner's machine. If a step fails, note the error and the step number.
+   > **Confirmed on TrueNAS SCALE, 22 Nov 2026.** An owner ran steps a to e there and got `paperclip-issues.json`. Step f (copying the file off the host) is not yet confirmed. If a step fails, note the error and the step letter.
 
    **You need:** a shell on the machine that runs Paperclip's Docker container, as root or as a user allowed to run `docker` (otherwise put `sudo` in front of each `docker` command). The machine needs internet access the first time, to pull the `postgres:17-alpine` image.
 
@@ -117,6 +117,27 @@ ls -lh paperclip-issues.json && head -c 300 paperclip-issues.json
 ```
 
    The file should start with `[{"identifier":"HOL-` (with your prefix in place of `HOL`). If it shows only `[]`, the prefix in `paperclip-issues.sql` is wrong: fix it in step c and run step d again. If the file is empty, read the error `docker run` printed: `connection refused` usually means the container name in step b is wrong, or Paperclip uses an external database (see below).
+
+   f. **Copy `paperclip-issues.json` to the computer that holds the export folder.** Skip this if it is the same machine as the Docker host.
+
+   > **Not yet confirmed.** This step has not yet been run on an owner's machine.
+
+   You copy the file with `scp`, run from the computer that holds the export folder (on Windows 10 and later, `scp` works in PowerShell). The Docker host needs SSH turned on. SSH usually refuses a `root` login, so log in as an ordinary user, and first put the file in that user's home folder, owned by them. On the Docker host, in the working folder, run this, replacing `alex` with that user's login:
+
+```sh
+sudo cp paperclip-issues.json ~alex/
+sudo chown alex: ~alex/paperclip-issues.json
+```
+
+   (Leave out `sudo` if you are already root.) Then, on the computer that holds the export folder, go into that folder (the one with `COMPANY.md`) and run this, replacing `alex` with the login and `192.168.1.50` with the Docker host's address:
+
+```sh
+scp alex@192.168.1.50:paperclip-issues.json .
+```
+
+   It asks for that user's password, unless you use an SSH key. `ls paperclip-issues.json` in the export folder should then list the file. If `scp` says `Connection refused`, SSH is off on the Docker host; if it says `Permission denied`, check the login and password, and that the file is in that user's home folder.
+
+   > **Worked example: TrueNAS SCALE.** Turn SSH on in System → Services → SSH. Log in as the admin user `truenas_admin`, not `root`: in the commands above, replace `alex` with `truenas_admin`.
 
    **Other setups.**
    - **The Paperclip image has `psql`.** Check with `docker exec "$CONTAINER" which psql`. If that prints a path, you can instead copy `paperclip-issues.sql` into the container and run the query there:
