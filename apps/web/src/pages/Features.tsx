@@ -26,6 +26,7 @@ import { when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
+import { CopyLinkButton } from "../components/CopyLinkButton";
 import { buildCsv, download } from "../csv";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
@@ -974,6 +975,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             {f.releasedAt && <span>Released {when(f.releasedAt)}</span>}
           </p>
         </div>
+        <CopyLinkButton />
       </header>
 
       {f.goalCheckAnswer ? (
