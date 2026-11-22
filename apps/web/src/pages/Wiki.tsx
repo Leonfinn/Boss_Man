@@ -13,6 +13,7 @@ import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
+import { WikiCompare } from "../components/WikiCompare";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
@@ -147,8 +148,9 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   // Versions opened from "Show older versions", older than the first page the page carries (BOS-496).
   const [older, setOlder] = useState<{ rows: Revision[]; busy: boolean; error: string | null }>({ rows: [], busy: false, error: null });
   const [old, setOld] = useState<OldVersion | null>(null);
+  const [cmp, setCmp] = useState<{ from: string; to: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => (setEditing(false), setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
+  useEffect(() => (setCmp(null), setEditing(false),setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
   const p = page.data;
   const versions = [...(p?.revisions ?? []), ...older.rows];
   const hasMore = !!p && versions.length < (p.revisionCount ?? p.revisions.length);
@@ -269,6 +271,14 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
                 by {r.agent ?? "you"}
                 {typeof r.size === "number" && <span className="muted"> · {r.size.toLocaleString("en-GB")} characters</span>}
                 {i === 0 && " (current)"}
+                {versions[i + 1] && (
+                  <>
+                    {" · "}
+                    <button type="button" className="link" onClick={() => setCmp({ from: (versions[i + 1] as Revision).id, to: r.id })}>
+                      Compare
+                    </button>
+                  </>
+                )}
                 {r.runId && (
                   <>
                     {" · "}
@@ -290,6 +300,19 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
             </p>
           )}
         </section>
+      )}
+      {cmp && (
+        <WikiCompare
+          companyId={companyId}
+          versions={versions}
+          from={cmp.from}
+          to={cmp.to}
+          onClose={() => setCmp(null)}
+          onRestore={(id) => {
+            setCmp(null);
+            void restoreOld(id);
+          }}
+        />
       )}
       {old && (
         <div className="banner" role="status" style={{ flexWrap: "wrap" }}>

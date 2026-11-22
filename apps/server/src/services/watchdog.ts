@@ -25,6 +25,7 @@ import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } fr
 import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
+import { dayFacts, dayLines } from "./weekly-summary.js";
 import { backoffGapMs, evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
 
 /** Why the Scrum Master is woken: the note lists the due flags. */
@@ -1035,6 +1036,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         openedAt: r.flag.openedAt,
       })),
       decisions: await ownerDecisions(companyId),
+      dayLines: dayLines(await dayFacts(db, companyId, t)),
     });
     if (!s) return false;
     if (recordOnly) {

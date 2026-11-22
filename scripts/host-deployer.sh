@@ -1535,7 +1535,7 @@ write_staging_status() { # result message
 staging_log_tail() { # offset
   [[ -f $LOG ]] || return 0
   tail -c +"$(($1 + 1))" "$LOG" 2>/dev/null | tail -n 30 | cut -c1-200 \
-    | sed -E 's/((token|secret|password|passwd|api[_-]?key|authorization|bearer|credential)[A-Za-z0-9_-]*[=: ]+)[^ ]+/\1[redacted]/Ig; s/(ghp_|github_pat_|sk-|xox[bp]-)[A-Za-z0-9_-]+/[redacted]/g; s#(https?://)[^/@ ]+@#\1[redacted]@#g' \
+    | sed -E 's/(authorization[=: ]+)(bearer|basic)[ ]+[^ ]+/\1[redacted]/Ig; s/(bearer[ ]+)[^ ]+/\1[redacted]/Ig; s/((token|secret|password|passwd|api[_-]?key|authorization|bearer|credential)[A-Za-z0-9_-]*[=: ]+)[^ ]+/\1[redacted]/Ig; s/(ghp_|github_pat_|sk-|xox[bp]-)[A-Za-z0-9_-]+/[redacted]/g; s#(https?://)[^/@ ]+@#\1[redacted]@#g' \
     | tail -c 2500 || true
 }
 staging_done() { log "staging $1: $2"; write_staging_status "$1" "$2"; return 0; } # result message: record the outcome; the tick goes on

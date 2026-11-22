@@ -1,5 +1,5 @@
 {
-  "id": "3f0b1c5a-c521-420c-8235-a0f5e42aef18",
+  "id": "3334082f-f5eb-4204-a92b-583a1cb8f983",
   "prevId": "a2ca9326-4981-4aca-b4ca-d7e6aea74687",
   "version": "7",
   "dialect": "postgresql",
@@ -809,155 +809,6 @@
             "id"
           ],
           "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.alert_destinations": {
-      "name": "alert_destinations",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "type": {
-          "name": "type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "secret_id": {
-          "name": "secret_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "kinds": {
-          "name": "kinds",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "allow_private": {
-          "name": "allow_private",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "last_failure_note": {
-          "name": "last_failure_note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_failed_at": {
-          "name": "last_failed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failing_since": {
-          "name": "failing_since",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "alert_destinations_secret_id_secrets_id_fk": {
-          "name": "alert_destinations_secret_id_secrets_id_fk",
-          "tableFrom": "alert_destinations",
-          "tableTo": "secrets",
-          "columnsFrom": [
-            "secret_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.alert_retries": {
-      "name": "alert_retries",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "destination_id": {
-          "name": "destination_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "payload": {
-          "name": "payload",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "due_at": {
-          "name": "due_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "alert_retries_destination_id_alert_destinations_id_fk": {
-          "name": "alert_retries_destination_id_alert_destinations_id_fk",
-          "tableFrom": "alert_retries",
-          "tableTo": "alert_destinations",
-          "columnsFrom": [
-            "destination_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -2144,6 +1995,12 @@
         },
         "hold_starts_quick_checks_queued": {
           "name": "hold_starts_quick_checks_queued",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "hold_starts_owner_waiting": {
+          "name": "hold_starts_owner_waiting",
           "type": "integer",
           "primaryKey": false,
           "notNull": false

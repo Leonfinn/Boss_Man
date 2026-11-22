@@ -11,6 +11,7 @@ import { agentAvatars, agentNotes, agents } from "../db/schema.js";
 import { AgentError, type agentsService } from "../services/agents.js";
 import { NOTE_LIMITS, NoteError, type notesService } from "../services/agent-notes.js";
 import { logoType } from "../services/image-type.js";
+import { permissionsForRun } from "../services/permission-store.js";
 import { RunError, type runsService } from "../services/runs.js";
 import type { schedulerService } from "../services/scheduler.js";
 import { sendLogo } from "../portal.js";
@@ -148,6 +149,8 @@ export function agentRunsRoutes(
     const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);
     return runsSvc.transcript(id, q).catch(runErrors(reply));
   });
+  // What each permission rule decided in one run (BOS-2185), kept 60 days.
+  owner.get("/api/runs/:id/permissions", async (req) => permissionsForRun(db, IdParam.parse(req.params).id));
   // End every run going now, in every company (BOS-837): the owner's emergency stop, behind the Runs page's confirm.
   owner.post("/api/runs/cancel-all", async () => runsSvc.cancelAll());
   owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));

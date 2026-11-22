@@ -32,6 +32,7 @@ import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
 import { sweepStepGuard } from "./sweep-step-guard.js";
+import { spendRateSweep } from "./spend-rate.js";
 import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
 import { HELD_AGENT } from "./fair-share.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, NOTHING_STARTABLE_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
@@ -1725,6 +1726,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
   const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
   const idleSlots30 = idleSlotsSweep(db, { freeSlots: opts.freeSlots, alert: opts.alert as (input: Record<string, unknown>) => Promise<unknown>, headOf: opts.branchHead, now });
+  const spendRate = spendRateSweep(db, { alert: opts.alert, now });
   // `run` is a property so a test can stand in for one sweep step and watch the pass around it (BOS-611).
   type Pass = { holdWakes: number; goalChecks: { raised: number }; portalHolds: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>>; /** Background steps that threw in this pass (BOS-2160). */ failedSteps: string[] };
 
@@ -1771,6 +1773,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const idleSlotsResult = held ? { woken: 0 } : await idleSlots(t);
       // BOS-1881: free slots outnumbering startable Ready tickets for 30 minutes tells the CEO once; before the signed-off sweep below, so it can name what that sweep will release.
       if (!held) await step("idle slots alert", () => idleSlots30.run(), undefined);
+      // BOS-2173: a day's spend over 3 times the usual rate tells the owner once a day.
+      await step("spend rate alert", () => spendRate.run(), undefined);
       // Silent runs, reviews that end without a verdict, and causes left unproven (BOS-314): these run whether or not the watchdog is on.
       const progress = held ? { steered: 0, flagged: 0, reviewsMoved: 0, unproven: 0 } : await progressSweep(db, t, { wake: (input) => opts.wake(input as WakeInput), alert: opts.alert, inCheckQueue: async (runId, silentMs) => silentMs < limits.checkQueueAfterMs && !!(await busyInCommand(runId))?.checkScript });
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);

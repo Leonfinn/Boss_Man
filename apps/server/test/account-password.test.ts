@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { owners, sessions } from "../src/db/schema.js";
+import { activity, companies, notifications, owners, sessions } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -62,6 +62,55 @@ describe("change password", () => {
     expect((await login(NEW)).statusCode).toBe(429);
     const [row] = await t.db.select().from(owners);
     expect(row!.passwordHash).not.toContain(NEW);
+  });
+});
+
+// BOS-2177: ten wrong sign-ins tell the owner once, with the address and no guess in the text.
+describe("sign-in lockout notice", () => {
+  it("raises one alert and one activity line, and none for further refused attempts", async () => {
+    await signIn(t);
+    await t.db.insert(companies).values({ name: "Example Co" });
+    const wrong = (i: number) => t.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: `secret guess ${i}` }, remoteAddress: "192.168.1.50" });
+    for (let i = 0; i < 10; i++) expect((await wrong(i)).statusCode).toBe(401);
+    expect((await wrong(10)).statusCode).toBe(429);
+    expect((await wrong(11)).statusCode).toBe(429);
+    // The notice is sent without waiting for it, so wait for the activity line.
+    await vi.waitFor(async () => expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(1), { timeout: 5000 });
+    const notes = (await t.db.select().from(notifications)).filter((n) => n.title.startsWith("Sign-in was locked"));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.title).toContain("192.168.1.50");
+    expect(notes[0]!.body).toContain("Settings → Account");
+    const lines = await t.db.select().from(activity).where(eq(activity.kind, "security"));
+    expect(JSON.stringify([notes, lines])).not.toContain("secret guess");
+  });
+
+  it("raises nothing for a correct sign-in, and says the username was locked when it locks from several addresses", async () => {
+    await signIn(t);
+    await t.db.insert(companies).values({ name: "Example Co" });
+    const from = (ip: string, password: string) => t.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password }, remoteAddress: ip });
+    expect((await from("192.168.1.60", OLD)).statusCode).toBe(200);
+    expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(0);
+    for (let i = 0; i < 10; i++) await from(`192.168.1.${100 + i}`, `secret guess ${i}`);
+    await vi.waitFor(async () => expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(1), { timeout: 5000 });
+    const notes = (await t.db.select().from(notifications)).filter((n) => n.title.includes("was locked"));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.title).toContain("the owner's username was locked");
+  });
+
+  it("BOS-2207: a made-up username is not called the owner's, and only 3 notices go out across addresses", async () => {
+    await signIn(t);
+    await t.db.insert(companies).values({ name: "Example Co" });
+    const from = (ip: string, name: string) => t.app.inject({ method: "POST", url: "/api/login", payload: { username: name, password: "secret guess" }, remoteAddress: ip });
+    // Five made-up usernames, each locked from ten different addresses.
+    for (let n = 0; n < 5; n++) for (let i = 0; i < 10; i++) await from(`192.168.${n}.${100 + i}`, `made-up-${n}`);
+    await vi.waitFor(async () => expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(3), { timeout: 5000 });
+    const notes = (await t.db.select().from(notifications)).filter((n) => n.title.includes("was locked"));
+    expect(notes).toHaveLength(3);
+    for (const n of notes) {
+      expect(n.title).toContain("a username was locked");
+      expect(n.title).not.toContain("owner's");
+    }
+    expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(3);
   });
 });
 

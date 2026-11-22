@@ -107,7 +107,7 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   );
 }
 
-export function ChatPage({ companies, companyId, agentId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
+export function ChatPage({ companies, companyId, agentId, messageId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; /** BOS-2192: a search result's message, scrolled to once loaded. */ messageId?: string; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
   const team = threads.data ?? [];
@@ -171,9 +171,36 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
   const latest = items.at(-1)?.createdAt;
   useEffect(() => setBusy(state !== "idle"), [state]);
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
+  // A search result names one message (BOS-2192): scroll to it once it has loaded. If the conversation
+  // loaded without it (older than the newest 200 shown), say so and open at the end as usual.
+  const target = useRef(messageId);
+  const [olderThanShown, setOlderThanShown] = useState(false);
+  // The palette stays mounted over this page and the page isn't keyed by route, so a result picked while a
+  // chat is open (same chat or another agent's) arrives as a new messageId on this same instance: re-arm.
+  // Declared before the scroll effect so it runs first in the same commit.
   useEffect(() => {
+    target.current = messageId;
+    setOlderThanShown(false);
+  }, [messageId, current?.id]);
+  // Only this conversation's data counts: right after a switch the previous agent's page is still in
+  // chat.data for one render, and the target missing from it must not read as "older than shown".
+  const loaded = !!current && chat.data?.agentId === current.id;
+  useEffect(() => {
+    const want = target.current;
+    if (want) {
+      const el = document.getElementById(`chat-msg-${want}`);
+      if (el) {
+        target.current = undefined;
+        el.scrollIntoView({ block: "center" });
+        return;
+      }
+      if (!loaded) return;
+      target.current = undefined;
+      setOlderThanShown(true);
+    }
+    // Keyed on the polled newest page (BOS-2167), so loading older messages doesn't jump to the end.
     end.current?.scrollIntoView({ block: "end" });
-  }, [newest.length, newest.at(-1)?.id, current?.id]);
+  }, [newest.length, newest.at(-1)?.id, current?.id, loaded, messageId]);
   useEffect(() => {
     if (!current || !latest) return;
     markSeen(current.id, latest);
@@ -283,6 +310,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                 )}
                 {!chat.data && chat.error && <LoadError what="this conversation" message={chat.error.message} onRetry={chat.reload} />}
                 {!chat.data && !chat.error && <Loader label="Loading the conversation" size={16} />}
+                {olderThanShown && <p className="muted">The message you searched for is older than the messages shown here, so the chat opens at its newest. Use "Load older messages" at the top to go back to it.</p>}
                 {items.length === 0 && chat.data && (
                   <p className="muted">
                     {current.role === "ceo" || current.duty === "assistant" ? 'Try: "Add rate limiting to the login API before the beta, after the auth refactor."' : `Ask ${current.name} about their work, or for something to go on the board.`}
@@ -291,7 +319,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                 {items.map((m, i) => {
                   const trace = m.trace;
                   return (
-                    <div key={m.id} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}`}>
+                    <div key={m.id} id={`chat-msg-${m.id}`} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}${m.id === messageId ? " found" : ""}`}>
                       {trace && m.role === "assistant" && (
                         <ThinkingTrace
                           trace={trace}
