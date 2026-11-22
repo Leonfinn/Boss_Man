@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpenIssues } from "../src/components/OpenIssues";
 import { actionHeading, actionSummary, ScrumMasterLog, type SmAction } from "../src/components/ScrumMasterLog";
-import { healthLine } from "../src/components/WatchdogHealth";
+import { healthLine, WatchdogHealth } from "../src/components/WatchdogHealth";
 
 afterEach(() => {
   cleanup();
@@ -34,6 +34,55 @@ describe("watchdog health line (BOS-60)", () => {
     const line = healthLine({ ...on, settings: { enabled: true, recordOnly: true } }, now);
     expect(line.text).toBe("Watchdog: record only (not acting) · last check 3 min ago · 2 issues being handled");
     expect(line.tone).toBe("");
+  });
+});
+
+describe("a failed load says so, with Retry (BOS-2249)", () => {
+  const failing = () => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } })));
+
+  it("Open now shows the error and Retry instead of loading for ever", async () => {
+    failing();
+    render(<OpenIssues companyId="c1" />);
+    expect(await screen.findByText(/Couldn't load the open issues/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.queryByText("Loading open issues")).toBeNull();
+  });
+
+  it("keeps the last good rows when a later poll fails", async () => {
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        n += 1;
+        if (n > 1) return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify([{ id: "f1", source: "flag", ticketId: "t1", ticketRef: "BOS-149", ticketTitle: "Fix the merge", warning: "w", rule: null, holder: "ceo", since: "2026-10-27T09:16:00Z", done: [], nextAt: null, nextText: "Checks again", openedAt: "2026-10-27T09:00:00Z" }]), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    render(<OpenIssues companyId="c1" />);
+    expect(await screen.findByText("Fix the merge")).toBeTruthy();
+    // Returning to the tab polls again; that poll fails.
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.waitFor(() => expect(n).toBeGreaterThan(1));
+    await new Promise((r) => setTimeout(r, 50)); // test-lines-ok: let the failed poll settle; the assertion is that nothing changes
+    expect(screen.getByText("Fix the merge")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load/)).toBeNull();
+  });
+
+  it("the log shows the error and Retry, in full and folded", async () => {
+    failing();
+    render(<ScrumMasterLog companyId="c1" />);
+    expect(await screen.findByText(/Couldn't load the log/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    cleanup();
+    render(<ScrumMasterLog companyId="c1" ticketId="t1" folded />);
+    expect(await screen.findByText(/Couldn't load the log/)).toBeTruthy();
+  });
+
+  it("the health line shows the error and Retry instead of vanishing", async () => {
+    failing();
+    render(<WatchdogHealth companyId="c1" />);
+    expect(await screen.findByText(/couldn't load its state/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 });
 

@@ -4,6 +4,7 @@ import { api } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "../pages/Runs";
 import { Loader } from "./Loader";
+import { LoadError } from "./LoadError";
 
 export type SmAction = {
   id: string;
@@ -164,7 +165,7 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded }: { compa
           {!!rows.length && <small className="muted">{smSummary(groups)}</small>}
         </button>
         {error && <p role="alert" className="error">{error}</p>}
-        {!log.data ? <Loader label="Loading the log" /> : !rows.length ? <p className="muted">Nothing yet. The Scrum Master's actions appear here with the reason for each.</p> : null}
+        {!log.data ? log.error ? <LoadError what="the log" message={log.error.message} onRetry={log.reload} /> : <Loader label="Loading the log" /> : !rows.length ? <p className="muted">Nothing yet. The Scrum Master's actions appear here with the reason for each.</p> : null}
         <ul style={{ margin: 0, listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
           {(all ? groups : shown).map((g) => (
             <li key={g.key}>
@@ -190,7 +191,7 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded }: { compa
     <section aria-label="Scrum Master activity">
       {heading && <h2 className="section-label">{heading}</h2>}
       {error && <p role="alert" className="error">{error}</p>}
-      {!log.data ? <Loader label="Loading the log" /> : !rows.length ? <p className="muted">Nothing yet. The Scrum Master's actions appear here with the reason for each.</p> : null}
+      {!log.data ? log.error ? <LoadError what="the log" message={log.error.message} onRetry={log.reload} /> : <Loader label="Loading the log" /> : !rows.length ? <p className="muted">Nothing yet. The Scrum Master's actions appear here with the reason for each.</p> : null}
       <ul style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
         {groups.map((g) =>
           g.issueKey ? (
