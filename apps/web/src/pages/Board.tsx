@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { FilterPanel, useIsPhone } from "../components/FilterPanel";
-import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
+import { buildCsv, download } from "../csv";
+import { api, today, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { BULK_TICKET_MAX, isLiveCheckWait, ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
@@ -559,6 +560,14 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
+/** The Board's "Download CSV": one row per ticket shown, in the order the lanes show them. */
+export function boardToCsv(rows: Array<{ t: BoardTicket; column: string; assignee: string; ref: string }>): string {
+  return buildCsv(
+    ["Reference", "Title", "Column", "Assignee", "Risk", "Size", "Feature", "Priority 1", "Last activity"],
+    rows.map(({ t, column, assignee, ref }) => [ref, t.title, column, assignee, t.risk ?? "", t.size ?? "", t.featureTitle ?? "", t.urgentByOwner ? "yes" : "no", t.lastActivityAt ?? ""]),
+  );
+}
+
 /** BOS-2193: what the Select bar can do to every ticket it holds. Moves to In progress, Review or Done are not offered. */
 export type BulkAction = { type: "move"; state: "backlog" | "ready" | "blocked" } | { type: "assign"; assigneeAgentId: string | null } | { type: "priority"; on: boolean };
 
@@ -937,6 +946,19 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   });
   const heldCount = lanes.find((l) => l.held)?.tickets.length ?? 0;
   const shownTotal = lanes.reduce((n, l) => n + l.tickets.filter(passes).length, 0);
+  const downloadCsv = () => {
+    const seen = new Set<string>();
+    const rows = lanes.flatMap((l) =>
+      l.tickets.filter(passes).flatMap((t) => {
+        if (seen.has(t.id)) return [];
+        seen.add(t.id);
+        const a = t.assigneeAgentId ? companies.flatMap((c) => c.agents).find((x) => x.id === t.assigneeAgentId) : undefined;
+        return [{ t, column: l.col.name, assignee: a ? a.name : t.assignedToOwner ? "You" : "", ref: (t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "") ?? "" }];
+      }),
+    );
+    const slug = (current?.name ?? "project").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "project";
+    download(`board-${slug}-${today()}.csv`, boardToCsv(rows));
+  };
   // BOS-1909: the "Where work stands" strip. Counts follow the filters and the search, like the lanes, so they match what is shown.
   const cols = board.data?.columns ?? [];
   const progressCol = cols.find((c) => c.systemState === "in_progress");
@@ -1248,6 +1270,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {current && view !== "features" && (
             <button type="button" className="btn" aria-pressed={selecting} onClick={() => (selecting ? stopSelecting() : setSelecting(true))}>
               {selecting ? "Done selecting" : "Select"}
+            </button>
+          )}
+          {current && view !== "features" && (
+            <button type="button" className="btn" disabled={!board.data || shownTotal === 0} onClick={downloadCsv}>
+              Download CSV
             </button>
           )}
           {!phone && chips.map((c) => (
