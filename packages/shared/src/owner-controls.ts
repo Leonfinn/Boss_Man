@@ -330,7 +330,7 @@ export const OWNER_FIELDS = {
     // Settings → Checks: rebuild a waiting merge on a moved main while it waits (merge_retarget; BOS-1344/1820/1821, BOS-1900).
     "Rebuild waiting merges when main moves",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
-    "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
+    "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory limit per check (GB, optional)",
     // Settings → Checks: each machine's split between merge checks and quick checks (BOS-1602).
     "Takes", "Kept for merge checks (0 to",
     // Workspace disk.
