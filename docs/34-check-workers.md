@@ -52,11 +52,13 @@ The token never goes into the container's environment (a check could read it the
 These are lines already in the file; change them in place. None has a host-specific default.
 
 - `BOSSMAN_CHECK_SLOTS`: checks at once. Boss Man's per-worker setting can lower it, never raise it.
-- `mem_limit` and `memswap_limit`: memory for the container (8g to start).
+- `mem_limit` and `memswap_limit`: memory for the container. Each check peaks near 5 GB (measured 3.8 to 4.7 GB), plus 2 GB for the machine itself: **8g for 1 check, 12g for 2 checks**, 17g for 3. The file Add a check worker gives you is already sized for the checks at once you chose. Keep the two lines equal.
 - `cpuset` (pin to CPU threads, such as `"8-15"`) or `cpus` (a hard cap): remove the `#` in front. A cpuset is preferred, because test tools then size themselves to those threads.
 - **Test threads per check** and **Memory per check, in GB** are set per worker in the Add a check worker form, not in the file. Both are optional; left empty, the machine decides.
 
-Sizing rule of thumb: a check wants about 4 threads and 4 GB when it is busy; leave the host enough to do its own job.
+Sizing rule of thumb: a check wants about 4 threads and 5 GB at its peak; leave the host enough to do its own job.
+
+**The worker checks its own memory** (BOS-2217). On every connect it tells Boss Man how much memory its machine has: the container's `mem_limit` when there is one, otherwise the host's memory. In Settings → Server and runner → Limits and checks → Checks, a worker whose **checks at once × Memory per check** is more than that shows a red memory warning on its card, and the same warning appears under the fields as you edit them. With Memory per check left empty, 5 GB per check is assumed. It is a warning, not a refusal, because you may be about to raise the container's limit; but act on it: when the numbers need more than the machine has, the machine runs out of memory before any check's own limit can act, and checks are stopped part-way. The worker also logs the same warning at start-up. Fix it by lowering Checks at once or Memory per check, or by giving the machine more memory. A worker older than this change reports no memory and shows no warning until it is redeployed once.
 
 ## Which checks each machine takes
 
@@ -95,7 +97,7 @@ Create a **custom app** from YAML and paste the copied file; no shell is needed.
 |---|---|
 | Checks at once (`BOSSMAN_CHECK_SLOTS`) | 2 |
 | `cpuset` | `"8-15"` (cores 4 to 7, both threads each) |
-| `mem_limit` and `memswap_limit` | `14g` |
+| `mem_limit` and `memswap_limit` | `12g` for 2 checks (never more than the box really has free) |
 | Repos | the named volume, with Docker's storage on an SSD pool if the box has one (confirm on the TrueNAS Storage page) |
 
 Expect each check to run about 40% slower than on the main server when the box is busy, and 35 to 45% extra load on the NAS while checks are queued.

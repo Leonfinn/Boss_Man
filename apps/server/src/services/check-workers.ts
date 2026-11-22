@@ -11,7 +11,7 @@
 //    company it serves.
 import { randomBytes } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import { PROTOCOL_VERSION, toolchainDifferences, toolchainMissing, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
+import { PROTOCOL_VERSION, checkMemoryWarning, toolchainDifferences, toolchainMissing, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { checkWorkers, companies, runners } from "../db/schema.js";
@@ -47,7 +47,11 @@ export type Readiness = { ok: true; limit: number } | { ok: false; reason: strin
 /** How many checks a worker may run at once: the owner's number, never more than the worker says it can run. */
 export const workerLimit = (w: Pick<CheckWorker, "slots" | "reportedSlots">) => Math.max(1, Math.min(w.slots, w.reportedSlots ?? w.slots, MAX_CHECK_SLOTS));
 
-const limitsOf = (w: Pick<CheckWorker, "checkThreads" | "checkMemoryMb">): CheckLimits | undefined =>
+/** BOS-2217: a warning when the checks at once × memory per check are more than the machine says it has; null when they fit or it has not said. */
+export const workerMemoryWarning = (w: Pick<CheckWorker, "slots" | "reportedSlots" | "checkMemoryMb" | "reportedMemoryMb">) =>
+  checkMemoryWarning({ slots: workerLimit(w), perCheckMb: w.checkMemoryMb, machineMb: w.reportedMemoryMb });
+
+const limitsOf =(w: Pick<CheckWorker, "checkThreads" | "checkMemoryMb">): CheckLimits | undefined =>
   w.checkThreads || w.checkMemoryMb ? { ...(w.checkThreads ? { threads: w.checkThreads } : {}), ...(w.checkMemoryMb ? { memoryMb: w.checkMemoryMb } : {}) } : undefined;
 
 function validate(s: Partial<WorkerSettings>) {
@@ -165,10 +169,10 @@ export function checkWorkersService(db: Db) {
     },
 
     /** Records a hello: last seen, image commit and version, the slots and features it reports. */
-    async touch(id: string, hello: { imageCommit?: string; toolchain?: { fingerprint: string; tools: Record<string, string> }; imageVersion: string | null; checkSlots?: number; features?: string[] }, now = new Date()): Promise<CheckWorker | null> {
+    async touch(id: string, hello: { imageCommit?: string; toolchain?: { fingerprint: string; tools: Record<string, string> }; imageVersion: string | null; checkSlots?: number; memoryMb?: number; features?: string[] }, now = new Date()): Promise<CheckWorker | null> {
       const [row] = await db
         .update(checkWorkers)
-        .set({ lastSeenAt: now, imageCommit: hello.imageCommit ?? null, toolchain: hello.toolchain ?? null, imageVersion: hello.imageVersion, reportedSlots: hello.checkSlots ?? null, features: hello.features ?? [] })
+        .set({ lastSeenAt: now, imageCommit: hello.imageCommit ?? null, toolchain: hello.toolchain ?? null, imageVersion: hello.imageVersion, reportedSlots: hello.checkSlots ?? null, reportedMemoryMb: hello.memoryMb ?? null, features: hello.features ?? [] })
         .where(eq(checkWorkers.id, id))
         .returning();
       return row ?? null;
@@ -232,6 +236,9 @@ export function checkWorkersService(db: Db) {
         connected: connected.has(w.id),
         slots: w.slots,
         reportedSlots: w.reportedSlots,
+        reportedMemoryMb: w.reportedMemoryMb,
+        // BOS-2217: shown in the Checks panel; a warning, not a refusal, because the machine's figure can be a container limit the owner is about to raise.
+        memoryWarning: workerMemoryWarning(w),
         limit: workerLimit(w),
         takes: workerPolicy(w).takes,
         mergeKept: workerPolicy(w).mergeKept,

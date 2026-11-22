@@ -49,8 +49,11 @@ services:
     # Same hardening as the runner: no extra privileges, never the Docker socket.
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 8g
-    memswap_limit: 8g
+    # Memory for the whole container: each check peaks near 5 GB, plus 2 GB for the machine itself. 1 check: 8g. 2 checks: 12g.
+    # Change this with BOSSMAN_CHECK_SLOTS above (5g per check + 2g, never below 8g), and the machine must really have it.
+    # The worker tells Boss Man how much it has, and Settings → Checks warns when slots × memory per check is over it.
+    mem_limit: 12g
+    memswap_limit: 12g
     # If the host runs out of memory, the worker goes first, not the host's other services.
     oom_score_adj: 500
     pids_limit: 4096

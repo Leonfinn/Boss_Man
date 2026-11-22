@@ -1160,6 +1160,8 @@ export const checkWorkers = pgTable("check_workers", {
   toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
   imageVersion: text("image_version"),
   reportedSlots: integer("reported_slots"),
+  /** BOS-2217: the memory the machine reports it has for checks, in MB (its container limit, or the host's memory when unlimited); null from an older worker. */
+  reportedMemoryMb: integer("reported_memory_mb"),
   features: jsonb("features").$type<string[]>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   createdAt: createdAt(),
