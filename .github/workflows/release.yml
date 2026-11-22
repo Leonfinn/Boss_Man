@@ -22,8 +22,11 @@ on:
 
 permissions: {}
 
+# Its own group (BOS-2302): it used to share publish-images, where GitHub cancels a waiting run when a third arrives,
+# so a main publish could silently drop the owner's Release press. It needs no publish to be running: the check step
+# below fails loudly, saying what to wait for, when the commit's images are not there yet.
 concurrency:
-  group: publish-images
+  group: release-images
   cancel-in-progress: false
 
 jobs:

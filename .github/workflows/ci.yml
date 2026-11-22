@@ -25,7 +25,7 @@ on:
 # A group holds one running and one waiting run, and GitHub cancels the waiting one when a third arrives, even with
 # cancel-in-progress off (BOS-2283: 50 main runs cancelled in 54 hours, each also skipping its Publish images run).
 # So main's group is per commit and event: every main run starts on its own, in parallel when merges land close
-# together. Pull requests and bossman branches keep one group per ref.
+# together. publish.yml groups per commit too, and release.yml has its own group, for the same slot rule. Pull requests and bossman branches keep one group per ref.
 concurrency:
   group: ci-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/bossman') }}
