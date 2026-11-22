@@ -206,7 +206,12 @@ export function judgePermission(question: string, command: string | null, ownFol
   // BOS-2244: a git command (`git -C "$R" grep x`) or a `cd "$R"` is read with a self-set literal variable replaced by its value, so it
   // is judged as the same command typed out. Only a variable set once, to a plain value, before its first use is replaced (the rule
   // above), and only one whose value is an absolute path: a relative one (`f=a.json; git diff -- $f`) stays an unknown word (BOS-725).
-  const resolveAbs = (t: string): string => t.replace(/\$\{?(\w+)\}?/g, (all, name: string) => (name !== "HOME" && /^\//.test(assigned.get(name) ?? "") ? assigned.get(name)! : all));
+  // Only `$NAME` and `${NAME}` are replaced. Any other `${NAME...}` (`${R/a/b}`, `${R%x}`, `${R#x}`, `${R:+x}`, `${R:0:3}`) changes the
+  // value when the shell runs it, so it stays unresolved and is denied as before (Jane's review of BOS-2244).
+  const resolveAbs = (t: string): string => t.replace(/\$(?:\{(\w+)\}|(\w+))/g, (all, b: string | undefined, p: string | undefined) => {
+    const name = (b ?? p)!;
+    return name !== "HOME" && /^\//.test(assigned.get(name) ?? "") ? assigned.get(name)! : all;
+  });
   if (gitDenied(resolveAbs(c), (d) => dirOk(d, inOwn), writeOk)) return result("outside");
   // A sed script is not a path, but only a script that provably can't run commands or write files is set aside as text:
   // `e` (flag or command), `w`/`W`/`r`/`R` (any file), or a script that can't be read means the write is not placed.

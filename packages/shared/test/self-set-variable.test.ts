@@ -30,6 +30,26 @@ describe("a self-set literal variable is read like its typed-out form (BOS-2244 
     `for R in /etc ${CHECKOUT}; do git -C "$R" grep -n x; done`,
     `R=/etc; cd "$R" && git --no-pager log`,
   ])("keeps today's Deny: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+
+  // Jane's review: a parameter expansion other than `$R` and `${R}` changes the value, so it must stay unresolved.
+  const OTHER = "11111111-2222-4333-8444-555555555555";
+  const expansions = [
+    `\${R/${OWN}/${OTHER}}`,
+    "${R%/*/*/*}/other",
+    "${R#/x}",
+    "${R:+/x}",
+    "${R:0:3}",
+  ];
+  const forms: ((e: string) => string)[] = [
+    (e) => `R=${CHECKOUT}/a/b; git -C "${e}" commit -am x`,
+    (e) => `R=${CHECKOUT}/a/b; git -C "${e}" grep -n x`,
+    (e) => `R=${CHECKOUT}/a/b; cd "${e}" && git log > out.txt`,
+    (e) => `R=${CHECKOUT}/a/b; cd "${e}" && rm -rf src`,
+    (e) => `R=${CHECKOUT}/a/b; "${e}/run.sh"`,
+  ];
+  for (const form of forms) {
+    it.each(expansions)(`${form("X").slice(0, 40)}... with %s is denied`, (e) => expect(judge(form(e)).verdict).toBe("deny"));
+  }
 });
 
 describe("a program run through a variable the command set itself is refused with a rewrite (BOS-2244 b)", () => {
