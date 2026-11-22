@@ -489,6 +489,51 @@ function folderOpen(over: OpenFolders, key: string, currentFolder: string): bool
   return over[key] ?? `${currentFolder}/`.startsWith(`${key.slice(1)}/`);
 }
 
+const RECENT_KEY = "wiki-recent-open";
+
+/** The 10 pages changed last, newest first, above the folders. Collapsible; the choice is kept in this browser. */
+function RecentlyChanged({ pages, companyId, current, onPick }: { pages: PageRow[]; companyId: string; current: string | undefined; onPick: () => void }) {
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(RECENT_KEY) !== "closed";
+    } catch {
+      return true;
+    }
+  });
+  const recent = [...pages].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 10);
+  if (recent.length === 0) return null;
+  return (
+    <details
+      className="wiki-recent"
+      open={open || undefined}
+      onToggle={(e) => {
+        const now = (e.target as HTMLDetailsElement).open;
+        if (now === open) return;
+        setOpen(now);
+        try {
+          localStorage.setItem(RECENT_KEY, now ? "open" : "closed");
+        } catch {
+          // Private mode: the choice just isn't kept.
+        }
+      }}
+    >
+      <summary>Recently changed</summary>
+      <ul>
+        {recent.map((p) => (
+          <li key={p.id}>
+            <a href={`#/wiki/${companyId}/${p.slug}`} aria-current={p.slug === current ? "page" : undefined} onClick={onPick} title={p.title}>
+              <span className="t">{p.title}</span>
+              <small>
+                {p.folder ? `${p.folder} · ` : ""}changed {when(p.updatedAt)} by {p.updatedBy ?? "you"}
+              </small>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 function TreeList({ folder, companyId, current, currentFolder, openAll, over, onToggle, onPick }: { folder: Folder; companyId: string; current: string | undefined; currentFolder: string; openAll: boolean; over: OpenFolders; onToggle: (key: string, open: boolean) => void; onPick: () => void }) {
   return (
     <ul>
@@ -634,6 +679,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
             {list.error && !away(list.error) && <p className="error" role="alert">Couldn't load the page list: {list.error.message}</p>}
             {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "Only the company brief so far."}</p>}
             <SemanticSettings companyId={company.id} />
+            {!q.trim() && <RecentlyChanged pages={pages} companyId={company.id} current={creating === null ? pageSlug : undefined} onPick={() => (setCreating(null), closeDrawer())} />}
             <TreeList
               folder={tree(pages)}
               companyId={company.id}
