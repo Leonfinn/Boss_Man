@@ -9,7 +9,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { costEvents, decisions, runs, tickets, wakes } from "../src/db/schema.js";
-import { WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
+import { reasonsOfClass, WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
 import type { Limits } from "../src/services/scheduler.js";
 import { HELD_COMPANY } from "../src/services/fair-share.js";
 
@@ -396,5 +396,27 @@ describe("wake classes: callers of wake() and notify()", () => {
       .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts" && f !== "services/runner-watch.ts" && f !== "services/deploy-wait.ts" && f !== "services/merge-jam.ts");
     const unlisted = callers.filter((f) => !(f in CALLERS));
     expect(unlisted).toEqual([]);
+  });
+});
+
+describe("wake classes: reasonsOfClass", () => {
+  it("returns each class its own reasons", () => {
+    expect(reasonsOfClass("waiting")).toEqual(expect.arrayContaining(["decision", "alert", "review requested", "woken by owner", "priority watch", "merge line stalled"]));
+    expect(reasonsOfClass("scheduled")).toEqual(expect.arrayContaining(["ticket watch", "check due", "resume", "watchdog", "github feedback"]));
+    expect(reasonsOfClass("agent")).toEqual(expect.arrayContaining(["nudge", "assigned", "unblocked", "feedback"]));
+    // Only the table's own reasons, never another class's.
+    expect(reasonsOfClass("waiting")).not.toContain("nudge");
+    expect(reasonsOfClass("scheduled")).not.toContain("decision");
+    expect(reasonsOfClass("agent")).not.toContain("check due");
+  });
+
+  it("puts every reason in exactly one class, so none is lost or counted twice", () => {
+    const all = [reasonsOfClass("waiting"), reasonsOfClass("scheduled"), reasonsOfClass("agent")].flat();
+    expect(all.slice().sort()).toEqual(Object.keys(WAKE_CLASS).sort());
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("gives an unknown class no reasons", () => {
+    expect(reasonsOfClass("not-a-class" as never)).toEqual([]);
   });
 });

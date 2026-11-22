@@ -8,7 +8,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
-import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
+import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
 import { activeWaits, WAIT_RULES } from "../src/services/update-waits.js";
 
@@ -1820,5 +1820,39 @@ describe("early building hold (BOS-1955)", () => {
     await c.maintenance.step();
     expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(2);
     expect(c.fake.rolledBack).toEqual([]);
+  });
+});
+
+describe("holdCapAt and drainGoAheadAt: the times a hold ends by itself", () => {
+  const start = "2026-11-15T10:00:00Z";
+  const hold = (extra: Record<string, unknown> = {}) => ({ reason: "a server update", kind: "update", since: start, deadline: "2026-11-15T10:30:00Z", minutes: 30, ...extra }) as never;
+  const cap = new Date(Date.parse(start) + HOLD_CAP_MINUTES * MIN).toISOString();
+  const drain = new Date(Date.parse(start) + DRAIN_GO_AHEAD_MINUTES * MIN).toISOString();
+
+  it("holdCapAt: the cap from the start when the owner's deadline is sooner", () => {
+    expect(holdCapAt(hold()).toISOString()).toBe(cap);
+  });
+
+  it("holdCapAt: a later owner deadline is honoured past the cap", () => {
+    expect(holdCapAt(hold({ deadline: "2026-11-15T13:00:00Z" })).toISOString()).toBe("2026-11-15T13:00:00.000Z");
+  });
+
+  it("holdCapAt: the edge where the deadline reaches the cap exactly returns that moment", () => {
+    expect(holdCapAt(hold({ deadline: cap })).toISOString()).toBe(cap);
+  });
+
+  it("drainGoAheadAt: its own end from the start, when the deadline is sooner", () => {
+    expect(drainGoAheadAt(hold()).toISOString()).toBe(drain);
+    // The edge where the deadline reaches its own end exactly returns that moment.
+    expect(drainGoAheadAt(hold({ deadline: drain })).toISOString()).toBe(drain);
+  });
+
+  it("drainGoAheadAt: an owner's later wait is honoured", () => {
+    expect(drainGoAheadAt(hold({ deadline: "2026-11-15T13:00:00Z" })).toISOString()).toBe("2026-11-15T13:00:00.000Z");
+  });
+
+  it("drainGoAheadAt: 'Swap as soon as these finish' adds its own cap from when it was chosen", () => {
+    const swap = new Date(Date.parse(drain) + 10 * MIN).toISOString();
+    expect(drainGoAheadAt(hold({ swapWhenDone: true, swapWhenDoneAt: swap })).toISOString()).toBe(new Date(Date.parse(swap) + SWAP_WHEN_DONE_CAP_MINUTES * MIN).toISOString());
   });
 });
