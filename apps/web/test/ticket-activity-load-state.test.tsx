@@ -30,10 +30,11 @@ function server(state: { messages: "ok" | "fail" | "hang"; runs: "ok" | "fail" }
 }
 
 describe("ticket Activity load states (BOS-2278)", () => {
-  it("says Loading the conversation while the first load is pending", () => {
+  it("says Loading the conversation while the first load is pending", async () => {
     server({ messages: "hang", runs: "ok" });
     render(<TicketActivity ticketId="t-hang" assignee="Engineer" />);
-    expect(screen.getByRole("status")).toBeTruthy();
+    // The Loader shows its label after its own delay (about 1 s); this is a deadline, not a speed limit.
+    await screen.findByText(/Loading the conversation/, undefined, { timeout: 5000 });
     expect(screen.queryByText(/No activity yet/)).toBeNull();
   });
 
@@ -56,12 +57,33 @@ describe("ticket Activity load states (BOS-2278)", () => {
     await screen.findByText(/Couldn't load the runs/);
   });
 
-  it("keeps the draft in the reply box while the conversation failed", async () => {
-    server({ messages: "fail", runs: "ok" });
+  it("keeps the draft in the reply box while the conversation failed and after Retry", async () => {
+    const state = { messages: "fail" as "ok" | "fail", runs: "ok" as const };
+    server(state);
     render(<TicketActivity ticketId="t-draft" assignee="Engineer" />);
     await screen.findByText(/Couldn't load the conversation/);
     const box = screen.getAllByRole("textbox")[0] as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "my draft" } });
     await waitFor(() => expect((screen.getAllByRole("textbox")[0] as HTMLTextAreaElement).value).toBe("my draft"));
+    state.messages = "ok";
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("hello owner");
+    expect((screen.getAllByRole("textbox")[0] as HTMLTextAreaElement).value).toBe("my draft");
+  });
+
+  it("keeps the earlier messages when a later poll fails", async () => {
+    const state = { messages: "ok" as "ok" | "fail", runs: "ok" as const };
+    server(state);
+    render(<TicketActivity ticketId="t-poll" assignee="Engineer" />);
+    await screen.findByText("hello owner");
+    state.messages = "fail";
+    // Coming back to the tab polls again; that failed poll must not swap the messages for an error.
+    const fetchMock = vi.mocked(fetch);
+    const before = fetchMock.mock.calls.length;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before));
+    await waitFor(() => expect(fetchMock.mock.results.length).toBeGreaterThan(before));
+    expect(screen.getByText("hello owner")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load the conversation/)).toBeNull();
   });
 });
