@@ -12,6 +12,7 @@ import { and, asc, eq, gt, inArray, isNotNull, lte } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, ownerChatMessages, runs, tickets, wikiPages } from "../db/schema.js";
+import { liveWikiPage } from "./wiki.js";
 
 const clock = (d: Date) => `${d.toISOString().slice(11, 16)} UTC`;
 const REPORTS_MAX = 5;
@@ -71,7 +72,7 @@ async function dueFor(db: Db, companyId: string, agentId: string, before: Date):
 
 /** What the ticket produced and handed on, from the record: its wiki pages and the follow-ups opened on it. */
 async function factsOf(db: Db, t: Due): Promise<{ pages: string[]; followUps: string[] }> {
-  const pages = await db.select({ title: wikiPages.title, slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.ticketId, t.id), eq(wikiPages.companyId, t.companyId))).limit(REPORTS_MAX);
+  const pages = await db.select({ title: wikiPages.title, slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.ticketId, t.id), eq(wikiPages.companyId, t.companyId), liveWikiPage)).limit(REPORTS_MAX);
   const ups = await db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "follow_up")));
   const ids = ups.map((u) => (u.detail as { followUpTicketId?: string } | null)?.followUpTicketId).filter((x): x is string => !!x);
   const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));

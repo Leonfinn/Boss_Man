@@ -7,7 +7,7 @@ import { readWatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { liveTagOf, type TargetRules } from "./deploys.js";
 import { agentAvatars, agentSkills, agents, companies, deployTargets, policyRules, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
-import { slugify } from "./wiki.js";
+import { liveWikiPage, slugify } from "./wiki.js";
 
 export const EXPORT_FORMAT = "bossman-company/1";
 export type ExportOptions = { wiki: boolean; tickets: "none" | "open" | "all" };
@@ -145,7 +145,7 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
   );
 
   if (opts.wiki) {
-    const pages = await db.select().from(wikiPages).where(eq(wikiPages.companyId, companyId)).orderBy(asc(wikiPages.slug));
+    const pages = await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage)).orderBy(asc(wikiPages.slug));
     for (const p of pages) files[`wiki/${p.slug}.md`] = strToU8(`---\n${JSON.stringify({ slug: p.slug, title: p.title, folder: p.folder, ticket: p.ticketId })}\n---\n${p.body}`);
   }
 

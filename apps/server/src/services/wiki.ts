@@ -2,7 +2,7 @@
 // or by agents through the wiki tool, and every save keeps a revision. A page written for a
 // ticket shows on that ticket as something it produced, next to repo files and links an
 // agent attaches, so "see the evidence" opens the work itself.
-import { and, asc, desc, eq, ilike, inArray, like, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, isNotNull, isNull, like, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, ticketArtifacts, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -10,6 +10,22 @@ import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import type { WikiSemantic } from "./wiki-semantic.js";
 
 export const MAX_BODY = 200_000;
+
+/** A deleted page waits this long in the Deleted pages list before the daily clean-up removes it for good (BOS-2197). */
+export const BIN_DAYS = 30;
+
+/**
+ * The SQL condition for a page that is not deleted. Every reader of wiki_pages that shows or uses pages
+ * (list, search, export, brief, semantic search, ...) adds it, so a deleted page is gone from all of them (BOS-2197).
+ */
+export const liveWikiPage = isNull(wikiPages.deletedAt);
+
+/** The date a deleted page is removed for good, as the messages show it ("2026-12-21"). */
+const binUntil = (deletedAt: Date) => new Date(deletedAt.getTime() + BIN_DAYS * 86_400_000).toISOString().slice(0, 10);
+
+/** The refusal for a write to an address a deleted page still holds. */
+const binRefusal = (p: { slug: string; deletedAt: Date }) =>
+  new WikiError(409, `"${p.slug}" is in the Deleted pages list until ${binUntil(p.deletedAt)}. Ask the owner to restore it, or use another name.`);
 /** One appended entry: a log line, not a page. Keeps a single append cheap (BOS-430). */
 export const MAX_ENTRY = 20_000;
 
@@ -362,7 +378,7 @@ export async function missingPageNote(db: Db, companyId: string, text: string): 
   if (!wanted.length) return null;
   let rows: { slug: string }[];
   try {
-    rows = await db.select({ slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), inArray(wikiPages.slug, wanted)));
+    rows = await db.select({ slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage, inArray(wikiPages.slug, wanted)));
   } catch {
     return null;
   }
@@ -454,7 +470,8 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
 
   async function page(companyId: string, slug: string) {
     const p = await findPage(db, companyId, slug);
-    if (!p) throw new WikiError(404, "There's no wiki page with that name.");
+    // A deleted page reads as not found (BOS-2197); the owner's views reach it through deletedStub.
+    if (!p || p.deletedAt) throw new WikiError(404, "There's no wiki page with that name.");
     return p;
   }
 
@@ -478,7 +495,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     db
       .select({ id: wikiPages.id, slug: wikiPages.slug, title: wikiPages.title, body: wikiPages.body })
       .from(wikiPages)
-      .where(and(eq(wikiPages.companyId, companyId), ftsMatch(q)))
+      .where(and(eq(wikiPages.companyId, companyId), liveWikiPage, ftsMatch(q)))
       .orderBy(sql`ts_rank(${ftsExpr}, websearch_to_tsquery('english', ${q})) desc`)
       .limit(limit);
 
@@ -496,7 +513,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         .select({ id: wikiPages.id, slug: wikiPages.slug, folder: wikiPages.folder, title: wikiPages.title, ticketId: wikiPages.ticketId, updatedAt: wikiPages.updatedAt, updatedBy: agents.name })
         .from(wikiPages)
         .leftJoin(agents, eq(agents.id, wikiPages.updatedByAgentId))
-        .where(and(eq(wikiPages.companyId, companyId), pattern ? or(ilike(wikiPages.title, pattern), ilike(wikiPages.body, pattern), ftsMatch(term!)) : undefined))
+        .where(and(eq(wikiPages.companyId, companyId), liveWikiPage, pattern ? or(ilike(wikiPages.title, pattern), ilike(wikiPages.body, pattern), ftsMatch(term!)) : undefined))
         .orderBy(desc(wikiPages.updatedAt))
         .limit(2000);
       if (!term) return rows;
@@ -558,12 +575,12 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
      */
     async links(companyId: string, slug: string, text: string) {
       const wanted = linkedSlugs(text).filter((l) => l !== slug);
-      const out = wanted.length ? await db.select({ slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), inArray(wikiPages.slug, wanted))) : [];
+      const out = wanted.length ? await db.select({ slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage, inArray(wikiPages.slug, wanted))) : [];
       const esc = slug.replace(/[%_\\]/g, (c) => `\\${c}`);
       const from = await db
         .select({ slug: wikiPages.slug })
         .from(wikiPages)
-        .where(and(eq(wikiPages.companyId, companyId), or(like(wikiPages.body, `%[[${esc}]]%`), like(wikiPages.body, `%[[${esc}#%`))))
+        .where(and(eq(wikiPages.companyId, companyId), liveWikiPage, or(like(wikiPages.body, `%[[${esc}]]%`), like(wikiPages.body, `%[[${esc}#%`))))
         .orderBy(asc(wikiPages.slug));
       return { links: wanted.filter((l) => out.some((o) => o.slug === l)), linkedFrom: from.map((r) => r.slug).filter((l) => l !== slug) };
     },
@@ -615,7 +632,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         .from(wikiRevisions)
         .innerJoin(wikiPages, eq(wikiPages.id, wikiRevisions.pageId))
         .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
-        .where(and(eq(wikiRevisions.id, revisionId), eq(wikiPages.companyId, companyId)));
+        .where(and(eq(wikiRevisions.id, revisionId), eq(wikiPages.companyId, companyId), liveWikiPage));
       if (!r) throw new WikiError(404, "No such revision.");
       return r;
     },
@@ -665,6 +682,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         // SELECT … FOR UPDATE: another append to this page waits here and then reads the row it saved.
         const p = await findPage(tx, companyId, input.slug, true);
         if (!p) throw new WikiError(404, "There's no wiki page with that name.");
+        if (p.deletedAt) throw binRefusal({ slug: p.slug, deletedAt: p.deletedAt });
         const body = appendToBody(p.body, input.entry, input.heading, position);
         const title = input.title?.trim() || p.title;
         // An append only adds text, so it never trips the shrink guard; it keeps a version like any save.
@@ -676,9 +694,52 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       return { ...r, size: r.page.body.length, where };
     },
 
-    async remove(companyId: string, slug: string) {
+    /**
+     * Deleting hides the page and keeps its versions (BOS-2197): it waits BIN_DAYS in the Deleted pages
+     * list, where the owner can restore it, and the daily clean-up removes it after that. `by` is the
+     * agent who deleted it, or null for the owner.
+     */
+    async remove(companyId: string, slug: string, by: string | null = null) {
       const p = await page(companyId, slug);
-      await db.delete(wikiPages).where(eq(wikiPages.id, p.id));
+      await db.update(wikiPages).set({ deletedAt: new Date(), deletedByAgentId: by }).where(eq(wikiPages.id, p.id));
+      await record(db, { companyId, agentId: by, kind: "wiki", summary: `Deleted wiki page "${p.title}" (${p.slug}); it can be restored for ${BIN_DAYS} days` });
+    },
+
+    /** The deleted page at an address, for the owner's link view ("deleted on <date>", Restore), or null when there is none. */
+    async deletedStub(companyId: string, slug: string) {
+      const p = await findPage(db, companyId, slug);
+      if (!p?.deletedAt) return null;
+      const [by] = p.deletedByAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, p.deletedByAgentId)) : [];
+      return { deleted: true as const, slug: p.slug, folder: p.folder, title: p.title, deletedAt: p.deletedAt, deletedBy: by?.name ?? null, purgeOn: binUntil(p.deletedAt) };
+    },
+
+    /** The company's deleted pages, newest deletion first (the owner's Deleted pages list). */
+    async listDeleted(companyId: string) {
+      const rows = await db
+        .select({ slug: wikiPages.slug, folder: wikiPages.folder, title: wikiPages.title, deletedAt: wikiPages.deletedAt, deletedBy: agents.name })
+        .from(wikiPages)
+        .leftJoin(agents, eq(agents.id, wikiPages.deletedByAgentId))
+        .where(and(eq(wikiPages.companyId, companyId), isNotNull(wikiPages.deletedAt)))
+        .orderBy(desc(wikiPages.deletedAt))
+        .limit(2000);
+      return rows.map((r) => ({ ...r, deletedAt: r.deletedAt!, purgeOn: binUntil(r.deletedAt!) }));
+    },
+
+    /** Puts a deleted page back where it was, with its versions, and logs it. Search picks it up again. */
+    async restoreDeleted(companyId: string, slug: string) {
+      const p = await findPage(db, companyId, slug);
+      if (!p?.deletedAt) throw new WikiError(404, "There's no deleted page with that name.");
+      await db.update(wikiPages).set({ deletedAt: null, deletedByAgentId: null }).where(eq(wikiPages.id, p.id));
+      await record(db, { companyId, kind: "wiki", summary: `Restored wiki page "${p.title}" (${p.slug}) from the Deleted pages list` });
+      semantic?.enqueue(companyId, p.id);
+      return { slug: p.slug, title: p.title };
+    },
+
+    /** Removes for good the pages deleted more than BIN_DAYS ago, with their versions. The daily clean-up calls it; returns how many. */
+    async purgeDeleted(now: Date = new Date()) {
+      const cut = new Date(now.getTime() - BIN_DAYS * 86_400_000);
+      const gone = await db.delete(wikiPages).where(and(isNotNull(wikiPages.deletedAt), lt(wikiPages.deletedAt, cut))).returning({ id: wikiPages.id });
+      return gone.length;
     },
 
     /**
@@ -802,6 +863,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
    * has (BOS-1552: DR-059 clashed because the index lagged). Refuses, naming the page and the next
    * free number. Checked on creation only, so an update to the same slug is never refused.
    */
+  // Deleted pages still count here on purpose: a binned DR keeps its number until it is purged or restored.
   async function refuseTakenDrNumber(conn: Db, companyId: string, slug: string, title: string) {
     const num = (s: string) => /^dr-(\d{1,6})(?!\d)/i.exec(s)?.[1];
     const wanted = num(title.trim()) ?? num(slug.split("/").at(-1) ?? "");
@@ -834,6 +896,8 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     }
     const bySlug = async (slug: string) => (await conn.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
     let existing = input.slug?.trim() ? await findPage(conn, companyId, input.slug) : undefined;
+    // A deleted page still holds its address for BIN_DAYS days; writing to it says so instead of reviving or duplicating it (BOS-2197).
+    if (existing?.deletedAt) throw binRefusal({ slug: existing.slug, deletedAt: existing.deletedAt });
     // A new page's address: the given slug in its stored form. An existing page keeps its own.
     const given = existing ? existing.slug : input.slug?.trim() ? normalSlug(input.slug) : null;
     const folder = input.folder !== undefined ? cleanFolder(input.folder) : (existing?.folder ?? (given ? folderOf(given) : ""));
@@ -842,12 +906,14 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       // A different folder moves the page; it keeps the last part of its address.
       slug = folder === existing.folder ? existing.slug : pageSlug(folder, existing.slug.split("/").at(-1)!);
       const clash = slug !== existing.slug ? await bySlug(slug) : undefined;
+      if (clash?.deletedAt) throw binRefusal({ slug: clash.slug, deletedAt: clash.deletedAt });
       if (clash) throw new WikiError(409, `There's already a page at ${slug} ("${clash.title}").`);
     } else {
       // An explicit slug is the address, whatever the folder (a project's brief keeps its slug when the project is renamed).
       slug = given ?? pageSlug(folder, title);
       // Writing a new page where one already is updates that page.
       existing = await bySlug(slug);
+      if (existing?.deletedAt) throw binRefusal({ slug: existing.slug, deletedAt: existing.deletedAt });
       if (!existing) await refuseTakenDrNumber(conn, companyId, slug, title);
     }
     const changed = !existing || existing.title !== title || existing.body !== input.body;

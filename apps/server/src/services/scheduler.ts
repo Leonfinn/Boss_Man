@@ -12,7 +12,7 @@ import { agentHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
-import { linkedSlugs } from "./wiki.js";
+import { linkedSlugs, liveWikiPage } from "./wiki.js";
 import { checkJobsByCompany, updateWaitCountsRun } from "./runner-busy.js";
 import { pickAccount } from "./claude-accounts.js";
 import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
@@ -522,7 +522,7 @@ export function schedulerService(
       : [];
     // Health check: links to pages that don't exist, and pages nothing links to.
     // shortcut: reads every page body per wake; move to a wiki_links table with the backlinks shortcut in wiki.ts.
-    const pages = await db.select({ slug: wikiPages.slug, body: wikiPages.body }).from(wikiPages).where(eq(wikiPages.companyId, agent.companyId));
+    const pages = await db.select({ slug: wikiPages.slug, body: wikiPages.body }).from(wikiPages).where(and(eq(wikiPages.companyId, agent.companyId), liveWikiPage));
     const exists = new Set(pages.map((p) => p.slug));
     const linkedTo = new Set<string>();
     const broken: string[] = [];

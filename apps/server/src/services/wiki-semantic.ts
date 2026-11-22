@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { and, cosineDistance, countDistinct, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { wikiPages, wikiSectionEmbeddings, wikiSemanticSettings } from "../db/schema.js";
-import { splitSections } from "./wiki.js";
+import { liveWikiPage, splitSections } from "./wiki.js";
 
 export const BATCH = 64;
 const MAX_CHARS = 6000;
@@ -80,7 +80,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
   async function embedPage(companyId: string, pageId: string): Promise<boolean> {
     const r = await ready(companyId);
     if (!r) return false;
-    const [p] = await db.select().from(wikiPages).where(and(eq(wikiPages.id, pageId), eq(wikiPages.companyId, companyId)));
+    const [p] = await db.select().from(wikiPages).where(and(eq(wikiPages.id, pageId), eq(wikiPages.companyId, companyId), liveWikiPage));
     if (!p) return false;
     const seen = new Set<string>();
     const wanted = splitSections(p.body)
@@ -163,7 +163,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
 
     /** "Re-embed all": every page of the company, in the background. Unchanged sections are skipped. */
     async reindexAll(companyId: string) {
-      const pages = await db.select({ id: wikiPages.id }).from(wikiPages).where(eq(wikiPages.companyId, companyId));
+      const pages = await db.select({ id: wikiPages.id }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage));
       void (async () => {
         for (const p of pages) await run(companyId, p.id);
       })();
@@ -173,7 +173,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
     /** How far indexing has got: pages with sections embedded by the current model, of all pages, and the last provider error. */
     async status(companyId: string) {
       const s = await settings(companyId);
-      const [all] = await db.select({ n: countDistinct(wikiPages.id) }).from(wikiPages).where(eq(wikiPages.companyId, companyId));
+      const [all] = await db.select({ n: countDistinct(wikiPages.id) }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage));
       const [done] = await db
         .select({ n: countDistinct(wikiSectionEmbeddings.pageId) })
         .from(wikiSectionEmbeddings)
@@ -225,7 +225,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
         .select({ path: wikiSectionEmbeddings.sectionPath, slug: wikiPages.slug, title: wikiPages.title, body: wikiPages.body, d: dist })
         .from(wikiSectionEmbeddings)
         .innerJoin(wikiPages, eq(wikiPages.id, wikiSectionEmbeddings.pageId))
-        .where(and(eq(wikiSectionEmbeddings.companyId, companyId), eq(wikiSectionEmbeddings.model, r.s.model), eq(wikiSectionEmbeddings.dims, r.s.dims)))
+        .where(and(eq(wikiSectionEmbeddings.companyId, companyId), liveWikiPage, eq(wikiSectionEmbeddings.model, r.s.model), eq(wikiSectionEmbeddings.dims, r.s.dims)))
         .orderBy(dist)
         .limit(TOP);
       return rows.map((x) => {

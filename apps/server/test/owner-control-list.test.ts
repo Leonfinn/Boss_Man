@@ -160,6 +160,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/SpendReport.tsx": "Spend",
   "pages/Ticket.tsx": "Ticket",
   "pages/Wiki.tsx": "Wiki",
+  "components/DeletedPages.tsx": "Wiki",
   "components/WikiCompare.tsx": "Wiki",
   "pages/Workflow.tsx": "Workflow",
 };

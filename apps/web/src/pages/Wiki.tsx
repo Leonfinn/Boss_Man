@@ -13,6 +13,7 @@ import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
+import { DeletedNotice, DeletedPages } from "../components/DeletedPages";
 import { WikiCompare } from "../components/WikiCompare";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
@@ -184,7 +185,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
     else page.reload();
   };
   const remove = async () => {
-    if (!p || !window.confirm(`Delete "${p.title}" and its history? This can't be undone.`)) return;
+    if (!p || !window.confirm(`Delete "${p.title}"? It waits 30 days under Deleted pages, where you can restore it.`)) return;
     try {
       await api(`/api/companies/${companyId}/wiki/${slug}`, { method: "DELETE" });
       onChanged();
@@ -219,6 +220,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
 
   if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} /> : away(page.error) ? null : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return <Loader label="Loading the page" />;
+  if ("deleted" in p) return <DeletedNotice companyId={companyId} slug={slug} stub={p as never} onRestored={() => (onChanged(), page.reload())} />;
   if (editing) return <Editor draftKey={`wiki/${companyId}/${slug}`} initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -642,6 +644,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               onToggle={onToggleFolder}
               onPick={() => (setCreating(null), closeDrawer())}
             />
+            <DeletedPages companyId={company.id} go={go} onChanged={list.reload} />
           </nav>
           <div>
             {creating !== null ? (

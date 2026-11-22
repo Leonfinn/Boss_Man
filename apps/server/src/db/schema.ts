@@ -1905,9 +1905,14 @@ export const wikiPages = pgTable(
     updatedByAgentId: uuid("updated_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Set when the page was deleted (BOS-2197): it waits in the Deleted pages list for 30 days, then the daily clean-up removes it. Null = live. */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    /** Who deleted it: an agent, or the owner when null (only meaningful with deletedAt). */
+    deletedByAgentId: uuid("deleted_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
   },
   (t) => [
     uniqueIndex("wiki_pages_company_slug").on(t.companyId, t.slug),
+    index("wiki_pages_deleted_at").on(t.deletedAt),
     // Full-text search (wiki.search); the query must use this exact expression to hit the index.
     index("wiki_pages_fts").using("gin", sql`to_tsvector('english', ${t.title} || ' ' || ${t.body})`),
   ],
