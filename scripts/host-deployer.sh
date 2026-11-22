@@ -1857,17 +1857,25 @@ main() {
   # The request is untrusted: it must be one flat object whose five fields are plain strings of safe characters.
   # Whitespace is dropped first, so the shape check below is one strict pattern; nothing is evaluated or sourced.
   local k flat id target commit at by
-  [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -eq $(stat -c %s "$mine") ]] || finish rejected "Rejected: the request file does not match the expected format."
+  # BOS-2213: each refusal below names which check failed (a fixed word, never the request's own text), so a
+  # rejected request in a gate log shows whether the file was empty, damaged or had a bad id or commit. The
+  # message still starts with the old sentence, and no check is looser than before.
+  local fmt="Rejected: the request file does not match the expected format"
+  [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -eq $(stat -c %s "$mine") ]] || finish rejected "$fmt (it holds a NUL byte)."
   flat="$(LC_ALL=C tr -d ' \t\r\n' <"$mine")"
   local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9_.:+-]{0,64}"'
-  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || finish rejected "Rejected: the request file does not match the expected format."
+  [[ -n $flat ]] || finish rejected "$fmt (the file is empty)."
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || finish rejected "$fmt (it is not one flat object of short plain strings)."
   for k in id target commit requestedAt approvedBy; do
-    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || finish rejected "Rejected: the request file does not match the expected format."
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || finish rejected "$fmt (the field $k is missing or repeated)."
   done
   id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
   at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
-  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner|restart)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
-    finish rejected "Rejected: the request file does not match the expected format."
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ ]] || finish rejected "$fmt (the id is not a 36-character id)."
+  [[ $target =~ ^(server|runner|restart)$ ]] || finish rejected "$fmt (the target is not server, runner or restart)."
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || finish rejected "$fmt (the commit is not one 40-character hash)."
+  [[ $by =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || finish rejected "$fmt (approvedBy is not a plain name)."
+  [[ $at =~ ^[0-9T:.+Z-]{10,40}$ ]] || finish rejected "$fmt (requestedAt is not a timestamp)."
   REQ_ID=$id TARGET=$target COMMIT=$commit
 
   # Accept both spacings: history lines written by older versions may be compact.
