@@ -271,7 +271,7 @@ export const OWNER_FIELDS = {
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
     "Security alerts (this project owns the repo's alerts)",
   ],
-  Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit"],
+  Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit", "Objective"],
   Wiki: [
     "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words",
     "Also search your past answers by meaning", "Also search tickets and the CEO's earlier advice by meaning", "Provider address",
