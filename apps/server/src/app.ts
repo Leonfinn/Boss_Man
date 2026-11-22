@@ -145,7 +145,7 @@ import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
 import { spendReportRoutes } from "./routes/spend-report.js";
 import { featureRoutes } from "./routes/features.js";
-import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { DateStr, companyExists, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { searchRoutes } from "./routes/search.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
@@ -1869,8 +1869,9 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/runner/restart", async (req, reply) => launch.restart(IdParam.parse(req.params).id).catch(launchErrors(reply)));
     owner.delete("/api/companies/:id/runner/launch", async (req, reply) => launch.stop(IdParam.parse(req.params).id).catch(launchErrors(reply)));
 
-    owner.get("/api/companies/:id/grants", async (req) => {
+    owner.get("/api/companies/:id/grants", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
+      if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
       return secretsSvc.grantsForCompany(id);
     });
 
@@ -1885,8 +1886,9 @@ export async function buildApp(opts: AppOptions) {
       headerValue: z.string().max(200).default("Bearer {secret}"),
     }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), { path: ["headerValue"], message: "The header value must contain {secret}." });
 
-    owner.get("/api/companies/:id/mcp-servers", async (req) => {
+    owner.get("/api/companies/:id/mcp-servers", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
+      if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
       // Says whether each server's token secret is granted, since a mistyped name silently leaves the server out of every run.
       const granted = new Set((await db.select({ env: secretGrants.envName }).from(secretGrants).where(eq(secretGrants.companyId, id))).map((g) => g.env));
       return (await db.select().from(mcpServers).where(eq(mcpServers.companyId, id)).orderBy(mcpServers.name)).map((m) => ({ ...m, secretGranted: !m.secretEnv || granted.has(m.secretEnv), secretRefused: !!m.secretEnv && isDaemonOnlySecret(m.secretEnv) }));
