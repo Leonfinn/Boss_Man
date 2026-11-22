@@ -21,7 +21,7 @@ async function run(opts: { model: string | null; secrets?: Record<string, string
     baseEnv: { PATH: process.env.PATH },
     adapterBins: { opencode: fake },
     ...(opts.skillsRoot ? { skillsRoot: opts.skillsRoot } : {}),
-    resolveEnv: async () => ({ DUMP: dump, ...(opts.skills?.length ? { FAKE_SKILL: opts.skills[0].name } : {}),...(opts.offered ? { FAKE_MODELS: JSON.stringify(opts.offered) } : {}), ...opts.secrets }),
+    resolveEnv: async () => ({ DUMP: dump, ...(opts.skills?.length ? { FAKE_SKILL: opts.skills[0]!.name } : {}),...(opts.offered ? { FAKE_MODELS: JSON.stringify(opts.offered) } : {}), ...opts.secrets }),
     emit: (e) => (events.push(e), e.type === "run.ended" && done()),
   });
   manager.handle({ type: "run.start", runId: "r1", agentId: "a1", agentKind: "opencode", model: opts.model, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t", ...(opts.skills ? { skills: opts.skills } : {}) } as never);
