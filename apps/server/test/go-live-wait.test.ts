@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { RUNNER_CODE_PATHS, touchesRunnerCode } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
+import { placeInOrder } from "../src/services/go-live-wait.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, companies, decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
@@ -98,6 +99,34 @@ describe("go-live wait: the pure parts", () => {
     expect(touchesRunnerCode(["apps/runner/test/check-job-slot.test.ts", "apps/runner/test/setup-env.ts", "apps/runner/vitest.config.ts", "packages/shared/test/x.test.ts"])).toBe(false);
     expect(touchesRunnerCode(["apps/runner/test/setup-env.ts", "packages/shared/src/go-live.ts"])).toBe(true);
     expect(touchesRunnerCode(["pnpm-lock.yaml"])).toBe(true);
+  });
+
+  // BOS-2231: where a running commit sits in merge order.
+  it("places a recorded merge at its own position", () => {
+    const a = "a".repeat(40);
+    const b = "b".repeat(40);
+    const c = "c".repeat(40);
+    const order = [a, b, c];
+    expect(placeInOrder(a, order)).toBe(0);
+    expect(placeInOrder(b, order)).toBe(1);
+    expect(placeInOrder(c, order)).toBe(2);
+  });
+
+  it("places a running commit by the newest commit it is known to contain, else -1", () => {
+    const a = "a".repeat(40);
+    const b = "b".repeat(40);
+    const c = "c".repeat(40);
+    const unknown = "d".repeat(40);
+    const order = [a, b, c];
+    // The host deployer only deploys a fast-forward, so a running commit can be no ticket's merge and is placed by
+    // what it contains: the newest such place wins.
+    expect(placeInOrder(unknown, order, [a, c])).toBe(2);
+    expect(placeInOrder(unknown, order, [c.toUpperCase()])).toBe(2);
+    // A contained commit the order doesn't know adds nothing, so an older known one still places it.
+    expect(placeInOrder(unknown, order, ["e".repeat(40), a])).toBe(0);
+    // Nothing places it: -1, never assumed live.
+    expect(placeInOrder(unknown, order)).toBe(-1);
+    expect(placeInOrder(unknown, order, ["e".repeat(40)])).toBe(-1);
   });
 });
 
