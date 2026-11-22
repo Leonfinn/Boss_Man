@@ -193,8 +193,10 @@ export function ProjectReviews({ projectId, companyId, agents }: { projectId: st
     }
   };
   // Customise starts from the company's table and saves it at once, so the choice is what the server holds.
-  const choose = (on: boolean) =>
-    run(async () => {
+  const choose = (on: boolean) => {
+    // Going back to the company's table deletes the project's own: ask first. On "no" nothing is sent and the controlled select stays on Customise.
+    if (!on && custom && !window.confirm("Use the company's reviews for this project? Its own review table will be deleted.")) return Promise.resolve();
+    return run(async () => {
       if (on) {
         const copy = await api<ReviewPolicy>(`/api/companies/${companyId}/review-policy`);
         await api(url, { method: "PUT", body: copy });
@@ -205,6 +207,7 @@ export function ProjectReviews({ projectId, companyId, agents }: { projectId: st
         setCustom(null);
       }
     });
+  };
   return (
     <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
       <label htmlFor={`rev-${projectId}`}>Reviews for this project</label>
