@@ -257,6 +257,12 @@ p { margin: 0; }
 .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 1fr); gap: 12px; align-items: start; }
 .board-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .board-bar > div, .board-bar label { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* BOS-2193: the Select bar sticks to the bottom of the screen so it stays in reach while the owner ticks cards. */
+.bulk-bar { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding: 10px 14px; margin: 8px 0; background: var(--card); border: 1px solid var(--line-strong); border-radius: 10px; }
+.bulk-bar .bulk-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.bulk-bar select { min-height: 40px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); color: var(--ink); }
+.bulk-bar .bulk-result { flex-basis: 100%; font-size: 13px; }
+.bulk-check { width: 20px; height: 20px; margin: 0; flex: none; }
 .board-bar label, .board-bar p { font-size: 13px; color: var(--muted); }
 .board-bar p { display: inline-flex; align-items: center; gap: 6px; }
 .board-bar select { min-height: 40px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--field); font-size: 13px; }
