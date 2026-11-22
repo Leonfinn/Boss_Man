@@ -133,9 +133,10 @@ export function usePoll<T>(load: (signal: AbortSignal) => Promise<T>, everyMs: n
 /**
  * "Show older" under a polled, newest-first first page (BOS-2165). `load(beforeId)` fetches the page older than a row;
  * the rows it brings are kept for `key` (a new key drops them) and follow the first page without repeats, so a poll
- * that shifts the first page never shows a row twice. More is offered while the last page came back full.
+ * that shifts the first page never shows a row twice. More is offered while the last page came back full
+ * (`olderSize` rows, default `pageSize`).
  */
-export function useOlder<T extends { id: string }>(first: T[] | null, pageSize: number, load: (before: string) => Promise<T[]>, key: string) {
+export function useOlder<T extends { id: string }>(first: T[] | null, pageSize: number, load: (before: string) => Promise<T[]>, key: string, olderSize = pageSize) {
   const [older, setOlder] = useState<{ key: string; rows: T[]; done: boolean }>({ key, rows: [], done: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -150,7 +151,7 @@ export function useOlder<T extends { id: string }>(first: T[] | null, pageSize: 
     setError(null);
     try {
       const page = await load(last.id);
-      setOlder({ key, rows: [...mine.rows, ...page], done: page.length < pageSize });
+      setOlder({ key, rows: [...mine.rows, ...page], done: page.length < olderSize });
     } catch (err) {
       setError((err as Error).message);
     } finally {
