@@ -3,6 +3,7 @@ import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
 import { Loader } from "../components/Loader";
+import { buildCsv, download } from "../csv";
 
 export const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 
@@ -120,6 +121,34 @@ export function failureReason(outcome: string | null | undefined): string | null
     return `Lost: Boss Man lost contact with the runner and doesn't know how it ended.${detail ? ` (${detail})` : ""}`;
   }
   return null;
+}
+
+/** A run's result as plain words for a file: the same wording as the tag, with the failure reason when there is one. */
+function resultText(outcome: string | null | undefined) {
+  if (!outcome) return "Running";
+  const why = failureReason(outcome);
+  if (why) return why;
+  return outcome === "cancelled" || outcome.startsWith("stopped") ? "Stopped" : "Finished";
+}
+
+/** The finished runs as a spreadsheet: the table's columns, times in ISO format, cost in dollars to four places as a number. */
+export function runsToCsv(rows: RunRow[], companies: Company[]): string {
+  return buildCsv(
+    ["ended", "company", "agent", "what_for", "woken_by", "model", "paid_from", "result", "cost_usd", "input_tokens", "output_tokens"],
+    rows.map((r) => [
+      r.endedAt ? new Date(r.endedAt).toISOString() : "",
+      companies.find((c) => c.id === r.companyId)?.name ?? "",
+      r.agent ?? "An agent",
+      r.ticketId ? (r.ticket ?? "its ticket") : runLabel(r).text,
+      r.ticketId ? whyRun(r) : "",
+      r.model ?? "default",
+      r.account ?? "none",
+      resultText(r.outcome),
+      ((r.costMicros ?? 0) / 1e6).toFixed(4),
+      r.inputTokens ?? "",
+      r.outputTokens ?? "",
+    ]),
+  );
 }
 
 function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Company[]; finished: boolean }) {
@@ -363,13 +392,21 @@ export function Runs({ companies }: { companies: Company[] }) {
         ) : (
           <Loader label="Loading the finished runs" />
         )}
-        {canMore && (
-          <div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {canMore && (
             <button type="button" className="btn" disabled={loadingMore} onClick={() => void showMore()}>
               {loadingMore ? "Loading…" : "Show more"}
             </button>
-          </div>
-        )}
+          )}
+          <button
+            type="button"
+            className="btn"
+            disabled={!shown?.length}
+            onClick={() => shown && download(`runs-${new Date().toISOString().slice(0, 10)}.csv`, runsToCsv(shown, companies))}
+          >
+            Download CSV
+          </button>
+        </div>
         {moreError && (
           <p role="alert" className="error">
             {moreError}

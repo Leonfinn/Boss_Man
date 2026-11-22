@@ -105,7 +105,7 @@ export const OWNER_CONTROLS = {
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
   Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
-  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry"],
+  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
