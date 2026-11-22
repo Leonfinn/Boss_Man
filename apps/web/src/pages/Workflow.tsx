@@ -4,6 +4,7 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
 import { findings, type Part } from "../workflow-findings";
+import { buildCsv, download } from "../csv";
 
 const PERIODS = [7, 14, 30, 90];
 
@@ -131,6 +132,64 @@ function StatsCells({ s }: { s: Stats }) {
   );
 }
 
+/** CSV figures are plain numbers (minutes, dollars, percent) so a spreadsheet can chart them; no number is an empty cell. */
+const mins = (ms: number | null) => (ms === null ? "" : Math.round(ms / 6_000) / 10);
+const usd = (micros: number | null) => (micros === null ? "" : Math.round(micros / 10_000) / 100);
+const pc = (n: number | null) => (n === null ? "" : Math.round(n * 1000) / 10);
+const one = (n: number | null) => (n === null ? "" : Math.round(n * 10) / 10);
+
+const STATS_HEAD = ["Done", "Right first time (%)", "Rework rounds", "Time to finish (min)", "Own cost ($)", "Ticket cost ($)", "Watchdog flags", "Answers changed (%)"];
+const statsRow = (s: Stats) => [s.done, pc(s.firstPassRate), one(s.meanRework), mins(s.medianCycleMs), usd(s.ownCostPerDoneMicros), usd(s.costPerDoneMicros), s.watchdogFlags, pc(s.overrideShare)];
+
+export function rolesCsv(d: Scorecard, showAgents: boolean): string {
+  return showAgents
+    ? buildCsv(["Agent", "Role", ...STATS_HEAD], d.byAgent.map((a) => [a.name, label(a.role), ...statsRow(a)]))
+    : buildCsv(["Role", "Agents", ...STATS_HEAD], d.byRole.map((r) => [label(r.role), r.agents, ...statsRow(r)]));
+}
+
+export function handoffsCsv(d: Scorecard): string {
+  return buildCsv(
+    ["From", "To", "Kind", "Count", "Wait (min)", "Sent back (%)"],
+    d.handoffs.map((h) => [label(h.from), label(h.to), h.kind === "assign" ? "Assigned" : "Reviewed", h.count, mins(h.medianWaitMs), pc(h.bounceRate)]),
+  );
+}
+
+export function featuresCsv(d: Scorecard): string {
+  return buildCsv(
+    ["Feature", "Status", "Tasks done", "Tasks total", "Tail is slow", "Tail lag (min)", "Tail tickets", "Critical path", "Likely time (min)", "Slow time (min)"],
+    d.features.map((f) => [
+      f.title,
+      label(f.status),
+      f.tasksDone,
+      f.tasksTotal,
+      f.tailFlag ? "Yes" : "No",
+      f.status === "released" ? mins(f.tailLagMs) : "",
+      f.tail.map((t) => t.ref ?? t.title).join(" "),
+      f.criticalPath ? f.criticalPath.chain.map((c) => c.ref ?? c.title).join(" > ") : "",
+      f.criticalPath ? mins(f.criticalPath.p50Ms) : "",
+      f.criticalPath ? mins(f.criticalPath.p85Ms) : "",
+    ]),
+  );
+}
+
+export function sizesCsv(d: Scorecard): string {
+  return buildCsv(
+    ["Role", "Size", "Done", "Typical time (min)", "Slow time (min)", "Cost ($)", "Sent back"],
+    d.sizes.map((r) => [label(r.role), r.size, r.done, mins(r.p50CycleMs), mins(r.p85CycleMs), usd(r.meanCostMicros), one(r.meanRework)]),
+  );
+}
+
+/** "workflow-roles-last-14-days-2026-11-22.csv": the table, the period and the day it was saved. */
+export const csvName = (table: string, days: number) => `workflow-${table}-last-${days}-days-${new Date().toISOString().slice(0, 10)}.csv`;
+
+function DownloadCsv({ table, days, build }: { table: string; days: number; build: () => string }) {
+  return (
+    <button type="button" className="btn" onClick={() => download(csvName(table, days), build())}>
+      Download CSV
+    </button>
+  );
+}
+
 const HEAD = ["Done", "Right first time", "Rework rounds", "Time to finish", "Own cost", "Ticket cost", "Watchdog flags", "Answers changed"];
 
 /** The latest retro's findings, ranked, and every change it led to. */
@@ -247,7 +306,14 @@ export function Workflow({ company }: { company: Company | undefined }) {
         </select>
       </header>
       {data.error && !away(data.error) ? (
-        <p role="alert" className="error">{data.error.message}</p>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <p role="alert" className="error" style={{ margin: 0 }}>
+            Couldn't load the workflow report: {data.error.message}
+          </p>
+          <button type="button" className="btn" onClick={data.reload}>
+            Retry
+          </button>
+        </div>
       ) : !d ? (
         <Loader label="Loading the workflow" />
       ) : (
@@ -297,6 +363,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
                     </tbody>
                   </table>
                 </div>
+                <DownloadCsv table={showAgents ? "agents" : "roles"} days={days} build={() => rolesCsv(d, showAgents)} />
               </>
             ) : (
               <p className="muted">Not enough finished tickets yet.</p>
@@ -309,6 +376,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
               Where work passes from one role to another. <strong>Wait</strong> is the middle time before the next role picked it up (an assignment) or gave its verdict (a review). <strong>Sent back</strong> is the share of reviews that asked for changes. Assignments by the owner or Boss Man show as "owner".
             </p>
             {d.handoffs.length ? (
+              <>
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -335,6 +403,8 @@ export function Workflow({ company }: { company: Company | undefined }) {
                   </tbody>
                 </table>
               </div>
+              <DownloadCsv table="handoffs" days={days} build={() => handoffsCsv(d)} />
+              </>
             ) : (
               <p className="muted">No handoffs in this period.</p>
             )}
@@ -346,7 +416,8 @@ export function Workflow({ company }: { company: Company | undefined }) {
               The <strong>tail</strong> is the tasks still open once three quarters of a feature is done. It is flagged when one has been open for more than twice the usual time to finish. The <strong>critical path</strong> is the longest chain of tasks that wait on each other, with a likely time range (typical to slow) from past tickets. A task on it is flagged when nobody has it, it is blocked, or it is older than a slow ticket for its role. After release, <strong>tail lag</strong> is how long the last quarter of tasks took.
             </p>
             {d.features.length ? (
-              d.features.map((f) => (
+              <>
+              {d.features.map((f) => (
                 <article key={f.id} className="card" style={{ marginBottom: 12 }}>
                   <h3 style={{ margin: 0 }}>
                     <a href={`#/features/${company.id}/${f.id}`}>{f.title}</a> <span className="tag">{label(f.status)}</span> {f.tailFlag && <span className="tag amber">Tail is slow</span>}
@@ -390,7 +461,9 @@ export function Workflow({ company }: { company: Company | undefined }) {
                     </>
                   )}
                 </article>
-              ))
+              ))}
+              <DownloadCsv table="features" days={days} build={() => featuresCsv(d)} />
+              </>
             ) : (
               <p className="muted">No features in progress.</p>
             )}
@@ -407,6 +480,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
               </p>
             ))}
             {d.sizes.length ? (
+              <>
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -435,6 +509,8 @@ export function Workflow({ company }: { company: Company | undefined }) {
                   </tbody>
                 </table>
               </div>
+              <DownloadCsv table="sizes" days={90} build={() => sizesCsv(d)} />
+              </>
             ) : (
               <p className="muted">No finished task has a size yet.</p>
             )}
