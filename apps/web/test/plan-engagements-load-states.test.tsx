@@ -41,7 +41,7 @@ describe("Plan and Engagements first load", () => {
 
   it("Engagements asks the server for open ones by default, remembers a changed choice, and words the empty result (BOS-2260)", async () => {
     localStorage.removeItem("bm.engagements.show");
-    const f = vi.fn(() => Promise.resolve(new Response("[]", { status: 200, headers: { "content-type": "application/json" } })));
+    const f = vi.fn((_url: string) => Promise.resolve(new Response("[]", { status: 200, headers: { "content-type": "application/json" } })));
     vi.stubGlobal("fetch", f);
     const { container } = render(<Engagements />);
     await settle();
