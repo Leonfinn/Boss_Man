@@ -65,6 +65,12 @@ describe("tool servers (MCP)", () => {
       expect((await patch(bad)).statusCode, JSON.stringify(bad)).toBe(400);
     }
     expect((await patch({ url: "http://192.168.1.50:1/mcp" }, "00000000-0000-4000-8000-000000000000")).statusCode).toBe(404);
+    // No owner session: refused.
+    expect((await c.app.inject({ method: "PATCH", url: `/api/mcp-servers/${made.id}`, payload: { transport: "http" } })).statusCode).toBe(401);
+    // A row saved before this change (legacy secret already refused) is untouched by an empty patch.
+    const before = (await c.req("GET", url)).json();
+    expect((await patch({})).statusCode).toBe(200);
+    expect((await c.req("GET", url)).json()).toEqual(before);
     const lines = (await c.db.select().from(activity).where(eq(activity.kind, "settings"))).map((a) => a.summary).filter((s) => s.includes("changed"));
     expect(lines).toEqual(["Owner changed tool server scrapling (http://192.168.1.60:9000/mcp)", "Owner changed tool server scrapling (http://example.com:8000/mcp)", "Owner changed tool server scrapling (http://example.com:8000/mcp)"]);
     for (const l of lines) expect(l).not.toMatch(/SCRAPLING_MCP_TOKEN|sekret|pw@/);

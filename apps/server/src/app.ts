@@ -1924,6 +1924,7 @@ export async function buildApp(opts: AppOptions) {
       if (patch.url !== undefined && patch.url !== cur.url) set.allowPrivate = await allowsPrivate(patch.url);
       let row = cur;
       if (Object.keys(set).length > 0) row = (await db.update(mcpServers).set(set).where(eq(mcpServers.id, id)).returning())[0] ?? cur;
+      if (Object.keys(set).length === 0) return cur;
       void launch.syncAllow(cur.companyId);
       // Name and address only: no header, secret name or value, and no login or query part of the address.
       await record(db, { companyId: cur.companyId, kind: "settings", summary: `Owner changed tool server ${row.name} (${plainUrl(row.url)})` });
