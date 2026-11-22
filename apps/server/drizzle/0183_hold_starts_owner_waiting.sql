@@ -1,0 +1,1 @@
+ALTER TABLE "companies" ADD COLUMN "hold_starts_owner_waiting" integer;
