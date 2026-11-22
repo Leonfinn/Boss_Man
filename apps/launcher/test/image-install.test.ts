@@ -39,7 +39,18 @@ describe("setup", () => {
     expect(runSetup(dir, dbDir, chown)).toEqual({ created: [], kept: ["master.key", "db_password"] });
     expect(readFileSync(path.join(dir, "master.key"), "utf8")).toBe(key);
     expect(readFileSync(path.join(dbDir, "db_password"), "utf8")).toBe(pw);
-    expect(owner).toHaveLength(2);
+    // The fake chown changes nothing, so the second run sees files with the wrong owner and gives them theirs again (and only that).
+    // (db_password's group 999 never matches a test user; master.key is skipped when the test user is already 1000:1000.)
+    expect(owner.slice(2)).toContain("db_password 1000:999");
+  });
+  it("gives a kept key its owner again when an earlier run died between the link and the chown", () => {
+    const dir = tmp();
+    const dbDir = tmp();
+    writeFileSync(path.join(dbDir, "db_password"), "mine\n", { mode: 0o440 });
+    const owner: string[] = [];
+    runSetup(dir, dbDir, (f, uid, gid) => owner.push(`${path.basename(f)} ${uid}:${gid}`));
+    expect(owner).toContain("db_password 1000:999");
+    expect(readFileSync(path.join(dbDir, "db_password"), "utf8")).toBe("mine\n");
   });
   it("keeps a master key the owner already has, and makes only what is missing", () => {
     const dir = tmp();

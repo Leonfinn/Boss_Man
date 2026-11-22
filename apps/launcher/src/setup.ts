@@ -23,7 +23,12 @@ type Chown = (f: string, uid: number, gid: number) => void;
  */
 function writeOnce(file: string, body: string, chown: Chown, mode: number, gid: number): boolean {
   if (existsSync(file)) {
-    if (statSync(file).size > 0) return false;
+    const st = statSync(file);
+    if (st.size > 0) {
+      // A run killed between the link and the chown leaves a file only root can read: give it its owner now (same content, never rewritten).
+      if (st.uid !== SERVER_UID || st.gid !== gid) chown(file, SERVER_UID, gid);
+      return false;
+    }
     unlinkSync(file); // empty = never finished; a key that was never used can be made again
   }
   const tmp = `${file}.tmp`;
