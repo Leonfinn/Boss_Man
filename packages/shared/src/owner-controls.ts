@@ -83,6 +83,8 @@ export const OWNER_CONTROLS = {
     "Try again",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
+    // Past the newest 500 messages, the conversation's older pages (BOS-2168).
+    "Load older messages", "Loading older messages",
     // The Scrum Master's log of this ticket.
     "Undo", "Undoing", "Scrum Master", "Show all …",
   ],
@@ -108,7 +110,7 @@ export const OWNER_CONTROLS = {
     "Hide", "Show",
   ],
   Wiki: [
-    "Show older versions",
+    "Show older versions", "Compare", "Close compare", "Show", "Restore this version",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
     "Deleted pages", "Restore", "Restoring",
@@ -255,7 +257,7 @@ export const OWNER_FIELDS = {
   Wiki: [
     "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words",
     "Also search your past answers by meaning", "Also search tickets and the CEO's earlier advice by meaning", "Provider address",
-    "Model (768 dimensions)", "API key", "Search",
+    "Model (768 dimensions)", "API key", "Search", "From",
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
