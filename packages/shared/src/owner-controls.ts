@@ -182,6 +182,8 @@ export const OWNER_CONTROLS = {
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": [
     "Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel",
+    // Change a tool server in place (BOS-2255).
+    "Change", "Save changes",
     // The Penpot form (BOS-1582).
     "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
     // Removing a deploy target that has past deploys (BOS-2158).
