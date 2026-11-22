@@ -186,7 +186,7 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => void p.then(() => (setError(null), s.reload(), onChanged()), (err: Error) => setError(err.message));
   const [adding, setAdding] = useState<"driver" | "area" | null>(null);
-  if (!s.data) return s.error ? <p className="error">{s.error.message}</p> : <Loader label="Loading settings" />;
+  if (!s.data) return s.error ? <LoadError what="the priority settings" message={s.error.message} onRetry={s.reload} /> :<Loader label="Loading settings" />;
   const d = s.data;
   const add = (kind: "driver" | "area", start: () => Promise<unknown>) => {
     if (adding) return;
@@ -938,7 +938,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
       () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
       (err: Error) => setError(err.message),
     );
-  if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Feature not found" backHref="#/features" backLabel="Back to Features">This feature doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
+  if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Feature not found" backHref="#/features" backLabel="Back to Features">This feature doesn't exist any more, or the link is wrong.</NotFoundBlock> : <LoadError what="the feature" message={data.error.message} onRetry={data.reload} />;
   const d = data.data;
   if (!d) return <Loader label="Loading feature" />;
   const f = d.feature;
