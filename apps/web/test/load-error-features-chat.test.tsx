@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, fireEvent } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Features } from "../src/pages/Features";
@@ -56,6 +56,9 @@ describe("Features and Chat: a failed load says so (BOS-1889)", () => {
     fireEvent.click(toggle);
     await screen.findByText(/Couldn't load the priority settings: settings boom/);
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    panelOpen = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByText(/Couldn't load the priority settings/)).toBeNull());
   });
 
   it("a feature's page shows 'Couldn't load the feature' with Retry on a server error, and keeps the 404 block (BOS-2294)", async () => {
