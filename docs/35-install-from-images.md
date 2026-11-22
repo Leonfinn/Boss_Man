@@ -80,7 +80,7 @@ Run these in the folder with the two files.
    docker compose --env-file images.env up -d
    ```
 
-4. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run step 3 again, and keep the port off the internet.
+4. Open `http://<this machine>:3100` and create the owner account. By default Boss Man listens only on the machine itself (`127.0.0.1`). To reach it from another computer, add `BOSSMAN_BIND=0.0.0.0` to `images.env` and run step 3 again, and keep the port off the internet. Logging in over plain `http://` on your home network also needs `BOSSMAN_INSECURE_COOKIES=1` in `images.env`; without it, login needs HTTPS.
 
 Company data (workspaces, agent sessions) lives in Docker volumes created by Boss Man's launcher, not in a folder you choose. List them with `docker volume ls`.
 
