@@ -82,7 +82,7 @@ export function Engagements() {
 export function Engagement({ id }: { id: string }) {
   const view = usePoll((signal) => api<EngagementView>(`/api/engagements/${id}`, { signal }), 15_000, id);
   const e = view.data;
-  if (view.error && !away(view.error)) return view.error.status === 404 ? <NotFoundBlock title="Engagement not found" backHref="#/engagements" backLabel="Back to Engagements">This engagement doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{view.error.message}</p>;
+  if (view.error && !away(view.error)) return view.error.status === 404 ? <NotFoundBlock title="Engagement not found" backHref="#/engagements" backLabel="Back to Engagements">This engagement doesn't exist any more, or the link is wrong.</NotFoundBlock> : <LoadError what="the engagement" message={view.error.message} onRetry={view.reload} />;
   if (!e) return <Loader label="Loading the engagement" />;
   const reached = e.status === "countered" ? 0 : e.status === "rejected" ? -1 : STEPS.indexOf(e.status as (typeof STEPS)[number]);
   const capFraction = e.budgetCapUsd ? Math.min(1, e.spentUsd / e.budgetCapUsd) : 0;

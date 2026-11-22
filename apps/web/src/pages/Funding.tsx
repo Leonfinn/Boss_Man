@@ -4,6 +4,7 @@ import { usePoll } from "../hooks";
 import { windowHasReset, windowLabel } from "@boss-man/shared";
 import { ageLabel } from "../age";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
 /** "Thu 29 Oct at 14:04": day, date and time in the same style as the reset line. */
@@ -376,8 +377,9 @@ export function FundingCards() {
   );
   return (
     <>
-      {sources.error ? <p className="error" role="alert">{sources.error.message}</p> : null}
+      {sources.error ? <LoadError what="funding sources" message={sources.error.message} onRetry={sources.reload} /> : null}
       {sources.data === null ? (
+        sources.error ? null :
         <Loader label="Loading funding sources" />
       ) : sources.data.length === 0 ? (
         <p className="muted">No funding sources yet.</p>
