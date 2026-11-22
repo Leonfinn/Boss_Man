@@ -44,6 +44,13 @@ describe("runsToCsv", () => {
 });
 
 describe("Download CSV button", () => {
+  it("is disabled when no runs are shown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200 })));
+    render(<Runs companies={companies} />);
+    await screen.findByText("No runs have finished yet.");
+    expect((screen.getByRole("button", { name: "Download CSV" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("downloads the rows shown", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/runs/recent") ? [run({})] : []), { status: 200 })));
     let saved: Blob | null = null;
