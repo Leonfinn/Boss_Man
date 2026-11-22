@@ -98,6 +98,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/ShowOlder.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
+  // The weekly email switch on Settings → Notifications (BOS-2195).
+  "components/WeeklySummaryForm.tsx": "Notifications",
   "components/TicketActivity.tsx": "Ticket",
   "components/TicketLinks.tsx": "Ticket",
   "components/TicketOutputs.tsx": "Ticket",

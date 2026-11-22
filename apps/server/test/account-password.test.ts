@@ -94,7 +94,23 @@ describe("sign-in lockout notice", () => {
     await vi.waitFor(async () => expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(1), { timeout: 5000 });
     const notes = (await t.db.select().from(notifications)).filter((n) => n.title.includes("was locked"));
     expect(notes).toHaveLength(1);
-    expect(notes[0]!.title).toContain("username was locked");
+    expect(notes[0]!.title).toContain("the owner's username was locked");
+  });
+
+  it("BOS-2207: a made-up username is not called the owner's, and only 3 notices go out across addresses", async () => {
+    await signIn(t);
+    await t.db.insert(companies).values({ name: "Example Co" });
+    const from = (ip: string, name: string) => t.app.inject({ method: "POST", url: "/api/login", payload: { username: name, password: "secret guess" }, remoteAddress: ip });
+    // Five made-up usernames, each locked from ten different addresses.
+    for (let n = 0; n < 5; n++) for (let i = 0; i < 10; i++) await from(`192.168.${n}.${100 + i}`, `made-up-${n}`);
+    await vi.waitFor(async () => expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(3), { timeout: 5000 });
+    const notes = (await t.db.select().from(notifications)).filter((n) => n.title.includes("was locked"));
+    expect(notes).toHaveLength(3);
+    for (const n of notes) {
+      expect(n.title).toContain("a username was locked");
+      expect(n.title).not.toContain("owner's");
+    }
+    expect(await t.db.select().from(activity).where(eq(activity.kind, "security"))).toHaveLength(3);
   });
 });
 

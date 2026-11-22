@@ -135,7 +135,9 @@ sections:
   - How you're told
   - Notifications
   - Set up your phone
+  - Weekly summary
 reads: 
+  - /api/companies/:id/weekly-summary
   - /api/host-facts
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
@@ -168,10 +170,12 @@ reads:
 ## #/runs
 sections: 
   - Finished
+  - Permissions in this run
   - Running now
   - Runs
 reads: 
   - /api/runs
+  - /api/runs/:id/permissions
   - /api/runs/:id/transcript
 
 ## #/scrum-master
