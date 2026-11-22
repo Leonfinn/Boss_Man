@@ -41,11 +41,18 @@ function writeOnce(file: string, body: string, chown: Chown, mode: number, gid: 
     } finally {
       closeSync(fd);
     }
-    chown(tmp, SERVER_UID, gid);
+    // Link first, chown after: once the temp file belongs to uid 1000 a root without DAC_OVERRIDE may not hard-link it
+    // (kernel protected_hardlinks, seen on the arm64 CI runner).
     try {
       linkSync(tmp, file); // never replaces an existing file
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw err;
+    }
+    try {
+      chown(file, SERVER_UID, gid);
+    } catch (err) {
+      rmSync(file, { force: true }); // never leave a key the server can't read
       throw err;
     }
   } finally {

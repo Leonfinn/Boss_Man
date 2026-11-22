@@ -20,6 +20,7 @@ needed_path() {
     docker-compose*.yml | */docker-compose*.yml) return 0 ;;
     Dockerfile* | */Dockerfile*) return 0 ;;
     package.json | pnpm-lock.yaml | pnpm-workspace.yaml) return 0 ;;
+    docs/35-install-from-images.md) return 0 ;; # scripts/install-images.test.sh checks the guide exists
   esac
   return 1
 }
