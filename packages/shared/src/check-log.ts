@@ -9,28 +9,48 @@ const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const TEST_LINE = /^\s*(?:FAIL|×)\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s*(?:>|›)\s*(.+?)\s*$/;
 const STEP_LINE = /^FAIL {1,2}(\S.*?)\s*$/;
 
-export type CheckLogFacts = { steps: string[]; test: string | null };
+// A suite that failed to load prints "FAIL  <file> [ <file> ]" with no test name.
+const FILE_LINE = /^\s*FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s*(?:\[.*)?$/;
+
+export type CheckLogFacts = { steps: string[]; test: string | null; files: string[] };
 
 export function checkLogFacts(output: string): CheckLogFacts {
   const steps: string[] = [];
+  const files: string[] = [];
   let test: string | null = null;
+  const addFile = (f: string) => {
+    if (!files.includes(f)) files.push(f.slice(0, 200));
+  };
   for (const raw of output.replace(ANSI, "").split("\n")) {
     const line = raw.replace(/\r$/, "");
     const t = TEST_LINE.exec(line);
     if (t) {
       test ??= `${t[1]} > ${t[2]}`.slice(0, 300);
+      addFile(t[1]!);
       continue;
     }
+    const f = FILE_LINE.exec(line);
+    if (f) addFile(f[1]!);
     const s = STEP_LINE.exec(line);
     if (s && !steps.includes(s[1]!)) steps.push(s[1]!.slice(0, 200));
   }
-  return { steps, test };
+  return { steps, test, files };
 }
 
-/** "the step "x" failed; first failing test: y", or "" when the log names neither. */
+/** BOS-2304: "3 failed test files: a.test.ts; b.test.ts; c.test.ts" (the count first), or "" when no test file is named. */
+export function failedFilesSentence(files: string[], max = 20): string {
+  if (!files.length) return "";
+  const shown = files.slice(0, max).join("; ");
+  const more = files.length > max ? `; and ${files.length - max} more` : "";
+  return `${files.length} failed test file${files.length > 1 ? "s" : ""}: ${shown}${more}`;
+}
+
+/** "N failed test files: ...; the step "x" failed; first failing test: y", or "" when the log names none of them. */
 export function checkFailureFacts(output: string): string {
   const f = checkLogFacts(output);
   const parts: string[] = [];
+  const files = failedFilesSentence(f.files);
+  if (files) parts.push(files);
   if (f.steps.length) parts.push(`step${f.steps.length > 1 ? "s" : ""} that failed: ${f.steps.map((s) => `"${s}"`).join("; ")}`);
   if (f.test) parts.push(`first failing test: ${f.test}`);
   return parts.join(". ");
@@ -75,9 +95,9 @@ export function withCheckFacts(fullOutput: string, limit = 8192): string {
   const tail = fullOutput.slice(-limit);
   const all = checkLogFacts(fullOutput);
   const seen = checkLogFacts(tail);
-  const missing = all.steps.some((s) => !seen.steps.includes(s)) || (all.test !== null && seen.test === null);
+  const missing = all.steps.some((s) => !seen.steps.includes(s)) || all.files.some((f) => !seen.files.includes(f)) || (all.test !== null && seen.test === null);
   if (!missing) return tail;
-  const header = `[Earlier in the log: ${checkFailureFacts(fullOutput)}]\n`.slice(0, 1200);
+  const header = `[Earlier in the log: ${checkFailureFacts(fullOutput)}]\n`.slice(0, 2000);
   return header + fullOutput.slice(-(limit - header.length));
 }
 
