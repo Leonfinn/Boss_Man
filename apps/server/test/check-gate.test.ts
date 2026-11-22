@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
-import { checkGate, checkPriority, DEFAULT_MERGE_CHECK_LIMIT } from "../src/services/check-gate.js";
+import {
+  checkGate,
+  checkPriority,
+  DEFAULT_BACKGROUND_LANE_AGE_MINUTES,
+  DEFAULT_MERGE_CHECK_LIMIT,
+  MAX_BACKGROUND_LANE_AGE_MINUTES,
+  readLaneAgeMinutes,
+} from "../src/services/check-gate.js";
 import { eq } from "drizzle-orm";
 import { settings } from "../src/db/schema.js";
 import { DEPLOY_WAIT_KEY } from "../src/services/deploy-wait-hold.js";
@@ -103,5 +110,31 @@ describe("check gate", () => {
     release.y!();
     await Promise.all(more);
     await close();
+  });
+});
+
+describe("background lane age setting (BOS-1803)", () => {
+  it("reads a whole number of minutes inside the allowed range", () => {
+    expect(readLaneAgeMinutes(60)).toBe(60);
+    expect(readLaneAgeMinutes("90")).toBe(90);
+  });
+
+  it("accepts both ends of the range", () => {
+    expect(readLaneAgeMinutes(0)).toBe(0);
+    expect(readLaneAgeMinutes(MAX_BACKGROUND_LANE_AGE_MINUTES)).toBe(MAX_BACKGROUND_LANE_AGE_MINUTES);
+  });
+
+  it("falls back to the default for a missing or blank value", () => {
+    expect(readLaneAgeMinutes(null)).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
+    expect(readLaneAgeMinutes(undefined)).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
+    expect(readLaneAgeMinutes("")).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
+  });
+
+  it("falls back to the default for a negative, too-large, fractional or non-numeric value", () => {
+    expect(readLaneAgeMinutes(-1)).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
+    expect(readLaneAgeMinutes(MAX_BACKGROUND_LANE_AGE_MINUTES + 1)).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
+    expect(readLaneAgeMinutes(1.5)).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
+    expect(readLaneAgeMinutes("abc")).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
+    expect(readLaneAgeMinutes(Number.NaN)).toBe(DEFAULT_BACKGROUND_LANE_AGE_MINUTES);
   });
 });
