@@ -173,7 +173,7 @@ type ActedResult ={ flaggedDecisions: string[]; flaggedTickets: string[]; woken:
  * waits on them) "may be out of date", mark their state notes stale, and wake each author
  * once to confirm or withdraw. Anything already flagged is left alone, so one action is one wake.
  */
-export async function ownerActed(db: Db, input: { companyId: string; ticketIds: string[]; reason: string; wake?: WakeFn | null; now?: Date; /** Agents already being woken for this action, so they get one note, not two. */ skipAgents?: Array<string | null>; /** The owner's feed, told when a card they had open leaves their list for a re-check (BOS-1691). */ notify?: ((n: NotifyInput) => Promise<unknown>) | null }): Promise<ActedResult> {
+export async function ownerActed(db: Db, input: { companyId: string; ticketIds: string[]; reason: string; wake?: WakeFn | null; now?: Date; /** Agents already being woken for this action, so they get one note, not two. */ skipAgents?: Array<string | null>; /** When set, an assignee is woken for a stale state note only on a ticket in this set (BOS-2291). */ assigneeWakeOnly?: Set<string>; /** The owner's feed, told when a card they had open leaves their list for a re-check (BOS-1691). */ notify?: ((n: NotifyInput) => Promise<unknown>) | null }): Promise<ActedResult> {
   const now = input.now ?? new Date();
   const roots = [...new Set(input.ticketIds.filter((id): id is string => !!id))];
   if (!roots.length) return { flaggedDecisions: [], flaggedTickets: [], woken: [] };
@@ -227,7 +227,9 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   // Woken only for a note or card of their own: `noted` is every flagged note (a dependent's own
   // "waiting on it" note counts, it is really out of date), and `flagged` is every open card about
   // anything in scope. Nobody is woken just for a ticket being listed downstream.
-  for (const n of noted) if (n.assigneeAgentId && !skip.has(n.assigneeAgentId) && !targets.has(n.assigneeAgentId)) targets.set(n.assigneeAgentId, { ticketId: n.id });
+  // BOS-2291: a card answer wakes an assignee for a stale note only when the card blocks or changes that ticket's work (assigneeWakeOnly).
+  const mayWake = (id: string) => !input.assigneeWakeOnly || input.assigneeWakeOnly.has(id);
+  for (const n of noted) if (n.assigneeAgentId && mayWake(n.id) && !skip.has(n.assigneeAgentId) && !targets.has(n.assigneeAgentId)) targets.set(n.assigneeAgentId, { ticketId: n.id });
   const woken: string[] = [];
   if (input.wake) {
     for (const [agentId, target] of targets) {
