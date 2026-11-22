@@ -1876,7 +1876,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Extra MCP servers (tool servers). A token is only ever named here (secretEnv); the runner looks it up from the run's granted secrets.
-    const McpServerInput = z.object({
+    const McpServerFields = z.object({
       name: z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9-]{0,31}$/, "Use lower-case letters, digits and hyphens, starting with a letter (32 characters at most).").refine((n) => n !== "bossman", "That name is Boss Man's own."),
       url: z.string().max(500).refine((u) => { try { return ["http:", "https:"].includes(new URL(u).protocol); } catch { return false; } }, "Use an http:// or https:// address."),
       transport: z.enum(["http", "sse"]),
@@ -1884,7 +1884,11 @@ export async function buildApp(opts: AppOptions) {
       secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, "Use an environment variable name like SCRAPLING_MCP_TOKEN.").refine((n) => !isDaemonOnlySecret(n), DAEMON_ONLY_SECRET_REFUSAL).nullable().default(null),
       headerName: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/, "Not a valid header name.").default("Authorization"),
       headerValue: z.string().max(200).default("Bearer {secret}"),
-    }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), { path: ["headerValue"], message: "The header value must contain {secret}." });
+    });
+    const SECRET_IN_HEADER = { path: ["headerValue"], message: "The header value must contain {secret}." };
+    const McpServerInput = McpServerFields.refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), SECRET_IN_HEADER);
+    // Change an existing server: the same field rules, every field optional, the name fixed (agents' tool names come from it).
+    const McpServerPatch = McpServerFields.omit({ name: true }).partial().strict();
 
     owner.get("/api/companies/:id/mcp-servers", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1906,6 +1910,27 @@ export async function buildApp(opts: AppOptions) {
       // Name and address only: no header, secret name or value, and no login or query part of the address.
       if (row) await record(db, { companyId: id, kind: "settings", summary: `Owner added tool server ${row.name} (${plainUrl(row.url)})` });
       return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });
+    });
+    owner.patch("/api/mcp-servers/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const parsed = McpServerPatch.parse(req.body);
+      // Fields left out stay as they are: the add form's defaults (null secret, Authorization header) must not apply here.
+      const sent = new Set(Object.keys((req.body ?? {}) as object));
+      const patch = Object.fromEntries(Object.entries(parsed).filter(([k, v]) => sent.has(k) && v !== undefined)) as typeof parsed;
+      const [cur] = await db.select().from(mcpServers).where(eq(mcpServers.id, id));
+      if (!cur) return reply.code(404).send({ error: "not_found" });
+      // The result must pass the add rules whole (including {secret} in the header value).
+      McpServerInput.parse({ name: cur.name, url: cur.url, transport: cur.transport, secretEnv: cur.secretEnv, headerName: cur.headerName, headerValue: cur.headerValue, ...patch });
+      const set: Partial<typeof mcpServers.$inferInsert> = { ...patch };
+      // A new address is judged as on add; an unchanged one keeps its trust.
+      if (patch.url !== undefined && patch.url !== cur.url) set.allowPrivate = await allowsPrivate(patch.url);
+      let row = cur;
+      if (Object.keys(set).length > 0) row = (await db.update(mcpServers).set(set).where(eq(mcpServers.id, id)).returning())[0] ?? cur;
+      if (Object.keys(set).length === 0) return cur;
+      void launch.syncAllow(cur.companyId);
+      // Name and address only: no header, secret name or value, and no login or query part of the address.
+      await record(db, { companyId: cur.companyId, kind: "settings", summary: `Owner changed tool server ${row.name} (${plainUrl(row.url)})` });
+      return row;
     });
     owner.delete("/api/mcp-servers/:id", async (req, reply) => {
       const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id, companyId: mcpServers.companyId, name: mcpServers.name });

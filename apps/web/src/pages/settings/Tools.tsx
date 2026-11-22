@@ -10,7 +10,7 @@ import { LoadError } from "../../components/LoadError";
 const TRANSPORT_LABEL = { http: "Streamable HTTP", sse: "SSE" } as const;
 const KIND_LABEL = { ssh: "SSH host", docker: "Docker endpoint", git: "Git remote" } as const;
 
-type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean; secretRefused?: boolean };
+type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; headerName: string; headerValue: string; secretGranted: boolean; secretRefused?: boolean };
 
 /** Extra MCP tool servers on the owner's network. Tokens stay in the secret store: only the name of a granted secret is entered here. */
 export function ToolServers({ company }: { company: Company }) {
@@ -19,8 +19,36 @@ export function ToolServers({ company }: { company: Company }) {
   const [form, setForm] = useState(blank);
   const act = useAction();
   const set = (k: keyof typeof blank) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  // The row being changed: the form shows its values, and Save sends only what differs.
+  const [editing, setEditing] = useState<McpServerRow | null>(null);
+  const startEditing = (m: McpServerRow) => {
+    setEditing(m);
+    setForm({ name: m.name, url: m.url, transport: m.transport, secretEnv: m.secretEnv ?? "", headerName: m.headerName, headerValue: m.headerValue });
+    document.getElementById("mcp-url")?.focus();
+  };
+  const stopEditing = () => {
+    setEditing(null);
+    setForm(blank);
+  };
   const add = (e: FormEvent) => {
     e.preventDefault();
+    if (editing) {
+      const m = editing;
+      const changes: Record<string, string | null> = {};
+      if (form.url !== m.url) changes.url = form.url;
+      if (form.transport !== m.transport) changes.transport = form.transport;
+      if ((form.secretEnv || null) !== m.secretEnv) changes.secretEnv = form.secretEnv || null;
+      if (form.headerName !== m.headerName) changes.headerName = form.headerName;
+      if (form.headerValue !== m.headerValue) changes.headerValue = form.headerValue;
+      if (!Object.keys(changes).length) return void act.run(async () => "Nothing changed.");
+      void act.run(async () => {
+        await api(`/api/mcp-servers/${m.id}`, { method: "PATCH", body: changes });
+        stopEditing();
+        servers.reload();
+        return `Saved ${m.name}. Agents get the change from their next run.`;
+      });
+      return;
+    }
     void act.run(async () => {
       const { secretEnv, ...rest } = form;
       await api(`/api/companies/${company.id}/mcp-servers`, { method: "POST", body: { ...rest, secretEnv: secretEnv || null } });
@@ -69,6 +97,9 @@ export function ToolServers({ company }: { company: Company }) {
                     {!m.secretRefused && !m.secretGranted && <span className="tag amber" style={{ marginLeft: 6 }}>Not granted to {company.name}: no agent gets this server</span>}
                   </td>
                   <td>
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => startEditing(m)} aria-label={`Change tool server ${m.name}`} style={{ marginRight: 6 }}>
+                      Change
+                    </button>
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(m)} aria-label={`Remove tool server ${m.name}`}>
                       Remove
                     </button>
@@ -84,7 +115,7 @@ export function ToolServers({ company }: { company: Company }) {
       <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", alignItems: "end" }}>
         <div className="field">
           <label htmlFor="mcp-name">Server name</label>
-          <input id="mcp-name" className="mono" required pattern="[a-z][a-z0-9-]{0,31}" placeholder="scrapling" value={form.name} onChange={set("name")} />
+          <input id="mcp-name" className="mono" required disabled={!!editing} pattern="[a-z][a-z0-9-]{0,31}" placeholder="scrapling" value={form.name} onChange={set("name")} />
         </div>
         <div className="field">
           <label htmlFor="mcp-url">Server URL</label>
@@ -123,8 +154,13 @@ export function ToolServers({ company }: { company: Company }) {
         </details>
         <div>
           <button className="btn" type="submit" disabled={act.busy}>
-            Add tool server
+            {editing ? "Save changes" : "Add tool server"}
           </button>
+          {editing && (
+            <button className="btn" type="button" style={{ marginLeft: 8 }} disabled={act.busy} onClick={stopEditing}>
+              Cancel
+            </button>
+          )}
         </div>
       </form>
       {act.view}
