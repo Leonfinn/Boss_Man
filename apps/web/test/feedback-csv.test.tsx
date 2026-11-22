@@ -45,6 +45,32 @@ describe("Download CSV button", () => {
     expect((screen.getByRole("button", { name: "Download CSV" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("exports only the notes of the tab shown, named after it", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const body = url.includes("state=archived") ? [note({ id: "n2", text: "Old one", state: "archived" })] : url.includes("/feedback?") ? [note({})] : url.includes("/feedback/unprocessed") ? {} : url.includes("/features") ? null : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    }));
+    let saved: Blob | null = null;
+    let name = "";
+    URL.createObjectURL = ((b: Blob) => ((saved = b), "blob:x")) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = () => {};
+    const click = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) { name = this.download; };
+    try {
+      render(<Feedback companies={companies} companyId="co-1" noteId={undefined} go={() => {}} />);
+      await screen.findByText("Please add export");
+      fireEvent.click(screen.getAllByRole("tab").find((t) => /archived/i.test(t.textContent ?? ""))!);
+      await screen.findByText("Old one");
+      fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+      const text = await (saved as unknown as Blob).text();
+      expect(text).toContain("Old one");
+      expect(text).not.toContain("Please add export");
+      expect(name).toMatch(/^feedback-App-Co-archived-\d{4}-\d{2}-\d{2}\.csv$/);
+    } finally {
+      HTMLAnchorElement.prototype.click = click;
+    }
+  });
+
   it("downloads the rows shown", async () => {
     stub([note({})]);
     let saved: Blob | null = null;
