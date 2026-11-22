@@ -151,7 +151,7 @@ import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
-import { DEFAULT_LOGIN_LIMITS, loginLimiter, type LoginLimits } from "./login-limit.js";
+import { DEFAULT_LOGIN_LIMITS, loginLimiter, lockoutNoticeGate, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
@@ -1494,7 +1494,24 @@ export async function buildApp(opts: AppOptions) {
 
   // BOS-2177: the first time sign-in locks, tell the owner once (an alert and one activity line, on the oldest
   // company, as sign-in belongs to no company). The text carries the address only: never a guessed name or password.
+  // BOS-2207: at most 3 notices an hour across all addresses; the ones held back are counted in the next notice.
+  const lockoutGate = lockoutNoticeGate(3, 60 * 60_000, () => (opts.now ? opts.now().getTime() : Date.now()));
   const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()), (e) => {
+    const gate = lockoutGate.take();
+    if (!gate.send) {
+      if (gate.summaryInMs !== undefined) {
+        // One summary when the window frees up: "N more locks", so the owner sees the size of a burst.
+        setTimeout(() => {
+          const n = lockoutGate.flush();
+          if (n === 0) return;
+          notes
+            .notify({ companyId: null, agentId: null, level: "flag", title: `${n} more sign-in lock${n === 1 ? "" : "s"} (addresses or usernames) in the last hour were not announced one by one`, body: "If this wasn't you, change your password in Settings → Account.", link: "#/settings" })
+            .catch((err) => app.log.warn({ err }, "sign-in lockout summary failed"));
+        }, gate.summaryInMs).unref();
+      }
+      return;
+    }
+    const more = gate.held > 0 ? ` (${gate.held} more lock${gate.held === 1 ? "" : "s"} in the last hour were not announced)` : "";
     const limits = opts.loginLimits ?? DEFAULT_LOGIN_LIMITS;
     const address = e.ip.replace(/[^0-9a-fA-F.:%]/g, "").slice(0, 64) || "an unknown address";
     const at = new Date(e.at);
@@ -1505,12 +1522,12 @@ export async function buildApp(opts: AppOptions) {
         agentId: null,
         level: "flag",
         title: e.byAddress
-          ? `Sign-in was locked after ${limits.maxFailures} wrong passwords from ${address}`
-          : `Sign-in for the owner's username was locked after ${limits.maxFailures} wrong passwords from several addresses, the latest ${address}`,
+          ? `Sign-in was locked after ${limits.maxFailures} wrong passwords from ${address}${more}`
+          : `Sign-in for ${e.ownerUsername ? "the owner's username" : "a username"} was locked after ${limits.maxFailures} wrong passwords from several addresses, the latest ${address}${more}`,
         body: "If this wasn't you, change your password in Settings → Account.",
         link: "#/settings",
       });
-      if (home) await record(db, { companyId: home.id, kind: "security", summary: `Sign-in locked after ${limits.maxFailures} failed attempts from ${address} at ${at.toISOString()}`, detail: { address, at: at.toISOString(), byAddress: e.byAddress, byUsername: e.byUsername }, at });
+      if (home) await record(db, { companyId: home.id, kind: "security", summary: `Sign-in locked after ${limits.maxFailures} failed attempts from ${address} at ${at.toISOString()}`, detail: { address, at: at.toISOString(), byAddress: e.byAddress, byUsername: e.byUsername, held: gate.held }, at });
     })().catch((err) => app.log.warn({ err }, "sign-in lockout alert failed"));
   });
   app.post("/api/login", async (req, reply) => {
@@ -1525,7 +1542,7 @@ export async function buildApp(opts: AppOptions) {
     }
     const [owner] = await db.select().from(owners).where(eq(owners.username, body.username));
     if (!owner || !(await verifyPassword(body.password, owner.passwordHash))) {
-      logins.failed(req.ip, body.username);
+      logins.failed(req.ip, body.username, !!owner);
       return reply.code(401).send({ error: "wrong_username_or_password" });
     }
     logins.succeeded(req.ip, body.username);
