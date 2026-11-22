@@ -11,7 +11,7 @@ import { checkJobs, checkResults, checkWorkers, projects, tickets } from "../db/
 import { RunnerGone } from "./runners.js";
 import type { CiStop } from "./ci-publish.js";
 import { clearMergeCards } from "./decisions.js";
-import { SUPERSEDED_TEXT } from "./check-queue.js";
+import { MACHINE_RUNNER, SUPERSEDED_TEXT } from "./check-queue.js";
 import { record } from "./activity.js";
 import { lineEvent, TRAIN_CLASH_FILES } from "./merge-line.js";
 import { mainGen, trainFor, type RestackWhy, type TrainClash } from "./merge-train.js";
@@ -194,12 +194,12 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
    * every poll: once it names a reason the round ends and the caller prepares again. Queueing the new tree then replaces a
    * queued job and keeps its place (BOS-1328); a running one is cancelled as a leftover, which frees its slot.
    */
-  const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; ciRefresh?: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined; stop?: CiStop; leftReview?: () => Promise<boolean> }): Promise<RoundEnd> => {
+  const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; ciRefresh?: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined; stop?: CiStop; leftReview?: () => Promise<boolean>; oom?: { avoid: string; placeAt: Date } }): Promise<RoundEnd> => {
     let lastRefresh = Date.now();
     for (const command of queuedChecks) {
       {
         let prep = ref.prep;
-        const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPrio });
+        const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPrio, ...(o.oom ? { avoidMachine: o.oom.avoid, placeAt: o.oom.placeAt } : {}) });
         // BOS-1289: a merge that starts again after a restart has no waiter on the old process's job. It was adopted above when
         // the tree is the same; a job for another tree (main moved) is left over and would hold a slot beside this one.
         if (!reused && deps.cancelCheck) {
@@ -316,6 +316,15 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
         }
         if (cur.state === "cancelled" && cur.reason === SUPERSEDED_TEXT) return { status: "job_superseded" };
         if (cur.state === "stuck" || cur.state === "cancelled") return { status: "job_stuck", command, reason: cur.reason ?? `The check job was ${cur.state}.`, output: cur.logTail ?? "" };
+        // BOS-2218: a test process lost to the kernel's out-of-memory kill is the machine's fault, not the code's. Once, the check
+        // runs again keeping its place, off that machine while another is up (the queue falls back to it when none is), before
+        // any card. A second loss goes to checkFailed, whose card names the machine.
+        if (cur.state === "failed" && !o.oom && checkNeverFinished({ timedOut: false, exitCode: cur.exitCode, output: cur.logTail ?? "" }) === "out_of_memory") {
+          const avoid = cur.workerId ?? MACHINE_RUNNER;
+          const name = cur.workerId ? ((await db.select({ name: checkWorkers.name }).from(checkWorkers).where(eq(checkWorkers.id, cur.workerId)))[0]?.name ?? "a check worker") : "the company runner";
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check \`${named(command)}\` lost a test process to an out-of-memory kill on ${name}; running it again once on another machine (this machine again only if no other is online), keeping its place. Nothing to do.` });
+          return runRound(ref, { ...o, oom: { avoid, placeAt: cur.queuedAt } });
+        }
         if (cur.state === "failed") {
           const chars = await queue.logChars(cur.id).catch(() => null);
           return { status: "check_failed", command, result: { ok: false, exitCode: cur.exitCode, timedOut: /timed out/i.test(cur.reason ?? ""), output: cur.logTail ?? "", ms: cur.startedAt && cur.endedAt ? cur.endedAt.getTime() - cur.startedAt.getTime() : 0, ...(chars ? { keptLog: { jobId: cur.id, chars, ticketId } } : {}) } };

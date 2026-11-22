@@ -1,0 +1,1 @@
+ALTER TABLE "check_jobs" ADD COLUMN "avoid_machine" text;

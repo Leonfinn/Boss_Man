@@ -271,7 +271,9 @@ if [ -n "$mem_peak" ]; then
   mem_mb="${BOSSMAN_CHECK_MEMORY_MB:-6912}"; [[ "$mem_mb" =~ ^[0-9]{1,6}$ ]] || mem_mb=6912
   node "$(dirname "$self")/check-mem-guard.mjs" "$$" "$mem_mb" "$mem_peak" &
   mem_guard=$!
-  trap 'kill "$mem_guard" 2>/dev/null || true; [ ! -s "$mem_peak" ] || echo "check-all: peak memory of this check about $(( $(cat "$mem_peak") * 10 / 1024 / 10 )).$(( $(cat "$mem_peak") * 10 / 1024 % 10 )) GB (ceiling ${mem_mb} MB, BOSSMAN_CHECK_MEMORY_MB)"; rm -f "$mem_peak"' EXIT
+  # BOS-2218: the machine's memory limit and how many processes it killed for lack of memory during this check, in the log either way.
+  oom_start="$(node "$(dirname "$self")/check-oom-report.mjs" start 2>/dev/null || echo unknown)"
+  trap 'kill "$mem_guard" 2>/dev/null || true; node "$(dirname "$self")/check-oom-report.mjs" report "$oom_start" 2>/dev/null || true; [ ! -s "$mem_peak" ] || echo "check-all: peak memory of this check about $(( $(cat "$mem_peak") * 10 / 1024 / 10 )).$(( $(cat "$mem_peak") * 10 / 1024 % 10 )) GB (ceiling ${mem_mb} MB, BOSSMAN_CHECK_MEMORY_MB)"; rm -f "$mem_peak"' EXIT
 fi
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
