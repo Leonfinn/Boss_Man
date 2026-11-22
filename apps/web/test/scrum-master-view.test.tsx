@@ -48,6 +48,26 @@ describe("a failed load says so, with Retry (BOS-2249)", () => {
     expect(screen.queryByText("Loading open issues")).toBeNull();
   });
 
+  it("keeps the last good rows when a later poll fails", async () => {
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        n += 1;
+        if (n > 1) return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify([{ id: "f1", source: "flag", ticketId: "t1", ticketRef: "BOS-149", ticketTitle: "Fix the merge", warning: "w", rule: null, holder: "ceo", since: "2026-10-27T09:16:00Z", done: [], nextAt: null, nextText: "Checks again", openedAt: "2026-10-27T09:00:00Z" }]), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    render(<OpenIssues companyId="c1" />);
+    expect(await screen.findByText("Fix the merge")).toBeTruthy();
+    // Returning to the tab polls again; that poll fails.
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.waitFor(() => expect(n).toBeGreaterThan(1));
+    await new Promise((r) => setTimeout(r, 50)); // test-lines-ok: let the failed poll settle; the assertion is that nothing changes
+    expect(screen.getByText("Fix the merge")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load/)).toBeNull();
+  });
+
   it("the log shows the error and Retry, in full and folded", async () => {
     failing();
     render(<ScrumMasterLog companyId="c1" />);
