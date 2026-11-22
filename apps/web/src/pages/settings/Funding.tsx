@@ -4,6 +4,7 @@ import { usePoll } from "../../hooks";
 import { ProjectBudget } from "../ProjectBudget";
 import { Section, useAction } from "./shared";
 import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 
 const PROVIDERS: Array<[string, string]> = [
   ["anthropic", "Anthropic"],
@@ -167,8 +168,7 @@ export function ProjectBudgets({ company }: { company: Company }) {
       <p className="muted" style={{ fontSize: 14 }}>
         What each project has cost on API and credit runs (list-price estimates, not a bill), and its cap per task and per month. Runs paid from a subscription are left out of the dollar figures. Set a project's caps on its Config tab.
       </p>
-      {projects.error ? <p className="error" role="alert">{projects.error.message}</p> : null}
-      {projects.data === null ? <Loader label="Loading projects" /> : rows.length === 0 ? <p className="muted">No projects yet. Add one on the Projects page.</p> : (
+      {projects.error && projects.data === null ? <LoadError what="the projects" message={projects.error.message} onRetry={projects.reload} /> : projects.data === null ? <Loader label="Loading projects" /> : rows.length === 0 ? <p className="muted">No projects yet. Add one on the Projects page.</p> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           {rows.map((p) => (
             <div key={p.id}>

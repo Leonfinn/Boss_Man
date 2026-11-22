@@ -78,4 +78,14 @@ describe("Spend page", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("Couldn't load the spend");
     expect((screen.getByRole("button", { name: "Download CSV" }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("offers Retry on a failed load and shows the spend once the retry works", async () => {
+    respond = () => ({ status: 500, body: { error: "boom" } });
+    render(<SpendReport company={company} />);
+    await screen.findByRole("alert");
+    respond = (url) => ({ status: 200, body: answer(Number(new URL(url, "http://x").searchParams.get("days"))) });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByRole("table");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 });

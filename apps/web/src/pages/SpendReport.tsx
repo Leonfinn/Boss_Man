@@ -5,6 +5,7 @@ import { useState } from "react";
 import { api, usd, type Company } from "../api";
 import { NoCompany } from "../components/NoCompany";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { usePoll } from "../hooks";
 import { buildCsv, download } from "../csv";
 import { away } from "../server-watch";
@@ -198,7 +199,7 @@ export function SpendReport({ company }: { company: Company | undefined }) {
           ))}
         </div>
       </div>
-      {report.error && !away(report.error) ? <p className="error" role="alert">Couldn't load the spend: {report.error.message}</p> : null}
+      {report.error && !away(report.error) ? <LoadError what="the spend" message={report.error.message} onRetry={report.reload} /> : null}
       {!data ? (
         report.error ? null : <Loader label="Loading the spend" />
       ) : (
