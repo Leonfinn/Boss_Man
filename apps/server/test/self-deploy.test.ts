@@ -75,6 +75,27 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.req("PUT", "/api/self-deploy/runner-addons", { ids: [] })).json()).toEqual({ saved: ["future-thing"] });
   });
 
+  it("Recent updates pages older rows with `before`, newest first (BOS-2277)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies);
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const at = new Date(Date.UTC(2026, 9, 1 + i));
+      const [d] = await c.db
+        .insert(decisions)
+        .values({ companyId: co!.id, kind: "question", tier: "owner", question: `u${i}`, options: ["Done"], recommendedOption: "Done", status: "answered", answeredAt: at, context: { type: "self_deploy", target: "server", commit: A, changes: [] } as never })
+        .returning();
+      ids.push(d!.id);
+    }
+    const newest = ids.slice().reverse(); // newest first
+    const first = (await c.req("GET", "/api/self-deploy/history?limit=3")).json() as { id: string }[];
+    expect(first.map((r) => r.id)).toEqual(newest.slice(0, 3));
+    const next = (await c.req("GET", `/api/self-deploy/history?limit=10&before=${first[2]!.id}`)).json() as { id: string }[];
+    expect(next.map((r) => r.id)).toEqual(newest.slice(3));
+    const none = (await c.req("GET", `/api/self-deploy/history?before=${ids[0]}`)).json();
+    expect(none).toEqual([]);
+  });
+
   it("refuses to save add-ons when self-deploy is not set up (BOS-1583)", async () => {
     const c = (ctx = await setup({ deployer: false }));
     expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toMatchObject({ enabled: false });

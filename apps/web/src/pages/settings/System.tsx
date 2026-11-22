@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type Company } from "../../api";
 import { stopRun } from "../../stop-run";
-import { usePoll } from "../../hooks";
+import { useOlder, usePoll } from "../../hooks";
+import { ShowOlder } from "../../components/ShowOlder";
 import { inForceHeadline, inForceReason, type LimitInForce } from "../../limit-in-force";
 import { setHold, useHold } from "../../hold";
 import { MoreAbout } from "../../components/MoreAbout";
@@ -152,7 +153,9 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
-  const history = usePoll((signal) => api<HistoryRow[]>("/api/self-deploy/history?limit=5", { signal }), 30_000, "self-deploy-history");
+  const history = usePoll((signal) => api<HistoryRow[]>(`/api/self-deploy/history?limit=${HISTORY_FIRST}`, { signal }), 30_000, "self-deploy-history");
+  // "Show older" (BOS-2277): 10 more rows each press, after the newest 5.
+  const olderHistory = useOlder(history.data, HISTORY_FIRST, (before) => api<HistoryRow[]>(`/api/self-deploy/history?limit=${HISTORY_MORE}&before=${before}`), "self-deploy-history", HISTORY_MORE);
   const act = useAction();
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
@@ -307,7 +310,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
           <NowRunning v={v} report={report.data} progress={progress} />
         </div>
-        <RecentUpdates rows={history.data} progress={progress} wait={wait.data} maint={maint.data} queued={!!v?.runnerQueue} />
+        <RecentUpdates rows={olderHistory.rows} liveRows={history.data} older={olderHistory}progress={progress} wait={wait.data} maint={maint.data} queued={!!v?.runnerQueue} />
       </div>
       {v && (
         <div className="upd-other" data-testid="other-actions">
@@ -494,9 +497,13 @@ function NowRunning({ v, report, progress }: { v: SelfDeployView | null; report:
 }
 
 /** Recent updates: the last 5 server updates and runner rebuilds, newest first (BOS-1238). */
-function RecentUpdates({ rows, progress, wait, maint, queued }: { rows: HistoryRow[] | null; progress: RunnerProgress; wait: DeployWaitView | null; maint: MaintenanceView | null; queued: boolean }) {
-  // Only the newest runner row can be mid-swap; older ones are history.
-  const newestRunner = rows?.find((r) => r.target === "runner")?.id;
+const HISTORY_FIRST = 5;
+const HISTORY_MORE = 10;
+function RecentUpdates({ rows, liveRows, older, progress, wait, maint, queued }: { rows: HistoryRow[] | null; liveRows: HistoryRow[] | null; older: React.ComponentProps<typeof ShowOlder>["older"]; progress: RunnerProgress; wait: DeployWaitView | null; maint: MaintenanceView | null; queued: boolean }) {
+  // Only the newest runner row can be mid-swap; older ones are history. BOS-2277: only the newest page (`liveRows`)
+  // can hold it, so rows loaded by "Show older" never show as swapping or waiting.
+  const newestRunner = liveRows?.find((r) => r.target === "runner")?.id;
+  const newestServer = liveRows?.find((r) => r.target !== "runner")?.id;
   return (
     <div className="upd-col" data-testid="recent-updates">
       <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Recent updates</h3>
@@ -509,7 +516,7 @@ function RecentUpdates({ rows, progress, wait, maint, queued }: { rows: HistoryR
           {rows.map((r) => {
             const t = historyTag(r, r.id === newestRunner ? progress : null);
             // BOS-2056: only the newest row of each kind can be the one that is live; older "Waiting" rows are history.
-            const waitsOn = r.id === newestRunner || r.id === rows.find((x) => x.target !== "runner")?.id ? historyWaitingOn(r, wait, maint, queued) : null;
+            const waitsOn = r.id === newestRunner || r.id === newestServer ? historyWaitingOn(r, wait, maint, queued) : null;
             return (
               <li key={r.id} className="upd-row" style={{ listStyle: "none" }}>
                 <span>{when(r.at)}</span>
@@ -521,6 +528,7 @@ function RecentUpdates({ rows, progress, wait, maint, queued }: { rows: HistoryR
           })}
         </ul>
       )}
+      <ShowOlder older={older} />
       <p style={{ fontSize: 13 }}><a href="#/decisions">All updates</a></p>
     </div>
   );

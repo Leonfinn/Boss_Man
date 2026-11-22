@@ -1834,12 +1834,17 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
      * The newest answered update cards for the panel's Recent updates (BOS-1238): target, how it ended, how many
      * changes and when. Read-only, from the cards that already hold it; `result` is null while the host is still on it.
      */
-    async history(limit = 5) {
+    async history(limit = 5, before?: string) {
+      const when = sql`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`;
+      // "Show older" (BOS-2277): only rows that sort after the row `before` (an id), newest first; an unknown id gives none.
+      const olderThan = before
+        ? sql`(${when}, ${decisions.id}) < (select coalesce(d2.answered_at, d2.created_at), d2.id from decisions d2 where d2.id = ${before})`
+        : undefined;
       const rows = await db
         .select({ id: decisions.id, context: decisions.context, answeredAt: decisions.answeredAt, createdAt: decisions.createdAt })
         .from(decisions)
-        .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'self_deploy'`))
-        .orderBy(desc(sql`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`))
+        .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'self_deploy'`, olderThan))
+        .orderBy(desc(when), desc(decisions.id))
         .limit(Math.max(1, Math.min(limit, 20)));
       return rows.map((r) => {
         const c = r.context as SelfDeployContext;
