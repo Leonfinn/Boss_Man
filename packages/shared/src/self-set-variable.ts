@@ -37,10 +37,11 @@ function plainSets(command: string): Map<string, { count: number; at: number; va
     const prev = sets.get(name);
     sets.set(name, { count: (prev?.count ?? 0) + 1, at: prev?.at ?? at, value });
   };
-  for (const m of command.matchAll(/(?:^|[;&|\n(\s])([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|)]*)/g)) {
-    const raw = m[2]!;
+  for (const m of command.matchAll(/(?:^|[;&|\n(\s])([A-Za-z_]\w*)((?:\[[^\]]*\])?)\+?=("[^"]*"|'[^']*'|[^\s;&|)]*)/g)) {
+    const raw = m[3]!;
+    // An element or append assignment (`R[0]=x`, `R+=x`) is a second set of R: the value is no longer plain.
     const value = raw.replace(/^(["'])([\s\S]*)\1$/, "$2");
-    note(m[1]!, m.index!, value);
+    note(m[1]!, m.index!, m[2] || m[0].includes("+=") ? null : value);
   }
   for (const m of command.matchAll(/\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]*)/g)) note(m[1]!, m.index!, m[2]!.includes("$") ? null : m[2]!);
   return sets;

@@ -29,6 +29,11 @@ describe("a self-set literal variable is read like its typed-out form (BOS-2244 
     `git -C "$R" grep -n x; R=${CHECKOUT}`,
     `for R in /etc ${CHECKOUT}; do git -C "$R" grep -n x; done`,
     `R=/etc; cd "$R" && git --no-pager log`,
+    // Jane round 2: an array-element or append assignment is a second set of R ($R is ${R[0]}).
+    `R=${CHECKOUT}; R[0]=${ROOT}/tickets/other; git -C "$R" commit -am x`,
+    `R=${CHECKOUT}; R[0]=${ROOT}/tickets/other; cd "$R" && rm -rf src`,
+    `R=${CHECKOUT}; R+=/x; git -C "$R" commit -am x`,
+    `R=${CHECKOUT}; R[1]+=x; cd "$R" && git log > out.txt`,
   ])("keeps today's Deny: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
 
   // Jane's review: a parameter expansion other than `$R` and `${R}` changes the value, so it must stay unresolved.

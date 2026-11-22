@@ -193,7 +193,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // value is unknown (HOME=/tmp; D=/etc; D=$HOME), so a target that uses it is denied.
   const setCount = new Map<string, number>();
   const bump = (n: string | undefined): void => void (n && setCount.set(n, (setCount.get(n) ?? 0) + 1));
-  for (const m of cs2.matchAll(/(?:^|[;&|\s(])(\w+)\+?=/g)) bump(m[1]);
+  for (const m of cs2.matchAll(/(?:^|[;&|\s(])(\w+)(?:\[[^\]]*\])?\+?=/g)) bump(m[1]);
   for (const m of cs2.matchAll(/\bfor\s+(\w+)\b|\bprintf\s+-v\s+(\w+)|\$\{(\w+)[^}\w]*?(?::?[=])/g)) bump(m[1] ?? m[2] ?? m[3]);
   for (const m of cs2.matchAll(/\b(?:read|mapfile|readarray|getopts)\b([^;&|\n]*)/g)) for (const w of m[1]!.split(/\s+/)) if (/^\w+$/.test(w)) bump(w);
   const assigned = new Map<string, string>();
