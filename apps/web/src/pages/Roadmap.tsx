@@ -190,6 +190,89 @@ function AddMilestone({ objectiveId, onAdded, horizon }: { objectiveId: string; 
   );
 }
 
+/** A key result with "Change" (an inline form) and "Remove" (asks first). BOS-2250. */
+function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][number]; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(k.title);
+  const [current, setCurrent] = useState(k.current === null ? "" : String(k.current));
+  const [target, setTarget] = useState(k.target === null ? "" : String(k.target));
+  const [unit, setUnit] = useState(k.unit ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const open = () => {
+    setTitle(k.title);
+    setCurrent(k.current === null ? "" : String(k.current));
+    setTarget(k.target === null ? "" : String(k.target));
+    setUnit(k.unit ?? "");
+    setError(null);
+    setEditing(true);
+  };
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    const num = (s: string) => (s.trim() === "" ? null : Number(s));
+    void api(`/api/key-results/${k.id}`, { method: "PATCH", body: { title: title.trim(), current: num(current), target: num(target), unit: unit.trim() || null } }).then(
+      () => (setEditing(false), onChanged()),
+      (err: Error) => setError(err.message),
+    );
+  };
+  if (editing)
+    return (
+      <li>
+        <form onSubmit={save} style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end", width: "100%" }}>
+          <div className="field" style={{ flex: "2 1 200px" }}>
+            <label htmlFor={`kr-t-${k.id}`}>Key result</label>
+            <input id={`kr-t-${k.id}`} required maxLength={200} autoFocus value={title} onChange={(e) => setTitle(e.target.value)} />
+          </div>
+          <div className="field" style={{ width: 100 }}>
+            <label htmlFor={`kr-c-${k.id}`}>Current</label>
+            <input id={`kr-c-${k.id}`} type="number" step="any" value={current} onChange={(e) => setCurrent(e.target.value)} />
+          </div>
+          <div className="field" style={{ width: 100 }}>
+            <label htmlFor={`kr-g-${k.id}`}>Target</label>
+            <input id={`kr-g-${k.id}`} type="number" step="any" value={target} onChange={(e) => setTarget(e.target.value)} />
+          </div>
+          <div className="field" style={{ width: 100 }}>
+            <label htmlFor={`kr-u-${k.id}`}>Unit</label>
+            <input id={`kr-u-${k.id}`} maxLength={20} value={unit} onChange={(e) => setUnit(e.target.value)} />
+          </div>
+          <button className="btn primary small" type="submit">
+            Save
+          </button>
+          <button className="btn small" type="button" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+          {error && <p className="error">{error}</p>}
+        </form>
+      </li>
+    );
+  return (
+    <li>
+      <span>{k.title}</span>
+      {k.progress !== null && (
+        <span className="bar" style={{ width: 90 }} aria-label={`${Math.round(k.progress * 100)}%`}>
+          <span style={{ width: `${k.progress * 100}%` }} />
+        </span>
+      )}
+      <span className="mono muted">
+        {k.current ?? 0}
+        {k.target !== null ? ` / ${k.target}` : ""}
+        {k.unit ? ` ${k.unit}` : ""}
+      </span>
+      <button type="button" className="btn small" aria-label={`Change the key result ${k.title}`} onClick={open}>
+        Change
+      </button>
+      <button
+        type="button"
+        className="btn small"
+        aria-label={`Remove the key result ${k.title}`}
+        onClick={() => window.confirm(`Remove the key result ${k.title}?`) && void api(`/api/key-results/${k.id}`, { method: "DELETE" }).then(onChanged, (err: Error) => setError(err.message))}
+      >
+        Remove
+      </button>
+      {error && <span className="error">{error}</span>}
+    </li>
+  );
+}
+
 function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { start: number; end: number }; now: string; onChanged: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const sel = o.milestones.find((m) => m.id === selected) ?? null;
@@ -208,19 +291,7 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
           {o.keyResults.length > 0 && (
             <ul className="rm-krs">
               {o.keyResults.map((k) => (
-                <li key={k.id}>
-                  <span>{k.title}</span>
-                  {k.progress !== null && (
-                    <span className="bar" style={{ width: 90 }} aria-label={`${Math.round(k.progress * 100)}%`}>
-                      <span style={{ width: `${k.progress * 100}%` }} />
-                    </span>
-                  )}
-                  <span className="mono muted">
-                    {k.current ?? 0}
-                    {k.target !== null ? ` / ${k.target}` : ""}
-                    {k.unit ? ` ${k.unit}` : ""}
-                  </span>
-                </li>
+                <KeyResultRow key={`${k.id}-${k.title}-${k.current}-${k.target}-${k.unit}`} k={k} onChanged={onChanged} />
               ))}
             </ul>
           )}
