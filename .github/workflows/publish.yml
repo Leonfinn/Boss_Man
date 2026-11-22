@@ -21,14 +21,16 @@ on:
 
 permissions: {}
 
-# One publish at a time, and a release waits for it. Never cancel one half way.
+# One group per commit (BOS-2302): a group holds one running and one waiting run and GitHub cancels the waiting one when
+# a third arrives, so with one shared group a burst of merges silently dropped some commits' images. Tags are
+# sha-<12> only, so publishes of different commits never write the same tag and can run in parallel. Never cancel one
+# half way. The Release workflow has its own group.
 concurrency:
-  group: publish-images
+  group: publish-images-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
-# Every job has a time limit (BOS-2097): this workflow and release.yml share the publish-images group without
-# cancelling, so a hung buildx push or cosign step would hold every later publish and the owner's Release button for
-# GitHub's 6-hour default. Limits as in ci.yml: about 1.5x the longest green run, rounded up to 5 minutes, at least 10.
+# Every job has a time limit (BOS-2097): without one a hung buildx push or cosign step would run for GitHub's 6-hour
+# default. Limits as in ci.yml: about 1.5x the longest green run, rounded up to 5 minutes, at least 10.
 jobs:
   settings:
     # Only a CI run that passed on a push to main (not the nightly run, not a pull request).

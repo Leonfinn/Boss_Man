@@ -21,6 +21,15 @@ afterEach(() => {
 });
 
 describe("feedback note pane", () => {
+  // First on purpose: the loading test below leaves a request hanging that a later test would share.
+  it("a failed load offers Retry, and Retry loads the note", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => (n++ === 0 ? new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } }) : ok(detail))));
+    render(<NotePane id="n1" companyId="c1" features={[]} onChanged={() => {}} onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("The board is slow", { exact: false })).toBeTruthy();
+  });
+
   it("shows a loading message, not a blank pane, while the note loads", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));

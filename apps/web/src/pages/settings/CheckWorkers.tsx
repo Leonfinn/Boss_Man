@@ -2,7 +2,9 @@
 // company runner's slots are full. The owner adds one (its token is shown once), sets its slots and per-check caps, and
 // can turn it off or remove it. Each worker says, per company, whether it takes checks and if not, why.
 import { useState } from "react";
-import { checkMemoryWarning } from "@boss-man/shared";
+import { CHECK_PEAK_MB, checkMemoryWarning } from "@boss-man/shared";
+
+const MEMORY_GUIDE = "https://github.com/Leonfinn/Boss_Man/blob/main/docs/34-check-workers.md#changing-the-memory-on-any-docker-host";
 import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
@@ -61,7 +63,10 @@ function valid(d: Draft, maxSlots: number) {
 function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix, machineMb }: { draft: Draft; setDraft: (d: Draft) => void; companies: Company[]; maxSlots: number; idPrefix: string; machineMb?: number | null }) {
   // BOS-2217: as the owner types, say when the numbers need more than the machine has. Only a worker that has connected reports its memory.
   const slotsNow = Number(draft.slots);
-  const warning = machineMb && Number.isInteger(slotsNow) && slotsNow >= 1 ? checkMemoryWarning({ slots: slotsNow, perCheckMb: draft.memoryGb.trim() ? Math.round(Number(draft.memoryGb) * 1024) : null, machineMb }) : null;
+  const typedMb = draft.memoryGb.trim() ? Math.round(Number(draft.memoryGb) * 1024) : null;
+  const perCheckMb = typedMb && typedMb > 0 ? typedMb : CHECK_PEAK_MB;
+  const gbText = (mb: number) => `${Math.round((mb / 1024) * 10) / 10} GB`; // one decimal, as in checkMemoryWarning, so the two lines agree
+  const warning = machineMb && Number.isInteger(slotsNow) && slotsNow >= 1 ? checkMemoryWarning({ slots: slotsNow, perCheckMb: typedMb, machineMb }) : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <label htmlFor={`${idPrefix}-name`}>Name</label>
@@ -84,11 +89,19 @@ function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix, machineMb 
       <SlotSplitFields value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} slots={Number(draft.slots) || 1} idPrefix={idPrefix} />
       <label htmlFor={`${idPrefix}-threads`}>Test threads per check (optional)</label>
       <input id={`${idPrefix}-threads`} type="number" min={1} max={256} value={draft.threads} onChange={(e) => setDraft({ ...draft, threads: e.target.value })} style={{ width: 80 }} />
-      <label htmlFor={`${idPrefix}-memory`}>Memory per check, in GB (optional)</label>
+      <label htmlFor={`${idPrefix}-memory`}>Memory limit per check (GB, optional)</label>
       <input id={`${idPrefix}-memory`} type="number" min={0.25} step={0.5} value={draft.memoryGb} onChange={(e) => setDraft({ ...draft, memoryGb: e.target.value })} style={{ width: 80 }} />
+      <p className="muted" style={{ fontSize: 14, margin: 0 }}>
+        The most memory Boss Man lets one check use on this machine. It does not give the machine more memory: the machine's total is set where the worker runs (<code>mem_limit</code> in its compose file). Set this to the machine's memory ÷ checks at once.
+      </p>
+      <p className="muted" style={{ fontSize: 14, margin: 0 }} data-testid="check-worker-memory-machine">
+        {machineMb
+          ? `This machine has ${gbText(machineMb)}${Number.isInteger(slotsNow) && slotsNow >= 1 ? ` (${slotsNow} check${slotsNow === 1 ? "" : "s"} × ${gbText(perCheckMb)} would need ${gbText(slotsNow * perCheckMb)})` : ""}.`
+          : "Not reported yet: redeploy the worker once to see it."}
+      </p>
       {warning && (
         <p role="alert" className="tag red" style={{ fontSize: 14 }} data-testid="check-worker-memory-warning">
-          {warning}
+          {warning} <a href={MEMORY_GUIDE} target="_blank" rel="noreferrer">Check worker guide</a>
         </p>
       )}
       <p className="muted" style={{ fontSize: 14 }}>

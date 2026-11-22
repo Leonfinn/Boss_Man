@@ -20,7 +20,7 @@ const wf = { path: "apps/runner/Dockerfile", added: 1, removed: 0 };
 const wfEdit = { path: ".github/workflows/ci.yml", added: 1, removed: 0 };
 const diff = (files: WorkspaceDiff["files"], head = "headcommit1"): WorkspaceDiff => ({ baseCommit: "b", head, tree: `tree-${head}`, commits: [{ sha: head, subject: "x" }], files, diff: "", truncated: false });
 
-async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "failed"; head?: string; context?: boolean; mainWorkflows?: boolean }) {
+async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "failed"; head?: string; context?: boolean; mainWorkflows?: boolean; quick?: "passed" | "none" }) {
   const { db } = await shared;
   await db.delete(checkJobs);
   await db.delete(settings);
@@ -30,6 +30,8 @@ async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "fai
   await db.insert(runners).values({ companyId: co!.id, name: "r", tokenHash: `h${Math.random()}` } as never);
   const [a] = await db.insert(agents).values({ companyId: co!.id, name: "A", role: "worker", agentKind: "claude" } as never).returning();
   const [t] = await db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "T", number: 1, assigneeAgentId: a!.id, systemState: "in_progress" } as never).returning();
+  // BOS-2284: GitHub's run starts only after the quick check passed on the commit; most tests here start from that pass.
+  if (opts.quick !== "none") await db.insert(checkJobs).values({ companyId: co!.id, projectId: p!.id, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: opts.head ?? "headcommit1", tree: `tree-${opts.head ?? "headcommit1"}`, state: "passed" });
   const wakes: Array<{ note: string; reason: string }> = [];
   const publish = vi.fn(async (commit: string): Promise<MergeResult> => ({ status: "published", branch: `bossman-ci/${t!.id}`, commit, hasWorkflows: true }));
   const unpublish = vi.fn(async () => ({ status: "unpublished" }));
@@ -71,6 +73,58 @@ describe("GitHub CI before review (BOS-1664)", () => {
     const rows = await s.db.select().from(checkResults).where(eq(checkResults.ticketId, s.ticket));
     expect(rows.find((r) => r.kind === "ci_preflight")).toMatchObject({ passed: true, sha: "headcommit1" });
     expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+
+  it("BOS-2284: with no quick pass yet the GitHub run waits, then starts when the quick check passes", async () => {
+    const s = await setup({ files: [wf], ci: "passed", quick: "none" });
+    const msg = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(msg).toMatch(/only after your quick check passes/);
+    expect(s.publish).not.toHaveBeenCalled();
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeTruthy();
+    const [job] = await s.db.update(checkJobs).set({ state: "passed" }).where(eq(checkJobs.ticketId, s.ticket)).returning();
+    // The dispatcher calls this when a job ends; one service per app, so a fresh one stands in for the same database rows.
+    const svc2 = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, wake: (_a, w) => void s.wakes.push(w), context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
+    await svc2.onQuickEnded(job!);
+    await settled(s);
+    expect(s.publish).toHaveBeenCalledWith("mergecommit1");
+    expect(s.wakes[0]!.note).toMatch(/passed/);
+  });
+
+  it("BOS-2284: a quick pass reused by tree (another ticket's commit, same tree) starts the run at once", async () => {
+    const s = await setup({ files: [wf], ci: "passed", quick: "none" });
+    const [t] = await s.db.select().from(tickets).where(eq(tickets.id, s.ticket));
+    const [other] = await s.db.insert(tickets).values({ companyId: s.co, projectId: t!.projectId, title: "O", number: 2, systemState: "in_progress" } as never).returning();
+    await s.db.insert(checkJobs).values({ companyId: s.co, projectId: t!.projectId, ticketId: other!.id, kind: "pre_review", scope: "quick", commit: "othercommit", tree: `tree-headcommit1`, state: "passed" });
+    const msg = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(msg).not.toMatch(/only after your quick check passes/);
+    await settled(s);
+    expect(s.publish).toHaveBeenCalledWith("mergecommit1");
+  });
+
+  it("BOS-2284: a run that waits is released by a reused pass on its tree (the sweep finds it, no job of its own)", async () => {
+    const s = await setup({ files: [wf], ci: "passed", quick: "none" });
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(s.publish).not.toHaveBeenCalled();
+    const [t] = await s.db.select().from(tickets).where(eq(tickets.id, s.ticket));
+    const [other] = await s.db.insert(tickets).values({ companyId: s.co, projectId: t!.projectId, title: "O", number: 2, systemState: "in_progress" } as never).returning();
+    await s.db.insert(checkJobs).values({ companyId: s.co, projectId: t!.projectId, ticketId: other!.id, kind: "pre_review", scope: "quick", commit: "othercommit", tree: `tree-headcommit1`, state: "passed" });
+    const svc2 = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, wake: (_a, w) => void s.wakes.push(w), context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
+    await svc2.recover();
+    await settled(s);
+    expect(s.publish).toHaveBeenCalledWith("mergecommit1");
+  });
+
+  it("BOS-2284: a failed quick check means GitHub's run is never started, and the ticket says why (once)", async () => {
+    const s = await setup({ files: [wf], ci: "passed", quick: "none" });
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    const [job] = await s.db.update(checkJobs).set({ state: "failed" }).where(eq(checkJobs.ticketId, s.ticket)).returning();
+    const svc2 = ciPreflightService(s.db, { hosts: {} as never, timing: FAST, context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
+    await svc2.onQuickEnded(job!);
+    await svc2.onQuickEnded(job!);
+    expect(s.publish).not.toHaveBeenCalled();
+    const rows = await s.db.select().from(checkResults).where(eq(checkResults.ticketId, s.ticket));
+    expect(rows.filter((r) => r.kind === "ci_preflight_skipped")).toHaveLength(1);
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeTruthy();
   });
 
   it("a failing run names the failed jobs in the wake and keeps the move to review refused", async () => {

@@ -25,7 +25,7 @@ Paperclip's `cancelled` has no Boss Man state, so those tickets arrive as done w
 
    Paperclip's built-in database listens on `127.0.0.1:54329` inside the Paperclip container's network (user and password `paperclip`, database `paperclip`). The standard Paperclip image has no `psql`, so running the query inside that container fails with `sh: 1: psql: not found`. Instead, run `psql` from a throwaway Postgres container that joins the Paperclip container's network. It changes nothing in Paperclip: the session is read-only and the container deletes itself when it ends.
 
-   > **Not yet confirmed on a real install.** This method has not yet been run end to end on an owner's machine. If a step fails, note the error and the step number.
+   > **Confirmed on TrueNAS SCALE, 22 Nov 2026.** An owner ran this method there and got `paperclip-issues.json`. If a step fails on your host, note the error and the step letter.
 
    **You need:** a shell on the machine that runs Paperclip's Docker container, as root or as a user allowed to run `docker` (otherwise put `sudo` in front of each `docker` command). The machine needs internet access the first time, to pull the `postgres:17-alpine` image.
 
@@ -130,10 +130,31 @@ docker exec -i -w /tmp -e PGPASSWORD=paperclip -e PGOPTIONS='-c default_transact
 
    - **Paperclip uses an external database** (a separate database container such as `paperclip-db`, or its own Postgres server, not the built-in one on `127.0.0.1:54329`). Point `psql` at that database instead: in step d, replace the `postgres://…` address and `PGPASSWORD` with that database's own host, port, user, password and database name, for example `postgres://paperclip@192.168.1.50:5432/paperclip`. If the database is reachable from the host, you can drop `--network container:"$CONTAINER"`.
 
-3. **Put `paperclip-issues.json` next to `COMPANY.md`** in the export folder, then zip the folder.
+3. **Copy `paperclip-issues.json` to the computer that holds the export folder.** Skip this if it is the same machine as the Docker host.
 
-4. **In Boss Man:** Settings → **Import and export** → pick the zip. Read the preview: the notes say what was left out or renamed. Press **Import as a new company**.
+   > **Not yet confirmed.** This step has not yet been run on an owner's machine.
 
-5. **Afterwards**, work through the checklist decision: add each secret and grant it, give agents a funding source, read any skill scripts it lists, then unpause agents one at a time.
+   You copy the file with `scp`, run from the computer that holds the export folder (on Windows 10 and later, `scp` works in PowerShell). The Docker host needs SSH turned on. SSH usually refuses a `root` login, so log in as an ordinary user, and first put the file in that user's home folder, owned by them. On the Docker host, in the working folder, run this, replacing `alex` with that user's login:
+
+```sh
+sudo cp paperclip-issues.json ~alex/
+sudo chown alex: ~alex/paperclip-issues.json
+```
+
+   (Leave out `sudo` if you are already root.) Then, on the computer that holds the export folder, go into that folder (the one with `COMPANY.md`) and run this, replacing `alex` with the login and `192.168.1.50` with the Docker host's address:
+
+```sh
+scp alex@192.168.1.50:paperclip-issues.json .
+```
+
+   It asks for that user's password, unless you use an SSH key. `ls paperclip-issues.json` in the export folder should then list the file. If `scp` says `Connection refused`, SSH is off on the Docker host; if it says `Permission denied`, check the login and password, and that the file is in that user's home folder.
+
+   > **Worked example: TrueNAS SCALE.** Turn SSH on in System → Services → SSH. Log in as the admin user `truenas_admin`, not `root`: in the commands above, replace `alex` with `truenas_admin`.
+
+4. **Make sure `paperclip-issues.json` is next to `COMPANY.md`** in the export folder, then zip the folder.
+
+5. **In Boss Man:** Settings → **Import and export** → pick the zip. Read the preview: the notes say what was left out or renamed. Press **Import as a new company**.
+
+6. **Afterwards**, work through the checklist decision: add each secret and grant it, give agents a funding source, read any skill scripts it lists, then unpause agents one at a time.
 
 **Rotate any secret that ever appeared in a Paperclip run log or issue before adding it to Boss Man.** The issues export carries comments verbatim, so a key pasted into a comment comes across too.

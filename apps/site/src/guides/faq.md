@@ -77,7 +77,7 @@ No. Boss Man is self-hosted only.
 
 ## How is it different from Paperclip?
 
-Boss Man was inspired by Paperclip and written from scratch. It does not depend on Paperclip. You can move a company over from Paperclip: see [`docs/14-paperclip-migration.md`](@repo/blob/main/docs/14-paperclip-migration.md).
+Boss Man was inspired by Paperclip and written from scratch. It does not depend on Paperclip. You can move a company over from Paperclip: see [Moving a company from Paperclip](/guides/move-from-paperclip).
 
 ## Is it ready to use?
 

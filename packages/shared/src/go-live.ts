@@ -132,6 +132,11 @@ export const isLiveCheckWait = (t: { systemState: string; mergeCommit?: string |
 
 /** BOS-1907: days a merged ticket is watched when the agent gave no end date for an open-ended event. */
 export const WATCH_DEFAULT_DAYS = 14;
+/** BOS-2288: events Boss Man knows that can wake a ticket in "Merged, watching" (set_ticket_state watch_trigger). */
+export const WATCH_TRIGGERS = ["gate_ci_failed", "github_main_failed"] as const;
+export type WatchTrigger = (typeof WATCH_TRIGGERS)[number];
+/** BOS-2288: a watch that names no trigger is re-read once a day (schedule_check, this many times at most). */
+export const WATCH_DAILY_CHECKS = 14;
 /** BOS-1907: the furthest ahead an agent may set a watch's end date. */
 export const WATCH_MAX_DAYS = 60;
 

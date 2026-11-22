@@ -11,6 +11,8 @@ The full install was not re-run on a fresh machine for this guide, so the exact 
 
 Still deciding? [What can go wrong with AI agent teams](/what-can-go-wrong) matches published failure stories, such as runaway bills and deleted databases, to what Boss Man does about each, and says where it does nothing yet.
 
+Coming from Paperclip? Install Boss Man first, then follow [Moving a company from Paperclip](/guides/move-from-paperclip) to bring your company, its tickets and its wiki pages across.
+
 ![What you install: the Boss Man server, its database, a launcher and one runner per company. Runners connect out to the server, so nothing needs an open port.](/img/what-you-install.svg =1160x800 narrow=/img/what-you-install-narrow.svg:360x1530 "What you are installing. Everything runs on one machine, and the runners dial out, so you open no ports for them.")
 
 ## What machine do I need
