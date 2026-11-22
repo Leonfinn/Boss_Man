@@ -10,19 +10,23 @@ import type { Db } from "../db/client.js";
 import { stagingReachable } from "../mcp-common.js";
 import { agents, companies, runners as runnersTable, settings } from "../db/schema.js";
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
-import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
+import { checkQueue, DEFAULT_CHECK_SLOTS, MACHINE_TAKES, MAX_CHECK_SLOTS } from "../services/check-queue.js";
+import { DEFAULT_BACKGROUND_LANE_AGE_MINUTES, MAX_BACKGROUND_LANE_AGE_MINUTES } from "../services/check-gate.js";
 import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, limitReason, memoryLine, readRunnerAgents } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
+import type { mainCiService } from "../services/main-ci.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
 import { runnerImageCommit } from "../services/runner-image.js";
 import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
 import { getHold, type maintenanceService } from "../services/maintenance.js";
-import type { reviewService } from "../services/review.js";
+import { MERGE_TURN_MAX_MIN, type reviewService } from "../services/review.js";
 import type { runnersService } from "../services/runners.js";
 import { DEFAULT_LIMITS, type schedulerService } from "../services/scheduler.js";
 
 const Uuid = z.string().uuid();
+/** BOS-1602: what a machine takes and how many of its slots are kept for merges (only with "both"). */
+const Policy = z.object({ takes: z.enum(MACHINE_TAKES), mergeKept: z.number().int().min(0).max(MAX_CHECK_SLOTS) });
 
 export function settingsLimitsRoutes(
   owner: FastifyInstance,
@@ -35,11 +39,12 @@ export function settingsLimitsRoutes(
     checks: ReturnType<typeof checkDispatcher>;
     review: ReturnType<typeof reviewService>;
     runners: ReturnType<typeof runnersService>;
+    mainCi: ReturnType<typeof mainCiService>;
     /** BOS-1435: check workers; absent in older test set-ups, then the panel lists none and the worker routes say so. */
     checkWorkers?: CheckWorkersService;
   },
 ) {
-  const { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, checkWorkers } = deps;
+  const { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, mainCi, checkWorkers } = deps;
 
   /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
   // With ?companyId the reviewer and sign-off come from that company's review policy.
@@ -65,6 +70,9 @@ export function settingsLimitsRoutes(
       company: v?.company ?? scheduler.limits.company,
       background: v?.background ?? scheduler.limits.background,
       defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company, background: DEFAULT_LIMITS.background },
+      // BOS-1634: the numbers the scheduler really uses (all companies, background) and whether new merge checks are paused,
+      // each differing from the saved one only with a reason (a server update's hold).
+      inForce: await scheduler.limitsInForce(),
     };
   };
   owner.get("/api/run-limits", async () => runLimits());
@@ -104,7 +112,7 @@ export function settingsLimitsRoutes(
     await db.insert(settings).values({ key: "wip_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
     return { ...value, defaultAgent: DEFAULT_AGENT_WIP_LIMIT };
   });
-  // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
+  // BOS-798: Settings → Server and runner → Limits and checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
   // Owner only: no agent tool or route writes these settings.
   const checkQueueView = async () => {
     const rows = await db.select({ id: runnersTable.id, company: companies.name }).from(runnersTable).innerJoin(companies, eq(companies.id, runnersTable.companyId));
@@ -145,6 +153,11 @@ export function settingsLimitsRoutes(
       // BOS-1366: the merge train switch (off by default) and the connected runners too old for it (they land one at a time).
       train: await checkQueueSvc.train(),
       runnersTooOldForTrain: live.filter((r) => !runners.can(r.id, "merge-base")).map((r) => r.company),
+      // BOS-1803: minutes a background-lane merge lets newer ordinary work go first (0 = always), and the default.
+      laneAgeMinutes: await checkQueueSvc.laneAge(),
+      defaultLaneAgeMinutes: DEFAULT_BACKGROUND_LANE_AGE_MINUTES,
+      // BOS-1602: what the company runner takes and how many of its slots are kept for merges.
+      runnerPolicy: await checkQueueSvc.runnerPolicy(),
       // BOS-1435: check workers, each with per company whether it takes checks and, if not, why.
       workers: (await checkWorkers?.list()) ?? [],
     };
@@ -152,12 +165,19 @@ export function settingsLimitsRoutes(
   owner.get("/api/settings/check-queue", async () => checkQueueView());
   owner.put("/api/settings/check-queue", async (req) => {
     // `train` is optional, so an older page that doesn't send it leaves the switch as it was.
-    const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional() }).parse(req.body);
+    // BOS-1602: `runnerPolicy` is optional too (an older page leaves it as it was); kept for merges can't exceed the slots.
+    const b = z
+      .object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional(), runnerPolicy: Policy.optional(), laneAgeMinutes: z.number().int().min(0).max(MAX_BACKGROUND_LANE_AGE_MINUTES).optional() })
+      .refine((v) => !v.runnerPolicy || v.runnerPolicy.mergeKept <= v.slots, { message: "Kept for merges can't be more than the runner's check slots." })
+      .parse(req.body);
     const was = await checkQueueSvc.mode();
     const slotsWere = await checkQueueSvc.slots();
     await checkQueueSvc.setSlots(b.slots);
+    if (b.runnerPolicy) await checkQueueSvc.setRunnerPolicy(b.runnerPolicy);
     await checkQueueSvc.setMode(b.mode);
     if (b.train !== undefined) await checkQueueSvc.setTrain(b.train);
+    // Optional too: an older page leaves the background-lane wait as it was.
+    if (b.laneAgeMinutes !== undefined) await checkQueueSvc.setLaneAge(b.laneAgeMinutes);
     // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
     // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
     const applying = launch.enabled && b.slots !== slotsWere ? await pushToRunners() : false;
@@ -170,7 +190,14 @@ export function settingsLimitsRoutes(
     if (b.mode === "server") await checks.pump();
     return { ...(await checkQueueView()), cancelled, applying };
   });
-  // BOS-1435 (DR-060): Settings → Server and runner → Checks → Check workers. Owner only. The token is in the answer to the
+  // BOS-1072: the main-CI watcher's switch and the plain line it keeps for each project.
+  const mainCiView = async () => ({ on: await mainCi.isOn(), projects: await mainCi.statuses() });
+  owner.get("/api/settings/main-ci", async () => mainCiView());
+  owner.put("/api/settings/main-ci", async (req) => {
+    await mainCi.setOn(z.object({ on: z.boolean() }).parse(req.body).on);
+    return mainCiView();
+  });
+  // BOS-1435 (DR-060): Settings → Server and runner → Limits and checks → Check workers. Owner only. The token is in the answer to the
   // add, once; only its hash is kept. Turning a worker off or removing it puts its running checks back in line at once
   // and closes its socket.
   const WorkerBody = z.object({
@@ -180,7 +207,14 @@ export function settingsLimitsRoutes(
     checkThreads: z.number().int().min(1).max(THREADS_MAX).nullable(),
     checkMemoryMb: z.number().int().min(MEMORY_MB_MIN).max(MEMORY_MB_MAX).nullable(),
     enabled: z.boolean(),
+    // BOS-1602: optional, so an older page leaves them as they were (a new worker then takes both kinds, none kept).
+    takes: z.enum(MACHINE_TAKES).optional(),
+    mergeKept: z.number().int().min(0).max(MAX_CHECK_SLOTS).optional(),
   });
+  const keptFits = (b: { slots?: number; mergeKept?: number }, slotsNow?: number) => {
+    const slots = b.slots ?? slotsNow;
+    if (b.mergeKept !== undefined && slots !== undefined && b.mergeKept > slots) throw Object.assign(new Error("Kept for merges can't be more than the worker's slots."), { statusCode: 400 });
+  };
   const needWorkers = () => {
     if (!checkWorkers) throw Object.assign(new Error("Check workers are not available on this server."), { statusCode: 404 });
     return checkWorkers;
@@ -195,6 +229,7 @@ export function settingsLimitsRoutes(
   owner.post("/api/settings/check-workers", async (req) => {
     const w = needWorkers();
     const b = WorkerBody.parse(req.body);
+    keptFits(b);
     await knownCompanies(b.companyIds);
     const { worker, token } = await w.register(b);
     // BOS-1550: the commit the worker must be built from = the one its chosen companies' runners are built from, so the
@@ -210,6 +245,7 @@ export function settingsLimitsRoutes(
     const w = needWorkers();
     const { id } = z.object({ id: Uuid }).parse(req.params);
     const b = WorkerBody.partial().parse(req.body);
+    if (b.mergeKept !== undefined) keptFits(b, (await w.get(id))?.slots);
     if (b.companyIds) await knownCompanies(b.companyIds);
     const row = await w.update(id, b);
     if (!row) return reply.code(404).send({ error: "not_found" });
@@ -236,4 +272,18 @@ export function settingsLimitsRoutes(
   // BOS-313: check the merged result before pushing it (off by default while it rolls out).
   owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
   owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
+  // BOS-1070: the merge gate waits for GitHub CI on the merge commit before it merges.
+  owner.get("/api/settings/wait-for-ci", async () => ({ on: await review.waitForCi() }));
+  owner.put("/api/settings/wait-for-ci", async (req) => ({ on: await review.setWaitForCi(z.object({ on: z.boolean() }).parse(req.body).on) }));
+  // BOS-1762: land a passed merge across a main move that touches none of its files, and the landing turn's cap (0 = off).
+  // BOS-1900: `refresh` is the merge_retarget switch (BOS-1344/1820/1821): rebuild a waiting merge on a moved main while it waits.
+  const mergeCarryView = async () => ({ on: await review.mergeCarry(), turnMinutes: await review.mergeTurnMinutes(), refresh: await review.mergeRetarget() });
+  owner.get("/api/settings/merge-carry", mergeCarryView);
+  owner.put("/api/settings/merge-carry", async (req) => {
+    const body = z.object({ on: z.boolean().optional(), turnMinutes: z.number().int().min(0).max(MERGE_TURN_MAX_MIN).optional(), refresh: z.boolean().optional() }).parse(req.body);
+    if (body.on !== undefined) await review.setMergeCarry(body.on);
+    if (body.turnMinutes !== undefined) await review.setMergeTurnMinutes(body.turnMinutes);
+    if (body.refresh !== undefined) await review.setMergeRetarget(body.refresh);
+    return mergeCarryView();
+  });
 }

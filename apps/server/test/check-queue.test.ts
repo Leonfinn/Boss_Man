@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
 import { DEPLOY_WAIT_KEY } from "../src/services/deploy-wait-hold.js";
 import { FULL_LOG_MAX } from "@boss-man/shared";
@@ -41,6 +41,28 @@ describe("check queue", () => {
     expect(still!.state).toBe("queued");
     await s.db.delete(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
     expect((await s.q.claimNext(null, T(2)))[0]!.id).toBe(m1.id);
+  });
+
+  it("BOS-1748: during the hold a check worker still takes a quick check behind many merges; merges and the company runner wait", async () => {
+    const s = await setup();
+    const [w] = await s.db.insert(checkWorkers).values({ name: "box", tokenHash: `h-${Math.random()}`, companyIds: [s.companyId] }).returning();
+    const merges = [] as string[];
+    for (let i = 0; i < 5; i++) merges.push((await s.req({ tree: `m${i}` })).job.id);
+    const quick = (await s.req({ tree: "q", kind: "pre_review", scope: "quick" })).job;
+    const full = (await s.req({ tree: "f", kind: "pre_review", scope: "full" })).job;
+    await s.db.insert(settings).values({ key: DEPLOY_WAIT_KEY, value: { phase: "waiting", approvedAt: T(0).toISOString() } });
+    // The company runner takes nothing, as before.
+    expect(await s.q.claimNext(null, T(1))).toEqual([]);
+    // The worker (2 free slots) takes the quick check only: not the merges, not the full check.
+    const got = await s.q.claimOn({ workerId: w!.id }, 2, T(1), s.companyId);
+    expect(got.map((j) => j.id)).toEqual([quick.id]);
+    expect(got[0]!.workerId).toBe(w!.id);
+    const [stillFull] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, full.id));
+    expect(stillFull!.state).toBe("queued");
+    // Once the hold lifts, the worker takes the rest as usual.
+    await s.db.delete(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
+    expect((await s.q.claimOn({ workerId: w!.id }, 2, T(2), s.companyId)).length).toBe(1);
+    await s.close();
   });
 
   it("serves merge jobs first, then fixes of main, urgent, oldest; one slot by default", async () => {
@@ -365,6 +387,32 @@ describe("check queue", () => {
       await s.close();
     });
 
+    // BOS-2219: a stuck job never reports; its last output is kept as its log (redacted), so check_log shows where it stopped.
+    it("keeps a stuck job's last output as its log, redacted, listed and readable", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "st1" })).job;
+      await s.q.claimNext(null, T(0));
+      await s.q.progress(j.id, null, `PASS  typecheck @boss-man/server\n      tests related to @boss-man/server changes: 3m, still running (41 test files done)\n${FAKES.join("\n")}`, T(1));
+      expect(await s.q.sweepStuck(T(30), 20)).toHaveLength(1);
+      const kept = await s.q.readLog(s.companyId, j.ticketId, j.id);
+      expect(kept?.log).toContain("still running (41 test files done)");
+      expect(kept!.log).toMatch(/No output for 20 minutes/);
+      expect(kept!.log).not.toMatch(/hunter2fakevalue|fakebearer1234567890|fakepassw0rd|Zq8Lm2Xv9Rt4Bn7Cw3Dk6Fh1Jg5Ps0Aa/);
+      expect((await s.q.failedJobs(s.companyId, j.ticketId)).find((f) => f.jobId === j.id)).toMatchObject({ state: "stuck", logChars: kept!.chars });
+
+      // Marked stuck by hand (markStuck) keeps it the same way; a job that printed nothing keeps none (nothing to show).
+      const h = (await s.req({ tree: "st2" })).job;
+      await s.q.claimNext(null, T(31));
+      await s.q.progress(h.id, null, "FAIL  heavy phase: last line", T(32));
+      await s.q.markStuck(h.id, "Stopped by hand: no output.");
+      expect((await s.q.readLog(s.companyId, h.ticketId, h.id))?.log).toContain("FAIL  heavy phase: last line");
+      const quiet = (await s.req({ tree: "st3" })).job;
+      await s.q.claimNext(null, T(33));
+      await s.q.markStuck(quiet.id, "Stopped by hand: no output.");
+      expect(await s.q.logChars(quiet.id)).toBeNull();
+      await s.close();
+    });
+
     it("redacts again on the server even when the runner sent the secrets as they were", async () => {
       const s = await setup();
       const j = (await s.req({ tree: "l3" })).job;
@@ -410,5 +458,76 @@ describe("check queue", () => {
       expect(await s.q.logChars(j.id)).toBeNull();
       await s.close();
     });
+
+    // BOS-1938 (the two tests BOS-1923's review noted as missing): complete() saves the step times, pruneLogs clears them after 14 days.
+    it("saves the step times and whether the full check ran, and pruneLogs clears the times after 14 days", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "st1", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 0, logTail: "", runnerId: null, stages: [{ name: "typecheck", seconds: 90 }, { name: "related tests", seconds: 120 }], ranFull: true }, T(0));
+      const [saved] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, j.id));
+      expect(JSON.parse(saved!.stages!)).toEqual([{ name: "typecheck", seconds: 90 }, { name: "related tests", seconds: 120 }]);
+      expect(saved!.ranFull).toBe(true);
+      await s.q.pruneLogs(new Date(T(0).getTime() + 13 * 86_400_000));
+      expect((await s.db.select().from(checkJobs).where(eq(checkJobs.id, j.id)))[0]!.stages).not.toBeNull();
+      await s.q.pruneLogs(new Date(T(0).getTime() + 15 * 86_400_000));
+      const [pruned] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, j.id));
+      expect(pruned!.stages).toBeNull();
+      expect(pruned!.ranFull).toBe(true);
+      await s.close();
+    });
+
+    // BOS-1723: a check that failed before its first step sends no whole log; its tail is kept instead, so it can be read.
+    it("keeps the tail as the log when a failed job sends no whole log, and still keeps nothing for a pass", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l7", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(j.id, { commit: j.commit, exitCode: null, logTail: "The runner could not start the check: fatal: invalid reference: c-l7", runnerId: null });
+      const kept = await s.q.readLog(s.companyId, j.ticketId, j.id);
+      expect(kept?.log).toContain("Only the end of the log reached the server");
+      expect(kept?.log).toContain("fatal: invalid reference: c-l7");
+      const ok = (await s.req({ tree: "l8", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(ok.id, { commit: ok.commit, exitCode: 0, logTail: "all passed", runnerId: null });
+      expect(await s.q.logChars(ok.id)).toBeNull();
+      await s.close();
+    });
+
+    it("reads a quick check's log whole, far past the old 8 KB tail", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l9", kind: "pre_review", scope: "quick" })).job;
+      await s.q.claimNext(null);
+      const log = `FAIL  apps/server/test/early.test.ts > an early test > fails\n${"passing line\n".repeat(5_000)}LAST-LINE`;
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 1, logTail: log.slice(-8192), runnerId: null, fullLog: log });
+      const kept = await s.q.readLog(s.companyId, j.ticketId, j.id);
+      expect(kept?.scope).toBe("quick");
+      expect(kept?.log).toBe(log);
+      await s.close();
+    });
+  });
+
+  // BOS-1723: check_log without a jobId lists the ticket's failed jobs instead of picking the newest one silently.
+  it("lists a ticket's failed and stuck jobs newest first, with the first failing line, and none of another ticket's", async () => {
+    const s = await setup();
+    const ticketId = await s.ticket();
+    const first = (await s.req({ tree: "f1", ticketId, kind: "pre_review", scope: "quick" })).job;
+    await s.q.claimNext(null, T(0));
+    await s.q.complete(first.id, { commit: first.commit, exitCode: 1, logTail: "lint ok\n FAIL  test/a.test.ts > suite > breaks\n", runnerId: null, fullLog: "whole" }, T(1));
+    const passed = (await s.req({ tree: "f2", ticketId, kind: "pre_review", scope: "quick" })).job;
+    await s.q.claimNext(null, T(2));
+    await s.q.complete(passed.id, { commit: passed.commit, exitCode: 0, logTail: "", runnerId: null }, T(3));
+    const second = (await s.req({ tree: "f3", ticketId })).job;
+    await s.q.claimNext(null, T(4));
+    await s.q.complete(second.id, { commit: second.commit, exitCode: 1, logTail: "FAIL  typecheck (server)\n", runnerId: null }, T(5));
+    const other = (await s.req({ tree: "f4" })).job;
+    await s.q.claimNext(null, T(6));
+    await s.q.complete(other.id, { commit: other.commit, exitCode: 1, logTail: "x", runnerId: null }, T(7));
+
+    const list = await s.q.failedJobs(s.companyId, ticketId);
+    expect(list.map((j) => j.jobId)).toEqual([second.id, first.id]);
+    expect(list[0]).toMatchObject({ kind: "merge", firstLine: 'step "typecheck (server)" failed' });
+    expect(list[1]).toMatchObject({ kind: "pre_review", scope: "quick", firstLine: "test/a.test.ts > suite > breaks", logChars: 5 });
+    expect(await s.q.failedJobs(OTHER_RUNNER, ticketId)).toEqual([]);
+    await s.close();
   });
 });

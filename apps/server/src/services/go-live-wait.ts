@@ -11,11 +11,21 @@ import { imageContains, runnerImageCommit } from "./runner-image.js";
 const SEEN_PREFIX = "live_release:";
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
 
+/**
+ * The commit this company's server runs, as release-log recorded it (null before the first observation), and the
+ * earlier live commits it is known to contain (BOS-1640): the host deployer only deploys a fast-forward of what runs,
+ * so a deploy's from_commit is inside its to_commit. Those place a live commit that is no ticket's recorded merge.
+ */
+export async function liveServerRecord(db: Db, companyId: string): Promise<{ live: string | null; contains: string[] }> {
+  const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, `${SEEN_PREFIX}${companyId}`));
+  const seen = (row?.value as { new?: string; contains?: unknown } | undefined) ?? {};
+  const contains = Array.isArray(seen.contains) ? seen.contains.filter(isSha).map((c) => c.toLowerCase()) : [];
+  return { live: isSha(seen.new) ? seen.new.toLowerCase() : null, contains };
+}
+
 /** The commit this company's server runs, as release-log recorded it; null before the first observation. */
 export async function liveServerCommit(db: Db, companyId: string): Promise<string | null> {
-  const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, `${SEEN_PREFIX}${companyId}`));
-  const seen = (row?.value as { new?: string } | undefined) ?? {};
-  return isSha(seen.new) ? seen.new.toLowerCase() : null;
+  return (await liveServerRecord(db, companyId)).live;
 }
 
 /**
@@ -32,15 +42,48 @@ export async function allMergeOrder(db: Db, companyId: string): Promise<string[]
   return [...new Set(rows.map((r) => r.mergeCommit!.toLowerCase()))];
 }
 
-/** True when the commit the server runs is `merge` or a merge that came after it. */
-export function serverContains(live: string | null, merge: string, order: string[]): boolean {
+/**
+ * Where a running commit sits in merge order: its own place, or else the newest place of a commit it is known to
+ * contain (BOS-1640: a merge that landed on main without the gate recording it, e.g. a reply lost to a runner
+ * restart, is no ticket's mergeCommit). -1 when neither can be placed: never assumed live.
+ */
+export function placeInOrder(commit: string, order: string[], contains: readonly string[] = []): number {
+  const own = order.indexOf(commit);
+  if (own >= 0) return own;
+  return contains.reduce((best, c) => Math.max(best, order.indexOf(c.toLowerCase())), -1);
+}
+
+/** True when the commit the server runs is `merge`, a merge that came after it, or contains such a commit (`contains`). */
+export function serverContains(live: string | null, merge: string, order: string[], contains: readonly string[] = []): boolean {
   if (!live) return false;
   const want = merge.toLowerCase();
-  if (live === want) return true;
+  if (live === want || contains.some((c) => c.toLowerCase() === want)) return true;
   const at = order.indexOf(want);
-  const run = order.indexOf(live);
+  const run = placeInOrder(live, order, contains);
   return at >= 0 && run >= 0 && at <= run;
 }
+
+/** BOS-1644: the three answers to "does what the server runs include this merge?". "unknown" always carries why. */
+export type LiveAnswer = { state: "yes" } | { state: "no" } | { state: "unknown"; reason: string };
+
+/**
+ * The same question as serverContains, but "can't tell" is its own answer instead of a "no" (R26). "no" only when
+ * both commits are placed in merge order and the merge is the later one. Nothing recorded, a merge or a running
+ * commit Boss Man can't place: "unknown", with the reason. serverContains is this answer being "yes".
+ */
+export function serverHas(live: string | null, merge: string, order: string[], contains: readonly string[] = []): LiveAnswer {
+  if (!live) return { state: "unknown", reason: "nothing is recorded yet about which version the server runs" };
+  const want = merge.toLowerCase();
+  if (live === want || contains.some((c) => c.toLowerCase() === want)) return { state: "yes" };
+  const at = order.indexOf(want);
+  if (at < 0) return { state: "unknown", reason: "Boss Man can't place this merge among the recorded merges" };
+  const run = placeInOrder(live, order, contains);
+  if (run < 0) return { state: "unknown", reason: `Boss Man can't place the running version (${live.slice(0, 8)}) among the recorded merges` };
+  return at <= run ? { state: "yes" } : { state: "no" };
+}
+
+/** What the runner image contains beyond its own place: the server's known contents when it was built from the live commit. */
+const imageKnown = (image: string | null, rec: { live: string | null; contains: string[] }) => (image && image === rec.live ? rec.contains : []);
 
 /**
  * DR-061 Q5: the one answer to "is this merge commit running?", over the one merge order (allMergeOrder).
@@ -58,13 +101,17 @@ export async function commitIsLive(
 ): Promise<boolean> {
   if (!commit) return false;
   const order = await allMergeOrder(db, companyId);
-  if (side === "runner") return imageContains(await runnerImageCommit(db, companyId), commit, order);
+  const rec = await liveServerRecord(db, companyId);
+  if (side === "runner") {
+    const image = await runnerImageCommit(db, companyId);
+    return imageContains(image, commit, order, imageKnown(image, rec));
+  }
   const fallback = opts.serverFallback?.toLowerCase();
-  return serverContains((await liveServerCommit(db, companyId)) ?? (fallback && isSha(fallback) ? fallback : null), commit, order);
+  return serverContains(rec.live ?? (fallback && isSha(fallback) ? fallback : null), commit, order, rec.contains);
 }
 
 /** The go-live facts of a merged ticket that every reader needs (liveMarkedAt is required so no caller can forget it). */
-export type GoLiveTicket = { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null; liveMarkedAt: Date | null; liveEvidence?: string | null };
+export type GoLiveTicket = { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null; liveMarkedAt: Date | null; liveEvidence?: string | null; deploysNothing?: boolean | null };
 
 /**
  * BOS-1345: whether Boss Man's own server (its deploy and its runner image) is how this company's merges go live.
@@ -87,15 +134,19 @@ export async function serverIsGoLive(db: Db, companyId: string): Promise<boolean
  */
 export async function goLiveWaitOf(db: Db, t: GoLiveTicket): Promise<GoLiveWait | null> {
   if (!t.mergeCommit) return null;
+  // BOS-1711: a merge that changed only tests, docs or CI (deploysNothing, the fixesMergeCheck rule) has nothing to
+  // deploy: it is live once merged. An unknown file list (null) still waits.
+  if (t.deploysNothing === true) return null;
   const merge = t.mergeCommit.toLowerCase();
-  const [live, order] = [await liveServerCommit(db, t.companyId), await allMergeOrder(db, t.companyId)];
+  const [rec, order] = [await liveServerRecord(db, t.companyId), await allMergeOrder(db, t.companyId)];
+  const live = rec.live;
   // Nothing recorded about what runs (a fresh install, a runner that never said its image commit) means there
   // is nothing to wait for: that is the behaviour from before this wait existed, and it can't hang forever.
   // The same holds for a company that puts its own work live: no record means Boss Man keeps no go-live facts here.
   if (!(await serverIsGoLive(db, t.companyId))) return live === null || t.liveMarkedAt ? null : "own";
-  const server = live !== null && !serverContains(live, merge, order);
+  const server = live !== null && !serverContains(live, merge, order, rec.contains);
   const image = await runnerImageCommit(db, t.companyId);
-  const runner = t.touchesRunner === true && image !== null && !imageContains(image, merge, order);
+  const runner = t.touchesRunner === true && image !== null && !imageContains(image, merge, order, imageKnown(image, rec));
   return server && runner ? "both" : server ? "server" : runner ? "runner" : null;
 }
 
@@ -103,16 +154,20 @@ export async function goLiveWaitOf(db: Db, t: GoLiveTicket): Promise<GoLiveWait 
 export async function goLiveFacts(
   db: Db,
   t: { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null },
-): Promise<{ live: string | null; server: boolean | undefined; runners: boolean | undefined } | null> {
+): Promise<{ live: string | null; server: boolean | undefined; serverUnknownReason?: string; runners: boolean | undefined } | null> {
   if (!t.mergeCommit) return null;
   const merge = t.mergeCommit.toLowerCase();
-  const live = await liveServerCommit(db, t.companyId);
+  const rec = await liveServerRecord(db, t.companyId);
+  const live = rec.live;
   const order = await allMergeOrder(db, t.companyId);
   const image = await runnerImageCommit(db, t.companyId);
+  const has = live === null ? null : serverHas(live, merge, order, rec.contains);
   return {
     live,
-    server: live === null ? undefined : serverContains(live, merge, order),
-    runners: t.touchesRunner === true && image !== null ? imageContains(image, merge, order) : undefined,
+    // undefined = nothing reported or can't tell (serverUnknownReason says why); never a false "no" (BOS-1644).
+    server: has === null || has.state === "unknown" ? undefined : has.state === "yes",
+    serverUnknownReason: has?.state === "unknown" ? has.reason : undefined,
+    runners: t.touchesRunner === true && image !== null ? imageContains(image, merge, order, imageKnown(image, rec)) : undefined,
   };
 }
 
@@ -127,7 +182,7 @@ export async function goLiveLine(db: Db, t: GoLiveTicket): Promise<string | null
   }
   const f = await goLiveFacts(db, t);
   if (!f) return null;
-  const server = `live on the server: ${yesNo(f.server)}${f.live ? ` (the server runs commit ${f.live.slice(0, 8)})` : ""}`;
+  const server = `live on the server: ${f.serverUnknownReason ? `can't tell (${f.serverUnknownReason})` : yesNo(f.server)}${f.live ? ` (the server runs commit ${f.live.slice(0, 8)})` : ""}`;
   return `Go-live: ${server}${t.touchesRunner === true ? `; runners rebuilt: ${yesNo(f.runners)}` : ""}. Say "is live" or "is deployed" only when this says yes.`;
 }
 

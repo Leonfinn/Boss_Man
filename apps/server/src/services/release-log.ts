@@ -43,13 +43,18 @@ function setupStepsOf(steps: string[]) {
 }
 
 /** A live ticket and the owner steps it still needs after the runner-update-only ones are taken out (BOS-741). */
-type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string; /** The CEO's lintOverride for these steps (DR-052). */ override: string | null };
+type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string; /** The CEO's lintOverride for these steps (DR-052). */ override: string | null; /** BOS-1650: the card's opening lines; null on a ticket written before they existed. */ why: string | null; ifSkipped: string | null };
 
 const short = (sha: string) => sha.slice(0, 8);
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
 
-/** What each company's last pass recorded: the commit before `pending` and the one being reconciled. */
-type Seen = { old?: string; new?: string; ticketId?: string | null };
+/**
+ * What each company's last pass recorded: the commit before `pending` and the one being reconciled. `contains`
+ * (BOS-1640): earlier live commits `new` is known to contain, newest first (see go-live-wait.ts liveServerRecord).
+ */
+type Seen = { old?: string; new?: string; ticketId?: string | null; contains?: string[] };
+/** Enough to step over a few unrecorded merges in a row; the list never grows past it. */
+const CONTAINS_MAX = 5;
 
 /**
  * How each deployer result names what went live. A switch-back and a rollback both end on the older
@@ -117,19 +122,28 @@ export const releaseLogService = (
    * that is a change. No ticket and no wake here: `releaseManagerWakes` does both, on the leader.
    * The first observation only records, so installing this never wakes anyone for the commit already live.
    */
-  async function noteLiveCommit(companyId: string, commit: string) {
+  async function noteLiveCommit(companyId: string, commit: string, from?: string) {
     const next = commit.toLowerCase();
     if (!isSha(next)) return { changed: false };
+    const base = isSha(from) && from.toLowerCase() !== next ? from.toLowerCase() : null;
     const seen = await seenOf(companyId);
-    if (seen.new === next) return { changed: false };
+    // BOS-1640: what `next` is known to contain: the commit it was deployed over and, when that is the one recorded
+    // live, what that one contained. Lets go-live place a live commit the merge gate never recorded.
+    const contains = (prior: string[]) => (base ? [...new Set([base, ...prior])].slice(0, CONTAINS_MAX) : prior);
+    if (seen.new === next) {
+      // The host's report can come a tick after the build's own commit was recorded: add what it says to the record.
+      if (base && !seen.contains?.includes(base)) await saveSeen(companyId, { ...seen, contains: contains(seen.contains ?? []) });
+      return { changed: false };
+    }
     // Another pass reconciled this commit already (seen.old === next): the record is ahead of what
     // this process was built from, so it never rewinds.
     if (seen.new && seen.old === next) return { changed: false };
+    const known = contains(base && base === seen.new ? (seen.contains ?? []) : []);
     if (!seen.new) {
-      await saveSeen(companyId, { old: next, new: next });
+      await saveSeen(companyId, { old: next, new: next, ...(known.length ? { contains: known } : {}) });
       return { changed: false };
     }
-    await saveSeen(companyId, { old: seen.new, new: next });
+    await saveSeen(companyId, { old: seen.new, new: next, ...(known.length ? { contains: known } : {}) });
     return { changed: true };
   }
 
@@ -166,12 +180,12 @@ export const releaseLogService = (
       const add = [...lines, `New commit: ${to}`].filter((l, i, all) => !have.has(l) && all.indexOf(l) === i);
       if (add.length) {
         await db.update(tickets).set({ body: `${primary.body ?? ""}\n${add.join("\n")}`.trim(), version: sql`${tickets.version} + 1` }).where(eq(tickets.id, primary.id));
-        await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record ${short(to)} too.` });
+        await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record ${short(to)} too, and republish the website from it so this release's "What's new" entry is live.` });
       }
     }
     // A wake already waiting for this ticket is the one that will run: don't stack a second.
     // Creating the ticket queues its own "assigned" wake, which is reused rather than doubled.
-    const note = `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record it in the Releases/Release log, then finish this ticket.`;
+    const note = `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record it in the Releases/Release log, republish the website from ${short(to)} so this release's "What's new" entry is live, then finish this ticket.`;
     if (!ticket) {
       const projectId = await releasesProjectId(companyId);
       if (!projectId) return false;
@@ -179,6 +193,8 @@ export const releaseLogService = (
         `The live commit changed from ${short(from)} to ${short(to)}, and it went live by ${HOW_WORDS[how]}.`,
         "",
         `Update the Releases/Release log for ${short(to)}: add the entry, say what shipped since ${short(from)}, and say whether the owner has to do anything.`,
+        "",
+        `Then republish the website from ${short(to)} so this release's "What's new" entry is on the live page, and say in the log entry whether it was republished.`,
         "",
         `Old commit: ${from}`,
         `New commit: ${to}`,
@@ -255,7 +271,7 @@ export const releaseLogService = (
       // A ticket whose every step is the runner update comes through with no steps: it is named on the
       // runner-update card instead of getting one of its own (BOS-741).
       const steps = setupStepsOf(t.steps);
-      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit, override: t.override });
+      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit, override: t.override, why: t.why, ifSkipped: t.ifSkipped });
     }
     // Take back each affected card once, clearing every ticket that pointed at it (BOS-741). A ticket
     // still live here that shared a withdrawn card now has no card, so the grouping below raises one for
@@ -277,7 +293,7 @@ export const releaseLogService = (
       // steps are the card's (a bigger card shared with other tickets carries steps it never saw).
       const same = (t: SetupTicket) => t.steps.size === group.steps.length && group.steps.every((s) => t.steps.has(stepKey(s)));
       const override = group.tickets.find((t) => t.override && same(t))?.override ?? null;
-      const card = await raiseOwnerSetup(db, { companyId, tickets: group.tickets.map((t) => ({ ticketId: t.id, title: t.title })), steps: group.steps, commit: to, facts, override });
+      const card = await raiseOwnerSetup(db, { companyId, tickets: group.tickets.map((t) => ({ ticketId: t.id, title: t.title, why: t.why, ifSkipped: t.ifSkipped })), steps: group.steps, commit: to, facts, override });
       if (!card) continue;
       raised++;
       const ids = group.tickets.filter((t) => t.decisionId !== card.id).map((t) => t.id);
@@ -296,13 +312,18 @@ export const releaseLogService = (
    */
   function setupGroups(live: SetupTicket[]) {
     const withSteps = live.filter((t) => t.steps.size);
-    const signature = (t: SetupTicket) => [...t.steps.keys()].sort().join("\n");
+    // BOS-1953: a fenced command block is one step with newlines inside, so keys are joined on a NUL, and the card
+    // shows each step as it was written, not as its whitespace-squeezed key.
+    const SEP = "\u0000";
+    const written = new Map<string, string>();
+    for (const t of withSteps) for (const [k, v] of t.steps) if (!written.has(k)) written.set(k, v);
+    const signature = (t: SetupTicket) => [...t.steps.keys()].sort().join(SEP);
     const bySignature = new Map<string, SetupTicket[]>();
     for (const t of withSteps) bySignature.set(signature(t), [...(bySignature.get(signature(t)) ?? []), t]);
     // Biggest step sets first, so a ticket is left to a card that covers all of its steps when one is there.
     const cards: { steps: Set<string>; tickets: SetupTicket[] }[] = [];
-    for (const sig of [...bySignature.keys()].sort((a, b) => b.split("\n").length - a.split("\n").length || a.localeCompare(b))) {
-      const steps = new Set(sig.split("\n"));
+    for (const sig of [...bySignature.keys()].sort((a, b) => b.split(SEP).length - a.split(SEP).length || a.localeCompare(b))) {
+      const steps = new Set(sig.split(SEP));
       const covering = cards.find((c) => c.steps.size > steps.size && [...steps].every((s) => c.steps.has(s)));
       if (covering) covering.tickets.push(...bySignature.get(sig)!);
       else cards.push({ steps, tickets: [...bySignature.get(sig)!] });
@@ -312,7 +333,7 @@ export const releaseLogService = (
     // read an empty group and throw, aborting the whole pass so new tickets raised nothing).
     return cards.flatMap((c) => {
       const fresh = c.tickets.filter((t) => !t.decisionId);
-      return fresh.length ? [{ tickets: fresh, steps: [...c.steps.values()] }] : [];
+      return fresh.length ? [{ tickets: fresh, steps: [...c.steps].map((k) => written.get(k) ?? k) }] : [];
     });
   }
 
@@ -337,18 +358,18 @@ export const releaseLogService = (
   /** Done tickets in this company that carry setup steps and a merge commit, with their card if raised. */
   async function ticketsWithSetup(companyId: string) {
     const rows = await db
-      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, ownerSetupOverride: tickets.ownerSetupOverride, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
+      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, ownerSetupOverride: tickets.ownerSetupOverride, why: tickets.ownerSetupWhy, ifSkipped: tickets.ownerSetupIfSkipped, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
       .from(tickets)
       .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")));
     return rows
       .filter((t) => !!t.mergeCommit && !!t.ownerSetup?.trim())
-      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!), override: t.ownerSetupOverride }));
+      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!), override: t.ownerSetupOverride, why: t.why, ifSkipped: t.ifSkipped }));
   }
 
   return {
     /** Records the live commit it is given (see noteLiveCommit). Nothing else happens until the leader's pass. */
-    async note(companyId: string, commit: string) {
-      return noteLiveCommit(companyId, commit);
+    async note(companyId: string, commit: string, from?: string) {
+      return noteLiveCommit(companyId, commit, from);
     },
 
     /**
@@ -374,7 +395,7 @@ export const releaseLogService = (
           }
           if (!isSha(seen.old) || !isSha(seen.new) || seen.old === seen.new) continue;
           // The record moves on whatever happens below, so a retry (or the next pass) can't double the ticket.
-          await saveSeen(companyId, { old: seen.new, new: seen.new });
+          await saveSeen(companyId, { old: seen.new, new: seen.new, ...(seen.contains?.length ? { contains: seen.contains } : {}) });
           // The owner's setup cards (DR-011) go on the same change, and don't need a Release Manager.
           try {
             await ownerSetupPass(companyId, seen.new, how);

@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { NoCompany } from "../components/NoCompany";
+import { Loader } from "../components/Loader";
+import { figureText } from "@boss-man/shared";
 import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
@@ -8,6 +11,8 @@ import { NotFoundBlock } from "../components/NotFoundBlock";
 import { STATUS_TONE } from "./Features";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { clearDraft } from "../drafts";
+import { defaultLinkAddress } from "../link-address";
+import type { HostFactsView } from "../host-facts-display";
 import { DraftTextarea } from "../components/DraftTextarea";
 
 type State = "unprocessed" | "processed" | "archived";
@@ -110,30 +115,37 @@ function ImportancePicker({ value, onChange, name }: { value: Importance; onChan
 }
 
 /** Pick (or create) a feature and link the selected passage to it. */
-function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHighlight }: { companyId: string; noteId: string; highlight: string; features: Feature[]; onLinked: () => void; onClearHighlight: () => void }) {
+export function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHighlight }: { companyId: string; noteId: string; highlight: string; features: Feature[]; onLinked: () => void; onClearHighlight: () => void }) {
   const [q, setQ] = useState("");
   const [importance, setImportance] = useState<Importance>("important");
   const [error, setError] = useState<string | null>(null);
   const matches = q.trim() ? features.filter((f) => f.title.toLowerCase().includes(q.trim().toLowerCase())).slice(0, 8) : [];
-  const link = async (featureId: string) => {
+  const [busy, setBusy] = useState(false);
+  const post = async (featureId: string) => {
+    await api(`/api/feedback/${noteId}/insights`, { method: "POST", body: { featureId, importance, ...(highlight ? { highlight } : {}) } });
+    setQ("");
+    setError(null);
+    onClearHighlight();
+    onLinked();
+  };
+  // One request at a time: a second click or Enter while one runs is ignored.
+  const guarded = async (fn: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
     try {
-      await api(`/api/feedback/${noteId}/insights`, { method: "POST", body: { featureId, importance, ...(highlight ? { highlight } : {}) } });
-      setQ("");
-      setError(null);
-      onClearHighlight();
-      onLinked();
+      await fn();
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
-  const create = async () => {
-    try {
+  const link = (featureId: string) => guarded(() => post(featureId));
+  const create = () =>
+    guarded(async () => {
       const f = await api<Feature>(`/api/companies/${companyId}/features`, { method: "POST", body: { title: q.trim() } });
-      await link(f.id);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  };
+      await post(f.id);
+    });
   return (
     <div className="link-panel">
       <p className="label">Link {highlight ? "the selected passage" : "this note"} to a feature</p>
@@ -158,7 +170,7 @@ function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHi
         <ul className="pick-list">
           {matches.map((f) => (
             <li key={f.id}>
-              <button type="button" onClick={() => void link(f.id)}>
+              <button type="button" disabled={busy} onClick={() => void link(f.id)}>
                 <span>{f.title}</span>
                 <span className={`tag ${STATUS_TONE[f.status]}`}>{FEATURE_STATUS_LABEL[f.status]}</span>
               </button>
@@ -166,9 +178,10 @@ function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHi
           ))}
           {!features.some((f) => f.title.toLowerCase() === q.trim().toLowerCase()) && (
             <li>
-              <button type="button" onClick={() => void create()}>
+              <button type="button" disabled={busy} onClick={() => void create()}>
                 <span>
-                  Create <b>{q.trim()}</b> and link it
+                  {busy ? "Creating…" : "Create"} <b>{q.trim()}</b>
+                  {busy ? "" : " and link it"}
                 </span>
               </button>
             </li>
@@ -180,7 +193,7 @@ function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHi
   );
 }
 
-function NotePane({ id, companyId, features, onChanged, onClose }: { id: string; companyId: string; features: Feature[]; onChanged: () => void; onClose: () => void }) {
+export function NotePane({ id, companyId, features, onChanged, onClose }: { id: string; companyId: string; features: Feature[]; onChanged: () => void; onClose: () => void }) {
   const data = usePoll((signal) => api<NoteDetail>(`/api/feedback/${id}`, { signal }), 60_000, `note-${id}`);
   const [highlight, setHighlight] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -199,10 +212,24 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
     return () => document.removeEventListener("selectionchange", on);
   }, []);
   const reload = () => (data.reload(), onChanged());
-  const act = (p: Promise<unknown>) => void p.then(() => (setError(null), reload()), (err: Error) => setError(err.message));
+  // One request at a time: the buttons and the importance menu are disabled while one runs, so a
+  // double click can't send it twice. `start` is a function so a second call never sends a request.
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const act = (start: () => Promise<unknown>, after: () => void = reload) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    void start()
+      .then(() => (setError(null), after()), (err: Error) => setError(err.message))
+      .finally(() => {
+        busyRef.current = false;
+        setBusy(false);
+      });
+  };
   if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Note not found" backHref="#/feedback" backLabel="Back to Feedback">This note doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
   const d = data.data;
-  if (!d) return null;
+  if (!d) return <Loader label="Loading the note" />;
   const n = d.note;
   return (
     <article className="card note-pane" aria-labelledby="note-h">
@@ -243,7 +270,11 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
                     className="mini"
                     aria-label={`How much ${i.feature.title} matters to them`}
                     value={i.importance}
-                    onChange={(e) => act(api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: i.feature.id, importance: e.target.value, highlight: i.highlight } }))}
+                    disabled={busy}
+                    onChange={(e) => {
+                      const importance = e.target.value;
+                      act(() => api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: i.feature.id, importance, highlight: i.highlight } }));
+                    }}
                   >
                     {IMPORTANCES.map((x) => (
                       <option key={x} value={x}>
@@ -251,7 +282,7 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
                       </option>
                     ))}
                   </select>
-                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => act(api(`/api/insights/${i.id}`, { method: "DELETE" }))}>
+                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} disabled={busy} onClick={() => window.confirm(`Unlink this feedback from ${i.feature.title}? Its highlight and importance are removed.`) && act(() => api(`/api/insights/${i.id}`, { method: "DELETE" }))}>
                     Unlink
                   </button>
                 </div>
@@ -271,7 +302,8 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
                 type="button"
                 className="chip"
                 title={`Shares: ${s.shared.join(", ")}`}
-                onClick={() => act(api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: s.id, importance: "important", ...(highlight ? { highlight } : {}) } }).then(() => setHighlight("")))}
+                disabled={busy}
+                onClick={() => act(() => api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: s.id, importance: "important", ...(highlight ? { highlight } : {}) } }).then(() => setHighlight("")))}
               >
                 Link to {s.title}
               </button>
@@ -282,20 +314,20 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
       <LinkPanel companyId={companyId} noteId={id} highlight={highlight} features={features} onLinked={reload} onClearHighlight={() => setHighlight("")} />
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         {n.state === "unprocessed" ? (
-          <button type="button" className="btn primary" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "processed" } }))}>
+          <button type="button" className="btn primary" disabled={busy} onClick={() => act(() => api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "processed" } }))}>
             Done: mark processed
           </button>
         ) : (
-          <button type="button" className="btn" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "unprocessed" } }))}>
+          <button type="button" className="btn" disabled={busy} onClick={() => act(() => api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "unprocessed" } }))}>
             Back to unprocessed
           </button>
         )}
         {n.state !== "archived" && (
-          <button type="button" className="btn" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "archived" } }))}>
+          <button type="button" className="btn" disabled={busy} onClick={() => act(() => api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "archived" } }))}>
             Archive
           </button>
         )}
-        <button type="button" className="btn" onClick={() => window.confirm("Delete this feedback and its links?") && void api(`/api/feedback/${id}`, { method: "DELETE" }).then(() => (onChanged(), onClose()), (err: Error) => setError(err.message))}>
+        <button type="button" className="btn" disabled={busy} onClick={() => window.confirm("Delete this feedback and its links?") && act(() => api(`/api/feedback/${id}`, { method: "DELETE" }), () => (onChanged(), onClose()))}>
           Delete
         </button>
       </div>
@@ -305,7 +337,7 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
 }
 
 /** The public portal: on or off, its words, and its secret link. */
-function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
+export function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
   const s = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `portal-${companyId}`);
   const [form, setForm] = useState<{ title: string; intro: string } | null>(null);
   // BOS-967: the optional way back to the owner's website, saved on its own so a bad address
@@ -316,6 +348,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
   const introKey = `portal-intro/${companyId}`;
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const d = s.data;
+  const hostFacts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 60_000, "host-facts-portal");
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
   const [backBusy, setBackBusy] = useState(false);
@@ -336,7 +369,10 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
     r.onload = () => run(api(`${logoUrl}`, { method: "PUT", body: { data: String(r.result).split(",")[1] ?? "" } }).then(() => setLogoV((v) => v + 1)), "Logo saved.");
     r.readAsDataURL(file);
   };
-  const link = d.portalToken ? `${d.portalUrl ?? window.location.origin}/portal.html#${d.portalToken}` : null;
+  // BOS-1603: with no portal address set, never fall back to the owner's own browser address: clients may not reach it.
+  const guess = d.portalUrl ? null : defaultLinkAddress({ origin: window.location.origin, facts: hostFacts.data?.facts, who: "clients" });
+  const base = d.portalUrl ?? guess?.url ?? "";
+  const link = d.portalToken && base ? `${base}/portal.html#${d.portalToken}` : null;
   return (
     <section className="card" aria-labelledby="portal-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <h2 id="portal-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -363,9 +399,14 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
           </button>
         </div>
       )}
-      {d.portalEnabled && (
-        <p className="muted" style={{ fontSize: 13 }}>
-          This link uses the address you're on now. If you serve the portal on its own port (BOSSMAN_PORTAL_PORT, see the install guide), swap in that address and keep everything after "#".
+      {d.portalEnabled && d.portalToken && !link && (
+        <p className="error" style={{ fontSize: 14 }} data-testid="portal-no-address">
+          {guess?.note} Set BOSSMAN_PORTAL_URL (see the install guide) to the address your clients open; the link appears here once it is set.
+        </p>
+      )}
+      {d.portalEnabled && link && (
+        <p className="muted" style={{ fontSize: 13 }} data-testid="portal-address-note">
+          {guess ? `${guess.note} ` : "This link uses the portal address set in BOSSMAN_PORTAL_URL. "}If you serve the portal on its own port (BOSSMAN_PORTAL_PORT, see the install guide), swap in that address and keep everything after "#".
         </p>
       )}
       <form
@@ -391,7 +432,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
               <input type="file" accept=".png,.jpg,.jpeg,.webp" hidden aria-label="Logo file" onChange={(e) => (pickLogo(e.currentTarget.files?.[0]), (e.currentTarget.value = ""))} />
             </label>
             {d.hasLogo && (
-              <button type="button" className="btn small" onClick={() => run(api(logoUrl, { method: "DELETE" }), "Logo removed.")}>
+              <button type="button" className="btn small" onClick={() => window.confirm("Remove the portal logo? Visitors will see the default.") && run(api(logoUrl, { method: "DELETE" }), "Logo removed.")}>
                 Remove
               </button>
             )}
@@ -447,6 +488,23 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         </div>
         <SaveButton dirty saved={false} busy={backBusy} disabled={!!backProblem || !back || (!back.url.trim() && !back.text.trim())} style={{ alignSelf: "flex-start" }} />
       </form>
+      <fieldset style={{ border: "1px solid var(--border, #333)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+        <legend style={{ fontSize: 14, fontWeight: 600, padding: "0 6px" }}>Short public address</legend>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input
+            type="checkbox"
+            checked={!!d.portalAtBareAddress}
+            aria-describedby="bare-address-help"
+            onChange={(e) =>
+              run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { portalAtBareAddress: e.target.checked } }), e.target.checked ? "The public address now opens this portal." : "The public address no longer opens this portal.")
+            }
+          />
+          Open this portal at the public address itself{d.portalUrl ? ` (${d.portalUrl})` : ""}, with no secret link part
+        </label>
+        <p id="bare-address-help" className="muted" style={{ fontSize: 13 }}>
+          Anyone who opens that address sees this portal, so use it for a portal meant to be public, such as the one your website links to. Only one company's portal can use it; turning it on here turns it off for any other. The portal must also be turned on.
+        </p>
+      </fieldset>
       <ConfirmByEmail companyId={companyId} d={d} run={run} />
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
@@ -478,7 +536,7 @@ function ConfirmByEmail({ companyId, d, run }: { companyId: string; d: FeedbackS
       </label>
       <p id="confirm-email-help" className="muted" style={{ fontSize: 13 }}>
         {!d.emailReady
-          ? "Set up outgoing email first (Settings → Server and runner → Outgoing email): the links are sent from it."
+          ? "Set up outgoing email first (Settings → Server and runner → Email): the links are sent from it."
           : !d.portalUrl
             ? "The links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide)."
             : "With this on, visitors give an email address. What they send is kept out of sight, and counts for nothing, until they click the emailed link. Unconfirmed posts are deleted when the link runs out."}
@@ -535,7 +593,7 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
         </div>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
@@ -552,7 +610,8 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                 {TABS.map((t) => (
                   <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
                     {t.label}
-                    {t.id === "unprocessed" && counts.data?.[company.id] ? <span className="tab-count">{counts.data[company.id]}</span> : null}
+                    {/* R43: the sidebar Feedback badge's figure and label (feedback.toProcess). */}
+                    {t.id === "unprocessed" && counts.data?.[company.id] ? <span className="tab-count" aria-label={figureText("feedback.toProcess", counts.data[company.id]!)} title={figureText("feedback.toProcess", counts.data[company.id]!)}>{counts.data[company.id]}</span> : null}
                   </button>
                 ))}
               </div>

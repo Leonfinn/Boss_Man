@@ -1,9 +1,9 @@
 // The Agents tab (R62): who works for each company, what they cost this month, and every change
 // to them, with what it was before so it can be undone.
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, INFINITE_MODEL_CHOICE, isClaudeModel, isInfiniteModel, harnessLabel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
+import { AGENT_TEMPLATES, CEO_TEMPLATE, DAY_NAMES, WORKING_HOURS_REASON, nextWorkingStart, workingHoursProblem, startLabel, FUNDING_PROVIDERS, HARNESSES, INFINITE_MODEL_CHOICE, isClaudeModel, isInfiniteModel, harnessLabel, modelFitProblem, providerLabel, speakerNameProblem } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
+import { agentAvatars, agentChanges, agents, ceoChapters, companies, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
 import { cantMoveSql, isWorkingRun, readWipLimits } from "./agent-wip.js";
 import { pictureType } from "./company-import.js";
@@ -22,7 +22,7 @@ export class AgentError extends Error {
 }
 
 type AgentRow = typeof agents.$inferSelect;
-export type AgentPatch = Partial<Pick<AgentRow, "name" | "title" | "instructions" | "model" | "thinking" | "fundingSourceId" | "agentKind" | "paused" | "starred">>;
+export type AgentPatch = Partial<Pick<AgentRow, "name" | "title" | "instructions" | "model" | "thinking" | "fundingSourceId" | "agentKind" | "paused" | "starred" | "workingHours">>;
 /** Fields whose changes are kept, and can be undone, under the name the history shows. */
 const TRACKED: Array<[keyof AgentPatch, string]> = [
   ["name", "name"],
@@ -33,6 +33,7 @@ const TRACKED: Array<[keyof AgentPatch, string]> = [
   ["fundingSourceId", "funding"],
   ["agentKind", "kind"],
   ["paused", "paused"],
+  ["workingHours", "working_hours"],
 ];
 const FIELD_COLUMN = Object.fromEntries(TRACKED.map(([col, field]) => [field, col])) as Record<string, keyof AgentPatch>;
 const OPEN = ["backlog", "ready", "in_progress", "blocked", "review"] as const;
@@ -179,8 +180,12 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     modelOptions,
 
     approvals,
+    /** Saves the setting and logs it; null when the company doesn't exist (nothing is written). */
     async setApprovals(companyId: string, value: AgentApprovals) {
+      const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
+      if (!company) return null;
       await db.insert(settings).values({ key: `agent_approvals:${companyId}`, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      await logActivity(db, { companyId, kind: "settings", summary: `Owner set agent changes to ${value}`, detail: { setting: "agent_approvals", value } });
       return value;
     },
 
@@ -605,6 +610,16 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         .from(tickets)
         .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`))
         .groupBy(tickets.assigneeAgentId);
+      // BOS-1909: the groups that count toward no limit, per agent, for "0 of 2 tickets in progress · 2 being checked".
+      const standing = await db
+        .select({
+          agentId: tickets.assigneeAgentId,
+          beingChecked: sql<number>`(count(*) filter (where ${tickets.systemState} = 'review' and ${tickets.checkHoldAt} is not null))::int`,
+          nextUp: sql<number>`(count(*) filter (where ${tickets.systemState} = 'ready' and ${tickets.nextUpAt} is not null))::int`,
+        })
+        .from(tickets)
+        .where(eq(tickets.companyId, companyId))
+        .groupBy(tickets.assigneeAgentId);
       const [pa] = await db
         .select({ total: sql<number>`count(*)::int`, posted: sql<number>`(count(*) filter (where ${paAnswers.outcome} = 'posted'))::int`, wrong: sql<number>`(count(*) filter (where ${paAnswers.verdict} = 'wrong'))::int` })
         .from(paAnswers)
@@ -616,12 +631,19 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
             ...a,
             funding,
             fundingKind,
+            // BOS-2200: while the agent is outside its working hours, when they open ("Mon 08:00") and the instant.
+            offUntil: (() => {
+              const next = a.retiredAt ? null : nextWorkingStart(t, a.workingHours);
+              return next ? { at: next.toISOString(), label: startLabel(next, a.workingHours!.timeZone) } : null;
+            })(),
             status: a.retiredAt ? "retired" : working ? "working" : a.paused ? "paused" : "idle",
             current: working?.ticketId ? { ticketId: working.ticketId, title: working.ticket } : null,
             pa: a.duty === "assistant" ? { posted: pa!.posted, escalated: pa!.total - pa!.posted, wrong: pa!.wrong } : null,
             openTickets: assigned.find((r) => r.agentId === a.id)?.n ?? 0,
             wipCount: wip.find((r) => r.agentId === a.id)?.n ?? 0,
             wipLimit,
+            beingChecked: standing.find((r) => r.agentId === a.id)?.beingChecked ?? 0,
+            nextUp: standing.find((r) => r.agentId === a.id)?.nextUp ?? 0,
             month: {
               costMicros: Number(money.find((m) => m.agentId === a.id)?.micros ?? 0),
               runs: used.find((u) => u.agentId === a.id)?.runs ?? 0,
@@ -667,7 +689,12 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     async update(agentId: string, patch: AgentPatch, byAgentId: string | null = null) {
       const before = await agent(agentId);
       if (before.retiredAt && patch.paused === false) throw new AgentError(409, `${before.name} is retired. Rehire them first.`);
-      const changed = TRACKED.filter(([col]) => patch[col] !== undefined && patch[col] !== before[col]);
+      if (patch.workingHours) {
+        const problem = workingHoursProblem(patch.workingHours);
+        if (problem) throw new AgentError(422, problem);
+      }
+      // Compared by value: working hours is an object.
+      const changed = TRACKED.filter(([col]) => patch[col] !== undefined && JSON.stringify(patch[col]) !== JSON.stringify(before[col]));
       // Starring is the owner's own tidy-up, so it isn't kept in the history.
       if (!changed.length && (patch.starred === undefined || patch.starred === before.starred)) return before;
       const harnessOrProvider = changed.some(([col]) => col === "agentKind" || col === "fundingSourceId");
@@ -675,6 +702,18 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       // A Claude Code session must never be reopened on OpenCode, or under another provider.
       if (harnessOrProvider) await clearResumeSessions(agentId);
       for (const [col, field] of changed) await record(before, field, before[col], after![col], byAgentId);
+      if (changed.some(([col]) => col === "workingHours")) {
+        const wh = after!.workingHours;
+        const summary = wh
+          ? `${before.name}'s working hours were set: ${wh.days.map((d) => DAY_NAMES[d]).join(", ")}, ${wh.start} to ${wh.end} (${wh.timeZone})`
+          : `${before.name}'s working hours were turned off: available at any time`;
+        await logActivity(db, { companyId: before.companyId, agentId: byAgentId, kind: "agent_working_hours", summary, detail: { before: before.workingHours ?? null, after: wh ?? null } });
+        // Hours that are now open (or off) free the work that was waiting for them: don't make it wait for the old start time.
+        const held = and(eq(wakes.agentId, agentId), eq(wakes.status, "deferred"), eq(wakes.statusReason, WORKING_HOURS_REASON), isNull(wakes.runId));
+        const next = nextWorkingStart(now(), wh);
+        if (!next) await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(held);
+        else await db.update(wakes).set({ notBefore: next }).where(held);
+      }
       return after!;
     },
 

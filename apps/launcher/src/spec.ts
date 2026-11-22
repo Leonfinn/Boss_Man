@@ -26,6 +26,8 @@ export const claudePackVolume = (stack?: string) => `${stack ? `boss-man-${stack
 export const TOKEN_TARGET = "/run/secrets/runner_token";
 /** Docker's default weight is 1024; runners get half, so the server and database win on a busy host. */
 export const DEFAULT_CPU_SHARES = 512;
+/** Container logs are capped (BOS-2161), like the compose files' x-logging: Docker's default keeps every line forever. */
+export const LOG_CONFIG = { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } };
 
 export type LauncherConfig = {
   /** BOSSMAN_DATA: the host folder, mounted at the same path in the launcher, so binds name real host paths. */
@@ -291,6 +293,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string,
       // No swap on top of the limit, and the first to be killed if the host itself runs out (BOS-395).
       MemorySwap: plan.memoryBytes,
       OomScoreAdj: 500,
+      LogConfig: LOG_CONFIG,
       // Priority, not a cap (BOS-412): when the host is busy the server and database win; when idle, runners use every core.
       CpuShares: cfg.cpuShares ?? DEFAULT_CPU_SHARES,
       // A core kept back for the server, database and proxy (BOS-586): runners never run on the reserved threads.

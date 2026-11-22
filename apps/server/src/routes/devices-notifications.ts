@@ -4,11 +4,12 @@
 // rather than through app.register, which would add a new scope. phoneApproveRoutes opens its own
 // scope for the ntfy taps, exactly as app.ts did, so their own JSON parsers and error handler still
 // answer a bad body with plain JSON rather than the error handler's message.
+import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { deviceProfilesService } from "../services/device-profiles.js";
 import type { hostFactsService } from "../services/host-facts.js";
-import { NotifySettings, NtfyUrl, type notificationsService } from "../services/notifications.js";
+import { NotifySettings, NtfyTopic, NtfyUrl, type notificationsService } from "../services/notifications.js";
 import type { phoneApproveService } from "../services/phone-approve.js";
 import type { phoneLoginService } from "../services/phone-login.js";
 import type { secretsService } from "../services/secrets.js";
@@ -131,6 +132,32 @@ export function notificationRoutes(
   });
 }
 
+/** The bundled ntfy's address on the private edge network, which Boss Man shares with it on every host (docs/31). */
+export const BUNDLED_NTFY_URL = "http://ntfy:80";
+const TOPIC_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+/**
+ * BOS-1581: what the "Set up ntfy" button does with the answer. The token goes into the encrypted secrets store ("ntfy
+ * access token", rotated in place if one is saved) and its id into the settings; the topic and server address are kept if
+ * the owner already chose them. Nothing here returns or logs the token. A repeat with the same token changes nothing.
+ */
+export function ntfySetupSaver(deps: { notes: ReturnType<typeof notificationsService>; secretsSvc: ReturnType<typeof secretsService> }) {
+  const { notes, secretsSvc } = deps;
+  return async ({ token, topic }: { token: string; topic: string }) => {
+    const current = await notes.getSettings();
+    let tokenSecretId = current.ntfy?.tokenSecretId ?? null;
+    const saved = tokenSecretId ? await secretsSvc.reveal(tokenSecretId).catch(() => null) : null;
+    if (saved !== token) {
+      const rotated = tokenSecretId ? await secretsSvc.rotate(tokenSecretId, token, { acceptUnusualFormat: true }) : null;
+      tokenSecretId = rotated ? tokenSecretId : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: token })).secret.id;
+    }
+    const url = current.ntfy?.url ?? BUNDLED_NTFY_URL;
+    const keptTopic = current.ntfy?.topic ?? topic;
+    if (current.ntfy?.url === url && current.ntfy.topic === keptTopic && current.ntfy.tokenSecretId === tokenSecretId) return;
+    await notes.setSettings({ ...current, ntfy: { url, topic: keptTopic, tokenSecretId } });
+  };
+}
+
 // Notifications settings (R44): what is on, which ntfy server and topic, and a test push (BOS-243).
 export function notificationSettingsRoutes(
   owner: FastifyInstance,
@@ -163,7 +190,7 @@ export function notificationSettingsRoutes(
   owner.put("/api/notification-settings", async (req) => {
     const b = NotifySettings.omit({ ntfy: true })
       .extend({
-        ntfy: z.object({ url: NtfyUrl, topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
+        ntfy: z.object({ url: NtfyUrl, topic: NtfyTopic, token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
       })
       .parse(req.body);
     const current = await notes.getSettings();
@@ -182,8 +209,10 @@ export function notificationSettingsRoutes(
   // password is in the poll answer once; nothing here logs a body or a response, and no cache may keep one.
   owner.post("/api/notification-settings/phone-login", { logLevel: "silent" }, async (req, reply) => {
     reply.header("Cache-Control", "no-store");
-    const { action } = z.object({ action: z.enum(["create", "reset"]) }).parse(req.body);
-    const topic = (await notes.getSettings()).ntfy?.topic ?? "";
+    const { action } = z.object({ action: z.enum(["create", "reset", "setup"]) }).parse(req.body);
+    // Setup (BOS-1581) may pick the topic itself: 20 random letters and digits when none is saved, which is the guide's advice.
+    const saved = (await notes.getSettings()).ntfy?.topic ?? "";
+    const topic = saved || (action === "setup" ? Array.from(randomBytes(20), (b) => TOPIC_CHARS[b % TOPIC_CHARS.length]).join("") : "");
     const r = await phoneLogin.begin(action, topic);
     return r.ok ? { id: r.id } : reply.code(r.code === "busy" ? 409 : 400).send({ error: r.code, message: r.message });
   });

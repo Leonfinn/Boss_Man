@@ -1,12 +1,14 @@
 // Company export (docs/11, step 1): the company as one zip, format "bossman-company/1". It holds
-// the set-up (agents, skills, projects, plan, tool servers, secret names and grants) and, when
+// the set-up (agents, skills, projects, plan, tool servers, secret names and grants, the company's own settings) and, when
 // asked, the wiki and tickets. Never in it: secret values or hints, owner login, runs, costs.
 import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { strToU8, zipSync } from "fflate";
 import { readWatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentAvatars, agentSkills, agents, companies, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
-import { slugify } from "./wiki.js";
+import { liveTagOf, type TargetRules } from "./deploys.js";
+import { agentAvatars, agentSkills, agents, companies, deployTargets, policyRules, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
+import { liveWikiPage, slugify } from "./wiki.js";
+import { exportSettings } from "./company-settings-package.js";
 
 export const EXPORT_FORMAT = "bossman-company/1";
 export type ExportOptions = { wiki: boolean; tickets: "none" | "open" | "all" };
@@ -109,14 +111,46 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
     .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
     .where(eq(secretGrants.companyId, companyId));
   const grantAgents = grants.length ? await db.select().from(secretGrantAgents).where(inArray(secretGrantAgents.grantId, grants.map((g) => g.id))) : [];
-  files["secrets.json"] = json(
-    grants
-      .filter((g) => !g.deployTargetId)
-      .map((g) => ({ name: g.name, kind: g.kind, envName: g.envName, agents: grantAgents.filter((x) => x.grantId === g.id).map((x) => agentSlug.get(x.agentId)).filter(Boolean) })),
+  const grantView = (g: (typeof grants)[number]) => ({ name: g.name, kind: g.kind, envName: g.envName, agents: grantAgents.filter((x) => x.grantId === g.id).map((x) => agentSlug.get(x.agentId)).filter(Boolean) });
+  files["secrets.json"] = json(grants.filter((g) => !g.deployTargetId).map(grantView));
+
+  // Deploy targets (BOS-2169), with the secrets granted to each by name only. The host's own staging lane is left
+  // out: the host creates it. A live tag's project id means nothing on another server, so it travels as the project's folder name.
+  const targetRows = await db.select().from(deployTargets).where(eq(deployTargets.companyId, companyId)).orderBy(asc(deployTargets.name));
+  files["deploy-targets.json"] = json(
+    targetRows
+      .filter((t) => (t.rules as TargetRules | null)?.hostStaging !== true)
+      .map((t) => {
+        const r = (t.rules ?? {}) as TargetRules;
+        const lt = liveTagOf(t);
+        return {
+          name: t.name,
+          kind: t.kind,
+          endpoint: t.endpoint,
+          isProduction: t.isProduction,
+          rules: { ...(r.requiresApproval === true ? { requiresApproval: true } : {}), ...(lt && projectSlug.has(lt.projectId) ? { liveTag: { project: projectSlug.get(lt.projectId), name: lt.name } } : {}) },
+          secrets: grants.filter((g) => g.deployTargetId === t.id).map(grantView),
+        };
+      }),
   );
 
+  // The company's own permission rules, in their order. Global rules (no company) never leave; a rule limited to agents names them, not their ids.
+  // A timed rule is left out: the export has no expiry, so on import it would turn into a rule that never ends (BOS-2188).
+  const ruleRows = await db.select().from(policyRules).where(and(eq(policyRules.companyId, companyId), isNull(policyRules.expiresAt))).orderBy(asc(policyRules.position), asc(policyRules.name));
+  const agentName = new Map(team.map((a) => [a.id, a.name]));
+  files["permission-rules.json"] = json(
+    ruleRows.map((r) => {
+      const { agentIds, ...rest } = (r.condition ?? {}) as Record<string, unknown> & { agentIds?: string[] };
+      return { name: r.name, trigger: r.trigger, condition: { ...rest, ...(Array.isArray(agentIds) ? { agents: agentIds.map((id) => agentName.get(id) ?? "(unknown agent)") } : {}) }, outcome: r.outcome, position: r.position };
+    }),
+  );
+
+  // The company's own choices kept in the settings table (BOS-2242): agent approvals, git templates, the retro agent and
+  // the second opinion. The second opinion's key travels by its secret's name only.
+  files["settings.json"] = json(await exportSettings(db, companyId, agentSlug));
+
   if (opts.wiki) {
-    const pages = await db.select().from(wikiPages).where(eq(wikiPages.companyId, companyId)).orderBy(asc(wikiPages.slug));
+    const pages = await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage)).orderBy(asc(wikiPages.slug));
     for (const p of pages) files[`wiki/${p.slug}.md`] = strToU8(`---\n${JSON.stringify({ slug: p.slug, title: p.title, folder: p.folder, ticket: p.ticketId })}\n---\n${p.body}`);
   }
 

@@ -3,14 +3,119 @@
 // gate that stops can be seen rather than asked about. Reads only what the server already records:
 // the tickets in review, their latest check results, the one open merge card per ticket, and the
 // merges this process is running. Nothing here changes the queue.
-import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { stageLine } from "./check-stage-line.js";
+import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
-import { softHold } from "./deploy-wait-hold.js";
+import { softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
+import { clashWords } from "./merge-line.js";
+import { mergeLineHealth, startBrakeOff, type StartBrakeOff, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
+import { goLiveWaitOf } from "./go-live-wait.js";
+import { goLiveWaitWords } from "@boss-man/shared";
+
+/** BOS-1942: the place a check job's record names: a check worker by its name, or the company runner (the server's own machine). */
+const placeOf = (workerId: string | null, worker: string | null) => (workerId ? (worker ?? "a check worker") : "company runner");
+
+/** BOS-1942: the running check jobs of a company, oldest first, each with where it runs (read from the job's record). */
+export async function runningCheckJobs(db: Db, companyId: string) {
+  const rows = await db
+    .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt, workerId: checkJobs.workerId, worker: checkWorkers.name })
+    .from(checkJobs)
+    .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
+    .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
+    .orderBy(asc(checkJobs.startedAt));
+  return rows.map(({ workerId, worker, ...j }) => ({ ...j, ranOn: placeOf(workerId, worker) }));
+}
+
+/** BOS-1942: where the latest ended merge check of each ticket ran, for a landing that now waits only for GitHub CI. */
+export async function endedMergePlaces(db: Db, companyId: string, ticketIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>(); // lost on restart, harmless because it is a per-call local result, not module state.
+  if (!ticketIds.length) return out;
+  const rows = await db
+    .select({ ticketId: checkJobs.ticketId, workerId: checkJobs.workerId, worker: checkWorkers.name })
+    .from(checkJobs)
+    .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
+    .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.kind, "merge"), inArray(checkJobs.ticketId, ticketIds), isNotNull(checkJobs.startedAt), isNotNull(checkJobs.endedAt)))
+    .orderBy(desc(checkJobs.endedAt));
+  for (const r of rows) if (!out.has(r.ticketId)) out.set(r.ticketId, placeOf(r.workerId, r.worker));
+  return out;
+}
+
+/** A fix that has been landing this long with no result is stalled (R28). */
+export const FIX_LANDING_LIMIT_MIN = 60;
+
+/**
+ * R28: the approved rows held only by waits, narrowed to those waiting on a ticket marked as fixing the merge check.
+ * The ids come from mergeHolds (the call that holds them), so the line can't disagree with the hold.
+ */
+async function heldBehindFixOf(
+  db: Db,
+  prefix: string | null | undefined,
+  heldWaits: Map<string, { ids: string[]; since: string }>,
+  view: { running: RunningNow[]; waiting: WaitingRow[] },
+): Promise<HeldBehindFix | null> {
+  const all = [...new Set([...heldWaits.values()].flatMap((h) => h.ids))];
+  if (!all.length) return null;
+  const fixes = await db
+    .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt })
+    .from(tickets)
+    .where(and(inArray(tickets.id, all), eq(tickets.fixesMergeCheck, true)));
+  if (!fixes.length) return null;
+  const fixIds = new Set(fixes.map((f) => f.id));
+  const rows = [...heldWaits.values()].filter((h) => h.ids.some((id) => fixIds.has(id)));
+  const out: HeldFix[] = [];
+  let updateCardId: string | null | undefined;
+  for (const f of fixes) {
+    const run = view.running.find((r) => r.ticketId === f.id);
+    const wait = view.waiting.find((w) => w.ticketId === f.id);
+    const goLive = f.mergeCommit ? await goLiveWaitOf(db, f).catch(() => null) : null;
+    let stateText: string;
+    let stalled: HeldFix["stalled"] = null;
+    if (f.mergeCommit) stateText = goLive === "own" ? "merged, waiting for the CEO to mark it live" : goLive ? `merged, ${goLiveWaitWords(goLive).replace(/^waiting for go-live: /, "waiting for ")}` : "merged";
+    else if (run) {
+      stateText = `merge check running, ${run.minutes} min`;
+      // The time with no result: the wait for GitHub CI when there is one, else the check's own run.
+      const noResult = Math.max(run.minutes, run.ci?.minutes ?? 0);
+      if (noResult >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been ${run.ci ? "waiting for GitHub CI" : "landing"} for ${noResult} minutes with no result` };
+    } else if (wait?.state === "waiting_for_ci") {
+      // BOS-1871: its check is over and the landing waits only for GitHub CI; `minutes` is that wait's own clock, not the approval's.
+      stateText = `waiting for GitHub CI, ${wait.minutes} min`;
+      if (wait.minutes >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been waiting for GitHub CI for ${wait.minutes} minutes with no result` };
+    } else if (wait) {
+      stateText = `approved, waiting to land, ${wait.minutes} min`;
+      // Whoever owns the wait (Boss Man, the CEO, an agent), an approved fix that has not landed in an hour is stalled.
+      if (wait.minutes >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been approved for ${wait.minutes} minutes and has not landed` };
+    } else if (f.state === "review") stateText = "in review";
+    else if (f.state === "in_progress") {
+      // Sent back: its latest review round asked for changes. Nobody's review is moving it now, so the line is stuck on it.
+      const [last] = await db.select({ round: reviewRequests.round }).from(reviewRequests).where(eq(reviewRequests.ticketId, f.id)).orderBy(desc(reviewRequests.round)).limit(1);
+      const sentBack = last ? (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, f.id), eq(reviewRequests.round, last.round), eq(reviewRequests.status, "changes_requested"))).limit(1)).length > 0 : false;
+      stateText = sentBack ? "sent back for changes" : "being fixed";
+      if (sentBack) stalled = { reason: "it was sent back from review, so it is not landing yet" };
+    } else {
+      stateText = f.state === "blocked" ? "blocked" : f.state === "ready" || f.state === "backlog" ? "not started" : f.state;
+      stalled = { reason: `it is ${stateText}, so nobody is working on it` };
+    }
+    const ownerUpdate = !!f.mergeCommit && !!goLive && goLive !== "own";
+    // Only the owner's server update is left: link the update card that is already open, and never raise a new one.
+    if (ownerUpdate && updateCardId === undefined) {
+      const [card] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.companyId, f.companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'deploy'`))
+        .orderBy(desc(decisions.createdAt))
+        .limit(1);
+      updateCardId = card?.id ?? null;
+    }
+    out.push({ ticketId: f.id, ref: ticketRef(prefix, f.number), title: f.title, stateText, ownerUpdate, updateCardId: ownerUpdate ? (updateCardId ?? null) : null, stalled });
+  }
+  const since = rows.map((h) => h.since).sort()[0] ?? null;
+  return { held: rows.length, fixes: out, since };
+}
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -22,7 +127,7 @@ export const WAITING_LIMIT_MS = 60 * 60_000;
 /** Who is acting on a stuck item, in the owner's words. */
 export type ActorKind = "agent" | "ceo" | "owner" | "system";
 
-export type MergePhase = "queued" | "checking" | "merging" | "waiting_to_retry";
+export type MergePhase = "queued" | "checking" | "merging" | "waiting_to_retry" | "retrying_git";
 
 export type RunningNow = {
   ticketId: string;
@@ -38,6 +143,10 @@ export type RunningNow = {
   slot: number;
   /** True past the limit, so the screen says what happens next. */
   overLimit: boolean;
+  /** BOS-1070: waiting for GitHub CI on the merge commit (beside the check): minutes so far, and the jobs still running. */
+  ci?: { minutes: number; waiting: string[] };
+  /** BOS-1942: where the merge check runs, from its check job: the check worker's name, or "company runner" for this server; absent when no job is known. */
+  ranOn?: string | null;
   /** BOS-1517: the same facts as one line. */
   statusLine: StatusLine;
 };
@@ -49,7 +158,11 @@ export type RunningNow = {
  */
 export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
 
-export type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
+/**
+ * waiting_for_ci (BOS-1871): its landing is under way, its check holds no slot any more, and it waits only for GitHub CI on its merge copy.
+ * waiting_for_turn (BOS-2119): its landing is under way and waits for another ticket's landing turn (to re-check, or to push).
+ */
+export type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held" | "waiting_for_ci" | "waiting_for_turn";
 
 /** Approved work held by the carried-work guard (BOS-130): the ticket(s) it waits for, by ref and title. */
 export type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
@@ -81,11 +194,20 @@ export type WaitingRow = {
   /** BOS-1384: place among the queued checks (1 is next) and why it is ahead ("urgent", "moved to front by …"); null when not queued. */
   place?: number | null;
   why?: string | null;
+  /** BOS-1803: "background lane: …" for a waiting background-lane merge (how long newer ordinary work still goes first); null otherwise. */
+  lane?: string | null;
   /** When the owner's sign-off for this round was given, if it was: a merge held by another card says so. */
   signedOffAt?: string | null;
   /** BOS-1517: the one status line (step, since, next, what is in the way). */
   statusLine?: StatusLine;
+  /** BOS-1942: for waiting_for_ci, where the finished merge check ran (same values as RunningNow.ranOn). */
+  ranOn?: string | null;
+  /** BOS-1515: held by the merge train to land on main alone: who it clashed with (refs), the files, since when. */
+  heldAlone?: { clashWith: string[]; files: string[]; since: string | null; holdsLine: boolean } | null;
 };
+
+/** BOS-1515: a ticket the merge train holds to land on main alone (merge-stall.ts mergeTrainStatus). */
+export type HeldAloneView = { ticketId: string; clashWith: string[]; files: string[]; since: string | null; holdsLine: boolean };
 
 /** The card a waiting merge is held by, in the owner's words (BOS-1078). */
 export type HoldingCardView = {
@@ -115,19 +237,34 @@ export type RecentRow = {
   /** One line: a failure names the failing step. */
   detail: string;
   at: string;
+  /** BOS-1938: the ticket's last finished merge check, quick or full, per stage; absent when no step times were kept. */
+  stageLine?: string;
 };
 
 export type MergeQueueView = {
   companyId: string;
   mode: "legacy" | "server";
   slots: number;
+  /** BOS-1942: the name Boss Man records for this server's host, for "Running on this server (name)"; null when none is recorded. */
+  serverHost?: string | null;
+  /** BOS-1942: what `slots` is made of, one entry per machine; only sent when more than one machine holds slots. */
+  slotSplit?: Array<{ ranOn: string; slots: number }>;
   running: RunningNow[];
   waiting: WaitingRow[];
   recent: RecentRow[];
-  /** How many approved tickets are waiting to merge (the side menu's badge). */
+  /** How many approved tickets are waiting to merge, not counting running ones (the start hold's figure). */
   waitingCount: number;
-  /** How many items look stuck: running past the limit, or waiting rows flagged stuck (BOS-767). */
+  /**
+   * R43 (BOS-1716), mergeQueue.inLine: everything in the merge line, waiting or running: the side menu's badge, the
+   * Merges tab and the Dashboard all show this one figure as "N in the merge line" (@boss-man/shared owner-figures).
+   */
+  lineCount: number;
+  /** 1 while the merge line is stuck (the same verdict as `line`), else 0; slow-but-landing is not stuck (BOS-767, BOS-1594). */
   stuckCount: number;
+  /** BOS-1594: the one verdict on the line's health (healthy, stuck, or merging but slowly); the banner and the jam alert both read it. */
+  line: MergeLineHealth;
+  /** R47: set while the start brake has no limit and the line has grown for an hour; the banner and the CEO's wake read it. */
+  startBrakeOff?: StartBrakeOff | null;
 };
 
 /** One plain line from a check's last output: the first error-looking line, or the last line. */
@@ -156,6 +293,7 @@ export const PHASE_LABEL: Record<MergePhase, string> = {
   checking: "running the check",
   merging: "merging",
   waiting_to_retry: "trying again after the runner restarted",
+  retrying_git: "retrying after a push/fetch failure to the git host",
 };
 
 /** BOS-1517: a running merge's step in the status line. Unlike PHASE_LABEL, "queued" here already holds a slot. */
@@ -164,6 +302,7 @@ const PHASE_TEXT: Record<MergePhase, string> = {
   checking: "running the check",
   merging: "merging",
   waiting_to_retry: "trying again after the runner restarted",
+  retrying_git: "retrying after a push/fetch failure to the git host",
 };
 
 /** The prefix of the carried-work note `refuseCarried` writes on the held ticket (BOS-130). */
@@ -201,6 +340,34 @@ export function carriedTitles(note: string | null | undefined): string[] {
 /** What the owner reads for a hold on `titles`: the sentence only, never the hidden title list. */
 export function carriedNoteText(note: string | null | undefined): string {
   return carriedHold(note).note ?? (note ?? "");
+}
+
+/**
+ * BOS-1871: the words for a landing that waits only for GitHub CI on its merge copy, e.g. "waiting for GitHub CI (check), 12 min
+ * so far". Written where that wait is decided (the landing's own CI marker), so the screen can't fall through to "next in line".
+ */
+export function ciWaitLabel(ci: { minutes: number; waiting: string[] }): string {
+  return `waiting for GitHub CI on its merge copy${ci.waiting.length ? ` (${ci.waiting.join(", ")})` : ""}, ${waitedText(Math.max(0, ci.minutes))} so far`;
+}
+
+/**
+ * BOS-2119 (R43): a merge waiting for another ticket's landing turn. "rebuild": it is in line for the turn and builds and
+ * checks its merge again once the turn is its own; "push": its check passed and only the push waits.
+ */
+export type TurnWait = { holderId: string; since: number; then: "rebuild" | "push" };
+
+/** The one line for a landing-turn wait, e.g. "waiting for BOS-12 to land, then re-checks". */
+export function turnWaitLabel(holder: string, then: TurnWait["then"]): string {
+  return then === "rebuild" ? `waiting for ${holder} to land, then re-checks` : `check passed; waiting for ${holder} to land, then pushes`;
+}
+
+/**
+ * turnWaitLabel with the holder named the way every screen names a ticket (its reference, else its title). The Merges tab,
+ * mergeState and server_status all call this, so the three can't disagree.
+ */
+export async function turnWaitWords(db: Db, w: TurnWait): Promise<string> {
+  const [h] = await db.select({ number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, w.holderId));
+  return turnWaitLabel(ticketRef(h?.prefix ?? null, h?.number) ?? (h ? `"${h.title}"` : "another ticket"), w.then);
 }
 
 /** One plain duration for the owner, e.g. "1 h 10 min". */
@@ -242,6 +409,19 @@ export const mergeQueueQueries = {
       .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), gte(tickets.stateChangedAt, since)))
       .orderBy(desc(tickets.stateChangedAt))
       .limit(RECENT_LIMIT * 2),
+  /** BOS-1938: each ticket's finished merge checks that kept step times, newest first. */
+  finishedMergeChecks: (db: Db, ticketIds: string[]) =>
+    db
+      .select({ ticketId: checkJobs.ticketId, stages: checkJobs.stages, ranFull: checkJobs.ranFull, busyAtStart: checkJobs.busyAtStart, startedAt: checkJobs.startedAt, endedAt: checkJobs.endedAt })
+      .from(checkJobs)
+      .where(and(inArray(checkJobs.ticketId, ticketIds), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["passed", "failed"]), isNotNull(checkJobs.stages)))
+      .orderBy(desc(checkJobs.endedAt)),
+  /** When tickets landed (merged) since a cut-off, for the landing rate (R47). */
+  landedSince: (db: Db, companyId: string, since: Date) =>
+    db
+      .select({ at: tickets.stateChangedAt })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), isNotNull(tickets.mergeCommit), gte(tickets.stateChangedAt, since))),
   /** Failed checks on finished tickets, through the company+time index (0105). */
   recentFailedChecks: (db: Db, companyId: string, since: Date) =>
     db
@@ -257,15 +437,21 @@ export function mergeQueueService(
   db: Db,
   deps: {
     /** This process's running merges, from the review service's own markers. */
-    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase }>;
+    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] }; turn?: TurnWait }>;
     /** The check slot limit: how many merge checks run at once. */
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
     /** This company's running check jobs, oldest start first: what really holds a slot (server mode). */
-    runningChecks?: (companyId: string) => Promise<Array<{ ticketId: string; kind: string; startedAt?: Date | null }>>;
+    runningChecks?: (companyId: string) => Promise<Array<{ ticketId: string; kind: string; startedAt?: Date | null; ranOn?: string | null }>>;
+    /** BOS-1942: where each ticket's latest finished merge check ran (worker name or "company runner"), for a landing that waits only for GitHub CI. */
+    endedMergePlaces?: (companyId: string, ticketIds: string[]) => Promise<Map<string, string>>;
+    /** BOS-1942: the name Boss Man records for this server's host. */
+    serverHost?: () => Promise<string | null>;
+    /** BOS-1942: how many of the check slots each machine holds (ranOn as in RunningNow). */
+    slotSplit?: (companyId: string) => Promise<Array<{ ranOn: string; slots: number }>>;
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
     /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
-    places?: (companyId: string) => Promise<Map<string, { place: number; why: string | null }>>;
+    places?: (companyId: string) => Promise<Map<string, { place: number | null; why: string | null; seatPlace?: number | null; lane?: string | null }>>;
     /** BOS-1486: whether this company's runner is connected right now (a waiting merge can't start without one). */
     runnerConnected?: (companyId: string) => Promise<boolean>;
     /** BOS-1486: a runner update is holding the line (a wrap-up hold is not one). */
@@ -273,7 +459,11 @@ export function mergeQueueService(
     /** BOS-1486: whether the launcher is on, so the screen may point at Start runner in Settings. */
     launcherOn?: () => boolean;
     /** BOS-1486: what holds the check slots and whether a red main holds checks back (server mode only). */
-    queueDetail?: (companyId: string) => Promise<{ slots: number; busy: Array<{ ref: string | null; title: string; kind: string }>; mainRed: boolean; fixRef: string | null; /** BOS-1517: merges whose check is held until the ticket has a merge-train seat. */ seatWait?: string[] }>;
+    queueDetail?: (companyId: string) => Promise<{ slots: number; busy: Array<{ ref: string | null; title: string; kind: string }>; mainRed: boolean; fixRef: string | null; /** BOS-1517: merges whose check is held until the ticket has a merge-train seat. */ seatWait?: string[]; /** BOS-1515: tickets held to land on main alone, with the clash (refs and files). */ heldAlone?: HeldAloneView[] }>;
+    /** BOS-1594: when a merge-train seat went empty (epoch ms), or null; the merge stall alarm's own clock. */
+    emptySeatSince?: (companyId: string) => Promise<number | null>;
+    /** BOS-1594: whether a check worker is connected and ready for this company; the capacity advice names a worker only when it is not. */
+    workerReady?: (companyId: string) => Promise<boolean>;
     now?: () => Date;
   },
 ) {
@@ -379,7 +569,14 @@ export function mergeQueueService(
       if (out.some((r) => r.ticketId === f.ticketId)) continue;
       out.push({ ticketId: f.ticketId, ref: ticketRef(prefix, f.number), title: f.title, result: "check_failed", detail: `check failed: ${failingStep(f.detail) ?? "no output recorded"}`, at: f.at.toISOString() });
     }
-    return out.sort((a, b) => b.at.localeCompare(a.at)).slice(0, RECENT_LIMIT);
+    const shown = out.sort((a, b) => b.at.localeCompare(a.at)).slice(0, RECENT_LIMIT);
+    if (!shown.length) return shown;
+    const jobs = await mergeQueueQueries.finishedMergeChecks(db, shown.map((r) => r.ticketId));
+    const slots = await deps.limit();
+    return shown.map((r) => {
+      const line = jobs.filter((j) => j.ticketId === r.ticketId).map((j) => stageLine(j, slots)).find(Boolean);
+      return line ? { ...r, stageLine: line } : r;
+    });
   }
 
   /**
@@ -417,14 +614,31 @@ export function mergeQueueService(
     // BOS-1517: when each running check itself began. The landing's start (runningMerges) can be hours older: it covers the
     // wait for a seat and earlier attempts.
     const checkStart = new Map<string, Date>();
+    // BOS-1871: landings whose check holds no slot (it has ended) but whose wait for GitHub CI is still open. They are
+    // not running a check, so they stay out of Running now, but they are not waiting for one either.
+    const ciWait = new Map<string, { since: string; waiting: string[] }>();
+    // BOS-2119 (R43): landings waiting for another ticket's landing turn, holding no slot. Like ciWait: under way, not waiting for a check.
+    const turnWait = new Map<string, TurnWait>(); // not state: local to this call
+    // BOS-1942: where each running merge check runs, from its check job.
+    const ranOnOf = new Map<string, string>();
     const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
     if (deps.runningChecks && queueMode?.mode === "server") {
       const held = await deps.runningChecks(companyId);
-      held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
+      held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); if (j.ranOn) ranOnOf.set(j.ticketId, j.ranOn); } });
       for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
+      for (const l of live) if (!slotOf.has(l.ticketId) && l.ci) ciWait.set(l.ticketId, l.ci);
+      for (const l of live) if (!slotOf.has(l.ticketId) && l.turn) turnWait.set(l.ticketId, l.turn);
       live = live.filter((l) => slotOf.has(l.ticketId));
+      // BOS-1757: a running merge job is what holds a slot, so it is listed even when no landing marker owns it (the ticket
+      // was sent back, or the server restarted). The Checks panel counts the same rows, so the two screens can't disagree.
+      const marked = new Set(live.map((l) => l.ticketId));
+      for (const j of held) {
+        if (j.kind !== "merge" || marked.has(j.ticketId)) continue;
+        marked.add(j.ticketId);
+        live.push({ ticketId: j.ticketId, startedAt: (j.startedAt ?? new Date(0)).toISOString(), startedBy: "the merge gate (no landing is waiting on it)" });
+      }
     }
-    return { live, slotOf, restarted, checkStart };
+    return { live, slotOf, restarted, checkStart, ciWait, turnWait, ranOnOf };
   }
 
   return {
@@ -438,12 +652,17 @@ export function mergeQueueService(
       const approved = await approvedOnly(await mergeQueueQueries.inReview(db, companyId));
       return approved.filter((r) => !running.has(r.id)).length;
     },
+    /** Everything in the merge line, waiting or landing (including a landing that only waits for GitHub CI): the cheap form of `get(...).lineCount`. */
+    async lineSize(companyId: string): Promise<number> {
+      const { live, ciWait } = await liveMerges(companyId);
+      return (await this.waitingCount(companyId)) + live.length + ciWait.size;
+    },
     async get(companyId: string): Promise<MergeQueueView> {
       const t = now();
-      const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+      const [company] = await db.select({ prefix: companies.ticketPrefix, brakeLimit: companies.holdStartsMergesWaiting }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
-      const { live, slotOf, restarted, checkStart } = await liveMerges(companyId);
+      const { live, slotOf, restarted, checkStart, ciWait, turnWait, ranOnOf } = await liveMerges(companyId);
       const limit = await deps.limit();
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
@@ -473,6 +692,8 @@ export function mergeQueueService(
           what: "merge_check",
           slot,
           overLimit: over,
+          ...(ranOnOf.has(l.ticketId) ? { ranOn: ranOnOf.get(l.ticketId) } : {}),
+          ...(l.ci ? { ci: { minutes: mins(t.getTime() - new Date(l.ci.since).getTime()), waiting: l.ci.waiting } } : {}),
         };
       });
 
@@ -486,7 +707,8 @@ export function mergeQueueService(
       const runningIds = new Set(running.map((r) => r.ticketId));
       const queue = deps.queueStatus ? await deps.queueStatus(companyId).catch(() => null) : null;
       // A server update waiting for a quiet machine parks new checks (BOS-420): say so rather than "waiting for a slot".
-      const held = (await softHold(db, t).catch(() => ({ on: false as const }))).on;
+      const soft = await softHold(db, t).catch(() => ({ on: false as const }));
+      const held = soft.on;
       // BOS-1486: live state for the reason a merge waits. Absent deps (older callers, tests) mean "unknown", never a reason.
       const runnerUp = deps.runnerConnected ? await deps.runnerConnected(companyId).catch(() => null) : null;
       const runnerUpdateOn = deps.runnerUpdateOn ? await deps.runnerUpdateOn().catch(() => false) : false;
@@ -497,8 +719,59 @@ export function mergeQueueService(
       const sinceOf = new Map<string, string>();
       const blockerOf = new Map<string, string>();
       const stepOf = new Map<string, string>();
+      const heldWaits = new Map<string, { ids: string[]; since: string }>();
+      // BOS-1942: where the finished check of each ticket that waits only for GitHub CI ran.
+      const endedPlaces = deps.endedMergePlaces && ciWait.size ? await deps.endedMergePlaces(companyId, [...ciWait.keys()]).catch(() => new Map<string, string>()) : new Map<string, string>();
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
+        // BOS-1871: its landing is under way and waits only for GitHub CI on the merge copy (the check is over, so it holds no
+        // slot). Said here, from the landing's own CI marker, before any reason a merge that hasn't started would have.
+        const ci = ciWait.get(r.id);
+        if (ci) {
+          const since = new Date(ci.since);
+          const words = ciWaitLabel({ minutes: mins(t.getTime() - since.getTime()), waiting: ci.waiting });
+          sinceOf.set(r.id, since.toISOString());
+          waiting.push({
+            ticketId: r.id,
+            ref: ticketRef(prefix, r.number),
+            title: r.title,
+            minutes: mins(t.getTime() - since.getTime()),
+            risk: riskOf(r.risk),
+            urgent: r.urgent,
+            failedCheck: false,
+            state: "waiting_for_ci",
+            ...(endedPlaces.has(r.id) ? { ranOn: endedPlaces.get(r.id) } : {}),
+            label: words,
+            stuck: false,
+            next: "It merges by itself once GitHub CI passes.",
+            actor: "system",
+            decisionId: null,
+          });
+          continue;
+        }
+        // BOS-2119 (R43): its landing is under way and waits for another ticket's landing turn, holding no slot. Said from the
+        // landing's own marker, so it can't fall through to "next in line for a check… a slot is free".
+        const turn = turnWait.get(r.id);
+        if (turn) {
+          const since = new Date(turn.since);
+          sinceOf.set(r.id, since.toISOString());
+          waiting.push({
+            ticketId: r.id,
+            ref: ticketRef(prefix, r.number),
+            title: r.title,
+            minutes: mins(t.getTime() - since.getTime()),
+            risk: riskOf(r.risk),
+            urgent: r.urgent,
+            failedCheck: false,
+            state: "waiting_for_turn",
+            label: await turnWaitWords(db, turn),
+            stuck: false,
+            next: "It goes on by itself when that ticket lands or its turn ends.",
+            actor: "system",
+            decisionId: null,
+          });
+          continue;
+        }
         const card = cards.get(r.id);
         const check = checks.get(r.id);
         const failedCheck = check ? !check.passed : false;
@@ -512,6 +785,9 @@ export function mergeQueueService(
         // DR-061 Q2b: the one merge-hold answer (mergeHolds), the same one the merge paths refuse on.
         const holds = await mergeHolds(db, r.id);
         const hold = holds.some((h) => h.kind === "hold") ? await holdView(db, r.id, t) : null;
+        // R28: what holds this row is only waits on other tickets (Boss Man's own hold, or none yet): note them for the line's one verdict.
+        const waitIds = holds.find((h): h is Extract<typeof h, { kind: "waits" }> => h.kind === "waits")?.ids ?? [];
+        if (waitIds.length && holds.every((h) => h.kind === "waits" || (h.kind === "hold" && hold?.system))) heldWaits.set(r.id, { ids: waitIds, since: hold?.createdAt ?? r.lastActivityAt.toISOString() });
         if (hold) {
           // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
           if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
@@ -602,6 +878,25 @@ export function mergeQueueService(
         }
         // BOS-1517: a merge waiting for a seat in the merge train has no check to wait for yet: its check starts once it is
         // seated. Saying "waiting for a check slot (21 ahead)" here counted the whole queue and named the wrong thing.
+        const alone = detail?.heldAlone?.find((h) => h.ticketId === r.id);
+        if (alone) {
+          // BOS-1515: held to land on main alone. Say who it clashed with and in which files, and what happens next.
+          const clash = clashWords(alone.clashWith, alone.files);
+          blockerOf.set(r.id, "The tickets ahead in the merge train haven't landed yet.");
+          waiting.push({
+            ...base,
+            state: "waiting_for_seat",
+            label: `waiting to land on main alone: it clashed with ${clash}${why}`,
+            stuck: overAnHour,
+            next: alone.holdsLine
+              ? "It goes next, once the tickets ahead have landed; others wait behind it until then. It is sent back at once if the clash reaches main."
+              : "It goes once the tickets ahead have landed. It is sent back at once if the clash reaches main.",
+            actor: "system",
+            decisionId: null,
+            heldAlone: { clashWith: alone.clashWith, files: alone.files, since: alone.since, holdsLine: alone.holdsLine },
+          });
+          continue;
+        }
         if (detail?.seatWait?.includes(r.id)) {
           blockerOf.set(r.id, "Every merge-train seat is taken.");
           waiting.push({ ...base, state: "waiting_for_seat", label: `waiting for a train seat${why}`, stuck: overAnHour, next: "It takes a seat as soon as one frees; its check then starts by itself.", actor: "system", decisionId: null });
@@ -630,7 +925,7 @@ export function mergeQueueService(
       const places = deps.places ? await deps.places(companyId).catch(() => null) : null;
       for (const w of waiting) {
         const p = places?.get(w.ticketId);
-        if (p) {
+        if (p?.place) {
           w.place = p.place;
           w.why = p.why;
           // BOS-1405: the label counts this merge's own place, not the whole queue's length (place 1 is next up).
@@ -641,19 +936,48 @@ export function mergeQueueService(
             if (s) stepOf.set(w.ticketId, s.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`));
           }
         }
+        // BOS-1803: a train-seat wait says how many wait ahead of it, and a background-lane merge says so and for how long,
+        // in the label the ticket's status line shows too, so "merging since …" with nothing running isn't read as lost.
+        if (p?.seatPlace && w.state === "waiting_for_seat" && !w.heldAlone) w.label = w.label.replace(/^waiting for a train seat/, `waiting for a train seat (${p.seatPlace === 1 ? "next up" : `${p.seatPlace - 1} ahead`})`);
+        if (p?.lane) {
+          w.lane = p.lane;
+          w.label = `${w.label}; ${p.lane}`;
+          const s = stepOf.get(w.ticketId);
+          if (s) stepOf.set(w.ticketId, `${s}; ${p.lane}`);
+        }
         w.statusLine = { step: stepOf.get(w.ticketId) ?? w.label, since: sinceOf.get(w.ticketId) ?? t.toISOString(), next: w.next ?? "", blocker: blockerOf.get(w.ticketId) ?? null };
       }
       waiting.sort((a, b) => (a.place ?? Infinity) - (b.place ?? Infinity) || Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
 
+      const recentRows = await recent(companyId, prefix, t);
+      const slots = queue?.slots ?? limit;
+      const emptySeatSince = deps.emptySeatSince ? await deps.emptySeatSince(companyId).catch(() => null) : null;
+      const workerReady = deps.workerReady ? await deps.workerReady(companyId).catch(() => undefined) : undefined;
+      const heldBehindFix = await heldBehindFixOf(db, prefix, heldWaits, { running, waiting });
+      // R44: a server update holding new checks is a deliberate pause: its own verdict, with the reason and the latest end.
+      const pause = soft.on ? { reason: "a server update", since: softHoldReason(soft).since, until: softHoldReason(soft).until } : null;
+      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix, pause });
+      // R47: only read the landings when there is no limit, so a company with the brake on pays nothing.
+      const landed = company?.brakeLimit == null ? (await mergeQueueQueries.landedSince(db, companyId, new Date(t.getTime() - 24 * 3_600_000))).map((r) => r.at.getTime()) : [];
+      const brakeOff = startBrakeOff({ brakeLimit: company?.brakeLimit ?? null, waiting, landed, now: t });
       return {
         companyId,
         mode: queue?.mode ?? "legacy",
-        slots: queue?.slots ?? limit,
+        startBrakeOff: brakeOff,
+        slots,
+        serverHost: deps.serverHost ? await deps.serverHost().catch(() => null) : null,
+        ...(await (async () => {
+          const split = deps.slotSplit && queue?.mode === "server" ? await deps.slotSplit(companyId).catch(() => []) : [];
+          return split.length > 1 ? { slotSplit: split } : {};
+        })()),
         running,
         waiting,
-        recent: await recent(companyId, prefix, t),
+        recent: recentRows,
         waitingCount: waiting.length,
-        stuckCount: running.filter((r) => r.overLimit).length + waiting.filter((w) => w.stuck).length,
+        lineCount: waiting.length + running.length,
+        // BOS-1594: the side-menu "stuck" badge follows the same verdict as the banner: 1 while the line is stuck, 0 when merging (even slowly) or healthy.
+        stuckCount: line.state === "stuck" ? 1 : 0,
+        line,
       };
     },
     /** BOS-1517: a ticket's status line for its page: from the same live view as the queue, or null when it isn't in the merge pipeline. */

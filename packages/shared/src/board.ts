@@ -63,6 +63,8 @@ export function staleNoteWhy(reason: string | null | undefined, ago: string): st
 export const TICKET_PREFIX = /^[A-Z0-9]{1,10}$/;
 /** The prefix a company starts with: the first three letters or digits of its name (as migration 0056 did). */
 export const defaultTicketPrefix = (name: string) => name.replace(/[^A-Za-z0-9]/g, "").slice(0, 3).toUpperCase() || "TKT";
+/** The most tickets one Board "Select" action may change in a request (BOS-2193). */
+export const BULK_TICKET_MAX = 100;
 /** How a ticket is referred to, e.g. HOL-12; null for one without a number yet. */
 export const ticketRef = (prefix: string | null | undefined, number: number | null | undefined) => (number ? `${prefix || "T"}-${number}` : null);
 

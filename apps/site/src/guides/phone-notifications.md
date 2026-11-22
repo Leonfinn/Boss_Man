@@ -34,17 +34,17 @@ You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your p
 
 1. Add `NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443` to `.env`.
 2. Start ntfy as its own Compose project with `docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d`.
-3. Make a user that can publish, a user your phone reads with, and a publish token, as the repository doc shows. The token starts with `tk_`.
-4. In Boss Man, open **Notifications**. Under **How you're told**, tick **Send to my phone through my own ntfy server**. Set **ntfy server** to `http://ntfy:80`, choose a hard-to-guess **Topic**, paste the publish token into **Access token**, and save. Boss Man stores the token encrypted.
-5. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's Tailscale address.
-6. On your phone, install the ntfy app, add your server's Tailscale address, log in as the reading user, and subscribe to your topic.
+3. In Boss Man, open **Notifications**. Under **How you're told**, choose **Set up ntfy for me**. Within a minute it makes the publish user and its token, saves the token encrypted, and fills in the **ntfy server** and a **Topic** if you have not chosen them. If you type your own topic, use only letters, digits, `-` and `_`, up to 64 characters. Boss Man refuses any other topic and leaves the saved token as it was.
+4. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's Tailscale address, and choose **Save**.
+5. Under **Set up your phone**, choose **Create phone login** and copy the password. It is shown only once.
+6. On your phone, install the ntfy app. Add the exact `NTFY_BASE_URL` address from step 1, including `:8443`. Do not use Boss Man's own address. Log in as the phone user with that password, and subscribe to your topic.
 7. Choose **Send a test to my phone**. It appears after you save. The test should arrive within seconds.
 
 ## Which cards reach your phone
 
 Under **Send to my phone**, choose **Urgent only (default)** or **All decisions**.
 
-- **Urgent only** sends a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO has marked urgent because you must act now, and the test button. A card that merely holds up a ticket (plans, merge sign-offs, after-merge checks) does not push, and a card still with the CEO never does. Urgent pushes go at the top priority (5). On Android, it breaks through Do Not Disturb only after you turn on one switch in the ntfy app: see [Urgent pushes on Android](#urgent-pushes-on-android). On an iPhone, you cannot rely on it to break through a Focus with the current ntfy app: see [Urgent pushes on iPhone](#urgent-pushes-on-iphone). When a pushed card is answered or withdrawn, Boss Man removes it from your phone (needs ntfy 2.14 or newer), and **Notifications → Recent phone pushes** lists the last 20 with why each was sent.
+- **Urgent only** sends a deploy that carries the fix for a live problem, Priority 1 work that has merged and is ready to go live, a page such as "server unusable", a card the CEO has marked urgent because you must act now, and the test button. A card that merely holds up a ticket (plans, merge sign-offs, after-merge checks) does not push, and a card still with the CEO never does. Urgent pushes go at the top priority (5). On Android, it breaks through Do Not Disturb only after you turn on one switch in the ntfy app: see [Urgent pushes on Android](#urgent-pushes-on-android). On an iPhone, you cannot rely on it to break through a Focus with the current ntfy app: see [Urgent pushes on iPhone](#urgent-pushes-on-iphone). When a pushed card is answered or withdrawn, Boss Man removes it from your phone (needs ntfy 2.14 or newer), and **Notifications → Recent phone pushes** lists the last 20 with why each was sent.
 - **All decisions** also sends routine cards, such as plans, hires and ordinary deploys, at the normal priority (3).
 - Everything stays on the Decisions and Notifications pages either way.
 - Tick **Also send flags (normal priority)** if you want flags on your phone too.
@@ -61,6 +61,10 @@ The ntfy app asks Android to let its max priority pushes through Do Not Disturb,
 4. Turn on Do Not Disturb and choose **Send a test to my phone** in Boss Man. The test is sent as urgent, so it should sound.
 
 Samsung phones may name these menus differently, and some may not have the switch for each channel. If you cannot find it, allow ntfy as an exception in the phone's Do Not Disturb settings instead.
+
+### After an ntfy restart
+
+If pushes only show when you open the app after an ntfy restart, close the app fully and open it again.
 
 ## iPhone
 

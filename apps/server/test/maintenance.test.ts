@@ -2,20 +2,21 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { and, eq, isNull } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
-import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
-import { MISSED_REASON } from "../src/services/scheduler.js";
+import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
+import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
+import { activeWaits, WAIT_RULES } from "../src/services/update-waits.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
   await ctx?.app.close();
   await ctx?.close();
-  await rm(ctx!.dir, { recursive: true, force: true });
+  if (ctx) await rm(ctx.dir, { recursive: true, force: true });
   ctx = undefined;
 });
 
@@ -66,10 +67,13 @@ function fakeLauncher() {
   const failTimes = new Map<string, number>();
   const rolledBack: string[] = [];
   let noPrevious = false;
-  return { fetch, calls, runnersBySlug, broken, guardBroken, failTimes, rolledBack, setNoPrevious: (v: boolean) => (noPrevious = v), setOldLauncher: (v: boolean) => (old = v) };
+  // BOS-2058: a launcher that has stopped answering (connection refused).
+  let isDown = false;
+  const down = ((input: string | URL | Request, init?: RequestInit) => (isDown ? Promise.reject(new TypeError("fetch failed")) : fetch(input, init))) as typeof globalThis.fetch;
+  return { fetch: down, calls, runnersBySlug, broken, guardBroken, failTimes, rolledBack, setNoPrevious: (v: boolean) => (noPrevious = v), setOldLauncher: (v: boolean) => (old = v), setDown: (v: boolean) => (isDown = v) };
 }
 
-async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
+async function setup(opts: { launcher?: boolean; reconnectMs?: number; settleMs?: number } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "bm-drain-"));
   await mkdir(path.join(dir, "inbox"));
   await mkdir(path.join(dir, "outbox"));
@@ -90,6 +94,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
     deployerDir: dir,
     launcher: opts.launcher === false ? undefined : { url: "http://launcher:3105", keyFile: path.join(dir, "key") },
     drainReconnectMs: opts.reconnectMs,
+    drainSettleMs: opts.settleMs,
   });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
@@ -102,7 +107,23 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   let seq = 0;
   /** A company with its runner (connected unless said otherwise) and a launcher slug. */
   const company = async (name: string, slug: string, connect = true) => {
+    const callsBefore = fake.calls.length;
     const { company: c, ceo } = (await req("POST", "/api/companies", { name })).json() as { company: { id: string }; ceo: { id: string } };
+    // POST /api/companies starts the company's runner in the background (`void launch.start`), which later writes the restart
+    // reason "owner restart". Wait for its last call (the allow-list PUT, after the token PUT) so that write can't land after
+    // a later reason such as "setting change" (BOS-1986 flake).
+    if (opts.launcher !== false) {
+      const started = () => {
+        const mine = fake.calls.slice(callsBefore);
+        const token = mine.findIndex((x) => /^PUT \/runners\/[^/]+$/.test(x));
+        return token >= 0 && mine.slice(token + 1).some((x) => /^PUT \/runners\/[^/]+\/allow$/.test(x));
+      };
+      const deadline = Date.now() + 30_000;
+      while (!started()) {
+        if (Date.now() > deadline) throw new Error("the new company's background runner start never finished");
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    }
     const reg = (await req("POST", `/api/companies/${c.id}/runner`)).json() as { runnerId: string };
     const [row] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
     if (connect)
@@ -134,7 +155,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const maint = () => req("GET", "/api/maintenance").then((r) => r.json());
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "maintenance");
   const titles = async () => (await db.select().from(notifications)).map((n) => `${n.level}: ${n.title}`);
-  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, decides, cancels, advance, maint, open, titles };
+  return { ...built, db, close, dir, fake, now: clock, finish, req, company, wake, commands, messages, decides, cancels, advance, maint, open, titles };
 }
 
 describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
@@ -226,11 +247,68 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
     await c.req("POST", "/api/maintenance/start", {});
     c.advance(31 * MIN);
+    // The check keeps printing (BOS-1982: a row silent for 20 minutes is not waited on).
+    await c.db.update(checkJobs).set({ lastOutputAt: c.now() }).where(eq(checkJobs.state, "running"));
     await c.maintenance.step();
     const asks = await c.open();
     expect(asks).toHaveLength(1);
     expect(asks[0]!.question).toMatch(/1 check is still going/);
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+  });
+
+  it("a check on a separate check worker doesn't hold the swap (BOS-1600)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const [w] = await c.db.insert(checkWorkers).values({ name: "worker-1", tokenHash: "x" } as never).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", workerId: w!.id, startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    expect(await c.maint()).toMatchObject({ on: true, runs: 0, checks: 0 });
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("the status names the runner check it waits on, and update-now ends the wait (BOS-1600)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    const st = (await c.maint()) as { checks: number; checksList: { kind: string }[] };
+    expect(st.checks).toBe(1);
+    expect(st.checksList[0]!.kind).toBe("merge");
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    expect((await c.maintenance.updateNow()).ok).toBe(true);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("the status counts match what the swap waits on: agents only, checks only, both, nothing (BOS-1600 A, B)", async () => {
+    // For each kind of wait, the banner's numbers must agree with the swap's own decision: it swaps exactly when the
+    // status says nothing is left (runs 0 and checks 0), and the text says "swapping the runners now" only then.
+    for (const [agents, check] of [[true, false], [false, true], [true, true], [false, false]] as const) {
+      if (ctx) {
+        await ctx.app.close();
+        await ctx.close();
+        await rm(ctx.dir, { recursive: true, force: true });
+      }
+      const c = (ctx = await setup());
+      const a = await c.company("App Co", "app-co");
+      const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+      const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+      if (agents) await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: null, model: "m", startedAt: new Date() });
+      if (check) await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+      await c.req("POST", "/api/maintenance/start", {});
+      const st = (await c.maint()) as { runs: number; checks: number };
+      expect(st.runs > 0).toBe(agents);
+      expect(st.checks > 0).toBe(check);
+      await c.maintenance.step();
+      const swapped = c.fake.runnersBySlug.get("app-co")!.current === true;
+      expect(swapped).toBe(st.runs === 0 && st.checks === 0);
+    }
   });
 
   it("a live chat run doesn't stop a busy company's runner swapping", async () => {
@@ -249,6 +327,47 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await getHold(c.db)).toBeNull();
   });
 
+  it("the swap waits for a chat run that started during the drain, then goes ahead (BOS-1877)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.req("POST", "/api/maintenance/start", {});
+    const hold = (await getHold(c.db))!;
+    // A chat run let through during the drain starts after the hold began.
+    const [chat] = await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: "chat", model: "m", startedAt: new Date(new Date(hold.since).getTime() + 1000) }).returning();
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    await c.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.id, chat!.id));
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("the status gives the phase, the expected finish from the check's usual time, and says when it is overdue (BOS-1877)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const base = Date.now();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c0", tree: "t0", state: "passed", startedAt: new Date(base - 100 * MIN), endedAt: new Date(base - 60 * MIN), lastOutputAt: new Date(base - 60 * MIN) });
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    const st = (await c.maint()) as { phase: string; expectedFinishAt: string | null; overdue: boolean; chatOpen: boolean };
+    expect(st).toMatchObject({ phase: "waiting", overdue: false, chatOpen: true });
+    expect(st.expectedFinishAt).not.toBeNull();
+    c.advance(45 * MIN);
+    expect(await c.maint()).toMatchObject({ phase: "waiting", overdue: true, expectedFinishAt: null });
+  });
+
+  it("drainForecast: nothing left is swapping; a run has no estimate; the deadline passing is overdue (BOS-1877)", () => {
+    const now = new Date("2026-11-19T13:30:00Z");
+    const deadline = "2026-11-19T14:00:00Z";
+    expect(drainForecast({ runs: 0, checks: [], deadline, now })).toEqual({ phase: "swapping", expectedFinishAt: null, overdue: false });
+    expect(drainForecast({ runs: 2, checks: [], deadline, now })).toEqual({ phase: "waiting", expectedFinishAt: null, overdue: false });
+    expect(drainForecast({ runs: 2, checks: [], deadline, now: new Date("2026-11-19T14:01:00Z") }).overdue).toBe(true);
+    const check = { companyId: "c1", ticket: "BOS-1", kind: "merge", scope: "full", startedAt: "2026-11-19T13:20:00Z", runningForMinutes: 10, usuallyMinutes: 40 };
+    expect(drainForecast({ runs: 0, checks: [check], deadline, now })).toMatchObject({ expectedFinishAt: "2026-11-19T14:00:00.000Z", overdue: false });
+    expect(drainForecast({ runs: 0, checks: [{ ...check, usuallyMinutes: null }], deadline, now }).expectedFinishAt).toBeNull();
+  });
+
   it("tells each running agent once to wrap up when the hold starts", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
@@ -260,7 +379,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP}`, interrupt: false, steer: true }]);
   });
 
-  it("stops holding new runs once the deadline question waits unanswered, and shows why (BOS-1414)", async () => {
+  it("holds new runs past the deadline until the owner answers, and at its own end goes ahead by itself: stops the run, swaps, tells owner and CEO (BOS-2058, was BOS-1807's lift at 90)", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
     const b = await c.company("Home Lab", "home-lab");
@@ -274,12 +393,318 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
 
     c.advance(31 * MIN);
     await c.maintenance.step();
-    expect(await c.open()).toHaveLength(1); // the question is open and unanswered
-    expect(await c.maint()).toMatchObject({ on: true, blocking: false });
-    // The wake held for hours is released and starts; it never keeps "update pending" as its reason.
+    const [card] = await c.open(); // the question is open and unanswered
+    expect(card).toBeDefined();
+    expect(card!.question).toContain("goes ahead by itself at"); // the card says when the update goes ahead
+    expect(card!.question).not.toContain("lifts by itself");
+    // Past the deadline, still held: work started now would outlast the drain (16:02 on 18 Nov).
+    expect(await c.maint()).toMatchObject({ on: true, blocking: true });
+    // Only the CEO's one-off reply (BOS-1954: woken once as the swap is late) goes through; Home Lab's wake stays held.
     expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
-    expect(c.commands.map((x) => x.company)).toEqual(["App Co", "Home Lab"]);
+    expect(c.commands.map((x) => x.company)).toEqual(["App Co", "App Co"]);
+    const appRun = c.commands[0]!.runId;
+    c.advance(DRAIN_GO_AHEAD_MINUTES * MIN - 31 * MIN - 2 * MIN);
+    await c.maintenance.step();
+    expect(await c.maint()).toMatchObject({ blocking: true }); // just under its end: still waiting, nothing stopped
+    expect(c.cancels).toEqual([]);
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    // At its own end it goes ahead by itself, with nobody pressing anything: App Co's run (and the CEO's alert run) are
+    // stopped with the per-run Stop, the runners are swapped, the card is withdrawn, owner and CEO are told.
+    c.advance(3 * MIN);
+    await c.maintenance.step();
+    expect(c.cancels).toContain(appRun);
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+    expect(c.fake.runnersBySlug.get("home-lab")!.current).toBe(true);
+    expect(await c.open()).toHaveLength(0);
+    expect(await c.titles()).toContain("note: Runner update went ahead by itself");
+    expect(await c.titles()).not.toContain("note: Runner update: new work is no longer held");
+    const goAheadNote = (await c.db.select().from(wakes).where(and(eq(wakes.agentId, a.ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).map((w) => w.note ?? "").find((n) => n.includes("went ahead by itself"));
+    expect(goAheadNote).toContain("stopped:");
+    // Once the swap is done the hold ends by itself, and its closing pass starts Home Lab's held wake.
+    expect(await getHold(c.db)).toBeNull();
+    await c.scheduler.tick();
+    await vi.waitFor(() => expect(c.commands.map((x) => x.company)).toContain("Home Lab"));
     expect((await c.db.select().from(wakes).where(eq(wakes.statusReason, HOLD_REASON))).length).toBe(0);
+  });
+
+  it("a scheduling pass that never ends doesn't freeze the drain: the swap goes ahead on the first pass after it ends (BOS-1954)", async () => {
+    const c = (ctx = await setup({ settleMs: 20 }));
+    await c.company("App Co", "app-co");
+    await c.maintenance.start({ minutes: 30 });
+    // Stand-in for the hang that kept 22:13 to 22:46 on 19 Nov frozen: the scheduler lane never settles.
+    const hung = vi.spyOn(c.scheduler, "settled").mockImplementation(() => new Promise(() => undefined));
+    await c.maintenance.step(); // returns after the bounded wait instead of never
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    hung.mockRestore();
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("wakes the CEO once, naming what the swap waits on, when it waits past its expected finish; stops nothing (BOS-1954)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    const ceoWakes = async () => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, a.ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).filter((w) => (w.note ?? "").includes("runner update"));
+    c.advance(10 * MIN);
+    await c.maintenance.step();
+    expect(await ceoWakes()).toHaveLength(0); // an agent run has no usual length: nothing is late before the deadline
+    c.advance(21 * MIN);
+    await c.maintenance.step();
+    const [w] = await ceoWakes();
+    expect(w!.note).toContain("31 minutes ago");
+    expect(w!.note).toContain("running 31 min");
+    expect(w!.note).toContain("Stop these and carry on");
+    // Once per hold: later passes (even much later) wake nobody again, and nothing was stopped.
+    c.advance(20 * MIN);
+    await c.maintenance.step();
+    expect(await ceoWakes()).toHaveLength(1);
+    expect(c.cancels).toEqual([]);
+    expect((await getHold(c.db))!.ceoWokenAt).toBeDefined();
+  });
+
+  it("each company's CEO is told only about that company's own work (BOS-1954, security round 1)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Other Co", "other-co");
+    await c.wake(a);
+    await c.wake(b);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    const noteOf = async (ceo: string) => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).map((w) => w.note ?? "").filter((n) => n.includes("runner update"));
+    const [forA, forB] = [await noteOf(a.ceo), await noteOf(b.ceo)];
+    expect(forA).toHaveLength(1);
+    expect(forB).toHaveLength(1);
+    // Each note lists one run (its own), never the other company's.
+    expect(forA[0]!.match(/running \d+ min/g)).toHaveLength(1);
+    expect(forB[0]!.match(/running \d+ min/g)).toHaveLength(1);
+  });
+
+  it("a check row stuck as running (no sign of life past the stuck window) is not waited on; the row is left alone (BOS-1982)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const base = Date.now();
+    // One that never printed and started 30 min ago, and one whose last output is 25 min old: both dead.
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(base - 30 * MIN), lastOutputAt: null });
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "quick", commit: "c2", tree: "t2", state: "running", startedAt: new Date(base - 60 * MIN), lastOutputAt: new Date(base - 25 * MIN) });
+    await c.maintenance.start({ minutes: 30 });
+    expect(await c.maint()).toMatchObject({ checks: 0 });
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+    expect(await c.db.select().from(checkJobs).where(eq(checkJobs.state, "running"))).toHaveLength(2);
+  });
+
+  it("a check row with recent output still holds the swap (BOS-1982)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const base = Date.now();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(base - 60 * MIN), lastOutputAt: new Date(base - 5 * MIN) });
+    await c.maintenance.start({ minutes: 30 });
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+  });
+
+  it("wakes the CEO once when nothing is counted, runners still wait and a scheduling pass never ends; the text names no closed card (BOS-1982)", async () => {
+    const c = (ctx = await setup({ settleMs: 20, reconnectMs: MIN }));
+    const a = await c.company("App Co", "app-co");
+    const ceoWakes = async () => (await c.db.select().from(wakes).where(and(eq(wakes.agentId, a.ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).filter((w) => (w.note ?? "").includes("runner update"));
+    await c.maintenance.start({ minutes: 30 });
+    vi.spyOn(c.scheduler, "settled").mockImplementation(() => new Promise(() => undefined));
+    await c.maintenance.step();
+    c.advance(MIN);
+    await c.maintenance.step();
+    expect(await ceoWakes()).toHaveLength(0); // before twice the reconnect time
+    c.advance(2 * MIN);
+    await c.maintenance.step();
+    const [w] = await ceoWakes();
+    expect(w!.note).toContain("scheduling pass");
+    expect(w!.note).toContain("No question to the owner is open right now");
+    expect(w!.note).not.toContain("Stop these and carry on");
+    c.advance(5 * MIN);
+    await c.maintenance.step();
+    expect(await ceoWakes()).toHaveLength(1);
+    // BOS-2058: 8 minutes on, past the scheduling pass's own 5-minute end, the swap went ahead without it.
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("a scheduling pass that never ends holds the swap for its own end only, and the screen says so meanwhile (BOS-2058)", async () => {
+    const c = (ctx = await setup({ settleMs: 20 }));
+    await c.company("App Co", "app-co");
+    await c.maintenance.start({ minutes: 30 });
+    vi.spyOn(c.scheduler, "settled").mockImplementation(() => new Promise(() => undefined));
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    const settle = (await activeWaits(c.db)).find((w) => w.kind === "runner-settle");
+    expect(settle?.waitingOn).toContain("scheduling pass");
+    expect(Date.parse(settle!.endsAt) - Date.parse(settle!.since)).toBe(WAIT_RULES["runner-settle"].endMin * MIN);
+    c.advance(4 * MIN);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    c.advance(MIN + 1000);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("a launcher that stops answering: the update gives up at its own end, lifts the hold and wakes the CEO, not only the owner (BOS-2058)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.maintenance.start({ minutes: 30 });
+    c.fake.setDown(true);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull();
+    const row = (await activeWaits(c.db)).find((w) => w.kind === "runner-launcher");
+    expect(row?.waitingOn).toContain("launcher");
+    expect(row?.atEnd).toBe("give-up");
+    c.advance(14 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull();
+    c.advance(MIN + 1000);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("page: Runner update gave up: the launcher does not answer");
+    const notes = (await c.db.select().from(wakes).where(and(eq(wakes.agentId, a.ceo), eq(wakes.reason, UPDATE_ALERT_REASON)))).map((w) => w.note ?? "");
+    expect(notes.some((n) => n.includes("launcher did not answer"))).toBe(true);
+  });
+
+  it("a launcher that answers again before its end clears the wait; the next outage starts its own clock (BOS-2058)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    // A run still going keeps the hold on after the launcher answers again.
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    c.fake.setDown(true);
+    await c.maintenance.step();
+    expect((await getHold(c.db))?.launcherDownSince).toBeDefined();
+    c.advance(10 * MIN);
+    c.fake.setDown(false);
+    await c.maintenance.step();
+    const h = await getHold(c.db);
+    expect(h).not.toBeNull();
+    expect(h!.launcherDownSince).toBeUndefined();
+    expect((await activeWaits(c.db)).map((w) => w.kind)).not.toContain("runner-launcher");
+    // Down again 10 minutes later: a fresh 15 minutes, not the 10 already spent.
+    c.fake.setDown(true);
+    c.advance(MIN);
+    await c.maintenance.step();
+    c.advance(10 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull();
+  });
+
+  it("holdEndsAt: swap-when-done ends SWAP_WHEN_DONE_CAP_MINUTES after the answer, other answers are unchanged (BOS-1982)", () => {
+    const since = new Date("2026-11-20T04:00:00Z");
+    const base = { reason: "runner update", kind: "update" as const, since: since.toISOString(), deadline: since.toISOString(), minutes: 30 };
+    const answered = new Date(since.getTime() + 80 * MIN);
+    const hold = { ...base, swapWhenDone: true, swapWhenDoneAt: answered.toISOString() };
+    expect(holdEndsAt(hold).getTime()).toBe(answered.getTime() + SWAP_WHEN_DONE_CAP_MINUTES * MIN);
+    expect(holdBlocksStarts(hold, new Date(answered.getTime() + 59 * MIN))).toBe(true);
+    expect(holdBlocksStarts(hold, new Date(answered.getTime() + 60 * MIN))).toBe(false);
+    // A hold saved before this change (no answer time) still ends, at the ordinary cap.
+    expect(holdBlocksStarts({ ...base, swapWhenDone: true }, new Date(since.getTime() + HOLD_CAP_MINUTES * MIN))).toBe(false);
+    expect(holdBlocksStarts({ ...base, swapWhenDone: true }, new Date(since.getTime() + 5 * MIN))).toBe(true);
+    // The owner's other choices are as before.
+    const far = new Date(since.getTime() + 500 * MIN);
+    for (const flag of [{ force: true }, { ignoreChecks: true }, { wrapSince: since.toISOString() }]) expect(holdBlocksStarts({ ...base, ...flag }, far)).toBe(true);
+  });
+
+  it("the general rule: a drain hold never lets work in between its start and its cap, whatever the deadline (BOS-1807)", () => {
+    const since = new Date("2026-11-18T14:00:00Z");
+    for (const minutes of [10, 30, 60]) {
+      const hold = { reason: "runner update", kind: "update" as const, since: since.toISOString(), deadline: new Date(since.getTime() + minutes * MIN).toISOString(), minutes };
+      // Every minute from the start to the cap blocks; the minute after the cap does not.
+      for (let m = 0; m < HOLD_CAP_MINUTES; m++) expect(holdBlocksStarts(hold, new Date(since.getTime() + m * MIN)), `${minutes} min deadline, minute ${m}`).toBe(true);
+      expect(holdBlocksStarts(hold, new Date(since.getTime() + HOLD_CAP_MINUTES * MIN))).toBe(false);
+    }
+    // A deadline the owner pushed past the cap is honoured; the owner's own choices hold with no cap.
+    const late = { reason: "runner update", kind: "update" as const, since: since.toISOString(), deadline: new Date(since.getTime() + 120 * MIN).toISOString(), minutes: 30 };
+    expect(holdBlocksStarts(late, new Date(since.getTime() + 100 * MIN))).toBe(true);
+    const after = new Date(since.getTime() + 500 * MIN);
+    expect(holdBlocksStarts({ ...late, deadline: since.toISOString(), swapWhenDone: true }, after)).toBe(false); // BOS-1982: it has its own end
+    expect(holdBlocksStarts({ ...late, deadline: since.toISOString(), ignoreChecks: true }, after)).toBe(true);
+    expect(holdBlocksStarts(null, since)).toBe(false);
+  });
+
+  it("with checks and runs together the card lists each with its time left and offers every stop option, and 'Swap as soon as these finish' keeps the hold with no more presses (BOS-1807)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick(); // one run going
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    // A passed check of 40 min gives the "usually" length; the live one has run for 10.
+    const base = Date.now();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c0", tree: "t0", state: "passed", startedAt: new Date(base - 100 * MIN), endedAt: new Date(base - 60 * MIN), lastOutputAt: new Date(base - 60 * MIN) });
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(base + 25 * MIN), lastOutputAt: new Date(base + 25 * MIN) });
+    await c.maintenance.start({ minutes: 30 });
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    const [d] = await c.open();
+    expect(d!.options).toEqual(["Stop these and carry on", "Stop the checks and update now", "Swap as soon as these finish", "Wait 10 more minutes", "Cancel the runner update"]);
+    expect(d!.recommendedOption).toBe("Swap as soon as these finish");
+    expect(d!.question).toMatch(/merge check for .*\(full\): running \d+ min, usually 40 min, about \d+ min left/);
+    expect(d!.question).toMatch(/running \d+ min, an agent run has no usual length/);
+    expect(d!.question).toContain("The swap is expected when the last run ends");
+    // Swap as soon as these finish (BOS-1982): the hold stays for SWAP_WHEN_DONE_CAP_MINUTES at most, one more question comes
+    // half way (without that option), nothing starts before the cap, and the checks are not killed.
+    const fresh = () => c.db.update(checkJobs).set({ lastOutputAt: new Date(Date.now() + offsetNow()) }).where(eq(checkJobs.state, "running"));
+    const offsetNow = () => c.now().getTime() - Date.now();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Swap as soon as these finish" });
+    expect(await c.open()).toHaveLength(0);
+    c.advance(20 * MIN);
+    await fresh();
+    await c.maintenance.step();
+    expect(await c.open()).toHaveLength(0); // not yet half way
+    c.advance(11 * MIN);
+    await fresh();
+    await c.maintenance.step();
+    const [again] = await c.open();
+    expect(again!.options).toEqual(["Stop these and carry on", "Stop the checks and update now", "Wait 10 more minutes", "Cancel the runner update"]);
+    expect(again!.question).toContain("You chose");
+    expect(await c.maint()).toMatchObject({ on: true, blocking: true });
+    c.advance(28 * MIN); // 59 minutes after the answer
+    await fresh();
+    await c.maintenance.step();
+    expect(await c.maint()).toMatchObject({ on: true, blocking: true });
+    c.advance(2 * MIN); // 61 minutes after the answer: BOS-2058, the update goes ahead by itself, once
+    await fresh();
+    await c.maintenance.step();
+    await c.maintenance.step();
+    expect((await c.titles()).filter((x) => x === "note: Runner update went ahead by itself")).toHaveLength(1);
+    expect(await c.titles()).not.toContain("note: Runner update: new work is no longer held");
+    // The run was stopped and the swap no longer waited for the check (it goes back in line after the swap).
+    expect(c.cancels.length).toBeGreaterThan(0);
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+    expect(await getHold(c.db)).toBeNull();
+  });
+
+  it("'Stop the checks and update now' with runs still going ends the wait for checks only; the runs are still waited for (BOS-1807)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.maintenance.start({ minutes: 30 });
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Stop the checks and update now" });
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false); // the run is still going: not killed
+    await c.finish(a);
+    await c.scheduler.tick(); // BOS-2058: the CEO's late-update note passes the hold; its short reply run is waited for
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true); // the check no longer holds the swap
   });
 
   it("asks the owner once at the deadline; each answer does what it says", async () => {
@@ -297,7 +722,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.maintenance.step();
     const [d] = await c.open();
     expect(await c.open()).toHaveLength(1);
-    expect(d).toMatchObject({ tier: "owner", options: ["Stop these and carry on", "Wait 10 more minutes", "Cancel the runner update"] });
+    expect(d).toMatchObject({ tier: "owner", options: ["Stop these and carry on", "Swap as soon as these finish", "Wait 10 more minutes", "Cancel the runner update"] });
     expect(d!.question).toContain("1 run is still going in 1 company");
     expect(d!.question).toContain("anything they haven't saved is lost");
     expect((d!.context as { runIds: string[] }).runIds).toHaveLength(1);
@@ -323,6 +748,10 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
     expect(await getHold(c.db)).not.toBeNull();
     // The runner confirms the stop, the company is idle, and the update goes ahead by itself.
+    await c.finish(a);
+    // BOS-2058: the CEO's "update is late" note (woken at 30 minutes) is let through the hold even with no work left; its
+    // short reply run is waited for, never killed, and then the swap goes ahead.
+    await c.scheduler.tick();
     await c.finish(a);
     await c.maintenance.step();
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
@@ -451,7 +880,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(body).toContain("Check workers are not swapped by this update");
     expect(body).toContain("second-host");
     expect(body).not.toContain("turned-off-host");
-    expect(body).toContain("docs/26-check-workers.md");
+    expect(body).toContain("docs/34-check-workers.md");
   });
 
   it("tries a failed swap again by itself, and needs nobody when a later try works", async () => {
@@ -638,9 +1067,10 @@ describe("setting change drain and restart reasons (BOS-594)", () => {
     await c.runners.bootSeen(await runnerOf(c, b.id), "boot-2", { previousExit: "stopped", hostBootAt: "2026-11-05T16:28:00.000Z" });
     // A crash afterwards, which Boss Man didn't ask for, is a flag the owner can act on.
     await c.runners.bootSeen(await runnerOf(c, b.id), "boot-3", { previousExit: "crashed", hostBootAt: "2026-11-05T16:28:00.000Z" });
-    await new Promise((r) => setTimeout(r, 20)); // the notice is sent without blocking the hello
-    const restarts = (await c.titles()).filter((t) => t.includes("Runner restarted"));
-    expect(restarts).toEqual(["note: Runner restarted: setting change", "flag: Runner restarted: crash or out of memory"]);
+    // The notice is sent without blocking the hello: wait for the second one to land, with a deadline.
+    const restartTitles = async () => (await c.titles()).filter((t) => t.includes("Runner restarted"));
+    await vi.waitFor(async () => expect(await restartTitles()).toHaveLength(2), { timeout: 10_000 });
+    expect(await restartTitles()).toEqual(["note: Runner restarted: setting change", "flag: Runner restarted: crash or out of memory"]);
     const status = (await c.serverStatus.status(b.id)) as { runner: { lastRestart: { reason: string; bootId: string } } };
     expect(status.runner.lastRestart).toMatchObject({ reason: "crash or out of memory", bootId: "boot-3" });
   });
@@ -749,14 +1179,115 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect((await row()).step).toBeNull();
   });
 
+  it("BOS-2058: a wrap-up with no update behind it lifts by itself after 60 minutes and stops no run", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
+    c.advance(61 * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(c.commands).toHaveLength(1); // the run was not touched
+    expect(await c.titles()).toContain("note: Wrap-up lifted after 60 minutes");
+  });
+
+  // 20 Nov 11:48: the CEO's note that the update was late sat "update pending" because the swap waited on something it could
+  // not name (or on a merge record). A wake that reports on the update is never held by it; every other wake still is.
+  it("BOS-2058: the CEO's update-alert note starts while the hold is on and nothing nameable is left; other wakes, routine replies included, stay held", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Other Co", "other-co");
+    await c.maintenance.start({ minutes: 30 });
+    c.advance(3 * MIN); // past UNKNOWN_WAIT_MS: no run, check or merge is left, and the swap has still not happened
+    await c.scheduler.wake({ agentId: a.ceo, reason: "nudge", note: "routine" });
+    // A routine reply-lane wake (DR-048 A) stays held: the swap may happen at any moment.
+    await c.scheduler.notify(b.ceo, { reason: CEO_REPLY_REASON, ticketId: null, priority: 4, note: "A card is waiting." });
+    await c.scheduler.notify(a.ceo, { reason: UPDATE_ALERT_REASON, ticketId: null, priority: 4, note: "The update is late." });
+    await c.scheduler.tick();
+    const started = await c.db.select().from(runs);
+    expect(started.map((r) => [r.purpose, r.origin])).toEqual([["reply", UPDATE_ALERT_REASON]]);
+    const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
+    expect(held.map((w) => [w.reason, w.statusReason]).sort()).toEqual([[CEO_REPLY_REASON, HOLD_REASON], ["nudge", HOLD_REASON]]);
+  });
+
+  it("BOS-2058: a wrap-up pressed while a server update waits belongs to it and lifts when that wait is over", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const wait = { decisionId: randomUUID(), commit: "b".repeat(40), fromCommit: "a".repeat(40), approvedAt: new Date().toISOString(), phase: "waiting", deadline: new Date().toISOString(), minutes: 30, origin: "approve" };
+    await c.db.insert(settings).values({ key: "deploy_wait", value: wait });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "server" });
+    await c.maintenance.step();
+    expect(await getHold(c.db)).not.toBeNull(); // the update still waits
+    await c.db.update(settings).set({ value: { ...wait, phase: "sent" } }).where(eq(settings.key, "deploy_wait"));
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Wrap-up lifted");
+  });
+
+  // BOS-2056: the screen names which update a wrap-up is for, and the owner is told once that it ended with the update.
+  it("BOS-2056: the status says which update a wrap-up is for (none, server, runner)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ kind: "wrapup", wrapForUpdate: "none", wrapSince: expect.any(String) });
+    await c.req("POST", "/api/maintenance/cancel", {});
+    const wait = { decisionId: randomUUID(), commit: "b".repeat(40), fromCommit: "a".repeat(40), approvedAt: new Date().toISOString(), phase: "waiting", deadline: new Date().toISOString(), minutes: 30, origin: "approve" };
+    await c.db.insert(settings).values({ key: "deploy_wait", value: wait });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ kind: "wrapup", wrapForUpdate: "server" });
+    await c.req("POST", "/api/maintenance/cancel", {});
+    await c.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ kind: "update", wrapAsked: true, wrapForUpdate: "runner", wrapSince: expect.any(String) });
+  });
+
+  for (const how of ["swap", "cancel"] as const)
+    it(`BOS-2056: a wrap-up tied to a runner update lifts with it on a ${how}, and says so once`, async () => {
+      const c = (ctx = await setup());
+      const a = await c.company("App Co", "app-co");
+      await c.wake(a);
+      await c.scheduler.tick();
+      await c.maintenance.start();
+      await c.req("POST", "/api/maintenance/wrapup", {});
+      expect((await getHold(c.db))!.wrapSince).toBeTruthy();
+      if (how === "swap") {
+        await c.finish(a);
+        await c.maintenance.step();
+      } else await c.req("POST", "/api/maintenance/cancel", {});
+      expect(await getHold(c.db), how).toBeNull(); // no press needed to lift the wrap-up
+      const last = ((await c.maint()) as { last?: { body: string } }).last;
+      expect(last?.body.match(/wrap-up you asked for ended with it/g), how).toHaveLength(1);
+    });
+
+  it("BOS-2056: an update with no wrap-up asked does not mention one when it ends", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    await c.finish(a);
+    await c.maintenance.step();
+    const last = ((await c.maint()) as { last?: { body: string } }).last;
+    expect(last?.body).not.toContain("wrap-up");
+  });
+
   it("never stops a run by itself, even well past the not-responding time", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
     await c.wake(a);
     await c.scheduler.tick();
     await c.req("POST", "/api/maintenance/wrapup", {});
-    c.advance(120 * MIN);
-    // Passes of the drain do nothing for a wrap-up: no swap, no page, and the run is still there.
+    c.advance(50 * MIN);
+    // Passes of the drain do nothing for a wrap-up: no swap, no page, and the run is still there. (BOS-2058: it lifts by
+    // itself after 60 minutes when no update is behind it; see the next test.)
     await c.maintenance.step();
     await c.maintenance.step();
     expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);
@@ -1035,5 +1566,293 @@ describe("Stop N and carry on with the update (BOS-1238)", () => {
     const h = (await c.req("GET", "/api/self-deploy/history?limit=5")).json() as Array<{ target: string; result: string | null; changes: number }>;
     expect(h).toHaveLength(1);
     expect(h[0]).toMatchObject({ target: "server", result: "deployed", changes: 2 });
+  });
+});
+
+// BOS-2088: while a runner update held work, a wake about an urgent ticket, or about one that fixes a live problem, sat
+// "update pending" behind it, even when it was the fix the update waited to deliver. Now it passes, its run is marked, no
+// wait counts that run, and the swap cuts it off and the interrupted-run recovery picks it up again.
+describe("urgent and fixes-live wakes pass an update's hold (BOS-2088)", () => {
+  async function seed(c: Awaited<ReturnType<typeof setup>>) {
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    const ticket = async (co: { id: string; ceo: string }, number: number, o: Partial<typeof tickets.$inferInsert> = {}) => {
+      const [p] = await c.db.insert(projects).values({ companyId: co.id, name: `P${number}` }).returning();
+      const [t] = await c.db.insert(tickets).values({ companyId: co.id, projectId: p!.id, title: `T${number}`, number, systemState: "ready", assigneeAgentId: co.ceo, ...o }).returning();
+      return t!.id;
+    };
+    const urgent = await ticket(a, 1, { urgent: true });
+    const plain = await ticket(a, 2);
+    const fixes = await ticket(b, 3, { fixesLive: "server freezes as memory climbs" });
+    const merged = await ticket(b, 4, { fixesLive: "server freezes as memory climbs", systemState: "review", mergeCommit: "c".repeat(40) });
+    return { a, b, urgent, plain, fixes, merged };
+  }
+
+  it("starts the urgent and the fixes-live wake, marks their runs, and the swap does not wait for them; routine and merged-fix wakes stay held", async () => {
+    const c = (ctx = await setup());
+    const { a, b, urgent, plain, fixes, merged } = await seed(c);
+    await c.maintenance.start({ minutes: 30 });
+    await c.scheduler.wake({ agentId: a.ceo, reason: "assigned", ticketId: urgent });
+    await c.scheduler.wake({ agentId: a.ceo, reason: "nudge", ticketId: plain, note: "routine" });
+    await c.scheduler.wake({ agentId: b.ceo, reason: "assigned", ticketId: fixes });
+    await c.scheduler.wake({ agentId: b.ceo, reason: "live release", ticketId: merged });
+    await c.scheduler.tick();
+
+    const started = await c.db.select().from(runs);
+    expect(started.map((r) => [r.ticketId, r.passedUpdateHold]).sort()).toEqual([[urgent, true], [fixes, true]].sort());
+    expect(c.commands.every((x) => x.prompt.includes("This run started while an update holds other work"))).toBe(true);
+    const held = await c.db.select().from(wakes).where(eq(wakes.status, "queued"));
+    expect(held.map((w) => [w.ticketId, w.statusReason]).sort()).toEqual([[plain, HOLD_REASON], [merged, HOLD_REASON]].sort());
+
+    // No wait counts the marked runs: the banner shows none, and both runners are swapped on the next step.
+    expect(await c.maint()).toMatchObject({ on: true, runs: 0 });
+    await c.maintenance.step();
+    expect([...c.fake.runnersBySlug.values()].map((r) => r.current)).toEqual([true, true]);
+    expect(c.cancels).toEqual([]); // nothing was stopped by the go-ahead; the swap itself cuts them off
+
+    // A new update holds work again; the swap cut the urgent run off. Recovery queues "resume", which passes again.
+    if (!(await getHold(c.db))) await c.maintenance.start({ minutes: 30 });
+    const runA = started.find((r) => r.ticketId === urgent)!.id;
+    await a.event({ type: "run.ended", runId: runA, stopReason: null, error: "The runner restarted while this run was going.", interrupted: true });
+    const deadline = Date.now() + 10_000;
+    while (!(await c.db.select().from(wakes).where(and(eq(wakes.reason, "resume"), eq(wakes.ticketId, urgent)))).length) {
+      if (Date.now() > deadline) throw new Error("no resume wake was queued for the cut-off urgent run");
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await c.scheduler.tick();
+    const resumed = (await c.db.select().from(runs)).filter((r) => r.origin === "resume");
+    expect(resumed.map((r) => [r.ticketId, r.passedUpdateHold])).toEqual([[urgent, true]]);
+    // The routine wake is still held by the new hold.
+    expect((await c.db.select().from(wakes).where(and(eq(wakes.status, "queued"), eq(wakes.ticketId, plain)))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
+  });
+
+  it("a wrap-up with no update behind it still holds an urgent ticket's wake: the owner asked for quiet", async () => {
+    const c = (ctx = await setup());
+    const { a, urgent } = await seed(c);
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup", forUpdate: "none" });
+    await c.scheduler.wake({ agentId: a.ceo, reason: "assigned", ticketId: urgent });
+    await c.scheduler.tick();
+    expect(await c.db.select().from(runs)).toEqual([]);
+    expect((await c.db.select().from(wakes).where(eq(wakes.status, "queued"))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
+  });
+});
+
+describe("early building hold (BOS-1955)", () => {
+  const drainFile = (dir: string, reason?: string) => writeFile(path.join(dir, "inbox", "drain.json"), JSON.stringify({ by: "update-runner.sh", ...(reason ? { reason } : {}) }));
+  const cancelFile = (dir: string) => writeFile(path.join(dir, "inbox", "drain-cancel.json"), "{}");
+  const gone = (p: string) => stat(p).then(() => false, () => true);
+
+  it("a building request holds new starts, swaps nothing and asks nobody to stop", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    expect(c.commands).toHaveLength(1);
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "building" });
+    expect(await gone(path.join(c.dir, "inbox", "drain.json"))).toBe(true);
+    // A new wake waits; the run going carries on and was not told to wrap up; no runner is touched.
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0 });
+    expect(c.commands).toHaveLength(1);
+    expect(c.messages).toHaveLength(0);
+    await c.finish(a);
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);
+    expect(await c.maint()).toMatchObject({ on: true, kind: "building", blocking: true, phase: "waiting", chatOpen: true });
+    expect(await c.titles()).toContain("note: Runner update building: new work held");
+  });
+
+  it("the real drain takes the hold over and keeps its start; its own deadline starts then", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const first = (await getHold(c.db))!;
+    c.advance(6 * MIN);
+    await drainFile(c.dir); // the image is built: a plain drain
+    await c.maintenance.step();
+    const h = await getHold(c.db);
+    // The only runner was idle, so it was swapped by the same pass; the hold is the update's, not the building one.
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(1);
+    expect(h === null || (h.kind === "update" && h.since === first.since)).toBe(true);
+    if (h) expect(new Date(h.deadline).getTime()).toBeGreaterThan(new Date(first.deadline).getTime() - 40 * MIN);
+  });
+
+  it("keeps since when the drain waits for a busy company", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const first = (await getHold(c.db))!;
+    c.advance(6 * MIN);
+    await drainFile(c.dir);
+    await c.maintenance.step();
+    const h = (await getHold(c.db))!;
+    expect(h).toMatchObject({ kind: "update", since: first.since, reason: "runner update" });
+    const nowMs = Date.now();
+    expect(new Date(h.deadline).getTime()).toBeGreaterThan(nowMs + 20 * MIN); // 30 minutes from the takeover, not from the build start
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toEqual([]);
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP}`]); // the update's own message now goes to the run going
+  });
+
+  it("a cancel file ends a building hold, and never a real update", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await gone(path.join(c.dir, "inbox", "drain-cancel.json"))).toBe(true);
+    expect((await c.maint()).last).toMatchObject({ ok: true, title: "Runner update build stopped" });
+    // New work starts again.
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+    // A real update under way is not touched by a stale cancel file.
+    await c.finish(a);
+    await c.maintenance.start({ kind: "update" });
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull(); // swapped and finished on its own pass, not cancelled
+    expect((await c.titles()).filter((t) => t.includes("build stopped"))).toHaveLength(1);
+  });
+
+  it("a real update asked together with a cancel is not cancelled", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    await drainFile(c.dir);
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+  });
+
+  it("a building request and a cancel in the same pass start no hold (a build that failed fast)", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await cancelFile(c.dir);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect(await gone(path.join(c.dir, "inbox", "drain.json"))).toBe(true);
+    expect(await gone(path.join(c.dir, "inbox", "drain-cancel.json"))).toBe(true);
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("a building request while an old building hold is on pushes its deadline out and keeps since", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const first = await getHold(c.db);
+    c.advance((BUILD_HOLD_MAX_MINUTES - 5) * MIN);
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    const again = await getHold(c.db);
+    expect(again).toMatchObject({ kind: "building", since: first!.since });
+    expect(new Date(again!.deadline).getTime()).toBeGreaterThan(new Date(first!.deadline).getTime());
+    c.advance(10 * MIN); // past the first deadline, inside the refreshed one
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "building" });
+  });
+
+  it("ends by itself at BUILD_HOLD_MAX_MINUTES, on the injected clock", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    c.advance((BUILD_HOLD_MAX_MINUTES - 1) * MIN);
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "building" });
+    expect(await c.maint()).toMatchObject({ blocking: true });
+    c.advance(2 * MIN);
+    // Even before the drain pass has run, the hold no longer blocks starts at its limit.
+    expect(await c.maint()).toMatchObject({ blocking: false });
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last).toMatchObject({ ok: true, title: "Runner update build hold ended" });
+    await c.wake(a);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("is not offered the owner's deadline question or 'update now', and Cancel lifts it", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect((await c.req("POST", "/api/maintenance/update-now", {})).json()).toMatchObject({ error: "no_update" });
+    await c.maintenance.answered("Wait 10 more minutes");
+    expect(await c.open()).toHaveLength(0);
+    expect((await c.req("POST", "/api/maintenance/cancel", {})).statusCode).toBe(200);
+    expect(await getHold(c.db)).toBeNull();
+  });
+
+  it("a building request while another hold is on changes nothing", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ kind: "update" });
+    const before = await getHold(c.db);
+    await drainFile(c.dir, "building");
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update", since: before!.since });
+  });
+
+  it("a failed swap is tried again inside the same hold: no lift and no page until the last try fails", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.failTimes.set("app-co", 1);
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ kind: "update", tries: { "app-co": { n: 1 } } });
+    expect((await c.titles()).some((t) => t.startsWith("page:"))).toBe(false);
+    c.advance(MIN);
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(2);
+    expect(c.fake.rolledBack).toEqual([]);
+  });
+});
+
+describe("holdCapAt and drainGoAheadAt: the times a hold ends by itself", () => {
+  const start = "2026-11-15T10:00:00Z";
+  const hold = (extra: Record<string, unknown> = {}) => ({ reason: "a server update", kind: "update", since: start, deadline: "2026-11-15T10:30:00Z", minutes: 30, ...extra }) as never;
+  const cap = new Date(Date.parse(start) + HOLD_CAP_MINUTES * MIN).toISOString();
+  const drain = new Date(Date.parse(start) + DRAIN_GO_AHEAD_MINUTES * MIN).toISOString();
+
+  it("holdCapAt: the cap from the start when the owner's deadline is sooner", () => {
+    expect(holdCapAt(hold()).toISOString()).toBe(cap);
+  });
+
+  it("holdCapAt: a later owner deadline is honoured past the cap", () => {
+    expect(holdCapAt(hold({ deadline: "2026-11-15T13:00:00Z" })).toISOString()).toBe("2026-11-15T13:00:00.000Z");
+  });
+
+  it("holdCapAt: the edge where the deadline reaches the cap exactly returns that moment", () => {
+    expect(holdCapAt(hold({ deadline: cap })).toISOString()).toBe(cap);
+  });
+
+  it("drainGoAheadAt: its own end from the start, when the deadline is sooner", () => {
+    expect(drainGoAheadAt(hold()).toISOString()).toBe(drain);
+    // The edge where the deadline reaches its own end exactly returns that moment.
+    expect(drainGoAheadAt(hold({ deadline: drain })).toISOString()).toBe(drain);
+  });
+
+  it("drainGoAheadAt: an owner's later wait is honoured", () => {
+    expect(drainGoAheadAt(hold({ deadline: "2026-11-15T13:00:00Z" })).toISOString()).toBe("2026-11-15T13:00:00.000Z");
+  });
+
+  it("drainGoAheadAt: 'Swap as soon as these finish' adds its own cap from when it was chosen", () => {
+    const swap = new Date(Date.parse(drain) + 10 * MIN).toISOString();
+    expect(drainGoAheadAt(hold({ swapWhenDone: true, swapWhenDoneAt: swap })).toISOString()).toBe(new Date(Date.parse(swap) + SWAP_WHEN_DONE_CAP_MINUTES * MIN).toISOString());
   });
 });

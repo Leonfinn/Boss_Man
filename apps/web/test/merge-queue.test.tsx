@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { MergeQueue, waitingLabel } from "../src/pages/MergeQueue";
+import { MergeQueue } from "../src/pages/MergeQueue";
 import { Sidebar } from "../src/components/Sidebar";
 
 afterEach(() => {
@@ -98,6 +98,17 @@ describe("merge queue screen (BOS-587)", () => {
     expect(screen.queryByRole("link", { name: "Needs you: open the card" })).toBeNull();
   });
 
+  it("says a running merge is also waiting for GitHub CI, with the jobs left and the minutes so far (BOS-1070)", async () => {
+    const running = [{ ...data.running[0], ci: { minutes: 12, waiting: ["images (arm64)", "check"] } }];
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, running })));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Merging now")).toBeTruthy();
+    const row = screen.getAllByRole("article")[0]!;
+    expect(row.querySelector("[data-ci-wait]")?.textContent).toBe("Waiting for GitHub CI: images (arm64), check, 12 min so far. It merges only once CI passes.");
+    // The check line beside it still says the check is running: both go on at once.
+    expect(row.textContent).toContain("running the check");
+  });
+
   it("says plainly when nothing is waiting or running", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waitingCount: 0, running: [], waiting: [], recent: [] })));
     render(<MergeQueue companies={[company]} companyId="c1" />);
@@ -107,23 +118,21 @@ describe("merge queue screen (BOS-587)", () => {
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
   });
 
-  it("shows the waiting count as the side menu's badge", () => {
-    expect(waitingLabel(4)).toBe("4 waiting to merge");
-    expect(waitingLabel(0)).toBeNull();
+  it("shows the merge-line count as the side menu's badge", () => {
     const noop = () => {};
     render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} mergeStuck={0} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
     expect(link.getAttribute("href")).toBe("#/merge-queue");
     expect(link.getAttribute("aria-current")).toBe("page");
-    expect(within(link).getByLabelText("4 waiting to merge").textContent).toBe("4");
-    expect(within(link).getByLabelText("4 waiting to merge").className).not.toContain("warn");
+    expect(within(link).getByLabelText("4 in the merge line").textContent).toBe("4");
+    expect(within(link).getByLabelText("4 in the merge line").className).not.toContain("warn");
   });
 
   it("turns the badge into the stuck count in the warning colour when items are stuck (BOS-767)", () => {
     const noop = () => {};
     render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={5} mergeStuck={2} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
-    const badge = within(link).getByLabelText("2 stuck");
+    const badge = within(link).getByLabelText("merge line stuck");
     expect(badge.textContent).toBe("2");
     expect(badge.className).toContain("warn");
     expect(link.querySelector(".count-dot")?.className).toContain("warn");
@@ -152,7 +161,7 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     expect(await screen.findByText("Behind the queue")).toBeTruthy();
     expect(screen.getByText(/Waiting for a check slot \(2 ahead\)\. Boss Man starts it as soon as a slot frees/)).toBeTruthy();
-    expect(screen.getByText("0 of 1 slot busy · flagged after an hour")).toBeTruthy();
+    expect(screen.getByText("0 merge checks running · 1 check slot in all, shared with quick checks · flagged after an hour")).toBeTruthy();
   });
 });
 
@@ -175,7 +184,24 @@ describe("status line (BOS-1517)", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]!.textContent).toMatch(/^Slot 1: running the check · since .*\(12m\)\. Next: It merges by itself if the check passes\.$/);
     expect(lines[1]!.textContent).toMatch(/Next: It takes a seat as soon as one frees; its check then starts by itself\. In the way: Every merge-train seat is taken\.$/);
-    expect(screen.queryByText(/check slot/)).toBeNull();
+    // The page header's slot figures (BOS-1942) are not a "waiting for a check slot" line.
+    expect(screen.queryByText(/waiting for a check slot/i)).toBeNull();
+  });
+
+  it("shows Move to front on a row waiting for a train seat (BOS-1516, BOS-1510), a button with a real label for touch", async () => {
+    const server = {
+      ...data,
+      mode: "server",
+      waitingCount: 1,
+      running: [],
+      waiting: [{ ticketId: "t1", ref: "APP-12", title: "Behind the queue", minutes: 8, state: "waiting_for_seat", label: "waiting for a train seat", stuck: false, next: "x", actor: "system", decisionId: null, risk: "low", urgent: true, failedCheck: false, place: 1 }],
+      recent: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => json(server)));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Behind the queue")).toBeTruthy();
+    const button = screen.getByRole("button", { name: /Move to front/ });
+    expect(button.tagName).toBe("BUTTON");
   });
 });
 
@@ -207,7 +233,7 @@ describe("merge queue attention layout (BOS-1239)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     const list = await screen.findByRole("list", { name: "What needs attention" });
     const pills = within(list).getAllByRole("link").map((a) => a.textContent);
-    expect(pills).toEqual(["1 need you", "Main is red: 2 checks held", "1 check failed", "1 stuck over an hour"]);
+    expect(pills).toEqual(["1 for you to answer", "Main is red: 2 checks on hold", "1 with a failed check", "1 not moved for over an hour"]);
     expect(within(list).getByRole("link", { name: /Main is red/ }).getAttribute("href")).toBe("#/merge-queue/c1/checks");
     expect(screen.queryByText(/Nothing needs you/)).toBeNull();
     // The right-hand "waiting to merge" sentence is gone; the Merges tab carries the count.
@@ -234,10 +260,25 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/2 checks are held/);
   });
 
+  // R28: only a GitHub-CI hold (no queued check is held by main) still shows the one "main is red" banner, naming the fix.
+  it("main red from a hold behind a fix: the banner shows with no held check, naming the fix and linking the update card", async () => {
+    const line = { state: "held_behind_fix", held: 3, since: null, fixes: [{ ticketId: "fx", ref: "APP-9", title: "Fix main", stateText: "merged, waiting for the server update", ownerUpdate: true, updateCardId: "card-1" }] };
+    serve({ ...calm, line }, noChecks);
+    goTo("#/merge-queue/c1/checks");
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText(/Merges are held\./);
+    expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/3 approved tickets are held until the fix \(APP-9, merged, waiting for the server update\)/);
+    goTo("#/merge-queue/c1");
+    cleanup();
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    const link = await screen.findByRole("link", { name: "Open the update card" });
+    expect(link.getAttribute("href")).toBe("#/decisions/card-1");
+  });
+
   it("a pill on the Merges tab moves focus to its target", async () => {
     serve({ ...data, waitingCount: 1, waiting: [{ ...base, ticketId: "a", ref: "APP-1", title: "Sign me", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: "d1" }] }, noChecks);
     render(<MergeQueue companies={[company]} companyId="c1" />);
-    fireEvent.click(await screen.findByRole("link", { name: "1 need you" }));
+    fireEvent.click(await screen.findByRole("link", { name: "1 for you to answer" }));
     expect(document.activeElement?.id).toBe("mq-needs");
     expect(document.getElementById("mq-needs")?.getAttribute("tabindex")).toBe("-1");
   });
@@ -277,21 +318,57 @@ describe("merge queue attention layout (BOS-1239)", () => {
 
   it("tabs show counts, amber when something needs you or main is red", async () => {
     serve(
-      { ...data, waitingCount: 3, waiting: [{ ...base, ticketId: "a", ref: "APP-1", title: "Sign me", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: "d1" }] },
+      { ...data, waitingCount: 3, lineCount: 4, waiting: [{ ...base, ticketId: "a", ref: "APP-1", title: "Sign me", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: "d1" }] },
       { mode: "server", slots: 2, running: 1, rows: [checkRow({ state: "running", position: null }), checkRow({ id: "j2", heldBy: "main is red", position: null })] },
     );
     render(<MergeQueue companies={[company]} companyId="c1" />);
     const merges = await screen.findByRole("tab", { name: /Merges/ });
-    await waitFor(() => expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2")).toBeTruthy());
-    // The badge counts every merge on the tab: 3 waiting + 1 running (BOS-1287).
+    await waitFor(() => expect(within(screen.getByRole("tab", { name: /Quick checks/ })).getByText("2")).toBeTruthy());
+    // The badge counts every merge on the tab: 3 waiting + 1 running (BOS-1287), the server's lineCount (R43).
     expect(within(merges).getByText("4").className).toContain("warn");
-    expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2").className).toContain("warn");
+    expect(within(merges).getByLabelText("4 in the merge line")).toBeTruthy();
+    expect(within(screen.getByRole("tab", { name: /Quick checks/ })).getByText("2").className).toContain("warn");
+  });
+
+  it("the Quick checks tab lists and counts only quick checks; merge checks stay on the Merges tab (BOS-1800)", async () => {
+    goTo("#/merge-queue/c1/checks");
+    serve(calm, { mode: "server", slots: 3, running: 2, rows: [checkRow({ id: "m1", ticketId: "tm", ref: "APP-70", kind: "merge", state: "running", position: null }), checkRow({ id: "q1", ticketId: "tq", ref: "APP-71", state: "running", position: null })] });
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("APP-71");
+    expect(screen.queryByText("APP-70")).toBeNull();
+    expect(container.querySelectorAll("[data-check-state]").length).toBe(1);
+    expect(within(screen.getByRole("tab", { name: /Quick checks/ })).getByText("1")).toBeTruthy();
+    expect(container.textContent).toContain("2 of 3 check slots busy, shared with merge checks");
+  });
+
+  // BOS-1800 item 4: each cause of a stop is told apart, on both tabs, from the server's own line state.
+  it("a server update waiting for running checks says so, with the count, on both tabs, and never says main is red", async () => {
+    const line = { state: "paused", reason: "a server update", since: "2026-11-17T08:52:00Z", until: "2026-11-17T11:52:00Z", inUse: 3, slots: 5 };
+    for (const hash of ["#/merge-queue/c1", "#/merge-queue/c1/checks"]) {
+      goTo(hash);
+      serve({ ...calm, line }, noChecks);
+      const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+      await waitFor(() => expect(container.querySelector("[data-merge-paused]")).not.toBeNull());
+      const text = container.textContent ?? "";
+      expect(text).toContain("A server update is waiting for these 3 running checks to finish; no new merges start until it's done.");
+      expect(text).not.toMatch(/Main is red|Main is failing/);
+      cleanup();
+    }
+  });
+
+  it("a hold behind a fix never says main is red, and real red is the only 'Main is failing' wording", async () => {
+    const line = { state: "held_behind_fix", held: 2, since: null, fixes: [{ ticketId: "fx", ref: "APP-9", title: "Fix", stateText: "merged, waiting for the server update", ownerUpdate: false }] };
+    goTo("#/merge-queue/c1/checks");
+    serve({ ...calm, line }, noChecks);
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText(/Merges are held\./);
+    expect(container.textContent).not.toMatch(/Main is red|Main is failing/);
   });
 
   it("tab counts are not amber when all is calm", async () => {
     serve({ ...calm, waitingCount: 2 }, { mode: "server", slots: 2, running: 0, rows: [checkRow({})] });
     render(<MergeQueue companies={[company]} companyId="c1" />);
-    const checks = await screen.findByRole("tab", { name: /Queued checks/ });
+    const checks = await screen.findByRole("tab", { name: /Quick checks/ });
     await waitFor(() => expect(within(checks).getByText("1")).toBeTruthy());
     expect(within(checks).getByText("1").className).not.toContain("warn");
     expect(within(screen.getByRole("tab", { name: /Merges/ })).getByText("2").className).not.toContain("warn");
@@ -323,8 +400,8 @@ describe("merge queue attention layout (BOS-1239)", () => {
     goTo("#/merge-queue/c1/checks");
     serve(calm, noChecks);
     render(<MergeQueue companies={[company]} companyId="c1" />);
-    const empty = await screen.findByText("No checks queued.");
-    expect(empty.parentElement!.textContent).toBe("No checks queued. When an agent or the merge gate asks for a check, it shows here until it finishes. Both slots are free.");
+    const empty = await screen.findByText("No quick checks queued.");
+    expect(empty.parentElement!.textContent).toBe("No quick checks queued. When an agent asks for a quick check, it shows here until it finishes. Merge checks are on the Merges tab. Both slots are free.");
     expect(screen.queryByText(/Main is failing/)).toBeNull();
   });
 
@@ -333,15 +410,16 @@ describe("merge queue attention layout (BOS-1239)", () => {
     const wording = async (slots: number, running: number) => {
       serve(calm, { mode: "server", slots, running, rows: [] });
       render(<MergeQueue companies={[company]} companyId="c1" />);
-      const empty = await screen.findByText("No checks queued.");
+      const empty = await screen.findByText("No quick checks queued.");
       const text = empty.parentElement!.textContent!;
       cleanup();
-      return text.replace(/^.*finishes\. /, "");
+      return text.replace(/^.*Merges tab\. /, "");
     };
     expect(await wording(3, 0)).toBe("All 3 slots are free.");
     expect(await wording(3, 2)).toBe("1 of 3 slots are free.");
     expect(await wording(3, 1)).toBe("2 of 3 slots are free.");
-    expect(await wording(3, 3)).toBe("No slot is free.");
+    expect(await wording(3, 3)).toBe("Merge checks are using all 3 slots.");
+    expect(await wording(1, 1)).toBe("A merge check is using the slot.");
     expect(await wording(1, 0)).toBe("The slot is free.");
   });
 
@@ -358,12 +436,12 @@ describe("merge queue attention layout (BOS-1239)", () => {
     const merges = await screen.findByRole("tab", { name: /Merges/ });
     expect(merges.getAttribute("aria-selected")).toBe("true");
     expect(merges.getAttribute("aria-controls")).toBe("mq-panel-merges");
-    expect(screen.getByRole("tab", { name: /Queued checks/ }).getAttribute("tabindex")).toBe("-1");
+    expect(screen.getByRole("tab", { name: /Quick checks/ }).getAttribute("tabindex")).toBe("-1");
     fireEvent.keyDown(merges, { key: "ArrowRight" });
-    await waitFor(() => expect(screen.getByRole("tab", { name: /Queued checks/ }).getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: /Quick checks/ }).getAttribute("aria-selected")).toBe("true"));
     expect(window.location.hash).toBe("#/merge-queue/c1/checks");
     expect(document.activeElement?.id).toBe("mq-tab-checks");
-    fireEvent.keyDown(screen.getByRole("tab", { name: /Queued checks/ }), { key: "ArrowLeft" });
+    fireEvent.keyDown(screen.getByRole("tab", { name: /Quick checks/ }), { key: "ArrowLeft" });
     await waitFor(() => expect(screen.getByRole("tab", { name: /Merges/ }).getAttribute("aria-selected")).toBe("true"));
     expect(window.location.hash).toBe("#/merge-queue/c1");
   });

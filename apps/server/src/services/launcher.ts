@@ -230,7 +230,30 @@ function rawGitHostAddress(repoUrl: string): string | null {
   }
 }
 
-export function launcherService(db: Db, deps: { runners: ReturnType<typeof runnersService>; options?: LauncherOptions; fetch?: typeof fetch; lookup?: HostLookup }) {
+/**
+ * host:port the guard opens for a company's Penpot (BOS-1582): the PENPOT_URL the owner saved, http or https only, never
+ * one of Boss Man's own services (a mistyped db or server address would open a path to it). Null when it can't be sent.
+ */
+export function penpotAddress(url: string): string | null {
+  try {
+    if (!["http:", "https:"].includes(new URL(url).protocol)) return null;
+  } catch {
+    return null;
+  }
+  return isStackService(url) ? null : sendable(toolServerAddress(url));
+}
+
+export function launcherService(
+  db: Db,
+  deps: {
+    runners: ReturnType<typeof runnersService>;
+    options?: LauncherOptions;
+    fetch?: typeof fetch;
+    lookup?: HostLookup;
+    /** The company's PENPOT_URL grant value (BOS-1582), or null when it has none. Without it Penpot is not opened. */
+    penpotUrl?: (companyId: string) => Promise<string | null>;
+  },
+) {
   const http = deps.fetch ?? fetch;
   const lookup = deps.lookup ?? systemLookup;
   const opts = deps.options;
@@ -291,16 +314,31 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
    * A tool server the owner marked (import tick or a LAN host they added) and a LAN git host they set are trusted for private;
    * anything else is not, so the guard drops a private address a name may resolve to later (BOS-708).
    */
+  /** The company's PENPOT_URL, trimmed, or null. A failed read (a master-key problem) leaves Penpot out rather than failing the whole list. */
+  async function penpotUrlFor(companyId: string): Promise<string | null> {
+    if (!deps.penpotUrl) return null;
+    try {
+      return (await deps.penpotUrl(companyId))?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
   async function allowFor(companyId: string): Promise<AllowEntry[]> {
     const rows = await db.select({ url: mcpServers.url, allowPrivate: mcpServers.allowPrivate }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
     // The company's own git remotes: each project's host and port only, so its runner can clone and fetch from a LAN git server.
     // Only a project the owner (or a ticked import) let reach private addresses is trusted, so a git address that arrives in
     // a package can't open the stack network by resolving private (BOS-708).
     const repos = await db.select({ url: projects.repoUrl, allowPrivate: projects.allowPrivate }).from(projects).where(and(eq(projects.companyId, companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+    // BOS-1582: the company's Penpot, from the PENPOT_URL the owner saved (only the owner can write secrets and grants). Its
+    // private addresses are trusted only for a LAN address (private IP literal or LAN-style name), the git-host rule, so a
+    // public name someone re-points at the stack network later is still dropped (BOS-708, BOS-777).
+    const penpot = await penpotUrlFor(companyId);
     const entries = [
       ...rows.map((r) => ({ addr: sendable(toolServerAddress(r.url)), private: r.allowPrivate })),
       // A public git name is never trusted, even with the project's flag on (rows saved before BOS-777 have it on for any host).
       ...repos.map((r) => ({ addr: gitHostAddress(r.url!), private: r.allowPrivate && isLanHost(r.url!) })),
+      ...(penpot ? [{ addr: penpotAddress(penpot), private: isLanHost(penpot) }] : []),
     ];
     // Same host:port twice: keep it trusted if either source trusts it.
     const byAddr = new Map<string, boolean>();
@@ -383,13 +421,16 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
      * is sent (allowFor), never a second copy. Only host:port, names and reasons come out: never a URL or a token.
      * Calls allowFor once per company: fine for the handful of companies one server holds, and only on a Settings load.
      */
-    async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[]; automatic: AutomaticEntry[] }> {
+    async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[]; penpot: string[]; automatic: AutomaticEntry[] }> {
       const mcp = await db.select({ url: mcpServers.url, name: mcpServers.name, companyId: mcpServers.companyId, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
       const repos = await db.select({ url: projects.repoUrl, name: projects.name, companyId: projects.companyId, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      const pens = deps.penpotUrl
+        ? (await Promise.all((await db.select({ companyId: companies.id, company: companies.name }).from(companies)).map(async (c) => ({ ...c, url: await penpotUrlFor(c.companyId) })))).filter((p): p is typeof p & { url: string } => !!p.url)
+        : [];
       // Trust comes from allowFor itself, per company: the exact `private` flag the guard is sent for each host:port, after
       // allowFor's own merge (an address both a trusted and an untrusted row name is trusted). Never re-derived here.
       const sent = new Map<string, Map<string, boolean>>();
-      for (const id of new Set([...mcp, ...repos].map((r) => r.companyId))) sent.set(id, new Map((await allowFor(id)).map((e) => [e.addr, e.private])));
+      for (const id of new Set([...mcp, ...repos, ...pens].map((r) => r.companyId))) sent.set(id, new Map((await allowFor(id)).map((e) => [e.addr, e.private])));
       const row = async (url: string, address: string | null, kind: AutomaticEntry["kind"], name: string, companyId: string, company: string): Promise<AutomaticEntry | null> => {
         const trust = address ? sent.get(companyId)?.get(address) : undefined;
         if (trust === undefined) return null; // not in the list the guard is sent
@@ -402,12 +443,13 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       const automatic = (await Promise.all([
         ...mcp.map((r) => row(r.url, sendable(toolServerAddress(r.url)), "tool server", r.name, r.companyId, r.company)),
         ...repos.map((r) => row(r.url!, gitHostAddress(r.url!), "git host", r.name, r.companyId, r.company)),
+        ...pens.map((p) => row(p.url, penpotAddress(p.url), "Penpot", "Penpot", p.companyId, p.company)),
       ])).filter((e): e is AutomaticEntry => !!e);
       // An .env line only "can go" when Boss Man really opens that address: one the guard drops still needs the line.
       const open = (kind: AutomaticEntry["kind"]) => [...new Set(automatic.filter((e) => e.kind === kind && !e.notAllowed).map((e) => e.address))];
-      // Only what the guard is actually sent: tool servers and project git hosts. Penpot and the other add-ons are not
-      // opened by the guard on their own (the owner adds a BOSSMAN_NETGUARD_ALLOW line for Penpot), so they don't appear.
-      return { toolServers: open("tool server"), gitHosts: open("git host"), automatic };
+      // Only what the guard is actually sent: tool servers, project git hosts and each company's Penpot (BOS-1582). The
+      // other add-ons (ntfy, Tailscale) are not opened by the guard, so they don't appear.
+      return { toolServers: open("tool server"), gitHosts: open("git host"), penpot: open("Penpot"), automatic };
     },
 
     /** Tells the launcher the company's tool servers again (after one is added or removed). Best effort: a launcher that is down picks them up at the next start. */

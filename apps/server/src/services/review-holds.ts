@@ -3,11 +3,12 @@
 // that the sweeps and the watchdog skip, and that the board shows as "Held". It ends by release (the normal
 // approve path runs next) or cancel (the reviewer's pass is withdrawn and the work is reviewed again).
 import { and, eq, inArray, isNotNull, isNull, ne } from "drizzle-orm";
-import { ticketRef } from "@boss-man/shared";
+import { deploysNothing, ticketRef, touchesRunnerCode } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, companies, decisions, projects, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
+import { mainCiFailures } from "./main-ci.js";
 import { openSignoffCard } from "./signoff.js";
 import { openHoldingCard, ticketBlockerFinished } from "./ticket-links.js";
 
@@ -131,21 +132,64 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
 /**
  * Whether a merge waiting on this ticket may go on (BOS-1173). A ticket marked as fixing the merge check must be in
  * force: closed without merging, or merged and running (on the server, and on the runners for runner code: a fix
- * the gate's runner doesn't run yet fixes nothing). Any other ticket is a plain ordering link: finished as the link
- * says (merged, or done; ticketBlockerFinished, BOS-989), with no wait for a deploy.
+ * the gate's runner doesn't run yet fixes nothing). A fix whose merge changed only tests, docs or CI (deploysNothing,
+ * BOS-1609) is in force once it is on main: the gate reads those from the tree it checks, and no deploy ever carries
+ * them, so waiting for one held every merge on it until the owner's next update. An unknown file list still waits.
+ * Any other ticket is a plain ordering link: finished as the link says (merged, or done; ticketBlockerFinished,
+ * BOS-989), with no wait for a deploy.
  */
 export async function ticketInForce(db: Db, ticketId: string, until: "merged" | "done" = "merged"): Promise<boolean> {
-  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
+  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, fixesMergeCheck: tickets.fixesMergeCheck, deploysNothing: tickets.deploysNothing, diffFiles: tickets.diffFiles }).from(tickets).where(eq(tickets.id, ticketId));
   if (!b) return true;
   if (!b.fixesMergeCheck) return ticketBlockerFinished({ ticketState: b.state, mergeCommit: b.mergeCommit, until });
   if (!b.mergeCommit) return b.state === "done";
-  return (await goLiveWaitOf(db, b)) === null;
+  // The flags as today's rules read the merge's files (BOS-1694): a fix merged before BOS-1693 kept touchesRunner true
+  // for runner tests, so whatever waited on it waited for a runner rebuild that changes nothing. land() stores the
+  // files just before it merges; an empty list (none kept) or one cut at 2000 is unknown, and the stored flags stand.
+  const files = b.diffFiles.length && b.diffFiles.length < 2000 ? b.diffFiles : null;
+  if (files ? deploysNothing(files) : b.deploysNothing === true) return true;
+  return (await goLiveWaitOf(db, files ? { ...b, touchesRunner: touchesRunnerCode(files) } : b)) === null;
+}
+
+/** A change every red covers (R40): CI config, or a file at the repo root (lockfile, package.json, tsconfig). */
+const touchesEveryRed = (p: string) => p.startsWith(".github/") || !p.includes("/");
+
+/** Whether a ticket's files touch a red's scope (R40). Null files (none kept, or cut at 2000) count as touching it. */
+export function touchesScope(files: string[] | null, scope: string[]): boolean {
+  if (!files) return true;
+  return files.some((p) => touchesEveryRed(p) || scope.some((s) => (s.endsWith("/") ? p.startsWith(s) : p === s)));
+}
+
+/** A ticket's stored diff files (set at approve and at land), or null when unknown. */
+export async function knownDiffFiles(db: Db, ticketId: string): Promise<string[] | null> {
+  const [r] = await db.select({ files: tickets.diffFiles }).from(tickets).where(eq(tickets.id, ticketId));
+  return r && r.files.length && r.files.length < 2000 ? r.files : null;
+}
+
+/**
+ * The scope of a GitHub-only red this fix ticket is for (R40, BOS-1685): the union of the scopes of the project's open
+ * main-CI failures filed on it. Null (holds every merge, as before R40) when the ticket isn't a main-CI watcher ticket,
+ * any of its failures has an unknown scope, or the gate's own check of main is red too: then it isn't GitHub-only.
+ */
+export async function githubOnlyScope(db: Db, projectId: string, fixId: string): Promise<string[] | null> {
+  const [p] = await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, projectId));
+  if (!p || p.s === "red") return null;
+  const reds = (await mainCiFailures(db, projectId)).filter((o) => o.ticketId === fixId);
+  if (!reds.length || reds.some((r) => !r.scope?.length)) return null;
+  return [...new Set(reds.flatMap((r) => r.scope!))].sort();
+}
+
+/** Whether ticket `t` waits on merge-check fix `fixId` (R40): always, unless the fix is for a GitHub-only red `t` doesn't touch. */
+export async function waitsOnFix(db: Db, t: { id: string; projectId: string }, fixId: string): Promise<boolean> {
+  const scope = await githubOnlyScope(db, t.projectId, fixId);
+  return !scope || touchesScope(await knownDiffFiles(db, t.id), scope);
 }
 
 /**
  * What an approved ticket's merge waits on before any check runs (BOS-1173, DR-053): its own waits-on links to
  * tickets not yet in force, and any other open ticket in the project marked as fixing the merge check. A ticket
- * marked that way never waits on another such ticket: it is the fix, and its own check must run.
+ * marked that way never waits on another such ticket: it is the fix, and its own check must run. A fix for a
+ * GitHub-only red holds only the tickets that touch the red (R40, waitsOnFix); a waits-on link always holds.
  */
 export async function mergeWaits(db: Db, t: { id: string; projectId: string; fixesMergeCheck: boolean }): Promise<string[]> {
   const linked = await db
@@ -158,7 +202,9 @@ export async function mergeWaits(db: Db, t: { id: string; projectId: string; fix
         .select({ id: tickets.id })
         .from(tickets)
         .where(and(eq(tickets.projectId, t.projectId), eq(tickets.fixesMergeCheck, true), ne(tickets.id, t.id), ne(tickets.systemState, "done")));
-  const waits = [...linked.map((l) => ({ id: l.id!, until: l.until === "done" ? ("done" as const) : ("merged" as const) })), ...gate.map((g) => ({ id: g.id, until: "merged" as const }))].filter((w) => w.id !== t.id);
+  const holding: string[] = [];
+  for (const g of gate) if (await waitsOnFix(db, t, g.id)) holding.push(g.id);
+  const waits = [...linked.map((l) => ({ id: l.id!, until: l.until === "done" ? ("done" as const) : ("merged" as const) })), ...holding.map((id) => ({ id, until: "merged" as const }))].filter((w) => w.id !== t.id);
   const out: string[] = [];
   for (const w of waits) if (!out.includes(w.id) && !(await ticketInForce(db, w.id, w.until))) out.push(w.id);
   return out;
@@ -202,12 +248,38 @@ export async function ensureSystemHold(db: Db, ticketId: string, blockerIds: str
   const open = await openHold(db, ticketId);
   if (open) {
     if (open.reviewerAgentId || open.reviewRequestId) return { hold: open, added: false };
-    const have = new Set((await db.select({ id: reviewHoldWaits.blockerTicketId }).from(reviewHoldWaits).where(eq(reviewHoldWaits.holdId, open.id))).map((w) => w.id));
-    const missing = blockerIds.filter((id) => !have.has(id));
-    if (missing.length) await db.insert(reviewHoldWaits).values(missing.map((id) => ({ holdId: open.id, blockerTicketId: id })));
-    return { hold: open, added: missing.length > 0 };
+    return { hold: open, added: await setSystemWaits(db, open.id, blockerIds, false) };
   }
   return { hold: await createHold(db, { ticketId, reviewRequestId: null, reviewerAgentId: null, reason, releaseAt: null, waits: blockerIds.map((id) => ({ ticketId: id })) }), added: true };
+}
+
+/**
+ * Adds the waits a system hold lacks; with `prune`, also drops the stored ones not named (BOS-1694), so the board's
+ * "waits on" names only what the merge still waits for. Only the release prunes: it alone works out the full list
+ * (systemHoldWaits). Returns whether a wait was added.
+ */
+async function setSystemWaits(db: Db, holdId: string, blockerIds: string[], prune: boolean): Promise<boolean> {
+  const have = (await db.select({ id: reviewHoldWaits.blockerTicketId }).from(reviewHoldWaits).where(and(eq(reviewHoldWaits.holdId, holdId), isNotNull(reviewHoldWaits.blockerTicketId)))).map((w) => w.id!);
+  const gone = prune ? have.filter((id) => !blockerIds.includes(id)) : [];
+  if (gone.length) await db.delete(reviewHoldWaits).where(and(eq(reviewHoldWaits.holdId, holdId), inArray(reviewHoldWaits.blockerTicketId, gone)));
+  const missing = blockerIds.filter((id) => !have.includes(id));
+  if (missing.length) await db.insert(reviewHoldWaits).values(missing.map((id) => ({ holdId, blockerTicketId: id })));
+  return missing.length > 0;
+}
+
+/**
+ * What Boss Man's own hold still waits on (BOS-1694): the ticket's merge waits as they are now (its waits-on links
+ * and open merge-check fixes), plus any stored wait still marked as fixing the merge check and not yet in force.
+ * That second part keeps a fix that went to done at merge holding until it is live (mergeWaits only looks at open
+ * fixes). A stored wait whose link was removed and whose mark was cleared counts for nothing, which the list copied
+ * when the hold opened never knew: BOS-1628 stayed held after its link went, and 13 tickets after a mark was cleared.
+ */
+async function systemHoldWaits(db: Db, t: { id: string; projectId: string; fixesMergeCheck: boolean }, stored: string[]): Promise<string[]> {
+  const out = await mergeWaits(db, t);
+  const marked = stored.length ? await db.select({ id: tickets.id }).from(tickets).where(and(inArray(tickets.id, stored), eq(tickets.fixesMergeCheck, true))) : [];
+  // R40: the same scope test as mergeWaits, or a ticket held before go-live on a GitHub-only red it doesn't touch stays held.
+  for (const { id } of marked) if (id !== t.id && !out.includes(id) && !(await ticketInForce(db, id)) && (await waitsOnFix(db, t, id))) out.push(id);
+  return out;
 }
 
 /**
@@ -240,15 +312,19 @@ export async function releaseReadyHolds(db: Db, start: (ticketId: string) => Pro
       const openCards = await db.select({ id: decisions.id }).from(decisions).where(and(inArray(decisions.id, a.decisionWaits), eq(decisions.status, "open")));
       if (openCards.length) continue;
     }
+    // Boss Man's own hold is ready when what it waits on now is (systemHoldWaits, BOS-1694). A reviewer's hold waits
+    // on exactly what the reviewer named, so its stored list decides.
+    const system = !h.reviewerAgentId && !h.reviewRequestId;
     let ready = true;
-    for (const id of a.ticketWaits) if (!(await ticketInForce(db, id))) ready = false;
+    if (!system) for (const id of a.ticketWaits) if (!(await ticketInForce(db, id))) ready = false;
     if (!ready) continue;
     const [t] = await db.select({ id: tickets.id, companyId: tickets.companyId, state: tickets.systemState, projectId: tickets.projectId, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, h.ticketId));
     if (!t || t.state !== "review") continue;
-    // Something new to wait on (another fix marked since): keep it held on that instead.
-    const still = await mergeWaits(db, t);
+    // Still something to wait on (or something new: another fix marked since): keep it held on exactly that.
+    const still = system ? await systemHoldWaits(db, t, a.ticketWaits) : await mergeWaits(db, t);
     if (still.length) {
-      await ensureSystemHold(db, t.id, still, h.reason);
+      if (system) await setSystemWaits(db, h.id, still, true);
+      else await ensureSystemHold(db, t.id, still, h.reason);
       continue;
     }
     if (!(await closeHold(db, h, "released", "Boss Man"))) continue;

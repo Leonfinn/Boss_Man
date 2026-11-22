@@ -1,17 +1,25 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type Company } from "../../api";
+import { stopRun } from "../../stop-run";
 import { usePoll } from "../../hooks";
+import { inForceHeadline, inForceReason, type LimitInForce } from "../../limit-in-force";
 import { setHold, useHold } from "../../hold";
 import { MoreAbout } from "../../components/MoreAbout";
+import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
+import { SaveButton } from "../../components/SaveButton";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
-import { LiveState, atTime, historyTag, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
+import { LiveState, atTime, historyTag, historyWaitingOn, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
+  const [base, setBase] = useState(gb);
+  const [saved, setSaved] = useState(false);
   const act = useAction();
   const n = Number(gb);
   const valid = Number.isInteger(n) && n >= 1 && n <= 100_000;
@@ -25,20 +33,21 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
           Most disk to use (GB) <code className="mono">workspace disk cap</code>
         </label>
         <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={gb !== base}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { diskCapGb: n } });
+              setBase(gb);
+              setSaved(true);
               onChanged();
               return "Saved. It applies at the next hourly clean-up.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       <p className="muted" style={{ fontSize: 13 }}>
         {company.diskCapBytes != null ? `Currently ${(company.diskCapBytes / 1024 ** 3).toFixed(1)} GB.` : "Currently the server default, 20 GB."}
@@ -153,7 +162,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     return (
       <Section id="deploy-h" title="Updates">
         <p className="muted" style={{ fontSize: 14 }}>
-          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/09-self-deploy.md" target="_blank" rel="noreferrer">how to set it up</a>).
+          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/30-in-app-updates.md" target="_blank" rel="noreferrer">how to set it up</a>).
         </p>
         <button
           type="button"
@@ -203,8 +212,21 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       maint.reload();
       return `Stopped ${r.stopped}${r.skipped ? `; ${r.skipped} had already ended` : ""}. The update goes ahead once no run is left.`;
     });
+  const updateNow = () =>
+    act.run(async () => {
+      if (!window.confirm("Stop the running checks and update the runners now? Each check starts again from the beginning afterwards, so the time it has already spent is lost.")) return;
+      try {
+        await api("/api/maintenance/update-now", { method: "POST", body: {} });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) return err.message;
+        throw err;
+      }
+      maint.reload();
+      return "The runners are being swapped now. The checks start again afterwards.";
+    });
   const press = (id: NonNullable<UpdateStatus["primary"]>["id"]) => {
     if (id === "ask-wrapup") return wrapUp();
+    if (id === "update-now") return updateNow();
     if (id === "stop-stragglers") return stopThem(st.primary?.runIds ?? []);
     return deployLatest(); // Try again, Review and deploy, Check for updates now: all are deploy-latest.
   };
@@ -229,10 +251,10 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     });
   const stopOne = (run: WrapUpRun) =>
     act.run(async () => {
-      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
-      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
+      const said = await stopRun(run.runId, run.agent);
+      if (!said) return;
       maint.reload();
-      return "Stopping that run.";
+      return said;
     });
 
   return (
@@ -285,7 +307,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
           <NowRunning v={v} report={report.data} progress={progress} />
         </div>
-        <RecentUpdates rows={history.data} progress={progress} />
+        <RecentUpdates rows={history.data} progress={progress} wait={wait.data} maint={maint.data} queued={!!v?.runnerQueue} />
       </div>
       {v && (
         <div className="upd-other" data-testid="other-actions">
@@ -298,12 +320,14 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
               title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
               onClick={() =>
                 act.run(async () => {
-                  const r = await api<{ queued?: boolean; message?: string }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
+                  const r = await api<{ queued?: boolean; message?: string; note?: string | null }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
                   // BOS-1086: a press that cannot run yet is queued, not refused; the status box says when it starts.
                   if (r?.queued) {
                     view.reload();
                     return r.message ?? "The runner update is queued.";
                   }
+                  // BOS-1644: Boss Man could not confirm a fix is live and went ahead; say why instead of moving on silently.
+                  if (r?.note) return `${r.note} Its card is in Decisions.`;
                   go("decisions");
                 })
               }
@@ -359,6 +383,47 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
               Update runners (finish runs first)
             </button>
           </details>
+        </div>
+      )}
+      {v?.staging?.configured && (
+        <div data-testid="staging-lane" style={{ marginTop: 8 }}>
+          <p style={{ margin: "0 0 4px", fontSize: 14 }}>
+            <strong>Staging</strong>
+            {v.staging.last
+              ? v.staging.last.result === "deployed"
+                ? `: runs ${v.staging.last.commit.slice(0, 8)}${v.staging.last.runnerImage ? ` (runner image ${v.staging.last.runnerImage})` : ""}. Smoke checks: ${v.staging.last.smoke ?? "not run"}.`
+                : `: the last staging request ${v.staging.last.result === "running" || v.staging.last.result === "held" ? "is" : "was"} ${v.staging.last.result}. ${v.staging.last.message}`
+              : ": no staging deploy yet."}
+          </p>
+          {v.staging.last && v.staging.last.checks.length > 0 && (
+            <ul className="muted" style={{ margin: "0 0 4px", paddingLeft: 18, fontSize: 14 }}>
+              {v.staging.last.checks.map((c) => (
+                <li key={c.name}>
+                  {c.name}: {c.result}
+                  {c.result !== "pass" && c.why ? ` (${c.why})` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy || v.staging.pending || v.staging.last?.result === "running"}
+            title="Deploys main's newest commit to staging and runs the smoke checks. Staging isn't production: no card, nothing to approve."
+            onClick={() =>
+              act.run(async () => {
+                try {
+                  await api("/api/self-deploy/deploy-staging", { method: "POST", body: {} });
+                } catch (err) {
+                  if (err instanceof ApiError && err.status === 409) return err.message;
+                  throw err;
+                }
+                return "Staging deploy requested. The host picks it up within a minute; the result shows here.";
+              })
+            }
+          >
+            Deploy to staging
+          </button>
         </div>
       )}
     </Section>
@@ -429,7 +494,7 @@ function NowRunning({ v, report, progress }: { v: SelfDeployView | null; report:
 }
 
 /** Recent updates: the last 5 server updates and runner rebuilds, newest first (BOS-1238). */
-function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress: RunnerProgress }) {
+function RecentUpdates({ rows, progress, wait, maint, queued }: { rows: HistoryRow[] | null; progress: RunnerProgress; wait: DeployWaitView | null; maint: MaintenanceView | null; queued: boolean }) {
   // Only the newest runner row can be mid-swap; older ones are history.
   const newestRunner = rows?.find((r) => r.target === "runner")?.id;
   return (
@@ -443,11 +508,14 @@ function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress
         <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
           {rows.map((r) => {
             const t = historyTag(r, r.id === newestRunner ? progress : null);
+            // BOS-2056: only the newest row of each kind can be the one that is live; older "Waiting" rows are history.
+            const waitsOn = r.id === newestRunner || r.id === rows.find((x) => x.target !== "runner")?.id ? historyWaitingOn(r, wait, maint, queued) : null;
             return (
               <li key={r.id} className="upd-row" style={{ listStyle: "none" }}>
                 <span>{when(r.at)}</span>
                 <span>{historyWhat(r)}</span>
                 <span className={`tag ${t.tone}`}>{t.tag}</span>
+                {waitsOn && <span className="muted" style={{ fontSize: 13, gridColumn: "1 / -1" }} data-testid="waiting-on">{waitsOn}</span>}
               </li>
             );
           })}
@@ -462,10 +530,34 @@ function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress
  * How many agents may run at once, in total and per company, plus the separate background slots for
  * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
  */
-export function RunLimits() {
-  const view = usePoll((signal) => api<{ instance: number; company: number; background: number; defaults: { instance: number; company: number; background: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
+/** BOS-1634: one limit's "Saved X · in force Y" line with its reason and a link to the update holding it; nothing when they match. */
+function InForceLine({ limit, testId, updatesHref }: { limit: LimitInForce | undefined; testId: string; updatesHref?: string }) {
+  const head = inForceHeadline(limit);
+  if (!head || !limit) return null;
+  return (
+    <p role="status" data-testid={testId} style={{ fontSize: 14 }}>
+      <strong>{head}</strong>. {inForceReason(limit)} {updatesHref ? <a href={updatesHref}>See the waiting update</a> : null}
+    </p>
+  );
+}
+
+export function RunLimits({ updatesHref }: { updatesHref?: string } = {}) {
+  const view = usePoll(
+    (signal) =>
+      api<{
+        instance: number;
+        company: number;
+        background: number;
+        defaults: { instance: number; company: number; background: number };
+        // BOS-1634: absent from an older server.
+        inForce?: { allCompanies: LimitInForce; background: LimitInForce; mergeChecks: { paused: boolean; because: string | null; since: string | null; until: string | null } };
+      }>("/api/run-limits", { signal }),
+    30_000,
+    "run-limits",
+  );
   const act = useAction();
   const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);
+  const [saved, setSaved] = useState(false);
   const d = view.data;
   if (!d) return null;
   const v = edit ?? { instance: String(d.instance), company: String(d.company), background: String(d.background) };
@@ -476,6 +568,8 @@ export function RunLimits() {
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <label htmlFor="limit-instance">Across all companies (1 to 32)</label>
         <input id="limit-instance" type="number" min={1} max={32} value={v.instance} onChange={(e) => setEdit({ ...v, instance: e.target.value })} style={{ width: 80 }} />
+        {/* BOS-1634: never a silent difference between the saved number and the one in force. */}
+        <InForceLine limit={d.inForce?.allCompanies} testId="run-limits-in-force" updatesHref={updatesHref} />
         <p className="muted" style={{ fontSize: 14 }}>
           Agents running at once, across all companies (default {d.defaults.instance}). Each running agent uses memory and CPU on this machine and spends from its funding source. Higher: more work happens in parallel, but more spend at once and more load on the server. Lower: work queues for longer (you'll see "at a concurrency limit: all companies"). When a slot frees, a company with nothing running gets it first, so one busy company can't keep the others waiting.
         </p>
@@ -492,29 +586,35 @@ export function RunLimits() {
           Background agents at once (0 to 16) <code className="mono">infinite mode</code>
         </label>
         <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
+        <InForceLine limit={d.inForce?.background} testId="run-limits-background-in-force" updatesHref={updatesHref} />
         <p className="muted" style={{ fontSize: 14 }}>
           Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
         </p>
       </div>
+      {d.inForce?.mergeChecks.paused && d.inForce.mergeChecks.because ? (
+        <p role="status" data-testid="run-limits-merge-checks" style={{ fontSize: 14 }}>
+          New merge checks wait too, because {d.inForce.mergeChecks.because}; they start by themselves once it is done. Quick checks on a separate check worker keep going; on the company's own runner they wait too.
+        </p>
+      ) : null}
       <p className="muted" style={{ fontSize: 14 }}>
         Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits. A company's runner is given memory to match: 2 GB, plus 1 GB for each agent it can run at once (one company's number plus the background number), plus 3 GB for each check; a change reaches each runner the next time it restarts.
       </p>
       <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={!!edit && (v.instance !== String(d.instance) || v.company !== String(d.company) || v.background !== String(d.background))}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c, background: g } });
               setEdit(null);
+              setSaved(true);
               view.reload();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
@@ -522,24 +622,18 @@ export function RunLimits() {
 }
 
 /**
- * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Saved on its
- * own, since the two limits above are for every company and these are this company's.
+ * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Only the
+ * fields: WipLimits saves them together with the in-progress limits (BOS-1944), one Save for the section.
  */
-function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () => void }) {
-  const act = useAction();
-  const text = (n: number | null | undefined) => (n == null ? "" : String(n));
-  const [edit, setEdit] = useState<{ merges: string; checks: string } | null>(null);
-  const v = edit ?? { merges: text(company.holdStartsMergesWaiting), checks: text(company.holdStartsQuickChecksQueued) };
-  const parse = (s: string) => (s.trim() === "" ? null : Number(s));
-  const [m, q] = [parse(v.merges), parse(v.checks)];
-  const ok = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
+function HoldStarts({ v, onChange }: { v: { merges: string; checks: string; owner: string }; onChange: (next: { merges: string; checks: string; owner: string }) => void }) {
+  const setEdit = onChange;
   return (
     <>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <label htmlFor="hold-merges">Hold new starts while this many merges are waiting (leave empty for off)</label>
         <input id="hold-merges" type="number" min={1} max={1000} placeholder="Off" value={v.merges} onChange={(e) => setEdit({ ...v, merges: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>
-          Off by default. While at least this many approved tickets wait in the merge line (the figure on the Merge queue page), a Ready ticket is not started: it shows "Held: 31 merges waiting (limit 20)" and starts by itself when the line is shorter. Work already in progress, reviews, sent-back work, merges, after-merge checks and urgent tickets carry on.
+          Off by default. While at least this many approved tickets wait in the merge line (the figure on the Merge queue page), a Ready ticket is not started: it shows "Held: 31 merges waiting (limit 20)" and starts by itself when the line is shorter. Work already in progress, reviews, sent-back work, merges, after-merge checks, urgent and live-fix tickets, and the CEO's own tickets carry on.
         </p>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -547,24 +641,13 @@ function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () =
         <input id="hold-checks" type="number" min={1} max={1000} placeholder="Off" value={v.checks} onChange={(e) => setEdit({ ...v, checks: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. The same hold, for quick checks waiting in the check queue. If both limits are set, either one holds new starts.</p>
       </div>
-      <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !ok(m) || !ok(q)}
-          onClick={() =>
-            void act.run(async () => {
-              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
-              setEdit(null);
-              onChanged?.();
-              return "Saved.";
-            })
-          }
-        >
-          Save
-        </button>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-owner">Hold new starts when this many need you (leave empty for off)</label>
+        <input id="hold-owner" type="number" min={1} max={1000} placeholder="Off" value={v.owner} onChange={(e) => setEdit({ ...v, owner: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. Counts what Needs you counts on the Dashboard: reviews, sign-offs and other cards waiting for your answer. While at least this many need you, a Ready ticket is not started: it shows "Held: 6 need you (limit 5)" and starts by itself when fewer need you. Work already started, urgent and live-fix tickets, and the CEO's own tickets carry on.
+        </p>
       </div>
-      {act.view}
     </>
   );
 }
@@ -576,13 +659,21 @@ function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () =
 export function WipLimits({ company, onChanged }: { company?: Company; onChanged?: () => void } = {}) {
   const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
   const act = useAction();
-  const [edit, setEdit] = useState<{ agent: string; company: string } | null>(null);
+  const [edit, setEdit] = useState<{ agent: string; company: string; merges: string; checks: string; owner: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  // Right after a save, show what was just saved until the refetch brings the same values back (no stale numbers in between).
+  const [last, setLast] = useState<{ agent: string; company: string; merges: string; checks: string; owner: string } | null>(null);
   const d = view.data;
+  useEffect(() => setLast(null), [d, company?.holdStartsMergesWaiting, company?.holdStartsQuickChecksQueued, company?.holdStartsOwnerWaiting]);
   if (!d) return null;
-  const v = edit ?? { agent: d.agent == null ? "" : String(d.agent), company: d.company == null ? "" : String(d.company) };
+  const text = (n: number | null | undefined) => (n == null ? "" : String(n));
+  const base = last ?? { agent: text(d.agent), company: text(d.company), merges: text(company?.holdStartsMergesWaiting), checks: text(company?.holdStartsQuickChecksQueued), owner: text(company?.holdStartsOwnerWaiting) };
+  const v = edit ?? base;
   const parse = (s: string) => (s.trim() === "" ? null : Number(s));
-  const [a, c] = [parse(v.agent), parse(v.company)];
-  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000));
+  const [a, c, m, q, o] = [parse(v.agent), parse(v.company), parse(v.merges), parse(v.checks), parse(v.owner)];
+  const okHold = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
+  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000)) && (!company || (okHold(m) && okHold(q) && okHold(o)));
+  const dirty = !!edit && (v.agent !== base.agent || v.company !== base.company || (!!company && (v.merges !== base.merges || v.checks !== base.checks || v.owner !== base.owner)));
   return (
     <Section id="wip-limits-h" title="Tickets in progress">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -597,30 +688,37 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
         <input id="wip-company" type="number" min={1} max={1000} placeholder="No limit" value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. A ceiling on all in-progress tickets together; new starts wait in Ready the same way.</p>
       </div>
-      {company ? <HoldStarts company={company} onChanged={onChanged} /> : null}
+      {company ? <HoldStarts v={v} onChange={(next) => setEdit({ ...v, ...next })} /> : null}
       <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={dirty}
+          saved={saved}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api("/api/wip-limits", { method: "PUT", body: { agent: a, company: c } });
+              if (company) {
+                await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q, holdStartsOwnerWaiting: o } });
+                onChanged?.();
+              }
+              setLast(v);
               setEdit(null);
+              setSaved(true);
               view.reload();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
       {act.view}
     </Section>
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[] };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[]; runnerPolicy?: SlotPolicy; laneAgeMinutes?: number; defaultLaneAgeMinutes?: number };
+/** BOS-1803: the server's MAX_BACKGROUND_LANE_AGE_MINUTES (a day); the server refuses anything above it. */
+const MAX_LANE_AGE_MINUTES = 1440;
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -708,17 +806,22 @@ export function PrivateDetails() {
   );
 }
 
-/** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
+/** Settings → Server and runner → Limits and checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
-  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean } | null>(null);
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy; laneAge: string } | null>(null);
+  const [savedQueue, setSavedQueue] = useState(false);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train };
+  const hasLaneAge = d.laneAgeMinutes !== undefined;
+  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train, policy: d.runnerPolicy ?? DEFAULT_POLICY, laneAge: String(d.laneAgeMinutes ?? "") };
   const n = Number(v.slots);
-  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
-  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train;
+  const lane = Number(v.laneAge);
+  const laneValid = !hasLaneAge || (v.laneAge.trim() !== "" && Number.isInteger(lane) && lane >= 0 && lane <= MAX_LANE_AGE_MINUTES);
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots && policyValid(v.policy, n) && laneValid;
+  const was = d.runnerPolicy ?? DEFAULT_POLICY;
+  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train || v.policy.takes !== was.takes || v.policy.mergeKept !== was.mergeKept || (hasLaneAge && lane !== d.laneAgeMinutes);
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -742,6 +845,15 @@ export function CheckQueueSetting() {
         <p className="muted" style={{ fontSize: 14 }}>
           How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors. The runners' memory follows this number; there is nothing to edit on the host.
         </p>
+        {/* BOS-1602: what the company runner's slots take; shown only to a server that knows the setting. */}
+        {d.runnerPolicy && (
+          <>
+            <p style={{ fontSize: 14, margin: 0 }} data-testid="check-runner-split">
+              Company runner: <strong>{policyLine(d.runnerPolicy, d.slots)}</strong>.
+            </p>
+            <SlotSplitFields value={v.policy} onChange={(policy) => setEdit({ ...v, policy })} slots={Number.isInteger(n) && n >= 1 ? n : 1} idPrefix="check-runner" />
+          </>
+        )}
         {d.effectiveSlots !== undefined && d.mode === "server" && (
           <p style={{ fontSize: 14 }} data-testid="check-effective-slots">
             Checks running at once right now: <strong>{d.effectiveSlots}</strong>.
@@ -781,28 +893,204 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      {/* BOS-1803: how long a background-lane merge lets newer ordinary work go first, then it waits by when it joined. */}
+      {hasLaneAge && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label htmlFor="check-lane-age">Background lane gives way for (minutes, 0 to {MAX_LANE_AGE_MINUTES})</label>
+          <input id="check-lane-age" type="number" min={0} max={MAX_LANE_AGE_MINUTES} value={v.laneAge} onChange={(e) => setEdit({ ...v, laneAge: e.target.value })} style={{ width: 80 }} />
+          <p className="muted" style={{ fontSize: 14 }}>
+            Approved work from background-lane agents lets newer ordinary work merge first for this long; after that it takes its place by when it joined the line (default {d.defaultLaneAgeMinutes ?? 120}). 0 means it always goes after ordinary work.
+          </p>
+        </div>
+      )}
       <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>
       <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid || !changed}
+        <SaveButton
+          dirty={changed}
+          saved={savedQueue}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
-              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train } });
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train, ...(d.runnerPolicy ? { runnerPolicy: v.policy } : {}), ...(hasLaneAge ? { laneAgeMinutes: lane } : {}) } });
+              setSavedQueue(true);
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
               return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.${applied}` : `Saved.${applied}`;
             })
           }
-        >
-          Save
-        </button>
+        />
       </div>
+      {act.view}
+      <WaitForCiSetting />
+      <MergeCarrySetting />
+    </Section>
+  );
+}
+
+/** BOS-1070: the owner's switch for the merge gate waiting on GitHub CI. Off by default. */
+export function WaitForCiSetting() {
+  const view = usePoll((signal) => api<{ on: boolean }>("/api/settings/wait-for-ci", { signal }), 60_000, "wait-for-ci");
+  const act = useAction();
+  const on = view.data?.on;
+  if (on === undefined) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }} data-testid="wait-for-ci">
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={act.busy}
+          onChange={(e) => {
+            const next = e.target.checked;
+            void act.run(async () => {
+              await api("/api/settings/wait-for-ci", { method: "PUT", body: { on: next } });
+              view.reload();
+              return next ? "Saved. Merges now wait for GitHub CI." : "Saved. Merges no longer wait for GitHub CI.";
+            });
+          }}
+        />
+        <span>
+          <strong>Wait for GitHub CI before merging</strong> <span className="tag">GitHub only</span>{" "}
+          <span className="muted">
+            Before each merge Boss Man pushes the exact merged result to a bossman-ci/ branch on GitHub and merges only once GitHub CI passes on it, while its own check runs at the same time. A CI failure goes back to the agent with the failing jobs and tests. Each merge uses GitHub Actions minutes, which a private repo pays for. Projects on other git hosts, or whose CI doesn't run on bossman-ci/ branches, merge on Boss Man's own check as before.
+          </span>
+        </span>
+      </label>
+      {act.view}
+    </div>
+  );
+}
+
+/** BOS-1762: land a passed merge when main's newer changes touch none of its files, and the landing turn's cap. Both on by default. */
+export function MergeCarrySetting() {
+  const view = usePoll((signal) => api<{ on: boolean; turnMinutes: number; refresh?: boolean }>("/api/settings/merge-carry", { signal }), 60_000, "merge-carry");
+  const act = useAction();
+  const [minutes, setMinutes] = useState<string | null>(null);
+  const [savedTurn, setSavedTurn] = useState(false);
+  const d = view.data;
+  if (!d) return null;
+  const shown = minutes ?? String(d.turnMinutes);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }} data-testid="merge-carry">
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input
+          type="checkbox"
+          checked={d.on}
+          disabled={act.busy}
+          onChange={(e) => {
+            const next = e.target.checked;
+            void act.run(async () => {
+              await api("/api/settings/merge-carry", { method: "PUT", body: { on: next } });
+              view.reload();
+              return next ? "Saved. A passed merge now lands when main's newer changes touch none of its files." : "Saved. A merge is tested again whenever main moves.";
+            });
+          }}
+        />
+        <span>
+          <strong>Land passed merges when main moved elsewhere</strong>{" "}
+          <span className="muted">
+            When a change has passed its checks but main moved meanwhile, Boss Man lands it anyway if main's newer changes touch none of its files and none of the project's dependency, container or check-script files. A new database migration, CI workflow or build setting on main still means testing again, but only for a change that touches the same kind of file (or the same app's code). Main's own CI checks the result. Off: every main move means testing the change again.
+          </span>
+        </span>
+      </label>
+      {d.refresh === undefined ? null : (
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input
+            type="checkbox"
+            checked={d.refresh}
+            disabled={act.busy}
+            onChange={(e) => {
+              const next = e.target.checked;
+              void act.run(async () => {
+                await api("/api/settings/merge-carry", { method: "PUT", body: { refresh: next } });
+                view.reload();
+                return next ? "Saved. A waiting merge is now rebuilt as soon as main moves under it." : "Saved. A waiting merge is now rebuilt only when it comes to land.";
+              });
+            }}
+          />
+          <span>
+            <strong>Rebuild waiting merges when main moves</strong>{" "}
+            <span className="muted">
+              When main moves while an approved change waits for its check or for another change's landing turn, Boss Man rebuilds it on the new main straight away instead of when it comes to land. With GitHub CI on, only a change that couldn't land across the move is rebuilt, and its GitHub run starts again. Off: a waiting merge is rebuilt only when it comes to land.
+            </span>
+          </span>
+        </label>
+      )}
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <span>
+          <strong>Landing turn</strong>{" "}
+          <span className="muted">A change rebuilt twice because main moved gets a turn: other changes wait to land for up to this many minutes. 0 turns it off.</span>
+        </span>
+        <input type="number" min={0} max={240} step={5} value={shown} style={{ width: 80 }} disabled={act.busy} onChange={(e) => setMinutes(e.target.value)} aria-label="Landing turn in minutes" />
+        <SaveButton
+          dirty={shown !== String(d.turnMinutes)}
+          ariaLabel="Save landing turn"
+          saved={savedTurn}
+          busy={act.busy}
+          disabled={!/^\d+$/.test(shown) || Number(shown) > 240}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/settings/merge-carry", { method: "PUT", body: { turnMinutes: Number(shown) } });
+              setMinutes(null);
+              setSavedTurn(true);
+              view.reload();
+              return Number(shown) === 0 ? "Saved. No landing turns." : `Saved. Landing turns last up to ${shown} minutes.`;
+            })
+          }
+        />
+      </label>
+      {act.view}
+    </div>
+  );
+}
+
+type MainCiView = { on: boolean; projects: Array<{ projectId: string; project: string; status: { state: string; detail?: string } }> };
+
+/** Settings → Server and runner → Main's CI (BOS-1072): the switch for the watcher that opens a ticket when GitHub CI fails on main, and its plain line per project. */
+export function MainCiSetting() {  const view = usePoll((signal) => api<MainCiView>("/api/settings/main-ci", { signal }), 60_000, "main-ci");
+  const act = useAction();
+  const d = view.data;
+  if (!d) {
+    return (
+      <Section id="main-ci-h" title="Main's CI">
+        {view.error ? <LoadError what="the Main's CI setting" message={view.error.message} onRetry={view.reload} /> : <Loader label="Loading the Main's CI setting" />}
+      </Section>
+    );
+  }
+  return (
+    <Section id="main-ci-h" title="Main's CI">
+      <p className="muted" style={{ fontSize: 14 }}>
+        When GitHub's CI fails on a project's main branch (a push or the nightly run), Boss Man opens one ticket for each failing step, adds later failed runs to it instead of opening another, and says so on it when main is green again. It sends no cards and no alerts.
+      </p>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={d.on}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api<MainCiView>("/api/settings/main-ci", { method: "PUT", body: { on: e.target.checked } });
+              view.reload();
+              return e.target.checked ? "Watching main's CI." : "Stopped watching main's CI.";
+            })
+          }
+        />
+        Watch main's CI and open tickets for failures
+      </label>
+      {d.on && d.projects.length > 0 && (
+        <ul style={{ fontSize: 14 }} data-testid="main-ci-status">
+          {d.projects.map((p) => (
+            <li key={p.projectId}>
+              <strong>{p.project}:</strong> {p.status.detail ?? "Not checked yet."}
+            </li>
+          ))}
+        </ul>
+      )}
       {act.view}
     </Section>
   );
@@ -817,10 +1105,19 @@ export function EmailSetting() {
   const testAct = useAction();
   const [edit, setEdit] = useState<{ host: string; port: string; security: "starttls" | "tls" | "none"; username: string; fromAddress: string; fromName: string; password: string } | null>(null);
   const [testTo, setTestTo] = useState("");
+  const [savedEmail, setSavedEmail] = useState(false);
   const d = view.data;
-  if (!d) return null;
+  if (!d) {
+    return (
+      <Section id="email-h" title="Outgoing email">
+        {view.error ? <LoadError what="the email setting" message={view.error.message} onRetry={view.reload} /> : <Loader label="Loading the email setting" />}
+      </Section>
+    );
+  }
   const s = d.settings;
-  const v = edit ?? { host: s?.host ?? "", port: String(s?.port ?? 587), security: s?.security ?? "starttls", username: s?.username ?? "", fromAddress: s?.fromAddress ?? "", fromName: s?.fromName ?? "", password: "" };
+  const base = { host: s?.host ?? "", port: String(s?.port ?? 587), security: s?.security ?? "starttls", username: s?.username ?? "", fromAddress: s?.fromAddress ?? "", fromName: s?.fromName ?? "", password: "" };
+  const v = edit ?? base;
+  const dirty = (Object.keys(base) as (keyof typeof base)[]).some((k) => v[k] !== base[k]);
   const set = (patch: Partial<typeof v>) => setEdit({ ...v, ...patch });
   const port = Number(v.port);
   const valid = v.host.trim() !== "" && Number.isInteger(port) && port >= 1 && port <= 65535 && v.fromAddress.includes("@");
@@ -869,34 +1166,35 @@ export function EmailSetting() {
         The sending domain needs SPF, DKIM and DMARC records, or mail will land in spam. The Writer's guide has the details.
       </p>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || !valid}
+        <SaveButton
+          dirty={dirty}
+          saved={savedEmail}
+          busy={act.busy}
+          disabled={!valid}
           onClick={() =>
             void act.run(async () => {
               await api("/api/settings/email", { method: "PUT", body: { host: v.host, port, security: v.security, username: v.username.trim() || null, fromAddress: v.fromAddress, fromName: v.fromName.trim() || null, ...(v.password ? { password: v.password } : {}) } });
               setEdit(null);
+              setSavedEmail(true);
               view.reload();
               return "Saved.";
             })
           }
-        >
-          Save
-        </button>
+        />
         {d.configured && (
           <button
             type="button"
             className="btn"
             disabled={act.busy}
-            onClick={() =>
+            onClick={() => {
+              if (!window.confirm("Turn off outgoing email? The mail server details and password are deleted, and you would need to enter them again.")) return;
               void act.run(async () => {
                 await api("/api/settings/email", { method: "DELETE" });
                 setEdit(null);
                 view.reload();
                 return "Outgoing email is off and the password is removed.";
-              })
-            }
+              });
+            }}
           >
             Turn off
           </button>

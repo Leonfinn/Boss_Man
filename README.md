@@ -10,9 +10,7 @@ It is for people who want AI agents doing real project work (code, docs, design)
 
 ![A 10 second silent loop of the Boss Man app with made-up data: the project board, the team of AI agents, the merge queue and the roadmap](docs/promo/boss-man-promo-loop.gif)
 
-**Watch the full video with sound:**
-
-https://github.com/user-attachments/assets/a239301f-dd1c-4fb4-a3f2-2a86c6a52972
+**[▶ Watch the full video (63 seconds)](https://github.com/user-attachments/assets/a239301f-dd1c-4fb4-a3f2-2a86c6a52972)**
 
 <!-- The loop above (BOS-1554) is cut from docs/promo/boss-man-promo.mp4 and autoplays because GitHub plays animated
      images on its own, never an MP4. How both are made: docs/promo/README.md -->
@@ -25,8 +23,8 @@ You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS S
 
 > **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).
 
-1. With only Docker on the host, install from the ready-made images: [docs/33-install-from-images.md](docs/33-install-from-images.md). To build from the source instead, follow [docs/00-first-time-install.md](docs/00-first-time-install.md). It takes you from an empty host to a company with an agent working its first ticket.
-2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example, with backups.
+1. With only Docker on the host, install from the ready-made images: [docs/33-install-from-images.md](docs/33-install-from-images.md). To build from the source instead, follow [docs/00-first-time-install.md](docs/00-first-time-install.md) on any host, TrueNAS SCALE included. It takes you from an empty host to a company with an agent working its first ticket.
+2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) adds the dataset, snapshots and the optional extras.
 3. Before you update, read [docs/23-updating.md](docs/23-updating.md).
 4. If something goes wrong, or you want to tune memory limits, see [docs/29-tune-and-troubleshoot.md](docs/29-tune-and-troubleshoot.md).
 
@@ -90,7 +88,7 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | Doc | What's in it |
 |---|---|
 | [docs/00-first-time-install.md](docs/00-first-time-install.md) | Start here to install: from an empty Linux host (or TrueNAS SCALE) to a company with an agent working its first ticket |
-| [docs/06-install-truenas.md](docs/06-install-truenas.md) | Installing on TrueNAS SCALE: datasets, building the images on the NAS, credentials, updates and backups |
+| [docs/06-install-truenas.md](docs/06-install-truenas.md) | TrueNAS SCALE: the dataset, snapshots, blue/green, and the TrueNAS steps for the host deployer, HTTPS and the feedback portal |
 | [docs/32-proxmox.md](docs/32-proxmox.md) | Running Boss Man on Proxmox: use a VM, not an LXC container, and why |
 | [docs/23-updating.md](docs/23-updating.md) | Read before you update: the update steps, backups and how to check one restores, breaking changes that need a hand step, and where release notes are |
 | [docs/29-tune-and-troubleshoot.md](docs/29-tune-and-troubleshoot.md) | Fixes for common problems, where backups are saved, memory limits, reserved threads and Synthetic |
@@ -98,6 +96,8 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | [docs/24-privacy.md](docs/24-privacy.md) | What Boss Man sends, and where |
 | [docs/20-https-tailscale.md](docs/20-https-tailscale.md) | An HTTPS address through Tailscale Serve, which the installable web app and phone notifications need |
 | [docs/31-phone-notifications.md](docs/31-phone-notifications.md) | Pages and asks on your phone through your own ntfy server, with Approve buttons |
+| [docs/33-public-portal-cloudflare.md](docs/33-public-portal-cloudflare.md) | The feedback portal on a public address through a Cloudflare Tunnel, with no router port opened |
+| [docs/34-check-workers.md](docs/34-check-workers.md) | Check workers: more machines on any Docker host to take quick and merge checks when the check line is long |
 | [docs/12-runner-add-ons.md](docs/12-runner-add-ons.md) | Optional tools in the runner image, such as a browser |
 | [docs/15-penpot.md](docs/15-penpot.md) | The optional Penpot design tool |
 | [docs/16-penpot-agent-setup.md](docs/16-penpot-agent-setup.md) | Letting agents read and draw designs in Penpot |

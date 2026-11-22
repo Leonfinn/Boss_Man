@@ -1,7 +1,7 @@
 // A ticket's conversation (R65). The owner writes on a ticket and the agent working it
 // hears: straight into its live run if there is one, otherwise as a new run on the ticket.
 // Agents answer with the ticket_reply tool, and each run's last message lands here too.
-import { and, asc, desc, eq, isNull, ne, or } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, ne, or, type SQL } from "drizzle-orm";
 import { systemAuthor, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, ownerReplies, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
@@ -18,6 +18,10 @@ export const PROMPT_HISTORY = 12;
 export const PROMPT_TEXT_MAX = 1500;
 /** How much of an agent's own reply is kept. Agents' replies stay limited; BOS-502 is about the owner's text. */
 const MAX_TEXT = 8000;
+/** How many messages one page of a ticket's conversation holds (BOS-1986, BOS-2168). */
+const PAGE = 500;
+/** A `before` that isn't a UUID can't name a message; checked here so Postgres never sees it. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class TicketChatError extends Error {
   constructor(
@@ -41,8 +45,24 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
   }
 
   return {
-    async list(ticketId: string) {
+    /**
+     * The newest PAGE messages, oldest first, or with `before` (a message id on this ticket) the
+     * PAGE before that one, for "Load older messages" (BOS-2168). `hasMore` says older ones remain.
+     * The cursor is (createdAt, id), so messages sharing a timestamp are neither skipped nor repeated.
+     */
+    async list(ticketId: string, opts: { before?: string } = {}) {
       await ticket(ticketId);
+      let older: SQL | undefined;
+      if (opts.before !== undefined) {
+        const [b] = UUID.test(opts.before)
+          ? await db
+              .select({ id: ticketMessages.id, createdAt: ticketMessages.createdAt })
+              .from(ticketMessages)
+              .where(and(eq(ticketMessages.id, opts.before), eq(ticketMessages.ticketId, ticketId)))
+          : [];
+        if (!b) throw new TicketChatError(404, "No message with that ID on this ticket.");
+        older = or(lt(ticketMessages.createdAt, b.createdAt), and(eq(ticketMessages.createdAt, b.createdAt), lt(ticketMessages.id, b.id)));
+      }
       // Each owner message carries its waiting-for-an-answer state (BOS-425) under it: how it
       // reached the agent, whether its agent is working on this ticket now, and how many times
       // Boss Man has asked for an answer.
@@ -64,15 +84,19 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         .from(ticketMessages)
         .leftJoin(agents, eq(agents.id, ticketMessages.agentId))
         .leftJoin(ownerReplies, eq(ownerReplies.messageId, ticketMessages.id))
-        .where(eq(ticketMessages.ticketId, ticketId))
-        .orderBy(asc(ticketMessages.createdAt))
-        .limit(500);
+        .where(and(eq(ticketMessages.ticketId, ticketId), older))
+        .orderBy(desc(ticketMessages.createdAt), desc(ticketMessages.id))
+        .limit(PAGE + 1);
+      // One extra row tells whether older ones remain. Newest PAGE (BOS-1986); the web wants them oldest first.
+      const hasMore = items.length > PAGE;
+      if (hasMore) items.pop();
+      items.reverse();
       const [live] = await db
         .select({ id: runs.id, agent: agents.name })
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .where(and(eq(runs.ticketId, ticketId), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))));
-      return { items, live: live ?? null };
+      return { items, hasMore, live: live ?? null };
     },
 
     /** The owner writes on the ticket; it's stored once it has reached someone (or no one is assigned). */

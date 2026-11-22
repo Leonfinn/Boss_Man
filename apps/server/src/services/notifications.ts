@@ -10,11 +10,31 @@ import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, ty
 import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, settings } from "../db/schema.js";
 import type { DecisionContext } from "./decisions.js";
+import type { AlertKind } from "./webhook-delivery.js";
+
+/** Which alert kind an owner card is, from its type (BOS-2199). Everything else on the owner's tier is a decision waiting. */
+export function alertKindOfCard(ctx: { type?: string } | null): AlertKind {
+  switch (ctx?.type) {
+    case "stalled_run":
+    case "run_time_limit":
+      return "run_failed";
+    case "budget_limit":
+      return "spend_alert";
+    case "check_stuck":
+      return "merge_stuck";
+    default:
+      return "decision_waiting";
+  }
+}
+
+/** Handed each saved alert for Slack, Discord and webhook delivery; must return at once and never throw. */
+export type AlertHook = (alert: { kind: AlertKind; title: string; text: string; link: string; publicUrl: string | null }) => void;
 
 /**
  * The ntfy server's address. Pushes go to it with its path kept (BOS-243 rule 8), so one served under
  * a path such as https://host/ntfy works; a query or # part would be dropped silently, so it is refused.
  */
+export const NtfyTopic = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "The topic can only use letters, digits, - and _ (up to 64 characters)");
 export const NtfyUrl = z
   .string()
   .url()
@@ -42,7 +62,7 @@ export const NotifySettings = z.object({
   /** Notifications per agent per hour before the rest become notes. */
   agentHourlyCap: z.number().int().min(1).max(100),
   /** Phone push through the owner's own ntfy server; the token is held as a secret. */
-  ntfy: z.object({ url: NtfyUrl, topic: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Letters, digits, - and _ only"), tokenSecretId: z.string().uuid().nullable() }).nullable(),
+  ntfy: z.object({ url: NtfyUrl, topic: NtfyTopic, tokenSecretId: z.string().uuid().nullable() }).nullable(),
   /**
    * Which cards go to the phone (BOS-1006). "urgent" (the default, and what an install saved before the
    * setting existed reads as) sends only a blocking card, a fixesLive deploy, a page and the test push.
@@ -95,9 +115,13 @@ export function wantsEveryPush(s: NotifySettings): boolean {
 }
 
 const KEY = "notifications";
-const PHONE_TEST_KEY = "notifications.phone-test";
+export const PHONE_TEST_KEY = "notifications.phone-test";
 const PHONE_TEST_TTL_MS = 15 * 60_000;
-type PhoneTestRecord = { sentAt: string; tokenHash: string | null; expiresAt: string | null; confirmedAt: string | null };
+/**
+ * The last test push. `url` is the public address its Got it button posted to (BOS-1797): a tap proves the phone
+ * reached Boss Man at that address, not at whatever the box holds later. Absent on a record from before it was kept.
+ */
+export type PhoneTestRecord = { sentAt: string; tokenHash: string | null; expiresAt: string | null; confirmedAt: string | null; url?: string | null };
 const hashTestToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 /** Cuts text to fit in `max` bytes of UTF-8, without splitting a character. */
@@ -129,7 +153,7 @@ export const ROUTINE_PRIORITY = 3;
  * whatever the owner's push levels say: it is not urgent, and the owner should see it when they next look, not be
  * buzzed for it.
  */
-export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** Why the card is urgent (BOS-1097): a live-fix deploy or the CEO's urgent mark. Set, it goes to the phone whatever the setting; the text is shown on the Notifications page. */ urgentReason?: string };
+export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; /** Which alert kind this is for the owner's Slack, Discord and webhook destinations (BOS-2199). Unset: a card's own type decides, and anything else goes to none. */ kind?: AlertKind; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** Why the card is urgent (BOS-1097): a live-fix deploy or the CEO's urgent mark. Set, it goes to the phone whatever the setting; the text is shown on the Notifications page. */ urgentReason?: string };
 
 /** What the CEO sets to mark an owner card urgent (BOS-1097): decisions escalate with urgent true; stored on the card's context. */
 export type UrgentPush = { by: string; at: string; why: string };
@@ -176,6 +200,22 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     }
   };
   let approveHook: ApproveHook | null = null;
+  let alertHook: AlertHook | null = null;
+
+  /** After the card is saved and the phone push is done: hand it to the owner's other destinations. Never blocks, never throws. */
+  async function toDestinations(s: NotifySettings, input: NotifyInput, row: { title: string; body: string | null; link: string; decisionId: string | null }, level: NotifyLevel) {
+    if (!alertHook) return;
+    try {
+      let kind = input.kind ?? null;
+      if (!kind && row.decisionId && level !== "note") {
+        const [d] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, row.decisionId));
+        kind = alertKindOfCard(d?.context as { type?: string } | null);
+      }
+      if (kind) alertHook({ kind, title: row.title, text: row.body ?? row.title, link: row.link, publicUrl: s.publicUrl });
+    } catch (err) {
+      deps.log?.(`alert destinations skipped: ${(err as Error).name}`);
+    }
+  }
 
   async function getSettings(): Promise<NotifySettings> {
     const [row] = await db.select().from(settings).where(eq(settings.key, KEY));
@@ -269,6 +309,8 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         await db.update(notifications).set({ pushError: msg.slice(0, 500) }).where(eq(notifications.id, row.id));
       }
     }
+    // BOS-2199: the owner's other destinations (Slack, Discord, webhook), after the card is saved and the phone push is done.
+    await toDestinations(s, input, row, level);
     return row;
   }
 
@@ -382,6 +424,10 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       approveHook = hook;
     },
 
+    setAlertHook(hook: AlertHook) {
+      alertHook = hook;
+    },
+
     /**
      * A push with no notification row (the table holds one per decision): the phone Approve outcome
      * replies (BOS-243). Plain text, sent whatever the push levels, since the owner has just tapped.
@@ -427,13 +473,13 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         // A deploy card carrying the fix for a live problem (BOS-639) is paged, once per fix: a later card for
         // the same fix (main moved on) is a plain ask. Quiet hours still lower it, in notify, as for any page.
         const c = d.context as DecisionContext;
-        const urgentFix = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
+        const urgentFix = (c.type === "self_deploy" || c.type === "deploy") && d.tier !== "ceo" ? c.urgent : undefined;
         const level: NotifyLevel = d.tier === "ceo" ? "note" : urgentFix && !urgentFix.repeat ? "page" : alertOnly ? "flag" : "ask";
         // BOS-1097: only two kinds of card are urgent by themselves: a live-problem deploy, and a card the CEO
         // marked urgent when escalating it (context.urgentPush). Blocking a ticket no longer counts, and a
         // "Got it" notice never pushes. Pages come from notify_owner and the test push is urgent in `test`.
         const mark = urgentPushOf(d.context);
-        const urgentReason = d.tier === "ceo" || alertOnly ? undefined : urgentFix ? "A deploy that carries the fix for a live problem" : mark ? `The CEO marked it urgent: ${mark.why}` : undefined;
+        const urgentReason = d.tier === "ceo" || alertOnly ? undefined : urgentFix ? (urgentFix.kind === "ready" ? "Work you marked Priority 1 has merged and is ready to put live" : "A deploy that carries the fix for a live problem") : mark ? `The CEO marked it urgent: ${mark.why}` : undefined;
         // BOS-1010: the runner update is routine. It stays in the feed and the browser, and never goes to the phone,
         // even under "All decisions". (A self_deploy card that is not the runner update is unchanged.)
         // BOS-1462: unless it carries a live fix that pages (urgentFix, not a repeat): then it pages like a server card.
@@ -504,21 +550,22 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       const s = await getSettings();
       const t = now();
       const actions: PushAction[] = [];
-      let rec: PhoneTestRecord = { sentAt: t.toISOString(), tokenHash: null, expiresAt: null, confirmedAt: null };
+      let rec: PhoneTestRecord = { sentAt: t.toISOString(), tokenHash: null, expiresAt: null, confirmedAt: null, url: null };
       if (s.publicUrl && new URL(s.publicUrl).protocol === "https:") {
         const token = randomBytes(32).toString("base64url");
-        rec = { ...rec, tokenHash: hashTestToken(token), expiresAt: new Date(t.getTime() + PHONE_TEST_TTL_MS).toISOString() };
-        actions.push({ action: "http", label: "Got it", url: `${s.publicUrl.replace(/\/$/, "")}/api/phone/got-it`, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }), clear: true });
+        const base = s.publicUrl.replace(/\/$/, "");
+        rec = { ...rec, tokenHash: hashTestToken(token), expiresAt: new Date(t.getTime() + PHONE_TEST_TTL_MS).toISOString(), url: base };
+        actions.push({ action: "http", label: "Got it", url: `${base}/api/phone/got-it`, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }), clear: true });
       }
       await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device." + (actions.length ? " Tap Got it to confirm." : ""), link: "#/notifications", level: "page", urgent: true, actions });
       await db.insert(settings).values({ key: PHONE_TEST_KEY, value: rec }).onConflictDoUpdate({ target: settings.key, set: { value: rec } });
     },
 
-    /** The last test push: when it was sent and whether the phone tapped Got it (null: none sent yet). */
-    async testStatus(): Promise<{ sentAt: string; confirmedAt: string | null } | null> {
+    /** The last test push: when it was sent, whether the phone tapped Got it (null: none sent yet), and the address the tap went to (null: not kept). */
+    async testStatus(): Promise<{ sentAt: string; confirmedAt: string | null; url?: string | null } | null> {
       const [row] = await db.select().from(settings).where(eq(settings.key, PHONE_TEST_KEY));
       const r = row?.value as PhoneTestRecord | undefined;
-      return r ? { sentAt: r.sentAt, confirmedAt: r.confirmedAt } : null;
+      return r ? { sentAt: r.sentAt, confirmedAt: r.confirmedAt, url: r.url ?? null } : null;
     },
 
     /** A tap on Got it. True only for the live, unused link of the last test; the link then stops working. */

@@ -1,0 +1,1 @@
+ALTER TABLE "tickets" ADD COLUMN "next_up_at" timestamp with time zone;

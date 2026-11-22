@@ -21,9 +21,10 @@ describe("compose memory limits", () => {
         .filter(([name, s]) => !NOT_RUN.has(name) && s.mem_limit === undefined)
         // Blue/green parks the single server (profiles overridden) and gives the colours the limit through an anchor.
         .map(([name]) => name);
-      // truenas-bluegreen.yml's `server` is parked and `runner-app-co` is inherited from docker-compose.yml.
-      // Overrides of services docker-compose.yml already limits (tailscale.yml adds only an env var to `server`).
-      const allowed = file.endsWith("truenas-bluegreen.yml") ? ["server", "runner-app-co"] : file.endsWith("tailscale.yml") ? ["server"] : [];
+      // An overlay may override a service (parked `server`, `runner-app-co`, `claude-pack`, tailscale's `server`) without
+      // repeating the limit, but only if docker-compose.yml already gives that service one. A new service must carry its own.
+      const base = file === "docker-compose.yml" ? {} : services("docker-compose.yml");
+      const allowed = Object.keys(base).filter((n) => base[n]!.mem_limit !== undefined);
       expect(missing.filter((n) => !allowed.includes(n)), `no mem_limit in ${file}`).toEqual([]);
     });
   }
@@ -89,6 +90,17 @@ describe("compose memory limits", () => {
     const bg = services("deploy/truenas-bluegreen.yml") as typeof main;
     for (const [n, s] of [["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
       expect(s!.environment?.BOSSMAN_STALL_PROFILE, n).toBe("${BOSSMAN_STALL_PROFILE:-}");
+    }
+  });
+
+  // BOS-2098: Docker's default 10 s stop cuts the server's shutdown drain short (BOS-794); every server needs at least 60 s.
+  it("the single server and both blue/green colours get at least 60 s to stop", () => {
+    const main = services("docker-compose.yml") as Record<string, Service & { stop_grace_period?: string }>;
+    const bg = services("deploy/truenas-bluegreen.yml") as typeof main;
+    for (const [n, s] of [["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      const m = /^(\d+)s$/.exec(String(s!.stop_grace_period));
+      expect(m, `${n} stop_grace_period`).not.toBeNull();
+      expect(Number(m![1]), n).toBeGreaterThanOrEqual(60);
     }
   });
 

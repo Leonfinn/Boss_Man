@@ -267,11 +267,16 @@ export function retroService(
     },
 
     async setAgent(companyId: string, agentId: string | null) {
+      const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
+      if (!company) throw new RetroError(404, "Company not found.");
+      let name: string | null = null;
       if (agentId) {
-        const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId), isNull(agents.retiredAt)));
+        const [a] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId), isNull(agents.retiredAt)));
         if (!a) throw new RetroError(404, "No active agent with that ID in this company.");
+        name = a.name;
       }
       await db.insert(settings).values({ key: settingKey(companyId), value: { agentId } }).onConflictDoUpdate({ target: settings.key, set: { value: { agentId } } });
+      await record(db, { companyId, kind: "settings", summary: `Owner set ${name ?? "no one"} to run workflow retros`, detail: { setting: "retro_agent", agentId } });
       return self.status(companyId);
     },
 

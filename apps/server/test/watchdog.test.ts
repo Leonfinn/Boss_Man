@@ -66,7 +66,7 @@ async function setup() {
     expect(r.statusCode).toBe(200);
     return r.json();
   };
-  const smWakes = () => db.select().from(wakes).where(and(eq(wakes.agentId, sm.id), eq(wakes.reason, WATCHDOG_REASON)));
+  const smWakes = () => db.select().from(wakes).where(and(eq(wakes.agentId, sm.id), eq(wakes.reason, WATCHDOG_REASON))).orderBy(wakes.createdAt);
   return { ...built, db, base, req, companyId, sm, dev, ceo: ceo!, project, advance, ago, ticket, stalled, switchOn, smWakes, now: () => clock };
 }
 
@@ -131,6 +131,19 @@ describe("the watchdog sweep (BOS-58)", () => {
     expect(r.json().message).toContain("Pick the Scrum Master");
     const bad = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { inProgressHours: -1 });
     expect(bad.statusCode).toBe(400);
+  });
+
+  it("a review ticket with an open hold is not flagged for no movement; once the hold is closed it is (BOS-1717)", async () => {
+    await ctx.switchOn();
+    const held = await ctx.ticket({ title: "Held on a waits-on hold", systemState: "review", stateChangedAt: ctx.ago(240) });
+    const control = await ctx.ticket({ title: "Quiet, no hold", systemState: "review", stateChangedAt: ctx.ago(240) });
+    const [hold] = await ctx.db.insert(reviewHolds).values({ ticketId: held.id, reason: "Waits on another ticket" }).returning();
+    await ctx.watchdog.run();
+    const flagged = async () => (await ctx.db.select().from(watchdogFlags)).map((f) => f.ticketId);
+    expect(await flagged()).toEqual([control.id]);
+    await ctx.db.update(reviewHolds).set({ status: "released", closedAt: ctx.ago(1) }).where(eq(reviewHolds.id, hold!.id));
+    await ctx.watchdog.run();
+    expect((await flagged()).sort()).toEqual([control.id, held.id].sort());
   });
 
   it("wakes the Scrum Master once per sweep with every due problem, and not at all when nothing trips", async () => {
@@ -726,6 +739,41 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
   });
 
+  // BOS-1907 criterion 6 and 7: a merged ticket in Blocked is quiet until its watch ends, then the usual hand-off follows
+  // (the assignee first); the watchdog never opens an owner flag for it. An existing row with no watch recorded gets 14 days from go-live.
+  it("a merged ticket stays quiet until its watch date, then is flagged for its assignee, and an old row gets the 14-day default", async () => {
+    await ctx.switchOn();
+    const days = (n: number) => new Date(ctx.now().getTime() + n * 24 * H);
+    const base = { systemState: "blocked" as const, stateChangedAt: ctx.ago(60 * 24 * 20), mergeCommit: "a".repeat(40), mergedAt: days(-20) };
+    const dated = await ctx.ticket({ ...base, title: "Watches a week", watchingFor: "a week of real use", watchUntil: days(3), liveAt: days(-20) });
+    const lapsed = await ctx.ticket({ ...base, title: "Watch ended", watchingFor: "a week of real use", watchUntil: days(-1), liveAt: days(-20) });
+    const freshOld = await ctx.ticket({ ...base, title: "Old row, live 5 days ago", liveAt: days(-5) });
+    const staleOld = await ctx.ticket({ ...base, title: "Old row, live 15 days ago", liveAt: days(-15) });
+    await ctx.watchdog.run();
+    const flags = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.status, "open"));
+    const flagged = new Set(flags.map((f) => f.ticketId));
+    expect(flagged.has(dated.id)).toBe(false);
+    expect(flagged.has(freshOld.id)).toBe(false);
+    expect(flagged.has(lapsed.id)).toBe(true);
+    expect(flagged.has(staleOld.id)).toBe(true);
+    expect(flags.some((f) => f.rule === "owner_decision_waiting")).toBe(false);
+  });
+
+  // BOS-2141: the agent's own blocked-until date on a merged, watching ticket still trips blocked_until_passed.
+  it("a watching ticket with its own blocked-until date is flagged once that date has passed, and stays quiet before it", async () => {
+    await ctx.switchOn();
+    const days = (n: number) => new Date(ctx.now().getTime() + n * 24 * H);
+    const base = { systemState: "blocked" as const, stateChangedAt: ctx.ago(60 * 24 * 2), mergeCommit: "a".repeat(40), mergedAt: days(-2), liveAt: days(-2), watchingFor: "a week of real use", watchUntil: days(10) };
+    const passed = await ctx.ticket({ ...base, title: "Date passed", blockedUntil: days(-1), blockedUntilReason: "waiting for the check" });
+    const ahead = await ctx.ticket({ ...base, title: "Date ahead", blockedUntil: days(1), blockedUntilReason: "waiting for the check" });
+    const noDate = await ctx.ticket({ ...base, title: "No date" });
+    await ctx.watchdog.run();
+    const flags = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.status, "open"));
+    expect(flags.filter((f) => f.ticketId === passed.id).map((f) => f.rule)).toEqual(["blocked_until_passed"]);
+    expect(flags.some((f) => f.ticketId === ahead.id)).toBe(false);
+    expect(flags.some((f) => f.ticketId === noDate.id)).toBe(false);
+  });
+
   it("the backtest gives an idle ticket at most two hand-offs in four hours", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
     const t = await ctx.stalled({ stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });
@@ -1132,6 +1180,19 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     expect(await ctx.smWakes()).toHaveLength(before);
   });
 
+  it("refuses a Scrum Master card the owner already answered on another ticket, quoting it; stillNeeded lets it through (BOS-1591)", async () => {
+    await ctx.switchOn();
+    const t = await handed({ stateChangedAt: ctx.ago(300) });
+    const home = await ctx.ticket({ title: "Raise the memory limit" });
+    const [earlier] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Is more memory granted to the runner?", options: ["Granted", "No"], recommendedOption: "Granted", status: "answered", answer: "Granted", answeredAt: new Date(), context: { type: "question", ticketId: home.id } } as never).returning();
+    await ctx.db.update(watchdogFlags).set({ lastFlaggedAt: ctx.now() }).where(eq(watchdogFlags.ticketId, t.id));
+    const args = { action: "raise_decision", ticketId: t.id, question: "Is more memory granted to the runner now?", options: ["Granted", "No"], recommended: "Granted", triedFirst: "Looked at it; it is a host setting.", reason: "Only the owner can change the host." };
+    const refused = await call(args);
+    expect(isError(refused)).toBe(true);
+    expect(textOf(refused)).toContain(earlier!.id);
+    expect(isError(await call({ ...args, stillNeeded: "The limit was reset by a host update." }))).toBe(false);
+  });
+
   it("undoing a raised decision still puts the ticket back when its old column is full", async () => {
     await ctx.switchOn();
     const t = await handed({ stateChangedAt: ctx.ago(300) });
@@ -1225,6 +1286,10 @@ describe("open issues and the timeline (BOS-199)", () => {
   });
 
   it("labels each timeline entry with its issue, its open or settled state, and a repeat warning on the same ticket", async () => {
+    // Pin the clock to midday UTC of its own day: "today" needs the warning and the clock on one date, and a run
+    // that crosses 00:00 UTC (BOS-1788) put the warning a minute before midnight, on yesterday.
+    const midday = new Date(clock); midday.setUTCHours(12, 0, 0, 0);
+    ctx.advance((midday.getTime() - clock.getTime()) / 60_000);
     const t = await ctx.ticket({ title: "Two warnings", stateChangedAt: ctx.ago(1) });
     const opened = ctx.now();
     const [first] = await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: t.id, rule: "stale_in_progress", status: "closed", openedAt: new Date(opened.getTime() - 60_000), closedAt: opened, dueAt: opened }).returning();
@@ -1385,5 +1450,46 @@ describe("record-only mode (BOS-166)", () => {
     // The owner's switch turns it back off like any other setting.
     await ctx.watchdog.update(ctx.companyId, { recordOnly: false });
     expect(await ctx.watchdog.recordOnly(ctx.companyId)).toBe(false);
+  });
+});
+
+describe("the owner's watchdog changes leave activity lines (BOS-2150)", () => {
+  const lines = async () =>
+    (await ctx.db.select().from(activity).where(and(eq(activity.companyId, ctx.companyId), eq(activity.kind, "settings")))).map((a) => a.summary).sort();
+  const patch = async (b: Record<string, unknown>) => expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, b)).statusCode).toBe(200);
+
+  it("records each change once, and nothing for a save that changes nothing or is refused", async () => {
+    await ctx.db.update(companies).set({ watchdog: { ...readWatchdogSettings(null), enabled: false } }).where(eq(companies.id, ctx.companyId));
+    // Refused (no Scrum Master yet): no line.
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { enabled: true })).statusCode).toBe(422);
+    expect(await lines()).toEqual([]);
+
+    await patch({ scrumMasterAgentId: ctx.sm.id, enabled: true });
+    expect(await lines()).toEqual(["Owner set the Scrum Master to Scrum Master", "Owner switched the watchdog on"]);
+
+    // The same values again: nothing new.
+    await patch({ scrumMasterAgentId: ctx.sm.id, enabled: true, recordOnly: false });
+    expect(await lines()).toHaveLength(2);
+
+    // Changing one field leaves every other stored setting as it was.
+    const stored = async () => (await ctx.db.select({ watchdog: companies.watchdog }).from(companies).where(eq(companies.id, ctx.companyId)))[0]!.watchdog;
+    const before = await stored();
+    await patch({ inProgressHours: 3 });
+    expect(await stored()).toEqual({ ...readWatchdogSettings(before), inProgressHours: 3 });
+
+    await ctx.db.delete(activity).where(eq(activity.companyId, ctx.companyId));
+    await patch({ recordOnly: true, reviewHours: 5, blockedHours: 9, progressContract: false });
+    expect(await lines()).toEqual(["Owner changed the watchdog limits", "Owner switched the progress contract off", "Owner switched the watchdog's record-only mode on"]);
+    const [lim] = await ctx.db.select().from(activity).where(and(eq(activity.companyId, ctx.companyId), eq(activity.summary, "Owner changed the watchdog limits")));
+    expect(lim!.detail).toEqual({ reviewHours: { from: 2, to: 5 }, blockedHours: { from: 8, to: 9 } });
+
+    await ctx.db.delete(activity).where(eq(activity.companyId, ctx.companyId));
+    await patch({ scrumMasterAgentId: ctx.dev.id });
+    await patch({ enabled: false });
+    expect(await lines()).toEqual(["Owner set the Scrum Master to Developer", "Owner switched the watchdog off"]);
+
+    await ctx.db.delete(activity).where(eq(activity.companyId, ctx.companyId));
+    await patch({ scrumMasterAgentId: null });
+    expect(await lines()).toEqual(["Owner removed the Scrum Master"]);
   });
 });

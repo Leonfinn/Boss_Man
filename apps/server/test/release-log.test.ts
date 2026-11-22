@@ -3,11 +3,12 @@ import { mkdtemp, mkdir, rm as rmFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq, like } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, deployTargets, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, deployTargets, runners, settings, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { RELEASE_REASON, releaseLogService } from "../src/services/release-log.js";
+import { RUNNER_NEED_UNKNOWN_REASON } from "../src/services/runner-update-need.js";
 
 let ctx: Awaited<ReturnType<typeof setupApp>> | undefined;
 afterEach(async () => {
@@ -73,11 +74,13 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(logTickets[0]).toMatchObject({ projectId, assigneeAgentId: rm!.id, noCode: true, systemState: "ready", title: `Release log: record ${B.slice(0, 8)}` });
     expect(logTickets[0]!.body).toContain(A);
     expect(logTickets[0]!.body).toContain(B);
+    expect(logTickets[0]!.body).toContain("republish the website");
     const [w] = await c.db.select().from(wakes).where(eq(wakes.ticketId, logTickets[0]!.id));
     expect(w).toMatchObject({ agentId: rm!.id, reason: RELEASE_REASON, ticketId: logTickets[0]!.id });
     expect(w!.note).toContain(A.slice(0, 8));
     expect(w!.note).toContain(B.slice(0, 8));
     expect(w!.note).toContain("the host deployer");
+    expect(w!.note).toContain("republish the website");
 
     // Another pass on the same status changes nothing: one ticket, one wake.
     await c.selfDeploy.sync();
@@ -166,6 +169,11 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(logTickets).toHaveLength(1);
     expect(logTickets[0]!.body).toContain(`New commit: ${B}`);
     expect(logTickets[0]!.body).toContain(`New commit: ${C}`);
+    // BOS-1809: the second release says to republish the site too, not just the first.
+    const [wakeToSecond] = await c.db.select().from(wakes).where(eq(wakes.ticketId, logTickets[0]!.id));
+    expect(wakeToSecond!.note).toContain("republish the website");
+    const said = (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, logTickets[0]!.id))).map((x) => x.text).join("\n");
+    expect(said).toContain("republish the website");
     // A repeat pass doesn't list the commit twice.
     await c.releaseLog.releaseManagerWakes("restarted");
     expect((await c.db.select().from(tickets).where(eq(tickets.id, logTickets[0]!.id)))[0]!.body!.split(`New commit: ${C}`)).toHaveLength(2);
@@ -287,20 +295,20 @@ describe("owner setup cards (DR-011)", () => {
   it("raises one card when the live commit includes the merge, with the author's steps", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
-    await doneTicket(c, projectId, { title: "Second Claude account", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source\nThen sign in to the second plan", at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Second Claude account", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source\nThen sign in to the second plan in Settings → Funding", at: new Date("2026-11-03T12:00:00Z") });
     await c.releaseLog.note(companyId, A);
     await c.releaseLog.note(companyId, B); // the deployer says B is live (after the standby window: only a finished deploy is noted)
     await c.releaseLog.releaseManagerWakes("deployed");
 
     const cards = await setupCards(c);
     expect(cards).toHaveLength(1);
-    expect(cards[0]).toMatchObject({ kind: "question", tier: "owner", status: "open", dedupeKey: `owner-setup:${(await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan")))[0]!.id}` });
+    expect(cards[0]).toMatchObject({ kind: "question", tier: "owner", status: "open", dedupeKey: `owner-setup:${(await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan in Settings → Funding")))[0]!.id}` });
     expect(cards[0]!.question).toContain("Second Claude account");
     expect(cards[0]!.question).toContain("Add funding source");
     expect(cards[0]!.question).toContain("sign in to the second plan");
     expect((cards[0]!.context as { ticketId?: string }).ticketId).toBeDefined();
     // The ticket records which card it raised.
-    const [t] = await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan"));
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.ownerSetup, "Settings → Funding → Add funding source\nThen sign in to the second plan in Settings → Funding"));
     expect(t!.ownerSetupDecisionId).toBe(cards[0]!.id);
   });
 
@@ -403,14 +411,15 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     const c = (ctx = await setupApp());
     await hostReport(c);
     const { companyId, projectId } = await withReleaseManager(c);
-    await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}}\nRestart the notifications add-on: `{{host.compose.cmd}} up -d ntfy`", at: new Date("2026-11-03T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}} (http://192.168.1.50/admin)\nRestart the notifications add-on: `{{host.compose.cmd}} up -d ntfy` (http://192.168.1.50/admin)", at: new Date("2026-11-03T12:00:00Z") });
     await live(c, companyId);
     const [card] = await setupCards(c);
     expect(card!.question).toContain("1. Remove the NTFY_IMAGE line from /opt/example/src/.env");
     expect(card!.question).toContain("2. Restart the notifications add-on: `cd /opt/example/src && docker compose -f docker-compose.yml up -d ntfy`");
     expect(card!.question).not.toContain("{{");
     expect(card!.question).not.toContain("doesn't know this server's folders");
-    expect((card!.context as { steps: string[] }).steps[0]).toBe("Remove the NTFY_IMAGE line from /opt/example/src/.env");
+    expect((card!.context as { steps: string[] }).steps[0]).toBe("Remove the NTFY_IMAGE line from /opt/example/src/.env (http://192.168.1.50/admin)");
+    expect(card!.question).toMatch(/Where: Steps 1, 2: Boss Man, in your browser/);
   });
 
   it("vague steps raise a CEO card and no owner card, nothing is logged as a silent refusal, and once fixed the owner's card goes out on the next pass", async () => {
@@ -431,7 +440,7 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     await c.releaseLog.releaseManagerWakes("deployed");
     expect((await c.db.select().from(decisions).where(like(decisions.dedupeKey, "owner-setup-fix:%")))).toHaveLength(1);
     // The steps are fixed; the live commit doesn't change, and the next pass raises the owner's card and closes the CEO's.
-    await c.db.update(tickets).set({ ownerSetup: "Delete the BOSSMAN_CHECK_SLOTS line from {{host.env.file}}: `sed -i '/^BOSSMAN_CHECK_SLOTS=/d' {{host.env.file}}`. This prints nothing." }).where(eq(tickets.id, t.id));
+    await c.db.update(tickets).set({ ownerSetup: "Delete the BOSSMAN_CHECK_SLOTS line from {{host.env.file}}: `sed -i '/^BOSSMAN_CHECK_SLOTS=/d' {{host.env.file}}`. This prints nothing. (http://192.168.1.50/admin)" }).where(eq(tickets.id, t.id));
     await c.releaseLog.releaseManagerWakes("deployed");
     const [card] = await setupCards(c);
     expect(card).toMatchObject({ status: "open", tier: "owner" });
@@ -441,13 +450,36 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.ownerSetupDecisionId).toBe(card!.id);
   });
 
+  it("BOS-1953: a host command in a fenced block names where it runs, passes the check and the owner's card has a Where line; a failing ticket's CEO card never reaches the owner's queue", async () => {
+    const c = (ctx = await setupApp());
+    await hostReport(c);
+    const { companyId, projectId } = await withReleaseManager(c);
+    const fenced = "```sh host=\"example-host\" as=\"root\"\nls -l /srv/example\n```";
+    await doneTicket(c, projectId, { title: "Fenced", mergeCommit: B, ownerSetup: fenced, at: new Date("2026-11-03T12:00:00Z") });
+    await live(c, companyId);
+    const [card] = await setupCards(c);
+    expect(card).toMatchObject({ status: "open", tier: "owner" });
+    expect(card!.question).toContain("ls -l /srv/example");
+    expect(card!.question).toMatch(/Where:/);
+  });
+
+  it("BOS-1953: the CEO's setup-fix card sits on the CEO's rung and never climbs, so it is not in the owner's queue", async () => {
+    const c = (ctx = await setupApp());
+    await hostReport(c);
+    const { companyId, projectId } = await withReleaseManager(c);
+    const t = await doneTicket(c, projectId, { title: "Vague", mergeCommit: B, ownerSetup: "Restart the notifications add-on", at: new Date("2026-11-03T12:00:00Z") });
+    await live(c, companyId);
+    const fix = await fixCard(c, t.id);
+    expect((fix!.context as { ladder?: { rung?: string; topRung?: string } }).ladder).toMatchObject({ rung: "ceo", topRung: "ceo" });
+  });
+
   it("with no deployer report, a token in the words becomes the label and the card says Boss Man doesn't know this server's folders yet", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
     await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}}", at: new Date("2026-11-03T12:00:00Z") });
     await live(c, companyId);
     const [card] = await setupCards(c);
-    expect(card!.question).toContain("1. Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This host shows it)");
+    expect(card!.question).toContain("1. Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This server shows it)");
     expect(card!.question).toContain("Boss Man doesn't know this server's folders yet");
   });
 
@@ -458,19 +490,34 @@ describe("go-live setup cards get the host facts and the full card check (DR-052
     await doneTicket(c, projectId, { title: "Newer ntfy", mergeCommit: B, ownerSetup: "Remove the NTFY_IMAGE line from {{host.env.file}}", at: new Date("2026-11-03T12:00:00Z") });
     await live(c, companyId);
     const [card] = await setupCards(c);
-    expect(card!.question).toContain("the .env file the stack starts with (Settings → Server and runner → This host shows it)");
+    expect(card!.question).toContain("the .env file the stack starts with (Settings → Server and runner → This server shows it)");
     expect(card!.question).not.toContain("/opt/example/src/.env");
   });
 
   it("the CEO's lintOverride stored with the steps lets a soft finding through, and the owner reads why", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
-    const t = await doneTicket(c, projectId, { title: "Notifications", mergeCommit: B, ownerSetup: "Restart the notifications add-on", at: new Date("2026-11-03T12:00:00Z") });
+    const t = await doneTicket(c, projectId, { title: "Notifications", mergeCommit: B, ownerSetup: "Restart the notifications add-on at http://192.168.1.50/admin", at: new Date("2026-11-03T12:00:00Z") });
     await c.db.update(tickets).set({ ownerSetupOverride: "The add-on restarts by itself after the update." }).where(eq(tickets.id, t.id));
     await live(c, companyId);
     const [card] = await setupCards(c);
-    expect(card!.question).toContain("The CEO let these steps past Boss Man's card check: The add-on restarts by itself after the update.");
+    expect(card!.question).toMatch(/The CEO let these steps past Boss Man's card check:\nStep 1 \(R\d+\): The add-on restarts by itself after the update\./);
     expect(await fixCard(c, t.id)).toBeUndefined();
+  });
+
+  it("R35: a stored override that names only one of two refused steps leaves the other refused: the CEO gets the fix card, the owner none", async () => {
+    const c = (ctx = await setupApp());
+    await hostReport(c);
+    const { companyId, projectId } = await withReleaseManager(c);
+    const t = await doneTicket(c, projectId, { title: "Two vague steps", mergeCommit: B, ownerSetup: "Delete BOSSMAN_CHECK_SLOTS from .env\nRestart the notifications add-on", at: new Date("2026-11-03T12:00:00Z") });
+    await c.db.update(tickets).set({ ownerSetupOverride: JSON.stringify([{ steps: [2], reason: "The add-on restarts by itself after the update." }]) }).where(eq(tickets.id, t.id));
+    await live(c, companyId);
+    expect(await setupCards(c)).toHaveLength(0);
+    expect(await fixCard(c, t.id)).toMatchObject({ tier: "ceo", status: "open" });
+    // A plain reason (the old form) can't cover two refused steps either.
+    await c.db.update(tickets).set({ ownerSetupOverride: "The add-on restarts by itself after the update." }).where(eq(tickets.id, t.id));
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(0);
   });
 });
 
@@ -532,7 +579,7 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
     await doneTicket(c, projectId, { title: "Add the second account", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source", at: new Date("2026-11-03T12:00:00Z") });
-    await doneTicket(c, projectId, { title: "Turn on the second storage bucket", mergeCommit: C, ownerSetup: "Turn on the second bucket in your storage provider's console", at: new Date("2026-11-03T12:05:00Z") });
+    await doneTicket(c, projectId, { title: "Turn on the second storage bucket", mergeCommit: C, ownerSetup: "Turn on the second bucket at http://192.168.1.50/console", at: new Date("2026-11-03T12:05:00Z") });
     await c.releaseLog.note(companyId, A);
     await c.releaseLog.note(companyId, C);
     await c.releaseLog.releaseManagerWakes("deployed");
@@ -572,7 +619,7 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     // live: its card is raised, and the grouped card isn't stacked on. The old code read an empty group
     // here and threw, aborting the whole pass so this new card never went up.
     const D = "4".repeat(40);
-    await doneTicket(c, projectId, { title: "Turn on the second bucket", mergeCommit: D, ownerSetup: "Turn on the second bucket in your storage provider's console", at: new Date("2026-11-03T12:10:00Z") });
+    await doneTicket(c, projectId, { title: "Turn on the second bucket", mergeCommit: D, ownerSetup: "Turn on the second bucket at http://192.168.1.50/console", at: new Date("2026-11-03T12:10:00Z") });
     await c.releaseLog.note(companyId, D);
     await c.releaseLog.releaseManagerWakes("deployed");
     const cards = await openCards(c);
@@ -627,6 +674,72 @@ describe("runner-update asks close themselves when the live runner image already
   const available = (c: Awaited<ReturnType<typeof setupApp>>, deployed: string) => writeFile(availableFile(c), JSON.stringify({ version: 1, checkedAt: new Date().toISOString(), deployed, tip: deployed, commits: [], paths: [], infraPaths: [], runnerChanged: false }));
   const dueNow = (c: Awaited<ReturnType<typeof setupApp>>, value: object) => c.db.insert(settings).values({ key: "self_deploy_runner_due", value: { commit: C, fromCommit: A, after: new Date(Date.now() - 1000).toISOString(), ...value } });
   const lastServer = (c: Awaited<ReturnType<typeof setupApp>>) => c.db.insert(settings).values({ key: "self_deploy_last_server", value: { result: "deployed", from: A, to: C, ended: new Date().toISOString() } });
+
+  // BOS-1648: the panel, the automatic card and the button all read the one answer (runner-update-need.ts).
+  describe("one answer to 'is a runner update needed?' (BOS-1648)", () => {
+    /** Image built from A; B and C merged since, C touching the runner or not. */
+    async function since(c: Awaited<ReturnType<typeof setupApp>>, cTouchesRunner: boolean) {
+      const { companyId, projectId } = await withReleaseManager(c);
+      await withImage(c, companyId, A);
+      const [, b, t] = await merged(c, projectId);
+      await c.db.update(tickets).set({ touchesRunner: false }).where(eq(tickets.id, b!.id));
+      await c.db.update(tickets).set({ touchesRunner: cTouchesRunner }).where(eq(tickets.id, t!.id));
+      await c.releaseLog.note(companyId, C);
+      await available(c, C);
+      return { companyId, b: b!, t: t! };
+    }
+
+    it("server-only changes since the image: no automatic card, an open one closes with the reason, the panel says up to date", async () => {
+      const c = (ctx = await setupApp());
+      const { companyId } = await since(c, false);
+      await c.db.insert(decisions).values(runnerCard(companyId, B));
+      await dueNow(c, { offer: true, needs: C });
+      await lastServer(c);
+      await c.selfDeploy.sync();
+      const all = await c.db.select().from(decisions);
+      expect(all.filter((d) => d.status === "open")).toEqual([]);
+      expect((all[0]!.context as { withdrawn: { note: string } }).withdrawn.note).toMatch(/^Runners are up to date: the changes since they were built \(.*\) are server-only\. So there is nothing to build\./);
+      expect((await c.db.select().from(settings).where(eq(settings.key, "self_deploy_runner_due")))).toEqual([]);
+      const o = await c.selfDeploy.overview();
+      expect(o.runnerUpdate).toMatchObject({ state: "not_needed" });
+      expect(o.runnerUpdate!.words).not.toMatch(/\bmay\b/);
+    });
+
+    it("a change to what the runners are built from: the automatic card is raised and the panel says needed, naming it", async () => {
+      const c = (ctx = await setupApp());
+      await since(c, true);
+      await dueNow(c, { offer: true, needs: C });
+      await lastServer(c);
+      await c.selfDeploy.sync();
+      expect((await c.db.select().from(decisions)).filter((d) => d.dedupeKey === `self-deploy:runner:${C}` && d.status === "open")).toHaveLength(1);
+      const o = await c.selfDeploy.overview();
+      expect(o.runnerUpdate!.state).toBe("needed");
+      expect(o.runnerUpdate!.words).toMatch(/^Runner update needed: /);
+    });
+
+    it("can't tell (the live commit is no recorded merge): the panel says why, the button's card says it too, and the CEO is woken once", async () => {
+      const c = (ctx = await setupApp());
+      const { companyId } = await since(c, false);
+      const X = "9".repeat(40);
+      await c.releaseLog.note(companyId, X);
+      await available(c, X);
+      const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
+      const o = await c.selfDeploy.overview();
+      expect(o.runnerUpdate!.state).toBe("unknown");
+      expect(o.runnerUpdate!.words).toContain("isn't a merge Boss Man recorded");
+      // Reading the panel never queues a run (a read with a side effect broke the run caps in fair-share.test.ts);
+      // the background sync wakes the CEO, once however often it runs.
+      const ceoWakes = async () => (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === RUNNER_NEED_UNKNOWN_REASON);
+      expect(await ceoWakes()).toHaveLength(0);
+      await c.selfDeploy.sync();
+      await c.selfDeploy.sync();
+      expect(await ceoWakes()).toHaveLength(1);
+      const r = await c.selfDeploy.updateRunners();
+      expect("decisionId" in r).toBe(true);
+      const [card] = await c.db.select().from(decisions).where(eq(decisions.id, (r as { decisionId: string }).decisionId));
+      expect(card!.question).toContain("Boss Man can't tell whether a runner update is needed, because");
+    });
+  });
 
   it("the runner card names the live runner-only tickets in its context's tickets list, never from its text; the go-live pass adds nothing to it", async () => {
     const c = (ctx = await setupApp());
@@ -687,8 +800,8 @@ describe("runner-update asks close themselves when the live runner image already
     const [card] = await c.db.select().from(decisions);
     expect(card!.dedupeKey).toBe(`self-deploy:runner:${C}`);
     expect((card!.context as { requested?: boolean }).requested).toBe(true);
-    // Brains' fix 1: the runners already run this commit, and the card says so.
-    expect(card!.question).toContain(`The runners already run ${C.slice(0, 8)}, which includes this. Nothing to do.`);
+    // Brains' fix 1: the runners already run this commit, and the card says so, in the one answer's words (BOS-1648).
+    expect(card!.question).toContain(`Runners are up to date: they were built from the version the server runs (${C.slice(0, 8)}). Nothing to do, unless you know of a fault in the runners.`);
     await c.selfDeploy.sync();
     expect((await c.db.select().from(decisions))[0]!.status).toBe("open");
     // Same commit again with the card still open: the same card.

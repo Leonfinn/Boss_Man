@@ -67,6 +67,19 @@ describe("acceptance criteria", () => {
     expect(readVerdicts(CRITERIA, "0 pass; 4 pass; 99 fail; 2 fail").map((r) => r.verdict)).toEqual([null, "fail", null]);
   });
 
+  it("a numbered pass is not overruled by a negated fail word in its own sentence (BOS-2144)", () => {
+    // The exact criterion and close note from BOS-2143, which read as fail and copied "6 fail" to BOS-1901.
+    const c = ["The first approved merge after BOS-1901 went live (20 Nov 09:16 UTC) has a merged record in the merge-line records, with no failed step of the merge gate in between"];
+    const note = "1 pass: first approved merge after BOS-1901 went live (3936727f, approved 09:29) passed check-quick 09:36 and GitHub CI 09:46, merged 09:46:09 as 6ba4142b on 20 Nov, no failed gate step between. Re-read from merge-line records.";
+    expect(readVerdicts(c, note).map((r) => r.verdict)).toEqual(["pass"]);
+    const n = ["Migration is expand-only and nothing fails on replay", "Secrets are never logged"];
+    expect(readVerdicts(n, "1 pass: migration is expand-only, nothing fails on replay; 2 pass").map((r) => r.verdict)).toEqual(["pass", "pass"]);
+    // A fail written in another sentence that matches the criterion still wins over the numbered pass.
+    expect(readVerdicts(n, "1 pass: nothing fails on replay. Migration is expand-only: fail, the replay broke; 2 pass").map((r) => r.verdict)).toEqual(["fail", "pass"]);
+    // A numbered fail stays a fail, whatever its sentence says.
+    expect(readVerdicts(n, "1 fail: migration is expand-only but replay is not green; 2 pass").map((r) => r.verdict)).toEqual(["fail", "pass"]);
+  });
+
   it("test counts in prose never override a stated verdict", () => {
     const c = ["Migration is expand-only", "Secrets are never logged", "Docs updated for the owner"];
     const a = readVerdicts(c, "Migration is expand-only: fail. Secrets are never logged: pass. Docs updated for the owner: fail. Suite: 3 passed, 1 failed.");

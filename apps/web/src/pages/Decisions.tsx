@@ -1,18 +1,25 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
+import { figureText, HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
-import { ageLabel, raisedAgo } from "../age";
+import { ageLabel, dayLabel, raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
+
+const ALWAYS_TTLS: [AlwaysTtl, string][] = [
+  ["always", "Always (until you remove it)"],
+  ["hour", "For 1 hour"],
+  ["midnight", "Until midnight (server time)"],
+];
 import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { Loader } from "../components/Loader";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 
 // A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
@@ -137,7 +144,7 @@ export function effectOf(d: Decision, option: string, alwaysWho = "any agent"): 
 
 type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean; phase?: string } | { state: "finished"; text?: string };
 const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
+const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Merge check running", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted", retrying_git: "Retrying after a push/fetch failure to the git host" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 
@@ -192,6 +199,35 @@ function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string |
   );
 }
 
+/** BOS-1744: the project filter value for "no project": hires, model changes and other company-wide cards. */
+export const COMPANY_WIDE = "company-wide";
+const PROJECT_FILTER_KEY = "bossman.decisions.projectFilter";
+
+/** The projects a card is for, by name; a card with none is company-wide. */
+export function cardProjects(d: Pick<Decision, "projects">): Array<{ id: string; name: string }> {
+  return d.projects ?? [];
+}
+
+/** Whether a card shows under a project filter (null = all, COMPANY_WIDE, or a project id). */
+export function inProjectFilter(d: Pick<Decision, "projects">, pf: string | null): boolean {
+  if (!pf) return true;
+  const ps = cardProjects(d);
+  return pf === COMPANY_WIDE ? ps.length === 0 : ps.some((p) => p.id === pf);
+}
+
+function readProjectFilter(): string | null {
+  try { return localStorage.getItem(PROJECT_FILTER_KEY) || null; } catch { return null; }
+}
+
+function ProjectLabel({ d }: { d: Pick<Decision, "projects"> }) {
+  const ps = cardProjects(d);
+  return (
+    <span className="tag project-tag" title="The project this card is for">
+      {ps.length ? ps.map((p) => p.name).join(", ") : "Company-wide"}
+    </span>
+  );
+}
+
 const shortSha = (sha: string) => sha.slice(0, 8);
 
 const HAND_EFFECT: Record<NonNullable<DeployUpdate["handEffect"]>, string> = {
@@ -210,8 +246,13 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
   // card doesn't fill the screen with the whole list (the same on every update card, open or closed).
   const KEEP_TICKETS = 3;
   const shownChanges = u.changes.slice(0, KEEP_TICKETS);
-  const hidden = u.changes.length - shownChanges.length;
   const [allShown, setAllShown] = useState(false);
+  // One overflow line, one number (BOS-1826): every ticket not on screen, whether the card keeps it (u.changes past
+  // the third, shown on a click) or only counts it (u.more, past the server's first 20).
+  const listed = allShown ? u.changes.length : shownChanges.length;
+  const notShown = u.changes.length - listed + u.more;
+  const canExpand = u.changes.length > shownChanges.length;
+  const otherCount = u.otherCommits.length + (u.otherMore ?? 0);
   return (
     <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
       <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
@@ -224,27 +265,41 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
               <a href={`#/tickets/${c.ticketId}`}><strong>{c.ref}</strong> {c.title}</a>
             </li>
           ))}
-          {hidden > 0 && (
+          {(notShown > 0 || allShown) && (
             <li>
-              <button type="button" className="linkish" onClick={() => setAllShown((v) => !v)}>
-                {allShown ? "Show fewer" : `+${hidden} more`}
-              </button>
-            </li>
-          )}
-          {u.more > 0 && (
-            <li className="muted">
-              and {u.more} more. <a href="#/board">See all the tickets</a>.
+              {notShown > 0 && (
+                <>
+                  {canExpand && !allShown ? (
+                    <button type="button" className="linkish" onClick={() => setAllShown(true)}>
+                      and {notShown} more
+                    </button>
+                  ) : (
+                    <span className="muted">and {notShown} more</span>
+                  )}
+                  {" — "}
+                  <a href="#/board">See all the tickets</a>
+                </>
+              )}
+              {allShown && (
+                <>
+                  {notShown > 0 ? " · " : ""}
+                  <button type="button" className="linkish" onClick={() => setAllShown(false)}>
+                    Show fewer
+                  </button>
+                </>
+              )}
             </li>
           )}
         </ul>
       )}
-      {u.otherCommits.length > 0 && (
+      {otherCount > 0 && (
         <details>
-          <summary>Other commits: {u.otherCommits.length}</summary>
+          <summary>Other commits: {otherCount}</summary>
           <ul style={{ paddingLeft: 20, margin: "4px 0" }}>
             {u.otherCommits.map((s, i) => (
               <li key={i} style={{ overflowWrap: "anywhere" }}><span className="mono muted">{s}</span></li>
             ))}
+            {(u.otherMore ?? 0) > 0 && <li className="muted">and {u.otherMore} more</li>}
           </ul>
         </details>
       )}
@@ -277,11 +332,23 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
 function CommandBlock({ command, where }: { command: string; where?: Where }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const pre = useRef<HTMLPreElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const alive = useRef(true);
+  // Clear the reset timer on unmount: a timer that outlives the page fires after the DOM is gone (BOS-1783).
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
   const copy = async () => {
     const ok = await copyText(command);
+    if (!alive.current) return;
     setState(ok ? "copied" : "failed");
     if (!ok) selectText(pre.current);
-    setTimeout(() => setState("idle"), 2000);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState("idle"), 2000);
   };
   const label = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select the text instead" : "Copy";
   return (
@@ -307,12 +374,23 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
  * The fences are read by the same parser as the server's card lint (BOS-550), so a step the lint accepts renders
  * its commands as blocks, labelled fence lines and indented list items included.
  */
-function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
-  const parsed = parseStep(text);
-  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text }];
+function StepText({ text, refs, stored }: { text: string; refs?: Decision["refs"]; stored?: StepSource | null }) {
+  // BOS-1665: the server takes the R19 tag out once and keeps the step's source beside it (`stored`). A card raised
+  // before that still has the tag in its text, so it is split here too; either way the owner reads a muted line.
+  const split = splitStepSource(text);
+  const shown = split.text;
+  const source = stored ?? split.source;
+  const parsed = parseStep(shown);
+  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text: shown }];
   return (
     <>
       {parts.map((p, i) => (p.type === "command" ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
+      {source?.kind === "seen" && (
+        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={`/api/ticket-images/${source.imageId}`} target="_blank" rel="noreferrer">your screenshot</a>{source.takenAt ? ` of ${source.takenAt}` : ""}</span>
+      )}
+      {source?.kind === "notSeen" && (
+        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={source.url} target="_blank" rel="noreferrer noopener">the vendor's docs</a>, {source.date}</span>
+      )}
     </>
   );
 }
@@ -504,8 +582,13 @@ function useLinkedCard(): string | null {
   return id;
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
+export function Decisions({ decisions, companies, loaded, loadError = false, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; loadError?: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
+  const [savedProject, setSavedProject] = useState<string | null>(readProjectFilter);
+  const pickProject = (v: string | null) => {
+    setSavedProject(v);
+    try { if (v) localStorage.setItem(PROJECT_FILTER_KEY, v); else localStorage.removeItem(PROJECT_FILTER_KEY); } catch { /* private browsing: the choice just isn't kept */ }
+  };
   // A link straight to one card (#/decisions/<id>, BOS-1078: the Merge queue names the card holding a merge):
   // that card is scrolled to and marked once it is on the page.
   const linkedId = useLinkedCard();
@@ -515,6 +598,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   }, [linkedId, loaded, decisions.length]);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [alwaysScopes, setAlwaysScopes] = useState<Record<string, "agent" | "company">>({});
+  const [alwaysTtls, setAlwaysTtls] = useState<Record<string, AlwaysTtl>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [endedHere, setEndedHere] = useState<Record<string, boolean>>({});
@@ -564,15 +648,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // close knows they may be part-way through its steps and also tells their feed. Best effort: a failed
   // call changes nothing on the page.
   const openedSent = useRef(new Set<string>());
+  const markOpened = (id: string) => {
+    if (openedSent.current.has(id)) return;
+    openedSent.current.add(id);
+    void api(`/api/decisions/${id}/opened`, { method: "POST", body: {} }).catch(() => undefined);
+  };
   useEffect(() => {
     for (const d of decisions) {
       const c = d.context;
       const handApply = (c?.type === "self_deploy" && c.handSteps?.length) || (c?.type === "owner_todo" && !!c.steps?.length);
-      if (!handApply || openedSent.current.has(d.id)) continue;
-      openedSent.current.add(d.id);
-      void api(`/api/decisions/${d.id}/opened`, { method: "POST", body: {} }).catch(() => undefined);
+      // (BOS-1691) Any card the owner opened by its link counts too: if it then leaves the list, they are told why.
+      if (handApply || d.id === linkedId) markOpened(d.id);
     }
-  }, [decisions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [decisions, linkedId]);
   const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
   const landingKey = landingIds.sort().join(",");
   useEffect(() => {
@@ -623,12 +712,21 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     }
   };
 
-  const shown = decisions.filter((d) => !filter || d.companyId === filter);
+  // Project chips come from the open cards, so a new project appears as soon as a card names it. A remembered
+  // project that no card names any more falls back to "All projects" rather than hiding everything.
+  const projectOptions = [...new Map(decisions.filter((d) => !filter || d.companyId === filter).flatMap((d) => cardProjects(d).map((p) => [p.id, p.name] as const))).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const hasCompanyWide = decisions.some((d) => (!filter || d.companyId === filter) && cardProjects(d).length === 0);
+  const projectFilter = savedProject && ((savedProject === COMPANY_WIDE && hasCompanyWide) || projectOptions.some(([id]) => id === savedProject)) ? savedProject : null;
+  const shown = decisions.filter((d) => (!filter || d.companyId === filter) && inProjectFilter(d, projectFilter));
   const shownNotices = closedNotices.filter((n) => !filter || n.companyId === filter);
   // (BOS-551) The server puts waiting cards last and marks them; show them in the "Waiting, nothing to do
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
   const queueCards = shown.filter((d) => !d.waiting);
-  const waitingCards = shown.filter((d) => !!d.waiting);
+  // (BOS-1691) A card folded away while its author re-checks it leaves a line in the main list, never a silent gap.
+  const recheckCards = shown.filter((d) => !!d.waiting && !!d.rechecking?.hidden);
+  const waitingCards = shown.filter((d) => !!d.waiting && !d.rechecking?.hidden);
+  // (BOS-1691) Cards that left the list in the last 2 hours say why in plain sight, not only inside the "Closed" fold.
+  const recentNotices = shownNotices.filter((n) => Date.parse(n.notice.until) > Date.now());
   // (BOS-969, BOS-996) The heading takes both numbers from the server tally, the same figure the menu
   // badge shows; it sends no numbers of its own. The app already polls that tally for the badge and
   // refreshes it on every answer, so the heading reads it from there and only asks itself if it is
@@ -644,7 +742,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const answeredQueue = answeredHere.filter((d) => !d.waiting).length;
   const answeredWaiting = answeredHere.filter((d) => !!d.waiting).length;
   // Until the first tally arrives, the cards themselves stand in, so the heading is never blank.
-  const counted = tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
+  // With a project chosen the server's tally (all projects) no longer fits, so the count comes from the visible cards.
+  const counted = projectFilter ?{ open: queueCards.length, waiting: waitingCards.length } : tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
   const counts = {
     open: Math.max(counted.open - answeredQueue, 0),
     waiting: Math.max(counted.waiting - answeredWaiting, 0),
@@ -693,7 +792,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     try {
       const note = notes[d.id]?.trim();
       const reasonLink = reasonLinks[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: answerText, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: answerText, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company", alwaysTtl: alwaysTtls[d.id] ?? "always" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       // The card is answered, so its kept note and answer are done with, and the attachments went with it.
       forgetNote(d.id);
@@ -725,18 +824,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {counts.open === 1 ? "1 needs you" : `${counts.open} need you`}
-            {counts.waiting > 0 ? ` · ${counts.waiting} with the team` : ""}
+            {figureText("decisions.needYou", counts.open)}
+            {counts.waiting > 0 ? ` · ${figureText("decisions.withTeam", counts.waiting)}` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (
             <p className="sub">
-              Also waiting:{" "}
+              {/* R43: the other companies' own "needs you" figure, the one the company switcher shows (it counted every open card). */}
+              Also:{" "}
               {elsewhere.map((c, i) => (
                 <span key={c.id}>
                   {i > 0 && ", "}
                   <button type="button" className="linkish" onClick={() => onPickCompany?.(c.id)}>
-                    {c.count} in {c.name}
+                    {figureText("decisions.needYou", c.count)} in {c.name}
                   </button>
                 </span>
               ))}
@@ -753,6 +853,23 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 {c.name}
               </button>
             ))}
+          </div>
+        )}
+        {(projectOptions.length > 0 || hasCompanyWide) && (projectOptions.length + (hasCompanyWide ? 1 : 0) > 1 || projectFilter) && (
+          <div role="group" aria-label="Filter by project" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button type="button" className="chip" aria-pressed={projectFilter === null} onClick={() => pickProject(null)}>
+              All projects
+            </button>
+            {projectOptions.map(([id, name]) => (
+              <button type="button" key={id} className="chip" aria-pressed={projectFilter === id} onClick={() => pickProject(id)}>
+                {name}
+              </button>
+            ))}
+            {hasCompanyWide && (
+              <button type="button" className="chip" aria-pressed={projectFilter === COMPANY_WIDE} onClick={() => pickProject(COMPANY_WIDE)}>
+                Company-wide
+              </button>
+            )}
           </div>
         )}
       </header>
@@ -777,7 +894,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           That card is not open any more: it was answered or withdrawn, or it belongs to another company. The Board stops showing it on its next refresh.
         </p>
       )}
-      {loaded && queueCards.length === 0 && waitingCards.length === 0 ? (
+      {!loaded && (loadError
+        ? <p className="banner" role="alert">Couldn't load your decisions. It will try again shortly.</p>
+        : <Loader label="Loading decisions" />)}
+      {loaded && queueCards.length === 0 && waitingCards.length === 0 && recheckCards.length === 0 ? (
         agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
             <p>{agentsWorking === 1 ? "1 agent is" : `${agentsWorking} agents are`} working. They'll raise a decision here when they need an answer, an approval or more budget.</p>
@@ -806,7 +926,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const checking = land?.state === "running" && !land.stale;
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
-                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
+                // (BOS-1691) Touching or typing in a card counts as having it open, so a later close or re-check tells the feed.
+                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} onPointerDown={() => markOpened(d.id)} onFocusCapture={() => markOpened(d.id)} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
                   <div className="body">
                     <div className="head-line">
                       {d.step ? (
@@ -814,6 +935,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           Step {d.step}
                         </span>
                       ) : null}
+                      <ProjectLabel d={d} />
                       <span className={`tag ${k.tone}`}>{k.label}</span>
                       {d.about?.map((t) => (
                         <a key={t.ticketId} className="ref-chip mono" href={`#/tickets/${t.ticketId}`} title={t.title}>{t.ref ?? "Ticket"}</a>
@@ -829,7 +951,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       <span className="pills">
                         {d.parts.liveRun > 0 && <span className="tag amber pill">{d.agentName ?? "An agent"} is waiting on you</span>}
                         {d.blocks.length > 0 && <span className="tag blue pill">Holds up {d.blocks[0]!.ref ?? d.blocks[0]!.title}{d.blocks.length > 1 ? ` +${d.blocks.length - 1} more` : ""}</span>}
-                        {d.dueDate && <span className="tag pill">Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
+                        {d.dueDate && <span className="tag pill">Due {dayLabel(d.dueDate)}</span>}
                       </span>
                     </div>
                     {d.doAfter?.length ? (
@@ -849,6 +971,14 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {d.context?.update && <DeployUpdateView u={d.context.update} />}
+                    {/* BOS-1660: a card with steps opens with why, where and how long. Where is written by Boss Man from the steps. */}
+                    {d.context?.opening && !done && (
+                      <dl data-opening className="card-opening" style={{ margin: "0 0 8px", padding: "8px 12px", borderRadius: 8, background: "var(--surface-2, rgba(127,127,127,0.1))", fontSize: 14 }}>
+                        <div><dt style={{ display: "inline", fontWeight: 600 }}>Why: </dt><dd style={{ display: "inline", margin: 0 }}>{d.context.opening.why}</dd></div>
+                        <div><dt style={{ display: "inline", fontWeight: 600 }}>Where: </dt><dd style={{ display: "inline", margin: 0 }}>{d.context.opening.where.join(" · ")}</dd></div>
+                        <div><dt style={{ display: "inline", fontWeight: 600 }}>How long: </dt><dd style={{ display: "inline", margin: 0 }}>About {d.context.opening.minutes} minute{d.context.opening.minutes === 1 ? "" : "s"}</dd></div>
+                      </dl>
+                    )}
                     {d.context?.type === "self_deploy" && d.context.urgent ? (
                       // The question's first paragraph is the heading shown just above; the rest is the usual deploy question.
                       <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n") || d.question} refs={d.refs} /></h2>
@@ -1041,15 +1171,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </dl>
                     )}
                     {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
-                    {d.context?.type === "self_deploy" && d.context.handSteps && d.context.handSteps.length > 0 && (
-                      <details className="plan">
-                        <summary>What you'll need to do</summary>
-                        <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
-                          {d.context.handSteps.map((s, i) => (
-                            <li key={i}><StepText text={s} refs={d.refs} /></li>
-                          ))}
-                        </ol>
-                      </details>
+                    {d.context?.type === "self_deploy" && (d.context.infra || (d.context.handSteps && d.context.handSteps.length > 0)) && (
+                      <div data-hand-steps>
+                        <p data-hand-why style={{ fontSize: 14 }}>
+                          This update changes how Boss Man deploys itself{d.context.update?.handFiles?.length ? <> (<span className="mono" style={{ overflowWrap: "anywhere" }}>{d.context.update.handFiles.join(", ")}</span>)</> : ""}, so it is applied on the machine that runs Boss Man, not by the button.
+                        </p>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>What you'll need to do</p>
+                        {d.context.handSteps && d.context.handSteps.length > 0 ? (
+                          <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                            {d.context.handSteps.map((s, i) => (
+                              <li key={i}><StepText text={s} refs={d.refs} /></li>
+                            ))}
+                          </ol>
+                        ) : (
+                          <p data-hand-nosteps className="banner" style={{ fontSize: 14 }}>
+                            Boss Man has no steps to show for this update, because the machine hasn't reported where Boss Man is installed. Don't press Approve yet: open Settings → Server and runner → This server and ask us on this ticket for the exact commands.
+                          </p>
+                        )}
+                      </div>
                     )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>
@@ -1062,14 +1201,18 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
-                            <li key={i}><StepText text={s} refs={d.refs} /></li>
+                            <li key={i}><StepText text={s} refs={d.refs} stored={d.context?.stepSources?.[i]} /></li>
                           ))}
                         </ol>
                         {/* The lint's findings (BOS-417): small, under the steps, never the headline. */}
                         {d.context.lint?.override && (
-                          <p className="muted" data-lint-override style={{ fontSize: 12 }}>
-                            Boss Man flagged {d.context.lint.override.findings.map((f) => `step ${f.step}: ${f.problem}`).join("; ")}. The CEO says: {d.context.lint.override.reason}
-                          </p>
+                          <div className="muted" data-lint-override style={{ fontSize: 12 }}>
+                            {(d.context.lint.override.entries ?? [{ reason: d.context.lint.override.reason, findings: d.context.lint.override.findings }]).map((e, i) => (
+                              <p key={i} style={{ margin: 0 }}>
+                                Boss Man flagged {e.findings.map((f) => `step ${f.step}${f.rule ? ` (${f.rule})` : ""}: ${f.problem}`).join("; ")}. The CEO says: {e.reason}
+                              </p>
+                            ))}
+                          </div>
                         )}
                         {!!d.context.lint?.warn.length && (
                           <p className="muted" data-lint-warn style={{ fontSize: 12 }}>
@@ -1107,6 +1250,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p className="muted" style={{ fontSize: 12 }}>Reported {when(d.context.lastFailure.at)}</p>
                       </div>
                     )}
+                    {d.context?.keptOpen && <p className="muted" style={{ fontSize: 13 }}>{d.context.keptOpen.note}</p>}
+                    {d.context?.openAlerts && <p className="muted" style={{ fontSize: 13 }}>{d.context.openAlerts}</p>}
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>
@@ -1151,7 +1296,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Permissions.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}${(alwaysTtls[d.id] ?? "always") === "hour" ? ", for 1 hour" : alwaysTtls[d.id] === "midnight" ? ", until midnight (server time)" : ""}. To undo it, remove it under Settings → Permissions.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : checking ? null : (
                       <>
                         {d.context?.hires && (
@@ -1256,7 +1401,15 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                   </label>
                                 </fieldset>
                               )}
-                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Permissions.</p>
+                              <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+                                <legend style={{ fontWeight: 600, marginBottom: 4 }}>How long the rule lasts</legend>
+                                {ALWAYS_TTLS.map(([value, label]) => (
+                                  <label key={value} style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                    <input type="radio" name={`always-ttl-${d.id}`} checked={(alwaysTtls[d.id] ?? "always") === value} onChange={() => setAlwaysTtls((s) => ({ ...s, [d.id]: value }))} /> {label}
+                                  </label>
+                                ))}
+                              </fieldset>
+                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Permissions, where a timed rule shows when it ends.</p>
                             </div>
                           ) : null}
                           {(() => {
@@ -1400,15 +1553,32 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           {typeof banner === "function" ? banner(true) : null}
           </>
           )}
+          {recheckCards.length > 0 && (
+            // (BOS-1691) In place of each card being re-checked: who has it, after what, and when it is back at the latest.
+            <ul data-testid="recheck-lines" style={{ listStyle: "none", padding: 0, margin: "12px 0" }}>
+              {recheckCards.map((d) => (
+                <li key={d.id} id={`decision-${d.id}`} role="status" className={`strip amber stack-narrow${d.id === linkedId ? " linked" : ""}`} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 6 }}>
+                  <TicketRefs about={d.about} />
+                  <strong className="strip-title">{d.question.split("\n")[0]}</strong>
+                  <div style={{ fontSize: 13 }}>
+                    Being re-checked by {d.rechecking!.by}
+                    {d.staleReason ? (/^the owner\b/i.test(d.staleReason) ? ` after ${fromYou(d.staleReason)}` : ` because ${d.staleReason}`) : ""}.{" "}
+                    {d.rechecking!.backBy ? `Back on your list by ${atTime(d.rechecking!.backBy)}` : "Back on your list within the hour"} unless it is confirmed or closed first; if it closes, this page says why.
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
           {waitingCards.length > 0 && (
             // (BOS-551) Cards whose ticket is back with an agent, or that the agent is re-checking: not the
             // owner's to do yet. Folded at the bottom so they never sit beside the cards that are ready.
             // A link to one of these (BOS-1159) opens the fold and marks the card, so it is never hidden behind a closed group.
             <details className="sub" open={waitingCards.some((d) => d.id === linkedId) || undefined}>
-              <summary>Waiting, nothing to do yet ({waitingCards.length})</summary>
+              <summary>{figureText("decisions.withTeam", waitingCards.length)}, nothing to do yet</summary>
               <ul>
                 {waitingCards.map((d) => (
                   <li key={d.id} id={`decision-${d.id}`} className={d.id === linkedId ? "linked" : undefined} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 8 }}>
+                    <ProjectLabel d={d} />
                     <TicketRefs about={d.about} />
                     <strong>{d.question.split("\n")[0]}</strong>
                     {d.waiting ? <div className="muted" style={{ fontSize: 13 }}>{d.waiting}</div> : null}
@@ -1421,8 +1591,137 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       )}
       {/* (BOS-809) Outside the empty-queue ternary on purpose: a closed notice (kept steps, the link to
           the newer card) and the settled/withdrawn history must still show when nothing else is open. */}
+      {recentNotices.length > 0 && (
+        // (BOS-1691) Every card that left the owner's list in the last 2 hours, one line each with who and why, unfolded.
+        <section data-testid="left-your-list" style={{ marginTop: 16 }}>
+          <h3 style={{ fontSize: 15, margin: "0 0 6px" }}>Left your list recently</h3>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+            {recentNotices.map((n) => (
+              <li key={n.id} className="strip stack-narrow strip-cols" style={{ fontSize: 14 }}>
+                <RolledTitle text={n.question.split("\n")[0] ?? ""} /> <span className="muted strip-when">· {atTime(n.notice.at)}</span>
+                <div>{n.notice.text}</div>
+                {n.notice.newer && <a href={`#/decisions/${n.notice.newer.decisionId}`}>Open the newer card ›</a>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <ClosedGroup notices={shownNotices} advised={advised} />
+      <AnsweredList companyId={filter} />
     </>
+  );
+}
+
+type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null };
+
+const answeredBy = (i: AnsweredItem) => (i.by === "owner" ? "You" : i.by === "ceo" ? i.byName ?? "The CEO" : i.by === "auto" ? "Automatically" : "Withdrawn by the team");
+const answeredWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+/**
+ * (BOS-2187) Past answers, newest first, 50 at a time. Read when the owner opens it, so the page costs nothing until then.
+ * A search box narrows it to questions containing the text.
+ */
+export function AnsweredList({ companyId }: { companyId?: string | null }) {
+  const [opened, setOpened] = useState(false);
+  const [items, setItems] = useState<AnsweredItem[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const [done, setDone] = useState(false);
+  const load = async (cursor: string | null, q: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      if (q.trim()) params.set("q", q.trim());
+      if (companyId) params.set("companyId", companyId);
+      const r = await api<{ items: AnsweredItem[]; next: string | null }>(`/api/decisions/answered?${params.toString()}`);
+      setItems((prev) => (cursor ? [...prev, ...r.items] : r.items));
+      setNext(r.next);
+      setDone(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the answered cards.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!opened) return;
+    const t = setTimeout(() => void load(null, text), text ? 300 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, text, companyId]);
+  return (
+    <details data-testid="answered-list" style={{ marginTop: 16 }} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary style={{ fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Answered</summary>
+      <div style={{ marginTop: 8 }}>
+        <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {done && items.length === 0 && !error && <p className="muted">{text.trim() ? "No answered card matches that." : "No card has been answered yet."}</p>}
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+          {items.map((i) => (
+            <li key={i.id} className="strip stack-narrow strip-cols" style={{ fontSize: 14 }}>
+              <RolledTitle text={i.question} />
+              <div>
+                {i.status === "answered" ? (
+                  <>
+                    <strong>{i.answer ?? "Answered"}</strong> · {answeredBy(i)}
+                  </>
+                ) : (
+                  <span className="muted">{answeredBy(i)}</span>
+                )}{" "}
+                <span className="muted">· {answeredWhen(i.at)}</span>
+              </div>
+              {i.ticket && (
+                <a href={`#/tickets/${i.ticket.id}`} title={i.ticket.title}>
+                  {i.ticket.ref ? <strong>{i.ticket.ref}</strong> : null} {i.ticket.title}
+                </a>
+              )}
+            </li>
+          ))}
+        </ul>
+        {busy && <Loader label="Loading answered cards" size={16} />}
+        {next && !busy && (
+          <button type="button" className="btn" onClick={() => void load(next, text)}>
+            Show older
+          </button>
+        )}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * (BOS-1935) A "Left your list recently" card's question, rolled up to its first 3 lines with an ellipsis. "Show more"
+ * appears only when the text really is cut (measured, so it follows the screen width), and expands this one card.
+ */
+function RolledTitle({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const [cut, setCut] = useState(false);
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || open) return;
+    const measure = () => setCut(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [text, open]);
+  return (
+    <span className="strip-title rolled-wrap">
+      <strong ref={ref} className={`rolled-text${open ? " open" : ""}`}>{text}</strong>
+      {(cut || open) && (
+        <button type="button" className="link-btn rolled-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? "Show less" : "Show more"}
+        </button>
+      )}
+    </span>
   );
 }
 

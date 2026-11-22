@@ -4,6 +4,8 @@
 // message tells the author exactly what to write, and what it cannot tie to a criterion counts
 // as missing. Shared so the server's review gate and the web's checklist agree exactly.
 import { z } from "zod";
+import { factClauses, namesHostFact } from "./host-facts.js";
+import { namesPage, pageClauses } from "./page-clause.js";
 
 /** A criterion as stored: a plain string, checked before merge (old rows stay strings), or the
  * `{ text, after: "merge" }` form for a check only a real host can settle (DR-024 #5). */
@@ -66,7 +68,16 @@ function numberedVerdicts(count: number, segments: readonly string[]): Map<numbe
  * cardAnswerLine writes it with no . ; or , in it, so it is always one segment. A later verdict the ticket's
  * own author reports for the same criterion replaces it; the card line never counts as the author's words.
  */
-const CARD_LINE = /^Owner answered .*?\) ?: ((?:\d{1,2} (?:pass|fail)(?: and )?)+)/;
+const CARD_LINE = /^(?:Owner answered .*?\) ?|Check ticket [A-Za-z0-9-]{1,40} reported): ((?:\d{1,2} (?:pass|fail)(?: and )?)+)/;
+
+/**
+ * The note line for a split-out check ticket that closed (BOS-1794): `Check ticket BOS-12 reported: 3 pass — "criterion" — "check title"`.
+ * Read like a card answer: by its number, standing in until the ticket's own author reports that criterion again.
+ */
+export function checkTicketLine(ref: string, n: number, verdict: "pass" | "fail", criterion: string, title: string): string {
+  const plain = (s: string) => s.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim();
+  return `Check ticket ${plain(ref).replace(/\s/g, "")} reported: ${n} ${verdict} — "${plain(criterion)}" — "${plain(title).slice(0, 120)}"`;
+}
 
 /** What an option means for the criteria its card settles (BOS-1155). */
 export type OptionVerdicts = Record<string, "pass" | "fail" | "none">;
@@ -95,7 +106,8 @@ export function cardAnswerLine(question: string, by: string, verdicts: ReadonlyA
  * sentences (on . ; and newlines); a sentence counts for a criterion when it contains enough of
  * the criterion's words (60%, or every word if the criterion has few), and that sentence's pass
  * or fail word is the verdict. Numbered verdicts ("1 pass; 2 fail: why", "C3 ok") in criteria order
- * also count when they start a segment; a fail from either reading wins. A criterion no sentence claims comes back as null: not reported.
+ * also count when they start a segment; a fail from either reading wins, but the word reading skips a sentence
+ * that starts with the criterion's own numbered verdict (BOS-2144). A criterion no sentence claims comes back as null: not reported.
  */
 export function readVerdicts(criteria: readonly Criterion[], note: string | null | undefined): Array<{ criterion: string; verdict: Verdict }> {
   const texts = criteria.map(criterionText);
@@ -111,9 +123,10 @@ export function readVerdicts(criteria: readonly Criterion[], note: string | null
   const bag = segments.map((s) => new Set(tokens(s)));
   const raw = segments;
   // The segment each numbered verdict sits in (a segment may hold commas, which also split verdicts).
-  const numberedAt = new Map<number, { verdict: Exclude<Verdict, null>; at: number }>();
+  // `leads`: the sentence starts with the verdict ("1 pass: ..."), not a mid-sentence count ("..., 2 ok of 5 checks").
+  const numberedAt = new Map<number, { verdict: Exclude<Verdict, null>; at: number; leads: boolean }>();
   segments.forEach((s, at) => {
-    for (const [n, v] of numberedVerdicts(texts.length, s.split(","))) if (!numberedAt.has(n)) numberedAt.set(n, { verdict: v.verdict, at });
+    for (const [n, v] of numberedVerdicts(texts.length, s.split(","))) if (!numberedAt.has(n)) numberedAt.set(n, { verdict: v.verdict, at, leads: v.at === 0 });
   });
   return texts.map((criterion, idx) => {
     const byNumber = numberedAt.get(idx + 1) ?? null;
@@ -124,6 +137,11 @@ export function readVerdicts(criteria: readonly Criterion[], note: string | null
       const need = want.length <= 2 ? want.length : Math.ceil(want.length * 0.6);
       let best = -1;
       for (let i = 0; i < bag.length; i++) {
+        // A sentence that starts "N pass" is read by its number only (BOS-2144): restating a criterion worded
+        // with a negated fail ("no failed step", "nothing fails") must not turn that pass into a fail. Other
+        // sentences are still read, so a fail stated elsewhere still wins; so does a fail word in a sentence
+        // whose "2 ok" is only a count after a comma.
+        if (byNumber?.leads && i === byNumber.at) continue;
         const hit = want.filter((w) => bag[i]!.has(w)).length;
         if (hit >= need && hit > (best < 0 ? 0 : want.filter((w) => bag[best]!.has(w)).length)) best = i;
       }
@@ -196,6 +214,49 @@ export function missingVerdicts(criteria: readonly Criterion[], note: string | n
     .map((r) => r.criterion);
 }
 
+/** What replaces a pass that was given before the work was live (BOS-2076). It holds no pass or fail word. */
+export const NOT_YET_CHECKED = "not yet checked";
+
+const PASS_WORDS = /\b(pass|passed|passes|passing|ok|done|yes|green)\b|[✓✔]/gi;
+
+/**
+ * BOS-2076: an after-merge criterion can only be checked once the work is live, so a "pass" on one given earlier
+ * (BOS-1737 criterion 5 passed at review while Google knew none of the pages) is rewritten in the note to
+ * "not yet checked". Only the pass words of the segments that carry an after-merge pass are touched, and a
+ * rewrite is kept only when it leaves every other criterion's verdict as it was. A fail is never changed.
+ * `held` lists the criteria whose pass was taken out; `note` is the note to store.
+ */
+export function holdEarlyAfterMergePasses(criteria: readonly Criterion[], note: string): { note: string; held: string[] } {
+  const passing = (n: string) => readVerdicts(criteria, n).map((r) => r.verdict === "pass");
+  const before = passing(note);
+  const wanted = before.map((p, i) => p && isAfterMerge(criteria[i]!));
+  if (!wanted.some(Boolean)) return { note, held: [] };
+  const verdictsOf = (n: string) => readVerdicts(criteria, n).map((r) => r.verdict);
+  const original = verdictsOf(note);
+  let current = note;
+  // Finest cut first (a comma piece, so "1 pass, 5 pass" only loses the 5), then the whole sentence.
+  for (const cut of [/([.;\n,])/, /([.;\n])/]) {
+    const pieces = current.split(cut);
+    for (let p = 0; p < pieces.length; p += 2) {
+      const piece = pieces[p]!;
+      if (piece.search(PASS_WORDS) < 0 || CARD_LINE.test(piece.trim())) continue;
+      const trial = [...pieces];
+      trial[p] = piece.replace(PASS_WORDS, NOT_YET_CHECKED);
+      const next = trial.join("");
+      const v = verdictsOf(next);
+      // Keep it when it takes out an after-merge pass and changes nothing else.
+      const ok = v.every((x, i) => x === original[i] || (wanted[i] && x === null));
+      const fewer = v.filter((x, i) => x === "pass" && wanted[i]).length < verdictsOf(current).filter((x, i) => x === "pass" && wanted[i]).length;
+      if (ok && fewer) {
+        current = next;
+        pieces.splice(0, pieces.length, ...current.split(cut));
+      }
+    }
+  }
+  const after = verdictsOf(current);
+  return { note: current, held: criteria.flatMap((c, i) => (wanted[i] && after[i] !== "pass" ? [criterionText(c)] : [])) };
+}
+
 /** The after-merge criteria with no verdict yet: what keeps a merged ticket open. */
 export const unreportedAfterMerge = (criteria: readonly Criterion[], note: string | null | undefined): string[] => missingVerdicts(criteria, note, "after");
 
@@ -232,11 +293,29 @@ const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|de
  */
 export function afterMergeLint(criteria: readonly Criterion[]): string {
   const loose = criteria.filter((c) => !isAfterMerge(c) && LIVE.test(criterionText(c)));
-  if (!loose.length) return "";
-  const names = loose.map((c) => `"${criterionText(c)}"`).join(", ");
-  const them = loose.length === 1 ? "it" : "them";
-  return `${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`;
+  const parts: string[] = [];
+  if (loose.length) {
+    const names = loose.map((c) => `"${criterionText(c)}"`).join(", ");
+    const them = loose.length === 1 ? "it" : "them";
+    parts.push(`${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`);
+  }
+  // BOS-1586: an after-merge criterion about something the host reports needs the clause the server checks.
+  const unclaused = criteria.filter((c) => isAfterMerge(c) && namesHostFact(criterionText(c)) && !factClauses(criterionText(c)).length);
+  if (unclaused.length) {
+    const names = unclaused.map((c) => `"${criterionText(c)}"`).join(", ");
+    parts.push(`${names} names something the host reports, but has no fact clause, so the ticket could close on a "pass" while the host still shows it failing. Add one to the criterion, e.g. "(fact: repo.probe = ok)" or "(fact: no failing check)": the ticket then closes only when the host's newest report taken after it went live agrees. This is a warning only.`);
+  }
+  // R37: an after-merge criterion about a live page needs the page clause the done move checks.
+  const pageless = criteria.filter((c) => isAfterMerge(c) && namesPage(criterionText(c)) && !pageClauses(criterionText(c)).length);
+  if (pageless.length) {
+    const names = pageless.map((c) => `"${criterionText(c)}"`).join(", ");
+    parts.push(`${names} is about a live page but has no page clause: add (page: https://example.com/path shows "words only the working page shows") or this can close on a status code. With it, a pass must cite a screenshot attached after go-live and quote those words. This is a warning only.`);
+  }
+  return parts.join("\n");
 }
+
+/** A criterion that lets a raised card stand in for the check ("... or names one ... with a card raised for it"). */
+export const allowsCardInstead = (text: string): boolean => /\bor\b[^.]*\bcard\b/i.test(text.replace(/\(\s*fact\s*:[^)]*\)/gi, ""));
 /** A real staging environment, not git's "staging area" or "staged changes" (BOS-1473). */
 const STAGING = /\b(?:on|to|in|against|at|via|the)\s+(?:the\s+)?staging\b(?!\s+(?:area|index|changes|files?|directory))|\bstaging\s+(?:environment|server|host|target|deploy(?:ment)?|site|instance)\b/i;
 

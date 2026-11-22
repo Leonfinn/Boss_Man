@@ -3,14 +3,22 @@
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 // BOS-1435 (DR-060): check workers on other machines take jobs the company runner has no free slot for. The runner is
 // always filled first; each ready worker then claims with its own limit. With no ready worker every path is as before.
-import { and, eq, inArray, isNotNull, lt } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, lt, ne } from "drizzle-orm";
 import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, type RunnerCommand, type WorkerCommand, type WorkerRepos } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { checkJobs, runners } from "../db/schema.js";
+import { checkJobs, runners, tickets } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
-import { checkQueue, type CheckJob } from "./check-queue.js";
+import { checkQueue, DEFAULT_SLOT_POLICY, MACHINE_RUNNER, isDefaultPolicy, SUPERSEDED_TEXT, type CheckDecline, type CheckJob, type MachineView } from "./check-queue.js";
+
+/** R46: one machine with a free check slot that is not taking a queued job it could take. */
+export type IdleSlot = CheckDecline & { companyId: string; machineKey: string; machine: string; since: Date; minutes: number };
 import type { Eligible } from "./check-workers.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
+import { blocksClass, type WaitKind } from "./update-waits.js";
+
+/** scripts/install-packages.sh (used by check-quick.sh and check-all.sh) prints this and exits 75 when the install stopped on a machine error. */
+export const MACHINE_FAULT_MARKER = "check-quick: install stopped on a machine fault";
+export const MACHINE_FAULT_RETRIES = 3;
 
 export type CheckDispatcherDeps = {
   send: (runnerId: string, command: RunnerCommand) => boolean;
@@ -48,8 +56,12 @@ export type CheckDispatcherDeps = {
   workerGraceMs?: number;
   /** Only the leader re-queues a dropped worker's jobs (a standby closed the socket itself). Absent: always the leader. */
   isLeader?: () => boolean;
-  /** A runner drain (image update or setting change) is under way (BOS-1471): no new job goes to any runner until it ends. Running ones finish; queued ones wait. */
-  drainPending?: () => Promise<boolean>;
+  /**
+   * A runner drain (image update or setting change) is under way (BOS-1471): which wait it is ("runner-drain", or
+   * "owner-force" once the owner chose to stop checks or runs), or null/false when none. `true` means "runner-drain".
+   * What it stops is that wait's `blocks` in WAIT_RULES (BOS-2108): the runner takes nothing new, a worker quick checks only.
+   */
+  drainPending?: () => Promise<WaitKind | boolean | null>;
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
@@ -96,6 +108,10 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
     return runner && deps.isConnected(runner.id) && deps.bundles.canPack(runner.id) ? runner.id : null;
   }
+
+  /** BOS-1628: how many times a job went back in line after a machine fault (the counter is lost on a server restart, which only allows a few more tries). */
+  // shortcut: lost on restart, harmless because a restart only allows a few more tries of a job that is capped at MACHINE_FAULT_RETRIES.
+  const machineFaults = new Map<string, number>();
 
   /** A job ended, was cancelled or went back in line: its bundle and its fetch state go. */
   function forgetCode(jobId: string, alsoExclusions: boolean) {
@@ -182,36 +198,113 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     else if (job.runnerId) deps.send(job.runnerId, { type: "check.cancel", jobId: job.id });
   };
 
+  // shortcut: lost on restart, harmless because the next tick rebuilds it and the idle clock simply starts again; upgrade only if alarms must survive restarts.
+  /** R46: a machine with a free slot that is not taking a queued job, since when and why. */
+  const idle = new Map<string, Omit<IdleSlot, "minutes">>();
+
   /** Start whatever the free slots allow. Safe to call any time: a job is never claimed twice. */
   async function pump(): Promise<void> {
     if ((await queue.mode()) !== "server") return;
-    // The runner is about to be swapped: a job started now would be killed by it. Workers wait too: a worker only takes
-    // jobs while its image commit equals the runner's (DR-042), and the swap is what changes the runner's commit.
-    if (await deps.drainPending?.()) return;
+    // The runner is about to be swapped: a job started now would be killed by it, so the runner takes nothing new.
+    // BOS-2108: a check worker follows the drain's row in WAIT_RULES, which does not block "quick-check-worker". The swap
+    // does not touch the worker's container, and the drain does not wait for worker jobs (runner-busy counts runner jobs
+    // only), so a worker's quick check neither dies in the swap nor holds it back. It is matched with the runner's image
+    // as it is now (DR-042, by tools since BOS-1570), like a job it started a second before the drain; once the swap
+    // lands, eligible() compares with the new image and a worker that no longer matches takes nothing more. Merge and
+    // full checks wait for the swap (the row blocks them), as under a server update (BOS-1748). Before this, the
+    // worker sat idle for the whole drain: 14:44:50 to 14:54:10 on 20 Nov (BOS-2106).
+    const raw = (await deps.drainPending?.()) ?? null;
+    const drain: WaitKind | null = raw === true ? "runner-drain" : raw || null;
+    if (drain && blocksClass(drain, "quick-check-worker")) return;
+    const workerQuickOnly = !!drain && (blocksClass(drain, "merge-check") || blocksClass(drain, "full-check"));
     const queuedCompanies = await db.selectDistinct({ companyId: checkJobs.companyId }).from(checkJobs).where(eq(checkJobs.state, "queued"));
+    for (const k of [...idle.keys()]) if (!queuedCompanies.some((q) => q.companyId === idle.get(k)!.companyId)) idle.delete(k);
     for (const { companyId } of queuedCompanies) {
+      // R46: what each machine with a free slot said when it took nothing this pass; the second (non-dedicated) pass wins.
+      const declined = new Map<string, { machine: string; why: CheckDecline | null }>();
+      const settle = () => {
+        for (const [k, v] of [...idle]) if (v.companyId === companyId) idle.delete(k);
+        const t = new Date();
+        for (const [k, d] of declined) {
+          if (!d.why) continue;
+          const before = prior.get(k);
+          idle.set(k, { companyId, machineKey: k, machine: d.machine, ...d.why, since: before && before.jobId === d.why.jobId && before.code === d.why.code ? before.since : t });
+        }
+      };
+      const prior = new Map([...idle].filter(([, v]) => v.companyId === companyId));
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
-      const runnerUp = !!runner && deps.isConnected(runner.id) && deps.can(runner.id);
+      // During a drain the runner is not offered jobs (every check class is in its row's `blocks`), but it still packs code for workers.
+      const runnerUp = !drain && !!runner && deps.isConnected(runner.id) && deps.can(runner.id);
       // BOS-1436: a worker gets the code only through the company runner, so with no runner able to pack it, no worker is used.
       const packer = runner && deps.bundles && deps.isConnected(runner.id) && deps.bundles.canPack(runner.id) ? runner.id : null;
       const workers = packer ? ((await deps.workers?.eligible(companyId)) ?? []) : [];
-      if (!runnerUp && !workers.length) continue;
+      if (!runnerUp && !workers.length) {
+        settle();
+        continue;
+      }
       // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
       const list = await scanList?.forScan();
-      // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
-      // limit is also capped by the slots it reported in hello.
-      if (runnerUp)
-        for (const job of await queue.claimNext(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id))) {
-          const sent = deps.send(runner!.id, runCommand(job, list));
-          if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
+      // BOS-1602: two passes. The first fills only slots set aside for one kind (kept for merges, a merges-only or a
+      // checks-only machine), so a merge goes to a kept slot and a quick check to a checks-only machine before either takes
+      // an "either" slot. The second fills the either slots as before. With nothing set there are no such slots, the first
+      // pass claims nothing and this is the old order: the runner first, then each worker.
+      const split = !isDefaultPolicy(await queue.runnerPolicy()) || workers.some((w) => w.policy && !isDefaultPolicy(w.policy));
+      // BOS-2225: an out-of-memory retry avoids a machine only if another machine would really accept this job, or it would
+      // sit queued with no card. A merge or full job needs a machine that takes merges and is not draining; a worker also
+      // needs the job's code (noCodeOn). A quick job is never avoided (only merge jobs carry an avoid).
+      const runnerPolicy = runnerUp ? await queue.runnerPolicy() : null;
+      const otherTakes = (job: CheckJob, thisKey: string): boolean => {
+        const long = job.kind === "merge" || job.scope === "full";
+        if (thisKey !== MACHINE_RUNNER && runnerUp && (!long || runnerPolicy!.takes !== "checks")) return true;
+        return workers.some((w) => w.id !== thisKey && w.limit > 0 && (!long || (!workerQuickOnly && w.policy?.takes !== "checks")) && !noCodeOn.get(job.id)?.has(w.id));
+      };
+      for (const dedicatedOnly of split ? [true, false] : [false]) {
+        // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
+        // limit is also capped by the slots it reported in hello.
+        if (runnerUp) {
+          const r = await queue.claimNextWhy(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly, othersUp: otherTakes });
+          if (!dedicatedOnly) declined.set(`runner:${runner!.id}`, { machine: "the company runner", why: r.declined });
+          for (const job of r.jobs) {
+            const sent = deps.send(runner!.id, runCommand(job, list));
+            if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
+          }
         }
-      // BOS-1435: then each ready worker. A merge job carries the owner's list here too: a worker has the runner's trust for
-      // checks (it already sees the source), the socket is TLS like the runner's, and the list is never logged.
-      // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
-      // never holds up the line); a job this worker couldn't get the code for is left to the others.
-      for (const w of workers)
-        for (const job of await queue.claimOn({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id))) track(codeFor(job, w, list, packer!, false));
+        // BOS-1435: then each ready worker. A merge job carries the owner's list here too: a worker has the runner's trust for
+        // checks (it already sees the source), the socket is TLS like the runner's, and the list is never logged.
+        // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
+        // never holds up the line); a job this worker couldn't get the code for is left to the others.
+        for (const w of workers) {
+          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly, quickOnly: workerQuickOnly, othersUp: otherTakes });
+          if (!dedicatedOnly) declined.set(`worker:${w.id}`, { machine: `check worker "${w.name}"`, why: r.declined });
+          for (const job of r.jobs) track(codeFor(job, w, list, packer!, false));
+        }
+      }
+      // A job another machine took in this same pass is no longer waiting: only a job still queued counts as declined.
+      for (const [k, d] of declined) if (d.why && !(await stillQueued(d.why.jobId))) declined.set(k, { ...d, why: null });
+      settle();
     }
+  }
+
+  const stillQueued = async (jobId: string) => (await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "queued")))).length > 0;
+
+  /** R46: free check slots that did not take a queued job they could take, with how long (see `claimOnWhy`). */
+  function idleSlots(companyId?: string, now = new Date()): IdleSlot[] {
+    return [...idle.values()].filter((s) => !companyId || s.companyId === companyId).map((s) => ({ ...s, minutes: Math.max(0, Math.floor((now.getTime() - s.since.getTime()) / 60_000)) }));
+  }
+
+  /** BOS-1602: the company's ready machines with their limits and splits, for "why it waits" on the queue view. */
+  async function machines(companyId: string): Promise<MachineView[]> {
+    const workers = (await packerFor(companyId)) ? ((await deps.workers?.eligible(companyId)) ?? []) : [];
+    return [{ workerId: null, limit: await queue.slots(), policy: await queue.runnerPolicy() }, ...workers.map((w) => ({ workerId: w.id, limit: w.limit, policy: w.policy ?? DEFAULT_SLOT_POLICY }))];
+  }
+
+  /**
+   * BOS-1602: the merge train seats one member per slot that can run a merge check (DR-059), so a checks-only machine adds
+   * no seat. Never below one, so the train still lands one at a time if the owner set every machine to checks only.
+   */
+  async function mergeCapacity(companyId: string): Promise<number> {
+    const n = (await machines(companyId)).reduce((sum, m) => sum + (m.policy.takes === "checks" ? 0 : m.limit), 0);
+    return Math.max(1, n);
   }
 
   /**
@@ -223,8 +316,25 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     return (await queue.slots()) + workers.reduce((n, w) => n + w.limit, 0);
   }
 
-  async function done(machine: string | { workerId: string }, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string }) {
-    const job = await queue.complete(msg.jobId, { runnerId: machine, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog });
+  async function done(machine: string | { workerId: string }, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string; stages?: Array<{ name: string; seconds: number }>; ranFull?: boolean }) {
+    // BOS-1628: the install died of the machine (EAGAIN, ENOSPC, EMFILE), not the branch. Back in line, never a failed check for
+    // the agent, up to MACHINE_FAULT_RETRIES times for one job; after that it fails with the reason in the log, so it can't loop.
+    if (msg.exitCode === 75 && !msg.timedOut && msg.tail.includes(MACHINE_FAULT_MARKER)) {
+      const n = machineFaults.get(msg.jobId) ?? 0;
+      if (n < MACHINE_FAULT_RETRIES) {
+        const back = await queue.requeue(msg.jobId, `The check could not install its packages on this machine (a machine fault, not the code), so it went back in line (try ${n + 1} of ${MACHINE_FAULT_RETRIES}).`, machine);
+        if (back) {
+          machineFaults.set(msg.jobId, n + 1);
+          const ack = { type: "check.ack" as const, jobId: msg.jobId };
+          if (typeof machine === "string") deps.send(machine, ack);
+          else deps.workers?.send(machine.workerId, ack);
+          forgetCode(msg.jobId, false);
+          await pump();
+          return;
+        }
+      }
+    }
+    const job = await queue.complete(msg.jobId, { runnerId: machine, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog, stages: msg.stages, ranFull: msg.ranFull });
     // The machine may forget the result once the server has seen the job end, whether or not this answer counted.
     const ack = { type: "check.ack" as const, jobId: msg.jobId };
     if (typeof machine === "string") deps.send(machine, ack);
@@ -234,9 +344,29 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     await pump();
   }
 
+  /** Cancel one job with its reason, stop it on the machine running it, and start the next in the freed slot. */
+  async function cancelJob(jobId: string, reason: string) {
+    const [before] = await db.select().from(checkJobs).where(eq(checkJobs.id, jobId));
+    const job = await queue.cancel(jobId, reason);
+    if (job) {
+      forgetCode(jobId, true);
+      if (before?.state === "running") stopOn(before);
+      await ended(job);
+      await pump();
+    }
+    return job;
+  }
+
+  /** BOS-1757: the message recorded on a merge check whose ticket is no longer in review. */
+  const NEWER_COMMIT_TEXT = "A newer commit of this ticket was queued for checking, so this running merge check was stopped.";
+  const LEFT_REVIEW_TEXT ="The ticket left review, so its merge check was stopped.";
+
   return {
     pump,
+    idleSlots,
     capacity,
+    mergeCapacity,
+    machines,
 
     /** Resolves once no worker's code is being packed (it keeps waiting while new ones start). */
     async settled() {
@@ -375,6 +505,41 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         forgetCode(job.id, true);
         await ended(job);
       }
+      // BOS-1757: a merge check (queued or running) whose ticket is no longer in review can't merge: sent back, GitHub bounce,
+      // cancelled, or moved by hand. The landing that waited on it normally stops it itself; this catches the rest (a landing
+      // lost to a restart, a CI stop that left the job running). Its slot frees at once and the next check starts.
+      const orphans = await db
+        .select({ id: checkJobs.id })
+        .from(checkJobs)
+        .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
+        .where(and(eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]), ne(tickets.systemState, "review")));
+      for (const o of orphans) await cancelJob(o.id, LEFT_REVIEW_TEXT).catch(() => null);
+      // BOS-1757: a running merge check for an older commit is stale once the same ticket has a later check queued or running
+      // for a different commit (the branch moved on). The queue only drops queued jobs; stop the running one and free the slot.
+      const liveMerge = await db
+        .select()
+        .from(checkJobs)
+        .where(and(inArray(checkJobs.state, ["queued", "running"]), eq(checkJobs.kind, "merge")));
+      if (liveMerge.some((j) => j.state === "running")) {
+        const live = await db.select().from(checkJobs).where(and(inArray(checkJobs.state, ["queued", "running"]), inArray(checkJobs.ticketId, liveMerge.map((j) => j.ticketId))));
+        for (const j of liveMerge.filter((m) => m.state === "running")) {
+          const newer = live.some((n) => n.ticketId === j.ticketId && n.id !== j.id && n.kind === "merge" && n.commit !== j.commit && (n.state === "queued" || (!!n.startedAt && !!j.startedAt && n.startedAt > j.startedAt))); // a later merge job inherits the earlier one's queuedAt (BOS-1328), so queuedAt can't order them
+          if (newer) await cancelJob(j.id, NEWER_COMMIT_TEXT).catch(() => null);
+        }
+      }
+      // BOS-1816: the same for a running quick (pre-review) check. When the ticket has a later check of the same kind and command
+      // queued, or started after it, for another commit, the running one is for a head that is gone: stop it on its machine (runner
+      // or worker), record it as superseded (cancelled, not failed), and free the slot.
+      const liveQuick = await db
+        .select()
+        .from(checkJobs)
+        .where(and(inArray(checkJobs.state, ["queued", "running"]), ne(checkJobs.kind, "merge")));
+      for (const j of liveQuick.filter((q) => q.state === "running")) {
+        const newer = liveQuick.some(
+          (n) => n.ticketId === j.ticketId && n.id !== j.id && n.kind === j.kind && (j.scope === "quick" || n.scope === "full") && (n.command ?? null) === (j.command ?? null) && n.commit !== j.commit && (n.state === "queued" ? n.queuedAt > j.queuedAt : !!n.startedAt && !!j.startedAt && n.startedAt > j.startedAt),
+        );
+        if (newer) await cancelJob(j.id, SUPERSEDED_TEXT).catch(() => null);
+      }
       // BOS-1436: bundles whose job no longer runs on a worker (ended, re-queued, or left by a crash) go.
       if (deps.bundles) {
         const live = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), isNotNull(checkJobs.workerId)));
@@ -390,16 +555,6 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     },
 
     /** Server-side cancel with a recorded reason; also stops it on the machine running it. */
-    async cancel(jobId: string, reason: string) {
-      const [before] = await db.select().from(checkJobs).where(eq(checkJobs.id, jobId));
-      const job = await queue.cancel(jobId, reason);
-      if (job) {
-        forgetCode(jobId, true);
-        if (before?.state === "running") stopOn(before);
-        await ended(job);
-        await pump();
-      }
-      return job;
-    },
+    cancel: cancelJob,
   };
 }

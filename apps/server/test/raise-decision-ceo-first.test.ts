@@ -96,7 +96,7 @@ describe("where a raise_decision card goes (BOS-1318)", () => {
   });
 
   it("ownerMustDo, or steps, keep the card with the owner without any ownerOnly", async () => {
-    const a = await row(idOf(textOf(await ask(ctx.dev.id, { ownerMustDo: true, steps: ["Open Settings → Server and runner → Updates and press Build and update runners.", "Undo: nothing to undo; the button only builds a new image."] }))));
+    const a = await row(idOf(textOf(await ask(ctx.dev.id, { ownerMustDo: true, why: "The runners get the new image.", minutes: 3, steps: ["Open Settings → Server and runner → Updates and press Build and update runners.", "Undo: nothing to undo in Settings → Server and runner → Updates; the button only builds a new image."] }))));
     expect(a.tier).toBe("owner");
     expect(ctxOf(a).ladder).toBeUndefined();
   });
@@ -158,6 +158,47 @@ describe("the CEO settles a team question (BOS-1318)", () => {
     const after = await row(d.id);
     expect(after.tier).toBe("owner");
     expect(ctxOf(after).ladder?.rung).toBe("owner");
+  });
+});
+
+describe("which cards the owner can see (R39)", () => {
+  const ceoCall = async (args: Record<string, unknown>) => (await ctx.mcp(ctx.ceo.id)).callTool({ name: "decisions", arguments: args });
+
+  it("the raise reply and the CEO's wake say how to reach the owner when the card landed CEO-first", async () => {
+    const r = await ask(ctx.dev.id);
+    expect(textOf(r)).toMatch(/steps or ownerOnly/);
+    const d = await row(idOf(textOf(r)));
+    const woken = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
+    expect(woken.some((w) => (w.note ?? "").includes(d.id) && /steps or ownerOnly/.test(w.note ?? ""))).toBe(true);
+    // A card that is the owner's already gets no hint.
+    expect(textOf(await ask(ctx.dev.id, { ownerOnly: "secret" }))).not.toMatch(/steps or ownerOnly/);
+  });
+
+  it("the CEO's list says Owner sees it: no for a CEO-rung card and yes for an owner one; view owner is exactly the owner's queue", async () => {
+    const teamId = idOf(textOf(await ask(ctx.dev.id)));
+    // A second agent: one agent's new card closes its earlier open one.
+    const other = (await ctx.req("POST", `/api/companies/${ctx.companyId}/agents`, { name: "Designer" })).json() as { id: string };
+    const ownerId = idOf(textOf(await ask(other.id, { ownerOnly: "secret" })));
+    const all = textOf(await ceoCall({ action: "list" }));
+    const block = (id: string) => all.split("\n\n").find((b) => b.startsWith(id))!;
+    expect(block(teamId)).toMatch(/Owner sees it: no, with you since \d\d:\d\d UTC; reaches the owner at \d\d:\d\d UTC/);
+    expect(block(ownerId)).toMatch(/Owner sees it: yes/);
+    const ownerList = textOf(await ceoCall({ action: "list", view: "owner" }));
+    expect(ownerList).toContain(ownerId);
+    expect(ownerList).not.toContain(teamId);
+    const queue = await ctx.decisions.queue({ companyId: ctx.companyId });
+    expect(queue.map((q) => q.id)).toEqual([...ownerList.matchAll(/^([0-9a-f-]{36}):/gm)].map((m) => m[1]));
+  });
+
+  it("escalate works on a team question and its errors say card", async () => {
+    const teamId = idOf(textOf(await ask(ctx.dev.id)));
+    const bad = await ceoCall({ action: "escalate", id: randomUUID(), triedFirst: "Read it first." });
+    expect(textOf(bad)).toMatch(/No open card/);
+    const r = await ceoCall({ action: "escalate", id: teamId, triedFirst: "Read it; only the owner can do this." });
+    expect(r.isError).not.toBe(true);
+    expect((await row(teamId)).tier).toBe("owner");
+    const own = await (await ctx.mcp(ctx.dev.id)).callTool({ name: "decisions", arguments: { action: "escalate", id: teamId, triedFirst: "x" } });
+    expect(textOf(own)).toMatch(/passes cards to the owner/);
   });
 });
 

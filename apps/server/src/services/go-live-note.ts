@@ -4,7 +4,24 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { GoLiveWait } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { decisions } from "../db/schema.js";
+import { decisions, tickets } from "../db/schema.js";
+
+/**
+ * BOS-1636: SQL twin of isLiveCheckWait (shared) for the Blocked half: in Blocked with a merge, or (BOS-1907) a split-out
+ * check ticket whose parent is merged and not done. Counts of "blocked" tickets leave these out.
+ */
+export const liveCheckWaitSql = sql`(${tickets.systemState} = 'blocked' and (${tickets.mergeCommit} is not null
+  or exists (select 1 from tickets p where p.id = ${tickets.checksTicketId} and p.merge_commit is not null and p.system_state <> 'done')))`;
+
+/** Blocked tickets of a company that really are blocked, and those that are only merged work waiting for a live check. */
+export async function blockedSplit(db: Db, companyId: string): Promise<{ blocked: number; liveCheck: number }> {
+  const [r] = await db
+    .select({ live: sql<number>`count(*) filter (where ${liveCheckWaitSql})::int`, all: sql<number>`count(*)::int` })
+    .from(tickets)
+    .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "blocked")));
+  const live = r?.live ?? 0;
+  return { blocked: (r?.all ?? 0) - live, liveCheck: live };
+}
 
 /** The owner's open server-update and runner-update cards of a company, by target (null when there is none). */
 export type UpdateCards = { server: string | null; runner: string | null };

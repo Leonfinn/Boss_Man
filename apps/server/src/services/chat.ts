@@ -5,17 +5,51 @@
 // Boss Man's board tools is refused. Each agent has its own conversation and answers one
 // message batch at a time.
 import path from "node:path";
-import { and, count, desc, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { agentIdentity, BUILT_IN_RULES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, ownerChatMessages, ownerChatTraces, projects, runs, tickets, wakes } from "../db/schema.js";
 import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
+import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
+import { namedThingsSection, type NamedSources } from "./named-things.js";
+
+/** Drops the "You said "X" on card Y, 2026-11-01, about Z, ..." footer lines that BOS-1855 saved under older CEO replies. */
+export function stripYouSaidLines(text: string): string {
+  return text.replace(/(?:\n+|^)You said "[^\n]*?, \d{4}-\d{2}-\d{2}, about [^\n]*/g, "").trimEnd();
+}
 import { runCapabilities } from "./run-capabilities.js";
 import type { ChatTraceService } from "./chat-trace.js";
+import { reportBackSection, settleReports } from "./chat-report-back.js";
 
 export const CHAT_REASON = "owner_chat";
+
+/** The brief's "Owner's setup" section, for the CEO's chat prompt; empty if the record can't be read. */
+async function ownerSetupSection(db: Db, companyId: string): Promise<string[]> {
+  const lines = [...ownerSetupLines(await ownerSetupFacts(db, companyId)), ...(await workerSetupLines(db, companyId).catch(() => []))];
+  return lines.length ? ["", "## Owner's setup (from the record: say nothing about it that this contradicts)", ...lines] : [];
+}
+
+/**
+ * The text the named-things lookup reads (DR-069 D2): the owner's messages after the CEO's last reply (the ones this run answers)
+ * and that reply itself, since a slip is often in a follow-up to what the CEO said before.
+ */
+export function namedTexts(recent: Array<{ role: string; text: string }>): string[] {
+  const lastReply = recent.map((m) => m.role).lastIndexOf("assistant");
+  const unanswered = recent.slice(lastReply + 1).filter((m) => m.role === "owner");
+  return [...(lastReply >= 0 ? [recent[lastReply]!.text] : []), ...unanswered.map((m) => m.text)];
+}
+
+/** The owner's messages after the CEO's last reply, joined: what the meaning search reads (BOS-2116). */
+export function unansweredOwnerText(recent: Array<{ role: string; text: string }>): string {
+  const lastReply = recent.map((m) => m.role).lastIndexOf("assistant");
+  return recent
+    .slice(lastReply + 1)
+    .filter((m) => m.role === "owner")
+    .map((m) => m.text)
+    .join("\n");
+}
 
 /**
  * BOS-1300: an ordinary working agent's owner chat has the agent's own working tools (its add-ons and skills, its shell and file
@@ -69,11 +103,46 @@ export class ChatError extends Error {
 
 type Agent = typeof agents.$inferSelect;
 
-export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string; trace?: ChatTraceService }) {
+/** The note on the one chat wake Boss Man adds after a run ended without a reply (BOS-1734): a run started by it isn't asked a third time. */
+export const NO_REPLY_NOTE = "The last chat run ended without a reply; asked again once.";
+
+/** Why a run stopped, in plain words with the recorded outcome kept (BOS-1734). */
+export function stopWords(outcome: string | null): string {
+  if (!outcome) return "no stop reason was recorded";
+  const plain: Record<string, string> = {
+    end_turn: "it ended its turn without writing one",
+    max_tokens: "it hit its output limit",
+    max_turn_requests: "it hit its step limit",
+    refusal: "the model refused",
+    cancelled: "it was cancelled",
+    interrupted: "it was interrupted",
+  };
+  const said = plain[outcome] ?? (outcome.startsWith("stopped: ") ? `Boss Man stopped it: ${outcome.slice(9)}` : null);
+  return said ? `${said}; stop reason "${outcome}"` : `stop reason "${outcome.slice(0, 200)}"`;
+}
+
+export function chatService(
+  db: Db,
+  deps: {
+    notify: (agentId: string, input: { reason: string; priority: number; note?: string; causedByRunId?: string }) => Promise<unknown>;
+    workspaceRoot: string;
+    trace?: ChatTraceService;
+    /** A "flag" in the owner's feed (BOS-1734): a chat run asked again still ended without a reply. */
+    flag?: (n: { companyId: string; agentId: string; title: string; body: string; link: string }) => Promise<unknown>;
+    /** What the named-things lookup may read besides the database (DR-069 D2, BOS-1854). */
+    named?: NamedSources;
+    /** Lines of "possible matches by meaning" for the owner's latest message (BOS-2116); absent, or empty when the company has it off. */
+    meaning?: (companyId: string, ownerText: string) => Promise<string[]>;
+  },
+) {
   // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
   const saving = new Map<string, Promise<unknown>>();
   // shortcut: how many changes the run had when it last replied, so the run-end line lists only what came after (BOS-758).
   const changesAtReply = new Map<string, number>();
+  async function isCeo(agentId: string): Promise<boolean> {
+    const [a] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, agentId));
+    return a?.role === "ceo";
+  }
   async function agentOf(companyId: string, agentId: string): Promise<Agent> {
     const [a] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, agentId)));
     if (!a) throw new ChatError(404, "No such agent in this company.");
@@ -138,15 +207,19 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       return { agentId: m.agentId };
     },
 
-    async list(companyId: string, agentId?: string | null) {
+    /** The newest 200 messages, or the 200 before message `before` (BOS-2167); `hasMore` says whether older ones remain. */
+    async list(companyId: string, agentId?: string | null, before?: string | null) {
       const agent = agentId ? await agentOf(companyId, agentId) : await who(companyId);
-      const items = await db
-        .select()
-        .from(ownerChatMessages)
-        .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agent.id)))
-        .orderBy(desc(ownerChatMessages.createdAt))
-        .limit(200);
-      const ordered = items.reverse();
+      const mine = and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agent.id));
+      let where = mine;
+      if (before) {
+        const [cursor] = await db.select({ createdAt: ownerChatMessages.createdAt }).from(ownerChatMessages).where(and(mine, eq(ownerChatMessages.id, before)));
+        if (!cursor) throw new ChatError(404, "message not found");
+        where = and(mine, or(lt(ownerChatMessages.createdAt, cursor.createdAt), and(eq(ownerChatMessages.createdAt, cursor.createdAt), lt(ownerChatMessages.id, before))));
+      }
+      const found = await db.select().from(ownerChatMessages).where(where).orderBy(desc(ownerChatMessages.createdAt), desc(ownerChatMessages.id)).limit(201);
+      const hasMore = found.length > 200;
+      const ordered = found.slice(0, 200).reverse();
       // The Thinking trace for each reply (BOS-1368): one query for the page's messages, only this company's.
       const ids = ordered.filter((m) => m.role === "assistant").map((m) => m.id);
       const traceRows = ids.length ? await db.select({ messageId: ownerChatTraces.messageId, trace: ownerChatTraces.trace }).from(ownerChatTraces).where(and(eq(ownerChatTraces.companyId, companyId), inArray(ownerChatTraces.messageId, ids))) : [];
@@ -156,9 +229,11 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       const live = running ? (deps.trace?.live(running.id) ?? null) : null;
       const withTrace = ordered.map((m) => {
         const trace = byMessage.get(m.id);
-        return trace ? { ...m, trace } : m;
+        // Replies saved before BOS-2087 carry "You said ..." footer lines (BOS-1855); the owner no longer sees them.
+        const shown = m.role === "assistant" ? { ...m, text: stripYouSaidLines(m.text) } : m;
+        return trace ? { ...shown, trace } : shown;
       });
-      return { agentId: agent.id, items: withTrace, state: await state(companyId, agent.id), live };
+      return { agentId: agent.id, items: withTrace, hasMore, state: await state(companyId, agent.id), live };
     },
 
     /** Everyone the owner can message, CEO first, each with their last message and what they're doing. */
@@ -205,6 +280,12 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
           : `You are ${agentIdentity(agent, company?.name ?? "this company").who}. The owner is messaging you directly in Boss Man's chat. Answer their questions about your work, and turn what they ask for into work on the board.`,
         ...agentIdentity(agent, company?.name ?? "this company").instructions,
         ...(ceo ? await ceoNotesLines(db, companyId, agentId) : []),
+        // DR-069 D1: the CEO's chat sees the same "Owner's setup" record as its ticket runs' brief (workers, runner, the owner's last word per worker).
+        ...(ceo ? await ownerSetupSection(db, companyId) : []),
+        // DR-069 D2: the things the owner's unanswered messages and the CEO's last reply name, with the record and the owner's newest answers on each.
+        ...(ceo ? await namedThingsSection(db, companyId, namedTexts(recent), deps.named).catch(() => []) : []),
+        // BOS-2116: the closest tickets, wiki pages and the CEO's own earlier advice by meaning; empty when off, failing or nothing is close.
+        ...(ceo && deps.meaning ? await deps.meaning(companyId, unansweredOwnerText(recent)).catch(() => []) : []),
         "",
         // The same built-in rules as a ticket run (BOS-754); here they mostly guard what goes into tickets and pages.
         ...BUILT_IN_RULES,
@@ -224,6 +305,8 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
         "- When your answer is substantial (an analysis, a comparison, research into options), also save it as a wiki page (Product/Analysis, or the folder it belongs in) and link it, so it isn't lost in the chat.",
         "- To link a wiki page, name it as [[slug]] (or [[slug#Section]]): the chat turns that into a working link. The wiki tools' replies give the exact link too (Link: #/wiki/<company>/<slug>), so copy that rather than writing the company id and page name yourself.",
         "- End with a short reply that lists everything you created or changed, each as `#/tickets/<id>` followed by its title, so the owner can open it.",
+        // R52: tickets asked for in this chat that have closed or handed out follow-ups since, to be reported back here.
+        ...(await reportBackSection(db, companyId, agentId, new Date()).catch(() => [])),
         "",
         "The conversation so far, oldest first:",
         ...recent.map((m) => `${m.role === "owner" ? "Owner" : m.role === "assistant" ? "You" : "Boss Man"}: ${m.text}`),
@@ -240,6 +323,8 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
 
     /** The answering run's final message becomes the agent's reply. */
     async onAgentMessage(runId: string, text: string) {
+      // Registered at once, so the run-end check waits for the whole save, however many lookups build the notes first.
+      const work = (async () => {
       const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
       // The PA speaks only through pa_reply, which is checked; its own closing text never reaches the owner (R87).
       if (r?.purpose !== "chat" || r.duty === "assistant") return;
@@ -262,9 +347,11 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
         .then(([row]) => {
           if (trace && row) return db.insert(ownerChatTraces).values({ messageId: row.id, companyId: r.companyId, agentId: r.agentId, runId, trace }).then(() => {});
         });
-      saving.set(runId, save.catch(() => {}));
       changesAtReply.set(runId, runTrace(runId).changes.length);
       await save;
+      })();
+      saving.set(runId, work.catch(() => {}));
+      await work;
     },
 
     async onRunEnded(runId: string, error: string | null, interrupted = false) {
@@ -277,11 +364,13 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       // that answered, and a run that never answered shows nothing.
       deps.trace?.forget(runId);
       const [r] = await db
-        .select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, startedAt: runs.startedAt, name: agents.name, duty: agents.duty })
+        .select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, startedAt: runs.startedAt, outcome: runs.outcome, stopReason: runs.stopReason, cancelRequestedAt: runs.cancelRequestedAt, name: agents.name, duty: agents.duty })
         .from(runs)
         .innerJoin(agents, eq(agents.id, runs.agentId))
         .where(eq(runs.id, runId));
       if (r?.purpose !== "chat") return;
+      // R52: tickets this chat was owed a report on are kept by a reply that names them, or Boss Man says it itself, whatever way the run ended.
+      if (!interrupted && r.duty !== "assistant" && r.agentId && r.startedAt) await settleReports(db, r.companyId, r.agentId, r.startedAt, runId).catch(() => 0);
       if (error) {
         await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "system", text: `The reply couldn't be finished: ${error.slice(0, 500)}`, runId });
         return;
@@ -307,9 +396,28 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       if (last && !done.length && !asked!.n) return;
       const parts = [...(asked!.n ? [`${asked!.n} decision${asked!.n === 1 ? "" : "s"} sent to Decisions`] : []), ...done.slice(0, 5)];
       const more = done.length > 5 ? ` (and ${done.length - 5} more)` : "";
-      const head = `${r.name} finished${last ? " after its last message" : " without a reply"}.`;
-      const text = parts.length ? `${head} ${last ? "Since that message" : "In this run"}: ${parts.join("; ")}${more}.` : head;
+      const did = parts.length ? ` ${last ? "Since that message" : "In this run"}: ${parts.join("; ")}${more}.` : "";
+      if (last) {
+        await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId, role: "system", text: `${r.name} finished after its last message.${did}`, runId });
+        return;
+      }
+      // BOS-1734: no reply at all must never be a silent end. The stop reason (runs.outcome, kept for every run) is named;
+      // the owner's messages are released so the next run claims them (and a PA-escalated copy's answer is still relayed);
+      // the run is asked again once, straight away. A run that was itself that second try, or one someone stopped by hand,
+      // isn't asked again: the owner is told why it stopped and that the message is kept, with a flag in the feed.
+      const stop = stopWords(r.outcome);
+      await db.update(ownerChatMessages).set({ runId: null }).where(and(eq(ownerChatMessages.runId, runId), eq(ownerChatMessages.role, "owner")));
+      const [woke] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.runId, runId), eq(wakes.note, NO_REPLY_NOTE)));
+      const byHand = !!r.cancelRequestedAt && !r.stopReason;
+      if (!woke && !byHand) {
+        await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId, role: "system", text: `${r.name} finished without a reply (${stop}), so it was asked again.${did}`, runId });
+        await deps.notify(agentId, { reason: CHAT_REASON, priority: 4, note: NO_REPLY_NOTE, causedByRunId: runId });
+        return;
+      }
+      const text = `${r.name} finished without a reply${woke ? " again" : ""} (${stop}). Your message is kept: ${r.name}'s next chat run answers it, and sending another message starts one.${did}`;
       await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId, role: "system", text, runId });
+      // Stopped by hand, the one who stopped it knows: only a second silent end is flagged.
+      if (woke) await deps.flag?.({ companyId: r.companyId, agentId, title: `${r.name} didn't answer your chat message`, body: `It ended twice without a reply (${stop}). Your message is kept.`, link: `#/chat/${r.companyId}/${agentId}` });
     },
   };
 }

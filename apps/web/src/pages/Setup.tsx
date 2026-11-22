@@ -8,11 +8,12 @@ import { usePoll } from "../hooks";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { Credentials } from "./settings/Credentials";
+import { useAction } from "./settings/shared";
 import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, RunnerStep } from "./SetupClaude";
 
-type Progress = { dismissed: boolean; step: number; companyId: string | null };
+type Progress = { dismissed: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null };
 export type ChecklistItem = { id: string; label: string; done: boolean };
 
 const STEPS = [
@@ -152,7 +153,7 @@ function TokenHelp({ projects }: { projects: Project[] }) {
             <li>GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.</li>
             <li>Name it (e.g. boss-man) and pick an expiry. 90 days is a sensible default.</li>
             <li>Repository access: Only select repositories, then pick {repo}'s repo.</li>
-            <li>Repository permissions: Contents read and write; Pull requests read and write; Workflows read and write (so agents can change the repo's CI files); Checks read (so Boss Man can read CI results); Metadata read-only (added automatically).</li>
+            <li>Repository permissions: Contents read and write; Pull requests read and write; Workflows read and write (so agents can change the repo's CI files); Actions read-only (so Boss Man can read CI runs); Metadata read-only (added automatically).</li>
             <li>Generate, copy it once, paste it here, then use "Check the token against {repo}".</li>
           </ol>
           <p style={{ margin: "4px 0" }}>
@@ -289,31 +290,47 @@ export function SetupChecklist({ companyId, go, folded = false }: { companyId: s
   const progress = usePoll((signal) => api<Progress>("/api/setup-progress", { signal }), 60_000, "setup-progress");
   const list = usePoll((signal) => (companyId ? api<ChecklistItem[]>(`/api/companies/${companyId}/setup-checklist`, { signal }) : Promise.resolve([])), 30_000, `setup-checklist-${companyId ?? "none"}`);
   const items = list.data ?? [];
-  if (!companyId || !progress.data || progress.data.dismissed || !items.length || items.every((i) => i.done)) return null;
+  const act = useAction();
+  if (!companyId || !progress.data || progress.data.dismissed || !items.length) return null;
   const doneCount = items.filter((i) => i.done).length;
+  // Once everything is ticked (the first merge is the last item) the card stays, with the merge time, until dismissed.
+  const allDone = doneCount === items.length;
   const Wrap = folded ? "details" : "section";
   return (
     <Wrap className="card" aria-labelledby={folded ? undefined : "finish-setup-h"} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {folded && (
         <summary style={{ fontSize: 16, fontWeight: 600, cursor: "pointer" }}>
-          Finish setting up: {doneCount} of {items.length} done
+          {allDone ? "Setup finished" : "Finish setting up"}: {doneCount} of {items.length} done
         </summary>
       )}
       <div style={{ display: "flex", justifyContent: folded ? "flex-end" : "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {!folded && (
           <h2 id="finish-setup-h" style={{ fontSize: 16, fontWeight: 600 }}>
-            Finish setting up
+            {allDone ? "Setup finished" : "Finish setting up"}
           </h2>
         )}
         <span style={{ display: "flex", gap: 8 }}>
-          <button type="button" className="btn primary" onClick={() => go("setup")}>
-            Continue
-          </button>
-          <button type="button" className="btn" onClick={() => void api("/api/setup-progress", { method: "PUT", body: { dismissed: true } }).then(progress.reload)}>
-            Dismiss
+          {!allDone && (
+            <button type="button" className="btn primary" onClick={() => go("setup")}>
+              Continue
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              void act.run(async () => {
+                await api("/api/setup-progress", { method: "PUT", body: { dismissed: true } });
+                progress.reload();
+              })
+            }
+          >
+            {act.busy ? "Saving…" : "Dismiss"}
           </button>
         </span>
       </div>
+      {act.view}
       <ul className="checklist">
         {items.map((i) => (
           <li key={i.id} className={i.done ? "done" : ""}>

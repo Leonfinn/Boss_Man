@@ -7,10 +7,13 @@ import { getHold } from "./maintenance.js";
 import { ceoPlanText } from "./ceo-plan.js";
 import { heldReadyTickets } from "./agent-wip.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
+import { blockedSplit } from "./go-live-note.js";
+import { isLiveCheckWait } from "@boss-man/shared";
 import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, settings, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
 import { CHECK_REUSED_KIND } from "./check-request.js";
+import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
 import { getStandingRules, standingRulesSection } from "./standing-rules.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
@@ -98,6 +101,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
   if (role === "ceo") {
     const counts = await db.select({ state: tickets.systemState, n: sql<number>`count(*)::int` }).from(tickets).where(eq(tickets.companyId, companyId)).groupBy(tickets.systemState);
     const n = (s: string) => counts.find((c) => c.state === s)?.n ?? 0;
+    const blockedNow = await blockedSplit(db, companyId);
     const needs = await db
       .select({ t: tickets, who: agents.name })
       .from(tickets)
@@ -114,7 +118,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
       ...open.map((d) => `- Decision: "${one(d.question, 120)}" (recommended: ${one(d.recommendedOption, 80)})`),
       ...needs
         .sort((a, b) => Number(b.t.systemState === "review") - Number(a.t.systemState === "review"))
-        .map(({ t, who }) => `- ${t.systemState === "review" ? "In review" : t.systemState === "blocked" ? "Blocked" : `Silent ${age(t.lastActivityAt)}`}: "${one(t.title, 60)}" (${who ?? "unassigned"}).${noteOf(t)}`),
+        .map(({ t, who }) => `- ${t.systemState === "review" ? "In review" : isLiveCheckWait(t) ? "Merged, waiting for a live check" : t.systemState === "blocked" ? "Blocked" : `Silent ${age(t.lastActivityAt)}`}: "${one(t.title, 60)}" (${who ?? "unassigned"}).${noteOf(t)}`),
     ];
     const done = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt)).limit(10);
     const unassigned = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), isNull(tickets.assigneeAgentId), eq(tickets.assignedToOwner, false))).orderBy(asc(tickets.createdAt));
@@ -140,9 +144,11 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const queueWhy = queueHeld[0] ? queueHeld[0].ticket.stateNote?.replace(/\. It starts by itself.*$/, "") : null;
     body = [
       ...(hold ? [`UPDATE PENDING: Boss Man is waiting for runs to finish so it can update the runners (${hold.reason}, since ${hold.since.slice(0, 16).replace("T", " ")} UTC). No new run starts anywhere until it is done: do not delegate new work or open new tickets for now, finish what is in flight, and leave the rest for after.`, ""] : []),
-      `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
+      // BOS-1636: "blocked" counts real blocks only; merged work waiting for its live check is shown apart.
+      `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${s === "blocked" ? blockedNow.blocked : n(s)}`).join(", ")}${blockedNow.liveCheck ? `, merged and waiting for a live check ${blockedNow.liveCheck} (not stuck)` : ""}.`,
       ...(companyRefused ? [`At company limit: ${companyRefused} Ready ticket${companyRefused === 1 ? "" : "s"} refused. Agents may sit idle until one in-progress ticket finishes or the owner raises the limit in Settings.`] : []),
       ...(queueHeld.length ? [`New starts held: ${queueHeld.length} Ready ticket${queueHeld.length === 1 ? "" : "s"} wait${queueHeld.length === 1 ? "s" : ""} while the merge line or check queue is long${queueWhy ? ` (${queueWhy.replace(/^Held: /, "")})` : ""}. Finish and merge work in flight; they start by themselves when it is shorter.`] : []),
+      ...section("Owner's setup (from the record: say nothing about it that this contradicts)", [...ownerSetupLines(await ownerSetupFacts(db, companyId)), ...(await workerSetupLines(db, companyId).catch(() => []))]),
       ...section("Needs you", capped(needLines, 8)),
       ...section("Merge-line conflicts (warnings, nothing linked)", capped(conflictLines, 6)),
       ...section("PA answers to check", capped(audit.map((a) => `- ${a.id}: asked "${one(a.question, 100)}"; the PA said "${one(a.reply ?? "", 200)}" citing ${(a.cites as Array<{ kind: string; id: string }>).map((c) => `${c.kind} ${c.id}`).join(", ")}. Mark it with pa_verdict.`), 3)),

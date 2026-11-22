@@ -39,6 +39,36 @@ function visitor(app: TestApp["app"], token: string) {
 }
 
 describe("feedback portal", () => {
+  it("BOS-1680: with the owner's switch on, the bare address (no link secret) shows that company's roadmap; a wrong secret still 404s", async () => {
+    const c = await setup();
+    const on = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true, title: "What's next for App Co" })).json();
+    const bare = (headers: Record<string, string> = {}) => t!.app.inject({ method: "GET", url: "/api/portal", headers });
+    // Off by default: nothing is shown at the bare address, even though the portal itself is on.
+    expect((await bare()).statusCode).toBe(404);
+    expect((await bare({ "x-portal-token": "" })).statusCode).toBe(404);
+    const set = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { portalAtBareAddress: true })).json();
+    expect(set.portalAtBareAddress).toBe(true);
+    for (const headers of [{} as Record<string, string>, { "x-portal-token": "" }]) {
+      const res = await bare(headers);
+      expect(res.statusCode).toBe(200);
+      // The content a visitor sees, not just the status: the title and the shown features.
+      expect(res.json().title).toBe("What's next for App Co");
+      expect(res.json().features.map((f: { title: string }) => f.title)).toContain("A dark theme.");
+    }
+    // The full link still works, and a wrong secret never falls back to the shared portal.
+    expect((await bare({ "x-portal-token": on.portalToken })).statusCode).toBe(200);
+    expect((await bare({ "x-portal-token": "x".repeat(32) })).statusCode).toBe(404);
+    // Turning the portal off closes the bare address too; a second company taking the switch moves it.
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: false });
+    expect((await bare()).statusCode).toBe(404);
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true });
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json().company;
+    await c.req("PATCH", `/api/companies/${other.id}/portal`, { enabled: true, title: "Other roadmap", portalAtBareAddress: true });
+    expect((await bare()).json().title).toBe("Other roadmap");
+    const settings = (await c.req("GET", `/api/companies/${c.company.id}/feedback-settings`)).json();
+    expect(settings.portalAtBareAddress).toBe(false);
+  });
+
   it("is off until the owner turns it on, and answers wrong or old links the same way", async () => {
     const c = await setup();
     expect((await t!.app.inject({ method: "GET", url: "/api/portal" })).statusCode).toBe(404);
@@ -246,18 +276,27 @@ describe("feedback portal", () => {
     const req = (method: "POST" | "PATCH", url: string, payload?: unknown) => t!.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
     const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json();
     const { portalToken } = (await req("PATCH", `/api/companies/${company.id}/portal`, { enabled: true })).json();
-    const v = visitor(t.app, portalToken);
-    expect((await v("POST", "/api/portal/ideas", { title: "One", text: "1" }, "198.51.100.1")).statusCode).toBe(201);
-    expect((await v("POST", "/api/portal/ideas", { title: "Two", text: "2" }, "198.51.100.2")).statusCode).toBe(201);
-    // 20,001 reads, each from its own address: one more key than the counter keeps. They carry no
-    // token, so each is counted and then answered 404 without touching the database.
-    for (let i = 0; i < 20_001; i++) {
-      const ip = `2001:db8::${i.toString(16)}`;
-      const res = await t.app.inject({ method: "GET", url: "/api/portal", remoteAddress: ip });
-      if (res.statusCode !== 404) expect(res.statusCode, ip).toBe(404);
+    // BOS-1926: the same routes on the portal's own listener with the counter's key bound set to 50 (it is 20,000 in
+    // production; the bound's own value is checked by the next test), so 51 distinct addresses show the eviction in
+    // milliseconds instead of 20,001 requests (30 s). What it still catches: a flood of new addresses evicting the
+    // per-portal write counter and resetting its cap.
+    const bound = 50;
+    const portal = await buildPortalApp({ feedback: t.feedback, secureCookies: false, limits: { writesPerPortalPerHour: 2, readsPerIpPerMinute: 1 }, counterMaxKeys: bound });
+    try {
+      const v = visitor(portal as unknown as TestApp["app"], portalToken);
+      expect((await v("POST", "/api/portal/ideas", { title: "One", text: "1" }, "198.51.100.1")).statusCode).toBe(201);
+      expect((await v("POST", "/api/portal/ideas", { title: "Two", text: "2" }, "198.51.100.2")).statusCode).toBe(201);
+      // One more address than the counter keeps. They carry no token, so each is counted and then answered 404 without touching the database.
+      for (let i = 0; i < bound + 1; i++) {
+        const ip = `2001:db8::${i.toString(16)}`;
+        const res = await portal.inject({ method: "GET", url: "/api/portal", remoteAddress: ip });
+        if (res.statusCode !== 404) expect(res.statusCode, ip).toBe(404);
+      }
+      expect((await v("POST", "/api/portal/ideas", { title: "Three", text: "3" }, "198.51.100.3")).statusCode).toBe(429);
+    } finally {
+      await portal.close();
     }
-    expect((await v("POST", "/api/portal/ideas", { title: "Three", text: "3" }, "198.51.100.3")).statusCode).toBe(429);
-  }, 120_000);
+  });
 
   it("keeps the rate-limit counter's memory bounded however many addresses call (BOS-1407)", () => {
     const counter = windowCounter(() => 1_000);

@@ -2,7 +2,12 @@
 // restart, and deploy targets. Owner routes: app.ts registers these inside its owner scope, so the
 // owner check and error handling are the same as for its other routes.
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
+import { RUNNER_ADDONS } from "@boss-man/shared";
+import type { Db } from "../db/client.js";
+import { companies } from "../db/schema.js";
+import { record } from "../services/activity.js";
 import { DeployError, type deploysService } from "../services/deploys.js";
 import type { launcherService } from "../services/launcher.js";
 import type { maintenanceService } from "../services/maintenance.js";
@@ -10,6 +15,7 @@ import type { runnerReportService } from "../services/runner-report.js";
 import type { schedulerService } from "../services/scheduler.js";
 import type { deployWaitService } from "../services/deploy-wait.js";
 import type { selfDeployService } from "../services/self-deploy.js";
+import type { ActiveWait } from "../services/update-waits.js";
 
 const Uuid = z.string().uuid();
 const IdParam = z.object({ id: Uuid });
@@ -17,6 +23,7 @@ const IdParam = z.object({ id: Uuid });
 export function serverAdminRoutes(
   owner: FastifyInstance,
   deps: {
+    db: Db;
     scheduler: ReturnType<typeof schedulerService>;
     maintenance: ReturnType<typeof maintenanceService>;
     runnerReport: ReturnType<typeof runnerReportService>;
@@ -26,9 +33,13 @@ export function serverAdminRoutes(
     deploysSvc: ReturnType<typeof deploysService>;
     /** The per-run stop (runsService.cancel). */
     cancelRun: (runId: string) => Promise<unknown>;
+    /** BOS-2058: every update wait that is on, from update-waits.ts (the same list server_status shows the CEO). */
+    activeWaits: () => Promise<ActiveWait[]>;
   },
 ) {
-  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun } = deps;
+  const { db, scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun, activeWaits } = deps;
+  // One list for every screen (rule c): what each update wait waits on, since when, and when it goes ahead or ends.
+  owner.get("/api/update-waits", async () => ({ waits: await activeWaits() }));
 
   // Scheduling and kill switches (R30).
   owner.post("/api/agents/:id/wake", async (req, reply) => {
@@ -45,10 +56,13 @@ export function serverAdminRoutes(
     await scheduler.setGlobalPause(paused);
     return { paused };
   });
-  owner.post("/api/companies/:id/pause", async (req) => {
+  owner.post("/api/companies/:id/pause", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
+    const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!company) return reply.code(404).send({ error: "not_found" });
     await scheduler.setCompanyPause(id, paused);
+    await record(db, { companyId: id, kind: "settings", summary: paused ? "Owner paused this company" : "Owner resumed this company" });
     return { paused };
   });
 
@@ -70,6 +84,13 @@ export function serverAdminRoutes(
   owner.post("/api/maintenance/wrapup", async () => {
     await maintenance.start({ kind: "wrapup" }); // leader-only
     return maintenance.status();
+  });
+  // "Stop the checks and update now" (BOS-1600): only when checks on a runner are all that is left; they restart afterwards.
+  owner.post("/api/maintenance/update-now", async (_req, reply) => {
+    const r = await maintenance.updateNow(); // leader-only
+    if (r.ok) return maintenance.status();
+    const message = r.reason === "agents_running" ? "Agents are still running; ask them to wrap up first." : r.reason === "no_checks" ? "No check is holding the update, so there is nothing to stop." : "No runner update is waiting.";
+    return reply.code(409).send({ error: r.reason, message });
   });
   // "Cancel wrap-up" while an update waits (BOS-988): take back only the owner's ask; the update is untouched.
   owner.post("/api/maintenance/cancel-wrap", async () => ({ cancelled: await maintenance.cancelWrap() })); // leader-only
@@ -108,6 +129,11 @@ export function serverAdminRoutes(
   });
 
   // A server update waiting for a quiet machine (BOS-420): what it waits for, and the owner's cancel.
+  // BOS-1472: "Deploy to staging": main's newest commit goes to the host's staging lane. Owner session only; agents use the deploy tool.
+  owner.post("/api/self-deploy/deploy-staging", async (_req, reply) => {
+    const r = await selfDeploy.deployStaging();
+    return "error" in r ? reply.code(409).send({ error: "staging_unavailable", message: r.error }) : r;
+  });
   owner.get("/api/self-deploy/wait", async () => deployWait.status());
   owner.post("/api/self-deploy/wait/cancel", async (_req, reply) => {
     const r = await deployWait.cancel(); // leader-only
@@ -124,6 +150,15 @@ export function serverAdminRoutes(
 
   // BOS-1086: take back a queued runner update.
   owner.post("/api/self-deploy/cancel-runner-queue", async () => selfDeploy.cancelRunnerQueue());
+
+  // BOS-1583: the runner add-on tick boxes. GET says what the owner saved and what the last build held; PUT saves the
+  // ticked ids for the next "Build and update runners" (the host script reads the file; nothing is rebuilt now).
+  owner.get("/api/self-deploy/runner-addons", async () => selfDeploy.runnerAddons());
+  owner.put("/api/self-deploy/runner-addons", async (req, reply) => {
+    const body = z.object({ ids: z.array(z.string().max(40)).max(50) }).parse(req.body);
+    const r = await selfDeploy.setRunnerAddons(body.ids, RUNNER_ADDONS.map((a) => a.id));
+    return "error" in r ? reply.code(409).send({ error: "cannot_save_addons", message: r.error }) : r;
+  });
 
   // "Restart the server" (BOS-647): owner session only; it writes a request file the host deployer acts on. No MCP tool reaches it.
   owner.post("/api/self-deploy/restart", async (_req, reply) => {
@@ -163,6 +198,13 @@ export function serverAdminRoutes(
   owner.patch("/api/deploy-targets/:id", async (req, reply) =>
     deploysSvc.updateTarget(IdParam.parse(req.params).id, TargetInput.partial().parse(req.body)).catch(deployErrors(reply)),
   );
-  owner.delete("/api/deploy-targets/:id", async (req, reply) => ((await deploysSvc.deleteTarget(IdParam.parse(req.params).id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" })));
+  owner.delete("/api/deploy-targets/:id", async (req, reply) => {
+    const force = z.object({ force: z.enum(["1", "true"]).optional() }).parse(req.query).force !== undefined;
+    const r = await deploysSvc.deleteTarget(IdParam.parse(req.params).id, force);
+    if (r.result === "deleted") return reply.code(204).send();
+    if (r.result === "live") return reply.code(409).send({ error: "live", message: `${r.detail} Let it finish or reject it in Decisions, then remove the target.` });
+    if (r.result === "has_history") return reply.code(409).send({ error: "has_history", field: "has_history", message: `This target has ${r.count} past deploy${r.count === 1 ? "" : "s"}, and removing it would erase ${r.count === 1 ? "it" : "them"} and the target's secret grants.` });
+    return reply.code(404).send({ error: "not_found" });
+  });
   owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
 }

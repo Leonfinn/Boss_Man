@@ -166,6 +166,19 @@ describe("board filters", () => {
     expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
   });
 
+  it("says a search matched nothing, with a Clear search button, instead of the empty-column hint", async () => {
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search tasks" }), { target: { value: "zzzqq" } });
+    expect(shown()).toEqual([]);
+    expect(screen.getAllByText(/No tasks match "zzzqq"\./).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Nothing finished yet.")).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: "Clear search" })[0]!);
+    expect((screen.getByRole("searchbox", { name: "Search tasks" }) as HTMLInputElement).value).toBe("");
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+  });
+
   it("opens as a non-modal dialog, closes on Escape and returns focus to the Filter button", async () => {
     stub();
     open();
@@ -245,6 +258,21 @@ describe("board filters", () => {
     await screen.findByText("Senior Developer", { exact: false });
     openPanel();
     expect(screen.getByText("Only tasks an agent is working on (3)")).toBeTruthy();
+  });
+
+  it("lists runs on another project's tickets as such, and keeps the 'other than a ticket' heading away", async () => {
+    stub({
+      workingAgents: 1,
+      withoutTicket: [],
+      otherProjects: [{ id: "r5", agent: "Dylan", purpose: null, startedAt: new Date().toISOString(), ticketId: "tx", ticketNumber: 12, ticketTitle: "Fix login", projectId: "p2", projectName: "Development" }],
+    });
+    open();
+    const strip = await screen.findByLabelText("Working on other projects");
+    expect(strip.textContent).toContain("Dylan");
+    expect(strip.textContent).toContain("Development");
+    expect(strip.querySelector("a[href=\"#/tickets/tx\"]")).not.toBeNull();
+    expect(strip.querySelector("a[href=\"#/board/p2\"]")).not.toBeNull();
+    expect(screen.queryByLabelText("Working on something other than a ticket")).toBeNull();
   });
 
   it("shows no strip when every working agent is on a card", async () => {

@@ -3,23 +3,27 @@ import { cleanReason, parseSecondOpinion, redactForModel, secondOpinionSystemPro
 
 // BOS-338: what is sent to an outside model is redacted, and only a strict answer counts.
 
+// Made-up key shapes, joined at run time so this file holds no key-shaped line for the secret scans (BOS-1932).
+const k = (...parts: string[]) => parts.join("");
+const PEM_BEGIN = ["-----BEGIN", "OPENSSH PRIVATE KEY-----"].join(" ");
+
 describe("redactForModel", () => {
   const secrets = [
-    "sk-or-v1-0123456789abcdef0123456789abcdef",
+    k("sk-or-v1-", "0123456789abcdef0123456789abcdef"),
     "sk-ant-api03-AbCdEf0123456789",
-    "ghp_ABCDEFGHIJKLMNOPQRSTUVWX0123",
-    "github_pat_11ABCDEFG0123456789_abcdefghij",
-    "xoxb-1234567890-abcdefghij",
+    k("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWX0123"),
+    k("github_pat_", "11ABCDEFG0123456789_abcdefghij"),
+    k("xoxb-", "1234567890-abcdefghij"),
     "AKIAIOSFODNN7EXAMPLE",
     "bmr_abcDEF123456",
-    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    k("eyJhbGciOiJIUzI1NiJ9", ".eyJzdWIiOiIxMjM0NTY3ODkwIn0", ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
     "Zx81KqP2vR7mN4tY6wB9cD3fG5hJ8kL0aQ1sE",
   ];
   for (const s of secrets) it(`removes ${s.slice(0, 8)}…`, () => expect(redactForModel(`curl -H x ${s} y`)).not.toContain(s));
 
   it("removes values of secret-named variables, auth headers, URL passwords and private keys", () => {
     const out = redactForModel(
-      'API_KEY=hunter2xyz DATABASE_URL="postgres://u:pw@db/x" curl -H "Authorization: Bearer abcdefghijkl" https://u:pass123@host/x?token=zzz\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----',
+      'API_KEY=hunter2xyz DATABASE_URL="postgres://u:pw@db/x" curl -H "Authorization: Bearer abcdefghijkl" https://u:pass123@host/x?token=zzz\n' + PEM_BEGIN + '\nAAAA\n-----END OPENSSH PRIVATE KEY-----',
     );
     for (const s of ["hunter2xyz", "pw@db", "abcdefghijkl", "pass123", "zzz", "AAAA"]) expect(out).not.toContain(s);
   });

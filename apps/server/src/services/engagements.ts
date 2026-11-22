@@ -2,7 +2,8 @@
 // channel between them. Request → (counter) → agree → owner approval if the provider
 // requires it → work on the provider's own tickets → deliver → sign-off or revision.
 // The requester sees the status and the thread, never the provider's tickets.
-import { and, asc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { olderThan, pageLimit, type Page } from "./list-page.js";
 import { findCredential, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { closeCardBySystem } from "./card-validity.js";
@@ -323,12 +324,14 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
       };
     },
 
-    async list(companyId?: string) {
+    /** Newest first, one page at a time (BOS-2165): the page polls it and the MCP list puts it in an agent's context. */
+    async list(companyId?: string, page: Page = {}) {
       const rows = await db
         .select()
         .from(engagements)
-        .where(companyId ? or(eq(engagements.requesterCompanyId, companyId), eq(engagements.providerCompanyId, companyId)) : undefined)
-        .orderBy(asc(engagements.createdAt));
+        .where(and(companyId ? or(eq(engagements.requesterCompanyId, companyId), eq(engagements.providerCompanyId, companyId)) : undefined, page.before ? olderThan(engagements, engagements, page.before) : undefined))
+        .orderBy(desc(engagements.createdAt), desc(engagements.id))
+        .limit(pageLimit(page.limit));
       const ids = [...new Set(rows.flatMap((r) => [r.requesterCompanyId, r.providerCompanyId]))];
       const names = new Map(ids.length ? (await db.select({ id: companies.id, name: companies.name }).from(companies).where(inArray(companies.id, ids))).map((c) => [c.id, c.name]) : []);
       return rows.map((r) => ({ id: r.id, title: r.title, status: r.status, requester: names.get(r.requesterCompanyId), provider: names.get(r.providerCompanyId), budgetCapUsd: r.budgetCapMicros != null ? r.budgetCapMicros / 1e6 : null }));

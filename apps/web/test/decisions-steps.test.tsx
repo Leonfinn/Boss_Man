@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions } from "../src/pages/Decisions";
@@ -44,6 +44,34 @@ describe("command blocks say where and as whom (BOS-427)", () => {
     expect(line(/^On nas01, as root\.$/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("ls -l /mnt/backups"));
+  });
+
+  it("leaves no Copy reset timer running after the card unmounts (BOS-1783)", async () => {
+    setSecure(true);
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const { unmount } = render(<Decisions decisions={[card(['List:\n\n```sh host="nas01" as="root"\nls\n```'])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+      // Wait for the event, not a fixed number of microtask turns: the copy promise settles, the label
+      // becomes "Copied" and the 2 s timer starts. React renders that on its own tick, which one
+      // advanceTimersByTimeAsync(0) does not wait for; on a slow GitHub runner the single settle missed it (BOS-1949).
+      // Each turn runs inside act (it flushes React's work) and yields to a real tick; the cap bounds a copy that never lands.
+      for (let turn = 0; turn < 200 && screen.getByRole("button", { name: "Copy this command" }).textContent !== "Copied"; turn++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+          await new Promise<void>((r) => setImmediate(r));
+        });
+      }
+      expect(screen.getByRole("button", { name: "Copy this command" }).textContent).toBe("Copied");
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(2500);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("says 'the logged-in account' for an as=login block", () => {

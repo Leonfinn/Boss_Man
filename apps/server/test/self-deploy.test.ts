@@ -3,13 +3,13 @@ import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
-import { selfDeployService } from "../src/services/self-deploy.js";
+import { DEPLOY_UNCHANGED_REASON, selfDeployService } from "../src/services/self-deploy.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { commandProblem, lintOwnerSteps, parseStep, sh, step } from "../src/services/steps.js";
-import { companies, activity, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, activity, decisions, notifications, projects, settings, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -38,7 +38,7 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const { db, close } = await openPglite(undefined, logQuery);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, deployerDir: opts.deployer === false ? undefined : dir });
   const cookie = await signedInOwner(db);
-  const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   await req("POST", "/api/companies", { name: "App Co" });
   // The poller skips a pass when a file keeps its size and mtime (BOS-414), and a file system stamps mtime
   // to a coarse tick: two same-sized writes within one tick looked untouched (BOS-560). Each write gets
@@ -60,11 +60,81 @@ async function setup(opts: { deployer?: boolean } = {}) {
 }
 
 describe("self-deploy (docs/09-self-deploy.md)", () => {
+  it("saves the ticked runner add-ons for the host script and keeps ids it carries (BOS-1583)", async () => {
+    const c = (ctx = await setup());
+    expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toEqual({ enabled: true, saved: null, built: null });
+    // What update-runner.sh recorded after its last build: one add-on, plus one this catalogue does not list.
+    await writeFile(path.join(c.dir, "outbox", "runner-addons.built"), "agent-browser,future-thing\n");
+    expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toMatchObject({ saved: null, built: ["agent-browser", "future-thing"] });
+    const put = await c.req("PUT", "/api/self-deploy/runner-addons", { ids: ["webkit", "webkit", "nope"] });
+    // Unknown ids from the owner are dropped; the one already built and unknown here is carried, so nothing is lost.
+    expect(put.json()).toEqual({ saved: ["future-thing", "webkit"] });
+    expect(await readFile(path.join(c.dir, "inbox", "runner-addons"), "utf8")).toBe("future-thing,webkit\n");
+    expect((await readdir(path.join(c.dir, "inbox"))).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    // Unticking everything saves an empty line: the plain image.
+    expect((await c.req("PUT", "/api/self-deploy/runner-addons", { ids: [] })).json()).toEqual({ saved: ["future-thing"] });
+  });
+
+  it("refuses to save add-ons when self-deploy is not set up (BOS-1583)", async () => {
+    const c = (ctx = await setup({ deployer: false }));
+    expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toMatchObject({ enabled: false });
+    expect((await c.req("PUT", "/api/self-deploy/runner-addons", { ids: ["webkit"] })).statusCode).toBe(409);
+  });
+
   it("tells the owner a refused runner update is only a note, in plain words (BOS-364)", async () => {
     const c = (ctx = await setup());
     await c.status({ id: randomUUID(), target: "runner", result: "rejected", message: "The runners were not updated. Nothing is broken and nothing needs doing now.", to_commit: B, ended: "2026-10-20T12:03:00Z" });
     await c.selfDeploy.sync();
     expect((await c.db.select().from(notifications))[0]).toMatchObject({ level: "note", title: expect.stringContaining("Runner update not started") });
+  });
+
+  describe("the staging line on a deploy card (BOS-1472)", () => {
+    const stagingResult = (over: Record<string, unknown>) => ({ id: randomUUID(), target: "staging", result: "deployed", message: "Staging runs it.", to_commit: B, started: "2026-10-20T12:00:00Z", ended: "2026-10-20T12:05:00Z", at: "2026-10-20T12:05:00Z", smoke: "passed", ...over });
+    const cardFor = async (c: Awaited<ReturnType<typeof setup>>) => {
+      await c.available();
+      await c.selfDeploy.sync();
+      const [d] = await c.open();
+      return d!.question;
+    };
+
+    it("says not checked when staging has nothing for this commit", async () => {
+      const c = (ctx = await setup());
+      expect(await cardFor(c)).toContain("Staging: not checked.");
+    });
+
+    it("says passed on the commit when staging deployed exactly it and every smoke check passed", async () => {
+      const c = (ctx = await setup());
+      await writeFile(path.join(c.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({})));
+      expect(await cardFor(c)).toContain(`Staging: passed on ${B.slice(0, 8)}.`);
+    });
+
+    it("asks staging to check the commit once when a card is open, and keeps the card's line true to the result", async () => {
+      const c = (ctx = await setup());
+      const request = path.join(c.dir, "inbox", "staging-request.json");
+      await c.selfDeploy.stagingTick(); // lane off: nothing is asked
+      await writeFile(path.join(c.dir, "outbox", "staging-lane.json"), JSON.stringify({ configured: "true" }));
+      await cardFor(c);
+      await c.selfDeploy.stagingTick();
+      expect(JSON.parse(await readFile(request, "utf8"))).toMatchObject({ target: "staging", commit: B });
+      expect((await c.open())[0]!.question).toMatch(/Staging: being checked now/);
+      await rm(request); // the host took it
+      await c.selfDeploy.stagingTick(); // asked once per commit
+      await expect(readFile(request, "utf8")).rejects.toThrow();
+      await writeFile(path.join(c.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({})));
+      await c.selfDeploy.stagingTick();
+      const q = (await c.open())[0]!.question;
+      expect(q).toContain(`Staging: passed on ${B.slice(0, 8)}.`);
+      expect(q.match(/Staging:/g)).toHaveLength(1);
+    });
+
+    it("names the failed checks, and says not checked on this commit when staging runs another one", async () => {
+      const c = (ctx = await setup());
+      await writeFile(path.join(c.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({ smoke: "failed", failed_checks: "board, signin" })));
+      expect(await cardFor(c)).toContain(`Staging: failed on ${B.slice(0, 8)} (board, signin).`);
+      const d = (ctx = await setup());
+      await writeFile(path.join(d.dir, "outbox", "staging-status.json"), JSON.stringify(stagingResult({ to_commit: A })));
+      expect(await cardFor(d)).toContain(`not checked on this commit (staging runs ${A.slice(0, 8)})`);
+    });
   });
 
   it("does not offer again a commit the host just refused as no longer the tip, until the host rewrites the offer", async () => {
@@ -220,6 +290,51 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(update.more).toBe(1);
   });
 
+  // BOS-1826: the host sent only the newest 30 commits, so the card said "30 changes" however many were waiting, and a
+  // live fix further back lost its urgent heading. The host now sends the whole range; this pins that the server counts
+  // and reads all of it: 120 commits, a live fix at the 45th, and every commit counted once as a ticket or another commit.
+  it("counts and heads a range of 120 commits, a live fix at the 45th still heading the card (BOS-1826)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const commits: Array<{ sha: string; subject: string }> = [];
+    const sha = () => (commits.length + 1).toString(16).padStart(40, "0");
+    const ids: string[] = [];
+    for (let i = 1; i <= 25; i++) {
+      const [t] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `Change ${i}`, number: 1000 + i, ...(i === 12 ? { fixesLive: "the board is blank" } : {}) }).returning();
+      ids.push(t!.id);
+      commits.push({ sha: sha(), subject: `Merge "Change ${i}" (${t!.id})` });
+      for (let k = 1; k <= 3; k++) commits.push({ sha: sha(), subject: `Step ${k} of change ${i}` });
+    }
+    commits.push({ sha: sha(), subject: `Merge "Change 2" (${ids[1]})` }); // a ticket merged a second time
+    while (commits.length < 120) commits.push({ sha: sha(), subject: `Bump ${commits.length}` });
+    expect(commits.findIndex((x) => x.subject.includes(ids[11]!))).toBe(44);
+    await c.available({ commits, paths: ["scripts/rebuild-live.sh", "apps/server/src/x.ts"], infraPaths: ["scripts/rebuild-live.sh"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    type U = { total: number; changes: unknown[]; more: number; otherCommits: string[]; otherMore?: number };
+    const u = (d!.context as { update: U }).update;
+    expect(u.total).toBe(120);
+    expect(u.changes).toHaveLength(20);
+    expect(u.more).toBe(5);
+    expect(u.otherCommits).toHaveLength(30);
+    expect(u.otherMore).toBe(65);
+    // Every commit is counted once: 25 tickets, plus 95 others (75 branch steps, the repeat merge, 19 bumps).
+    expect(u.changes.length + u.more + u.otherCommits.length + u.otherMore!).toBe(u.total);
+    const heading = "Urgent: contains the fix for the board is blank (BOS-1012)";
+    expect(d!.question.split("\n\n")[0]).toBe(`${heading}.`);
+    // The card that clears an older one names 10 tickets and counts the other 15, not only those past the 20th.
+    expect(d!.question).toContain("BOS-1010: Change 10; and 15 more.");
+    // Main moves on by one commit: the fix is still in the range, so the new card is headed again but is a repeat.
+    await c.available({ tip: C, commits: [{ sha: C, subject: "Tidy a comment" }, ...commits], paths: ["scripts/rebuild-live.sh"], infraPaths: ["scripts/rebuild-live.sh"] });
+    await c.selfDeploy.sync();
+    const [d2] = await c.open();
+    expect(d2!.id).not.toBe(d!.id);
+    expect((d2!.context as { urgent?: { heading: string; repeat?: boolean } }).urgent).toMatchObject({ heading, repeat: true });
+    expect((d2!.context as { update: U }).update.total).toBe(121);
+  });
+
   it("will not take a second approval while a deploy is running, and withdraws a question main has outrun", async () => {
     const c = (ctx = await setup());
     await c.available();
@@ -255,8 +370,10 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const [runner] = await c.open();
     expect(runner).toMatchObject({ options: ["Update runners", "Not now"], context: { type: "self_deploy", target: "runner", commit: B } });
     expect(runner!.question).toContain(`This rebuilds the runner containers from the version Boss Man runs (${B.slice(0, 8)}); the server itself doesn't change.`);
-    // The runner card can list the commits too, when the host has reported them.
-    expect((runner!.context as { update: { total: number; otherCommits: string[] } }).update).toMatchObject({ total: 1, otherCommits: ["Add rate limiting"] });
+    // BOS-1805: the host's offer (here still listing "Add rate limiting") is what the next SERVER deploy brings; the runner
+    // image is built from the live commit, so the runner card never lists that range as its own.
+    expect((runner!.context as { update?: unknown; changes?: unknown }).update).toBeUndefined();
+    expect((runner!.context as { changes?: unknown }).changes).toBeUndefined();
     expect((await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
     expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: true, pending: true, status: { result: "deployed" } });
@@ -355,7 +472,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).not.toContain("docker compose build launcher");
     // The card still checks that the new server took charge, and how to recover it.
     expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
-    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader (or single on a server that runs one copy)") });
+    expect(todo!.context).toMatchObject({ check: expect.stringContaining("This server: Role reads leader (or single on a server that runs one copy)") });
     // No fixed claim about the watchdog (a per-company setting an update never changes) or a vague Reviews look.
     expect((todo!.context as { check: string }).check).not.toMatch(/watchdog|look as expected/i);
     expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("\n(umask 022 && cd /srv/bm/src && git checkout " + A + " && scripts/rebuild-live.sh)\n") });
@@ -619,6 +736,20 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     // Once the server runs it, the press goes through.
     await c.db.update(settings).set({ value: { old: B, new: C } }).where(eq(settings.key, `live_release:${co!.id}`));
     expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
+  });
+
+  it("goes ahead, and says why it couldn't confirm, when the live commit can't be placed (BOS-1644, R26)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Fix update-runner.sh", number: 1417, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: true });
+    // The server runs a commit that is no ticket's recorded merge and nothing places it: "can't tell", not "no".
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(200);
+    expect(r.json().note).toContain("couldn't confirm that BOS-1417");
   });
 
   it("does not refuse for a merge that never touched the runner update path (BOS-1467)", async () => {
@@ -1474,6 +1605,73 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     expect(all.filter((n) => n.requested === "page")).toHaveLength(1);
     expect(all.find((n) => n.decisionId === again!.id)).toMatchObject({ requested: "ask", title: HEADING });
   });
+
+  // BOS-1805 (18 Nov 14:59): a runner card for the live 84aa64cc was headed "Urgent: contains the fix for … (BOS-1762)"
+  // because the heading was read from the host's offer (what the NEXT server deploy brings), and BOS-1762 had only just
+  // reached main as 7704a0c6. The owner rebuilt the runners and nothing changed.
+  it("a runner card is headed only by a fix its image contains, never by the server offer's range (BOS-1805)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const MERGE_FIX = "Merges keep re-testing every time main moves";
+    // Merged as C (runner code), waiting to go live: not done, and no setup step but the runner update.
+    const [fix] = await c.db
+      .insert(tickets)
+      .values({ companyId: co!.id, projectId: p!.id, title: "Merge gate fix", number: 1762, systemState: "blocked", mergeCommit: C, touchesRunner: true, mergedAt: new Date(), fixesLive: MERGE_FIX })
+      .returning();
+    const heading = `Urgent: contains the fix for ${MERGE_FIX} (BOS-1762)`;
+
+    // The server runs A; the fix is in the offer A..C only. The runner card is for A, whose image lacks the fix.
+    await c.available({ deployed: A, tip: C, commits: [{ sha: C, subject: `Merge "Merge gate fix" (${fix!.id})` }] });
+    const r = await c.selfDeploy.updateRunners();
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.id, (r as { decisionId: string }).decisionId));
+    expect(card!.context).toMatchObject({ target: "runner", commit: A });
+    expect(card!.question).not.toContain("Urgent");
+    expect((card!.context as { urgent?: unknown }).urgent).toBeUndefined();
+
+    // Once the server runs C, the runner card for C builds the fix into the image: now it carries the heading.
+    await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Not now" });
+    await c.available({ deployed: C, tip: C, commits: [] });
+    const r2 = await c.selfDeploy.updateRunners();
+    const [card2] = await c.db.select().from(decisions).where(eq(decisions.id, (r2 as { decisionId: string }).decisionId));
+    expect(card2!.context).toMatchObject({ target: "runner", commit: C });
+    expect(card2!.question.split("\n\n")[0]).toBe(`${heading}.`);
+  });
+});
+
+// BOS-1805 (18 Nov 14:37): the owner answered "Deploy" and the live commit never moved, with nobody told why.
+describe("an approved server update that leaves the live commit unchanged (BOS-1805)", () => {
+  it("tells the owner and wakes the CEO with the host's reason", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, co!.id), eq(agents.role, "ceo")));
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "rejected", message: "Refused: another deploy ran 3 minutes ago. Try again in 7 minute(s).", from_commit: A, to_commit: B });
+    await c.selfDeploy.sync();
+    await c.selfDeploy.sync();
+    expect((await c.db.select().from(notifications)).find((n) => n.title === `Update refused: ${B.slice(0, 8)}`)?.body).toContain("Try again in 7 minute(s)");
+    const told = (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === DEPLOY_UNCHANGED_REASON);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.note).toContain(`card ${d!.id.slice(0, 8)}`);
+    expect(told[0]!.note).toContain('the host reported "rejected": Refused: another deploy ran 3 minutes ago.');
+  });
+
+  it("a deploy that changed the live commit wakes nobody", async () => {
+    const c = (ctx = await setup());
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "deployed", message: "Deployed aaaaaaaa to bbbbbbbb." });
+    await c.selfDeploy.sync();
+    expect((await c.db.select().from(wakes)).filter((w) => w.reason === DEPLOY_UNCHANGED_REASON)).toHaveLength(0);
+  });
 });
 
 describe("an approval when main moves on before the host runs it (BOS-753)", () => {
@@ -1616,7 +1814,7 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       expect(await cards(c)).toHaveLength(1);
       expect(card!.question).toContain("Your host's deployer script is older than the running version");
       const steps = (card!.context as { steps: string[]; rollback: string }).steps.join("\n");
-      expect(steps).toContain("cp -p /srv/bm/deployer/host-deployer.sh /srv/bm/deployer/host-deployer.sh.old && cp -v /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh");
+      expect(steps).toContain("cp -p /srv/bm/deployer/host-deployer.sh /srv/bm/deployer/host-deployer.sh.old && BOSSMAN_DEPLOYER=/srv/bm/deployer /srv/bm/src/scripts/install-deployer.sh");
       expect(steps).toContain('host="nas01" as="root"');
       expect((card!.context as { rollback: string }).rollback).toContain("cp -p /srv/bm/deployer/host-deployer.sh.old /srv/bm/deployer/host-deployer.sh");
     });

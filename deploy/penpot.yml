@@ -35,7 +35,13 @@ x-database: &database
   PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
   PENPOT_DATABASE_USERNAME: penpot
   PENPOT_DATABASE_PASSWORD: ${PENPOT_DB_PASSWORD:?Set PENPOT_DB_PASSWORD in .env}
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
 x-common: &common
+  logging: *logging
   profiles: ["penpot"]
   restart: unless-stopped
   networks: [penpot]
@@ -104,7 +110,7 @@ services:
 
   penpot-postgres:
     <<: *common
-    image: postgres:15
+    image: postgres:15.20@sha256:10f9e886f772e9d6484350b043bcf990ead67ae5d9988ddce265d72a299055d5
     stop_signal: SIGINT
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U penpot"]
@@ -123,7 +129,7 @@ services:
 
   penpot-valkey:
     <<: *common
-    image: valkey/valkey:8.1
+    image: valkey/valkey:8.1.12@sha256:5032c4dd7abe08d6fd9382054608183e2bf1f7e3895ef619b8784698454325f7
     healthcheck:
       test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
       interval: 5s
@@ -137,6 +143,6 @@ services:
   # Receives Penpot's outgoing mail (internal only, no published port).
   penpot-mailpit:
     <<: *common
-    image: axllent/mailpit:v1
+    image: axllent/mailpit:v1.34.0@sha256:23a2ef85bc50853ab3093645d1d64679afd8887e89da5e48a88940c172591a4e
     expose: ["1025"]
     mem_limit: ${PENPOT_MEM_MAILPIT:-128m}

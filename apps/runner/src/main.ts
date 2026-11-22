@@ -1,14 +1,17 @@
 // Runner daemon: one per company. Dials out to the Boss Man server, runs agents over ACP
 // on its commands, and journals every event until the server has it (R31).
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { machineMemoryMb, startupMemoryWarning } from "./machine-memory.js";
 import { checkClaude } from "./claude-check.js";
 import { adapterBin, claudeBin, lockHash, PACK_SOURCE, readPack } from "./claude-pack.js";
 import { probeGuardWhenReady } from "./guard-probe.js";
 import { platformReport } from "./platform.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
+import { readToolchain } from "./toolchain.js";
 import { CheckJobs } from "./check-jobs.js";
+import { DiskGuard, levelsFromEnv } from "./disk-guard.js";
 import { Journal } from "./journal.js";
 import { DEFAULT_VACUUM_TIMEOUT_MS, keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
 import { RunnerConnection } from "./connection.js";
@@ -54,14 +57,9 @@ const sandbox = { ...sandboxSelfTest(), platform: platformReport(env) };
 const checkSlots = applyCheckSlots(coordDir, env.BOSSMAN_CHECK_SLOTS);
 if (checkSlots > 1) console.log(`[runner] full checks: ${checkSlots} at a time (BOSSMAN_CHECK_SLOTS)`);
 if (checkSlots > 1) {
-  // Each extra full check peaks near 3 GB; warn when the container limit (cgroup v2 or v1) is lower than that.
-  for (const f of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
-    if (!existsSync(f)) continue;
-    const limit = Number(readFileSync(f, "utf8").trim());
-    if (Number.isFinite(limit) && limit < checkSlots * 3 * 1024 ** 3 + 2 * 1024 ** 3 && limit < 2 ** 50)
-      console.warn(`[runner] warning: memory limit is ${Math.round(limit / 1024 ** 3)} GB but ${checkSlots} full checks at once need about ${checkSlots * 3 + 2} GB; raise BOSSMAN_RUNNER_MEMORY or checks may be OOM-killed`);
-    break;
-  }
+  // BOS-2217: each full check peaks near 5 GB (measured 3.8 to 4.7 GB); warn when the machine has less than that.
+  const warning = startupMemoryWarning(checkSlots, machineMemoryMb());
+  if (warning) console.warn(`[runner] ${warning}`);
 }
 // One pnpm store for every install an agent's checks make (BOS-568): on the workspaces volume by default,
 // or at PNPM_STORE_DIR. Without it pnpm starts a fresh store in each agent's $HOME (on the root disk) and
@@ -88,7 +86,10 @@ if (sandbox.level !== "unavailable") workspaces.checkFence = { home: path.join(d
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;
-const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
+// BOS-2182: free space on the workspaces volume. Below the floor new runs and checks wait; running ones are left alone.
+const diskLevels = levelsFromEnv(env);
+const diskGuard = new DiskGuard(workspacesRoot, diskLevels);
+const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log, undefined, diskGuard);
 // The Claude pack (DR-050, BOS-972): the image ships no Anthropic code, so Claude Code and its ACP adapter
 // come from a ready folder on the bossman-claude volume, mounted read-only. The launcher's installer container
 // (or the compose claude-pack service) fills it before this process starts; here we only read it. Without a
@@ -139,6 +140,7 @@ const sessions = new SessionManager({
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
   checkJobs,
+  diskGuard,
   // The Claude adapter comes from the ready pack, not the runner's node_modules (DR-050).
   ...(claudePack.ready && claudePack.dir ? { adapterBins: { claude: adapterBin(claudePack.dir) } } : {}),
   fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot), pnpmStore: storeDir },
@@ -157,6 +159,7 @@ connection = new RunnerConnection({
   runnerVersion: "0.0.0",
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
   imageCommit: /^[0-9a-f]{40}$/i.test(env.BOSSMAN_IMAGE_COMMIT ?? "") ? env.BOSSMAN_IMAGE_COMMIT : undefined,
+  toolchain: await readToolchain(),
   harnessVersions: await harnessVersions({ claudeAdapterVersion: claudePackAdapterVersion() }),
   log,
   onCommand: (command) => sessions.handle(command),
@@ -196,16 +199,28 @@ setInterval(() => void reportGuard(), 5 * 60_000).unref();
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled
 // like any event, so it reaches the server once the connection is up.
+let lastDiskReport: Awaited<ReturnType<typeof workspaces.housekeeping>> | null = null;
+/** The report with the volume's free space, measured now. */
+const withFreeSpace = (report: NonNullable<typeof lastDiskReport>) => {
+  const space = diskGuard.read();
+  return { ...report, ...(space ? { freeBytes: space.freeBytes, totalBytes: space.totalBytes } : {}), holding: diskGuard.hold() !== null };
+};
 const housekeeping = async () => {
   try {
     const report = await workspaces.housekeeping();
     if (report.removed.length) log(`removed ${report.removed.length} orphaned workspace folder(s)`);
-    connection.emit({ type: "runner.disk", ...report });
+    lastDiskReport = report;
+    connection.emit({ type: "runner.disk", ...withFreeSpace(report) });
   } catch (err) {
     log(`workspace clean-up failed: ${(err as Error).message}`);
   }
   await pruneOpencode();
 };
+// While space is low the report is repeated every 5 minutes with fresh free-space figures (no clean-up pass again),
+// so the server can warn the owner, and sees when space comes back.
+setInterval(() => {
+  if (lastDiskReport && diskGuard.state() !== "ok") connection.emit({ type: "runner.disk", ...withFreeSpace(lastDiskReport) });
+}, 5 * 60_000).unref();
 
 // OpenCode never deletes its old sessions (BOS-616): drop ones untouched for
 // BOSSMAN_OPENCODE_SESSION_DAYS (default 14, 0 = off), 50 per database per pass, then give the

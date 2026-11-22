@@ -21,6 +21,9 @@ import { ticketBlockerFinished } from "./ticket-links.js";
 import { activity, agents, checkJobs, companies, decisions, notifications, reviewRequests, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CHECK_SLOTS_KEY, DEFAULT_CHECK_SLOTS } from "./check-queue.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
+import { HELD_AGENT } from "./fair-share.js";
+import { isBackgroundLaneTitle } from "./check-gate.js";
+import { heldTicketIds } from "./review-holds.js";
 
 export const PRIORITY_WATCH_REASON = "priority watch";
 /** The sweep runs on every pass; it does its work this often. */
@@ -32,13 +35,18 @@ export const OWNER_AFTER_MS = 15 * 60_000;
 /** An event (a move back, a cut-off run, leaving the line) older than this is no longer news. */
 export const EVENT_WINDOW_MS = 15 * 60_000;
 
-const RANK: Record<string, number> = { backlog: 0, ready: 1, in_progress: 2, review: 3 };
+/** BOS-1774: a review -> blocked state row this close to the ticket's merge time is the merge's own move. */
+const MERGE_MOVE_WINDOW_MS = 10 * 60_000;
+const RANK:Record<string, number> = { backlog: 0, ready: 1, in_progress: 2, review: 3 };
 const CUT_OFF = /^(interrupted|cancelled|lost:|error:|stopped)/i;
 
 /** BOS-1547: a merged ticket waiting for go-live this long (the update card or deploy still open) tells the CEO. */
 export const GO_LIVE_SLOW_MS = 2 * 60 * 60_000;
 
-export type Cause = "nothing" | "cut_off" | "moved_back" | "left_line" | "seat_free" | "go_live_slow";
+/** BOS-1635: an urgent Ready ticket whose wake has waited this long behind its busy agent tells the CEO, once. */
+export const HELD_BUSY_AFTER_MS = 30 * 60_000;
+
+export type Cause = "nothing" | "cut_off" | "moved_back" | "left_line" | "seat_free" | "go_live_slow" | "held_busy";
 
 export type Facts = {
   state: string;
@@ -62,6 +70,10 @@ export type Facts = {
   left: { id: string; to: string } | null;
   /** BOS-1547: merged, with after-merge checks waiting for go-live; null once it is live (or if it never waited). */
   goLive?: { wait: string; since: Date | null } | null;
+  /** BOS-1635: the ticket's wake waits on "this agent is busy"; who, since when, the run it waits behind, and the free foreground agents. */
+  heldBusy?: { agent: string; since: Date; behind: string | null; free: string[]; key: string } | null;
+  /** BOS-1717: the ticket's hold is recorded: an open waits-on link or an open system hold. */
+  heldOnRecord?: boolean;
 };
 
 export type Verdict = {
@@ -73,6 +85,9 @@ export type Verdict = {
 
 /** Pure: what is under way and what to alarm on, from the facts. */
 export function judge(f: Facts, now: Date): Verdict {
+  // BOS-1717: an approved ticket held in review on a waits-on link or a system hold is waiting on purpose; its hold
+  // ending wakes its assignee, so no alarm (and no wake) is raised for it here.
+  if (f.state === "review" && f.heldOnRecord) return { underWay: ["held in review on a recorded waits-on link or system hold"], alarms: [] };
   const under: string[] = [];
   if (f.liveRuns.length) under.push(`a run is live (${f.liveRuns.map((r) => r.agent ?? "an agent").join(", ")})`);
   if (f.queuedWakes) under.push(`${f.queuedWakes} wake${f.queuedWakes === 1 ? "" : "s"} queued`);
@@ -111,6 +126,14 @@ export function judge(f: Facts, now: Date): Verdict {
     alarms.push({ cause: "seat_free", key: `seat_free:${lineEv!.at.toISOString()}`, text: `it has waited ${ageWords(now.getTime() - lineEv!.at.getTime())} for a merge-train seat while a check slot is free` });
   }
   if (slowGoLive) alarms.push({ cause: "go_live_slow", key: `go_live_slow:${f.goLive!.since!.toISOString()}`, text: `${slowGoLive}; this is the update step, not a stopped ticket` });
+  if (f.state === "ready" && f.heldBusy && now.getTime() - f.heldBusy.since.getTime() >= HELD_BUSY_AFTER_MS) {
+    const h = f.heldBusy;
+    alarms.push({
+      cause: "held_busy",
+      key: `held_busy:${h.key}`,
+      text: `its wake has been held ${ageWords(now.getTime() - h.since.getTime())} because ${h.agent} is busy${h.behind ? `, with a run on ${h.behind}` : ""}. Free foreground agents: ${h.free.length ? h.free.join(", ") : "none"}. Boss Man doesn't move started work by itself: reassign it with assign_ticket if another agent fits`,
+    });
+  }
   const quiet = now.getTime() - f.lastActiveAt.getTime() >= QUIET_AFTER_MS;
   if (!live && quiet && !waitingSeat) {
     const why = f.deferredWakes.length ? `; ${f.deferredWakes.length} wake${f.deferredWakes.length === 1 ? " is" : "s are"} held (${f.deferredWakes[0] ?? "no reason recorded"})` : "";
@@ -190,7 +213,7 @@ export function priorityWatchService(
     const line = last && d && d.event !== "merged" && d.event !== "left" ? { event: d.event, hold: d.hold, at: last.at } : null;
     const leftRow = lineRows.find((r) => (r.detail as { event: string }).event === "left" && r.at >= since);
     const stateRows = await db
-      .select({ id: activity.id, summary: activity.summary })
+      .select({ id: activity.id, summary: activity.summary, at: activity.at })
       .from(activity)
       .where(and(eq(activity.ticketId, t.id), eq(activity.kind, "state"), gte(activity.at, since)))
       .orderBy(desc(activity.at));
@@ -198,6 +221,9 @@ export function priorityWatchService(
     for (const r of stateRows) {
       const m = /^(\w+) -> (\w+)/.exec(r.summary);
       if (!m) continue;
+      // BOS-1774: review -> blocked made by the merge itself (merged, waiting for go-live or after-merge checks) is
+      // Boss Man's own step, not a move backwards. It is recorded within minutes of the ticket's merge time.
+      if (m[1] === "review" && m[2] === "blocked" && t.mergedAt && Math.abs(r.at.getTime() - t.mergedAt.getTime()) <= MERGE_MOVE_WINDOW_MS) continue;
       const from = RANK[m[1]!];
       // Blocked counts as a move back only from review; in_progress -> blocked is a normal wait.
       const to = m[2] === "blocked" ? (m[1] === "review" ? -1 : undefined) : RANK[m[2]!];
@@ -213,6 +239,22 @@ export function priorityWatchService(
       .select({ n: sql<number>`count(*)::int` })
       .from(checkJobs)
       .where(and(eq(checkJobs.companyId, t.companyId), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "running"), ne(checkJobs.ticketId, t.id)));
+    let heldBusy: Facts["heldBusy"] = null;
+    const heldWake = t.systemState === "ready" && t.assigneeAgentId ? await db.select({ id: wakes.id, createdAt: wakes.createdAt }).from(wakes).where(and(eq(wakes.ticketId, t.id), eq(wakes.status, "queued"), eq(wakes.statusReason, HELD_AGENT))).orderBy(wakes.createdAt).limit(1) : [];
+    if (heldWake[0]) {
+      const [owner] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId!));
+      const [behindRun] = await db.select({ title: tickets.title, number: tickets.number }).from(runs).leftJoin(tickets, eq(tickets.id, runs.ticketId)).where(and(eq(runs.agentId, t.assigneeAgentId!), isNull(runs.endedAt))).limit(1);
+      const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+      const candidates = await db.select({ id: agents.id, name: agents.name, title: agents.title }).from(agents).where(and(eq(agents.companyId, t.companyId), ne(agents.role, "ceo"), eq(agents.paused, false), isNull(agents.retiredAt), ne(agents.id, t.assigneeAgentId!)));
+      const working = new Set((await db.select({ id: runs.agentId }).from(runs).where(and(eq(runs.companyId, t.companyId), isNull(runs.endedAt)))).map((r) => r.id));
+      heldBusy = {
+        agent: owner?.name ?? "the assignee",
+        since: heldWake[0].createdAt,
+        behind: behindRun ? `${ticketRef(co?.prefix ?? null, behindRun.number) ?? "a ticket"} "${behindRun.title}"` : null,
+        free: candidates.filter((a) => !isBackgroundLaneTitle(a.title) && !working.has(a.id)).map((a) => `${a.name} (${a.title ?? "agent"})`),
+        key: heldWake[0].id,
+      };
+    }
     const times = [t.lastActivityAt, lastRun?.lastEventAt, lastRun?.endedAt, lastRun?.startedAt, ...wk.map((w) => w.createdAt)].filter((x): x is Date => !!x);
     return {
       state: t.systemState,
@@ -229,6 +271,8 @@ export function priorityWatchService(
       seatsFree: busyJobs < slots,
       lastRun: lastRun ? { id: lastRun.id, outcome: lastRun.outcome, endedAt: lastRun.endedAt } : null,
       movedBack,
+      heldBusy,
+      heldOnRecord: openWaitsOn > 0 || (await heldTicketIds(db, [t.id])).has(t.id),
       goLive: t.goLiveWait ? { wait: t.goLiveWait, since: t.goLiveWaitSince } : null,
       left: leftRow ? { id: leftRow.id, to: (leftRow.detail as { to?: string }).to ?? "another state" } : null,
     };

@@ -160,7 +160,6 @@ export function judgePermission(question: string, command: string | null, ownFol
     if (/^\/tmp(\/|$)/.test(p)) return true;
     return inOwn(p);
   };
-  if (gitDenied(c, (d) => dirOk(d, inOwn), writeOk)) return result("outside");
   // Variables set in the same command are resolved; any other variable (and $(...)) can't be, so its target is denied.
   // $(git rev-parse --git-dir ...) is the asking agent's own git folder and $(mktemp ...) lands in /tmp, unless its
   // arguments (or a TMPDIR set anywhere) put the file somewhere else.
@@ -194,7 +193,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // value is unknown (HOME=/tmp; D=/etc; D=$HOME), so a target that uses it is denied.
   const setCount = new Map<string, number>();
   const bump = (n: string | undefined): void => void (n && setCount.set(n, (setCount.get(n) ?? 0) + 1));
-  for (const m of cs2.matchAll(/(?:^|[;&|\s(])(\w+)\+?=/g)) bump(m[1]);
+  for (const m of cs2.matchAll(/(?:^|[;&|\s(])(\w+)(?:\[[^\]]*\])?\+?=/g)) bump(m[1]);
   for (const m of cs2.matchAll(/\bfor\s+(\w+)\b|\bprintf\s+-v\s+(\w+)|\$\{(\w+)[^}\w]*?(?::?[=])/g)) bump(m[1] ?? m[2] ?? m[3]);
   for (const m of cs2.matchAll(/\b(?:read|mapfile|readarray|getopts)\b([^;&|\n]*)/g)) for (const w of m[1]!.split(/\s+/)) if (/^\w+$/.test(w)) bump(w);
   const assigned = new Map<string, string>();
@@ -203,7 +202,22 @@ export function judgePermission(question: string, command: string | null, ownFol
     const firstUse = cs2.search(new RegExp(`\\$\\{?${name}\\b`));
     if (setCount.get(name) === 1 && (firstUse < 0 || firstUse > m.index!)) assigned.set(name, m[3]!);
   }
-  const resolve = (t: string): string => t.replace(/\$\{?(\w+)\}?/g, (all, name: string) => (name !== "HOME" && assigned.has(name) ? assigned.get(name)! : all));
+  // One helper for both resolvers: only `$NAME` (not followed by a word char) and `${NAME}` (closing brace straight after the name) are
+  // replaced. Any other `${NAME...}` form (`${R/a/b}`, `${R%x}`, `${R#x}`, `${R:+x}`) is changed by the shell when it runs, so it stays
+  // unresolved and the target is unknown (BOS-2245).
+  const substVars = (t: string, ok: (v: string) => boolean): string => t.replace(/\$(?:\{(\w+)\}|(\w+))/g, (all, b: string | undefined, p: string | undefined) => {
+    const name = (b ?? p)!;
+    const v = assigned.get(name);
+    return name !== "HOME" && v !== undefined && ok(v) ? v : all;
+  });
+  const resolve = (t: string): string => substVars(t, () => true);
+  // BOS-2244: a git command (`git -C "$R" grep x`) or a `cd "$R"` is read with a self-set literal variable replaced by its value, so it
+  // is judged as the same command typed out. Only a variable set once, to a plain value, before its first use is replaced (the rule
+  // above), and only one whose value is an absolute path: a relative one (`f=a.json; git diff -- $f`) stays an unknown word (BOS-725).
+  // Only `$NAME` and `${NAME}` are replaced. Any other `${NAME...}` (`${R/a/b}`, `${R%x}`, `${R#x}`, `${R:+x}`, `${R:0:3}`) changes the
+  // value when the shell runs it, so it stays unresolved and is denied as before (Jane's review of BOS-2244).
+  const resolveAbs = (t: string): string => substVars(t, (v) => /^\//.test(v));
+  if (gitDenied(resolveAbs(c), (d) => dirOk(d, inOwn), writeOk)) return result("outside");
   // A sed script is not a path, but only a script that provably can't run commands or write files is set aside as text:
   // `e` (flag or command), `w`/`W`/`r`/`R` (any file), or a script that can't be read means the write is not placed.
   const sedMasked = maskSedScripts(cs2);
@@ -222,15 +236,15 @@ export function judgePermission(question: string, command: string | null, ownFol
   // tar and unzip, must be placed too.
   for (const t of toolTargets(forTargets)) addTarget(t);
   // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
-  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(c, inOwn) || runsByPathOutside(cs2, inOwn) || usesScratchUnsafely(c)) return result("outside");
+  if (!inlineCodeOk(c, writeOk) || runsUnreadFile(resolveAbs(c), inOwn) || runsByPathOutside(resolveAbs(cs2), inOwn) || usesScratchUnsafely(c)) return result("outside");
   // A tool run through pnpm/npm/yarn/npx, or a find -exec program, that names a path leaving the checkout runs code or reads
   // config the judge can't see (BOS-638, Jane's round-5 findings for BOS-378): the program word and any folder flag are
   // judged wherever they appear among the flags.
-  if (toolingOrExecLeaves(c, inOwn)) return result("outside");
+  if (toolingOrExecLeaves(resolveAbs(c), inOwn)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
-  if (hasRedirect) for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
+  if (hasRedirect) for (const m of resolveAbs(c).matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|shred|unlink|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
@@ -283,7 +297,7 @@ export function judgePermission(question: string, command: string | null, ownFol
       // No program found: xargs then runs echo, but a bare `parallel` runs each input line as a command (BOS-731).
       if (prog === undefined ? m[0].startsWith("parallel") : !XARGS_READONLY.has(prog)) return result("outside");
     }
-    for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
+    for (const m of resolveAbs(c).matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
     for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
       const start = m[2]!;

@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { dateIn, dateInCacheSize, milestoneHorizon, milestoneStatus, timeZoneOr } from "../src/index.js";
+import { dateIn, dateInCacheSize, milestoneHorizon, milestoneStatus, nextMidnightIn, timeZoneOr } from "../src/index.js";
+
+// BOS-2188: "until midnight (server time)" for a timed permission rule.
+describe("nextMidnightIn", () => {
+  it("is the next local midnight, in UTC and in an offset zone", () => {
+    expect(nextMidnightIn(new Date("2026-11-22T10:15:00Z"), "UTC").toISOString()).toBe("2026-11-23T00:00:00.000Z");
+    // 10:15 UTC is 21:15 in Sydney (UTC+11 in November): midnight is 2h45 away.
+    expect(nextMidnightIn(new Date("2026-11-22T10:15:00Z"), "Australia/Sydney").toISOString()).toBe("2026-11-22T13:00:00.000Z");
+    // A half-hour zone.
+    expect(nextMidnightIn(new Date("2026-11-22T10:15:00Z"), "Asia/Kolkata").toISOString()).toBe("2026-11-22T18:30:00.000Z");
+  });
+  it("never returns the moment it was given, even just after midnight or exactly at it", () => {
+    expect(nextMidnightIn(new Date("2026-11-22T00:00:00Z"), "UTC").toISOString()).toBe("2026-11-23T00:00:00.000Z");
+    expect(nextMidnightIn(new Date("2026-11-22T23:59:59Z"), "UTC").toISOString()).toBe("2026-11-23T00:00:00.000Z");
+  });
+  it("is right on a 25-hour and a 23-hour daylight-saving day", () => {
+    // London clocks go back on 25 Oct 2026: that day is 25 hours long (midnight BST = 23:00Z the day before).
+    expect(nextMidnightIn(new Date("2026-10-25T00:30:00Z"), "Europe/London").toISOString()).toBe("2026-10-26T00:00:00.000Z");
+    // London clocks go forward on 29 Mar 2026: the day is 23 hours long.
+    expect(nextMidnightIn(new Date("2026-03-29T00:30:00Z"), "Europe/London").toISOString()).toBe("2026-03-29T23:00:00.000Z");
+  });
+});
 
 const today = "2026-10-16";
 

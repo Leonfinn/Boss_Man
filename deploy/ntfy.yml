@@ -15,7 +15,9 @@
 #   NTFY_EDGE_IP=<address>      # default 172.30.0.6, ntfy fixed address on edge. Must sit inside BOSSMAN_EDGE_SUBNET and never be
 #                               # BOSSMAN_EDGE_IP (the one address whose forwarded headers the server trusts) or the gateway (.1).
 # Optional: NTFY_IMAGE (pinned by digest below; change version and digest together), NTFY_CACHE_DURATION (1h),
-#   NTFY_UPSTREAM_BASE_URL (leave unset; iPhone only, see the doc).
+#   NTFY_UPSTREAM_BASE_URL (leave unset for Android; iPhone only, see the doc).
+# After ANY restart of ntfy, Android phones may stay silent until the ntfy app is closed and reopened:
+# see "After you restart ntfy (Android)" in docs/31-phone-notifications.md and send a test push with the app closed.
 #
 # No port is published on the host at all. The container joins the "edge" network of the Tailscale sidecar
 # from deploy/tailscale.yml (BOS-242, set that up first); the sidecar's Serve config (deploy/tailscale/serve.json)
@@ -23,13 +25,44 @@
 # Boss Man's server is on the same edge network and publishes to http://ntfy:80 directly (no ts.net name needed);
 # only the phone and the Approve buttons use the https address.
 # Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
-# `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set, so nothing is
-# relayed anywhere. Messages are kept for NTFY_CACHE_DURATION, then dropped.
+# `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set by default, so
+# nothing is relayed anywhere (unless you set NTFY_UPSTREAM_BASE_URL for an iPhone). Messages are kept for NTFY_CACHE_DURATION, then dropped.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${BOSSMAN_LOG_MAX_SIZE:-10m}
+    max-file: "${BOSSMAN_LOG_MAX_FILE:-3}"
 
 services:
-  ntfy:
+  # BOS-1581: hands the data folder to ntfy's user before ntfy starts, so nobody runs chown by hand on any host. Docker
+  # makes a missing folder owned by root, which ntfy (uid 1000) cannot write to. Runs once, then exits; the same image and
+  # the same mount as ntfy, no network, only the one capability a chown needs.
+  ntfy-init:
+    logging: *logging
     profiles: ["ntfy"]
     image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
+    entrypoint: ["chown", "-R", "1000:1000", "/var/lib/ntfy"]
+    command: []
+    restart: "no"
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    network_mode: none
+    volumes:
+      - ${NTFY_DATA:-${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy}:/var/lib/ntfy
+    mem_limit: 64m
+    pids_limit: 16
+
+  ntfy:
+    logging: *logging
+    profiles: ["ntfy"]
+    image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
+    depends_on:
+      ntfy-init:
+        condition: service_completed_successfully
     command: ["serve"]
     restart: unless-stopped
     user: "1000:1000"
@@ -51,6 +84,10 @@ services:
       NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
       NTFY_CACHE_DURATION: ${NTFY_CACHE_DURATION:-1h}
       NTFY_UPSTREAM_BASE_URL: ${NTFY_UPSTREAM_BASE_URL:-}
+      # BOS-1589: counters for the host deployer's "did a phone reconnect" fact. Served on a port that is NOT
+      # published and not in Serve's config; only `docker exec` inside the container reads it.
+      NTFY_ENABLE_METRICS: "true"
+      NTFY_METRICS_LISTEN_HTTP: ":9090"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:80/v1/health || exit 1"]
       interval: 30s

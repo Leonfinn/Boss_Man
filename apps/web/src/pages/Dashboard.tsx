@@ -1,12 +1,16 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
+import { setCompanyPause } from "./settings/Team";
 import { api, type Company, type Decision, type DecisionTally, type RunRow } from "../api";
+import { NoCompany } from "../components/NoCompany";
 import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
+import { Loader } from "../components/Loader";
+import { WorkStands } from "../components/WorkStands";
 import { NeedsYou, RightNow, healthLines, type HealthData } from "../components/DashboardPanels";
-import { MergesStuckBanner, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
+import { MergesStuckBanner, brakeOffSummary, pausedSummary, slowSummary, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
 import { RunLabelLink } from "./Runs";
 
 type Result = "running" | "succeeded" | "failed" | "other";
@@ -21,7 +25,7 @@ type AgentCard = {
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
   agents: AgentCard[];
-  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
+  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; /** BOS-1909: in progress without the work that can't move, and the groups that move by themselves; missing from an older server. */ inProgressCounted?: number; nextUp?: number; beingChecked?: number; watching?: number; open: number; blocked: number; /** Merged work in Blocked that only waits for its live check, not counted in blocked (BOS-1636); missing from an older server. */ waitingLiveCheck?: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
@@ -115,19 +119,21 @@ function SuccessChart({ days }: { days: Day[] }) {
   );
 }
 
-export function Dashboard({ company, decisions = null, tally = null }: { company: Company | undefined; /** The owner's open items for this company (null until loaded). */ decisions?: Decision[] | null; tally?: DecisionTally | null }) {
+export function Dashboard({ company, decisions = null, tally = null, onChanged }: { company: Company | undefined; /** Reloads the company list after a Resume. */ onChanged?: () => void; /** The owner's open items for this company (null until loaded). */ decisions?: Decision[] | null; tally?: DecisionTally | null }) {
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
   // The Merges line and the banner share one read of the Merge queue; a failed read leaves the line "couldn't check".
   const merges = usePoll((signal) => (company ? api<MergeHealthView>(`/api/companies/${company.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)), 20_000, `dash-merges-${company?.id ?? "none"}`);
-  if (!company) return <p>Create a company on the Kanban first.</p>;
+  if (!company) return <NoCompany />;
   if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
   const d = data.data;
-  if (!d) return null;
+  if (!d) return <Loader label="Loading the dashboard" />;
   const s = d.stats;
   const tokens = s.monthSubscriptionTokens.input + s.monthSubscriptionTokens.output;
   // While the company is paused nothing moves, so a stuck-merges banner would only be noise.
   const stuck = merges.data && !company.paused ? stuckSummary(merges.data) : null;
-  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, running: s.running, companyId: company.id });
+  const slow = merges.data && !company.paused ? slowSummary(merges.data) : null;
+  const paused = merges.data && !company.paused ? pausedSummary(merges.data) : null;
+  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, slow, running: s.running, companyId: company.id });
   return (
     <>
       <header className="page-head">
@@ -137,10 +143,13 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
         </div>
       </header>
 
-      <MergesStuckBanner stuck={stuck} companyId={company.id} />
+      <MergesStuckBanner stuck={stuck} slow={slow} paused={paused} brakeOff={merges.data && !company.paused ? brakeOffSummary(merges.data) : null} companyId={company.id} />
+
+
+      {s.inProgressCounted != null && <WorkStands counts={{ inProgress: s.inProgressCounted, nextUp: s.nextUp ?? 0, beingChecked: s.beingChecked ?? 0, watching: s.watching ?? 0 }} hrefFor="#/board" />}
 
       <div className="dash-lead">
-        <RightNow lines={lines} paused={company.paused} companyId={company.id} />
+        <RightNow lines={lines} paused={company.paused} companyId={company.id} onResume={onChanged ? async () => { await setCompanyPause(company.id, false); onChanged(); } : undefined} />
         <NeedsYou decisions={decisions} tally={tally} />
       </div>
 
@@ -191,13 +200,20 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
           </small>
         </a>
         <a className="card stat" href="#/board">
-          <strong>{s.inProgress}</strong>
+          <strong>{s.inProgressCounted ?? s.inProgress}</strong>
           <span>Tasks in progress</span>
+          {s.inProgressCounted != null && (
+            <small className="muted" data-testid="dash-uncounted">
+              {[s.nextUp ? `${s.nextUp} next up` : "", s.beingChecked ? `${s.beingChecked} being checked` : "", s.watching ? `${s.watching} merged, watching` : ""].filter(Boolean).join(" · ") || "Nothing else is waiting"}
+              {" · none counted"}
+            </small>
+          )}
           <small className="muted">
-            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked
+            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
           </small>
         </a>
-        <a className="card stat" href="#/funding">
+        {/* The API-money card opens the Spend page (BOS-2194); the subscription-tokens card still opens Funding. */}
+        <a className="card stat" href={s.monthSubscriptionRuns > 0 ? "#/funding" : `#/spend/${company.id}`}>
           {/* Subscription use is tokens, not money (R67); money is only what API use cost. */}
           {s.monthSubscriptionRuns > 0 ? (
             <>
@@ -217,7 +233,7 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
             <>
               <strong>${(s.monthCostMicros / 1_000_000).toFixed(2)}</strong>
               <span>API spend this month</span>
-              <small className="muted">API credit and pay-as-you-go</small>
+              <small className="muted">API credit and pay-as-you-go · where it went</small>
             </>
           )}
         </a>

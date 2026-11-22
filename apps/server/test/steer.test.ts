@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, companies, decisions, runners, runs, wakes } from "../src/db/schema.js";
+import { agents, companies, costEvents, decisions, fundingSources, runners, runs, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -98,7 +98,9 @@ describe("finished-run history through MCP", () => {
     const [other] = await c.db.insert(companies).values({ name: "Other Co" }).returning();
     const at = new Date(Date.now() - 3_600_000);
     // The live run c.runId keeps the MCP tokens working (a token dies with its run), so the finished run is a separate row.
-    const [finished] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.worker.id, startedAt: at, endedAt: new Date(at.getTime() + 90_000), outcome: "done", model: "m1", inputTokens: 10 }).returning();
+    const [finished] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.worker.id, startedAt: at, endedAt: new Date(at.getTime() + 90_000), outcome: "done", model: "m1", inputTokens: 10, cachedReadTokens: 500, cachedWriteTokens: 70 }).returning();
+    const [src] = await c.db.insert(fundingSources).values({ name: "Test source", kind: "api_payg", provider: "anthropic" }).returning();
+    for (const costMicros of [1_500_000, 250_000]) await c.db.insert(costEvents).values({ runId: finished!.id, fundingSourceId: src!.id, companyId: c.company.id, costMicros });
     await c.db.insert(runs).values({ companyId: other!.id, startedAt: at, endedAt: new Date(), outcome: "done" });
     const hist = (args: object) => ({ name: "runs", arguments: { action: "history", ...args } });
 
@@ -110,8 +112,8 @@ describe("finished-run history through MCP", () => {
       const m = await c.mcp(id);
       const rows = JSON.parse(textOf(await m.callTool(hist({}))));
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ id: finished!.id, agent: "Engineer", model: "m1", outcome: "done", seconds: 90, inputTokens: 10, outputTokens: null });
-      expect(Object.keys(rows[0]).sort()).toEqual(["agent", "endedAt", "id", "inputTokens", "model", "origin", "outcome", "outputTokens", "seconds", "startedAt", "stopReason", "ticket"]);
+      expect(rows[0]).toMatchObject({ id: finished!.id, agent: "Engineer", model: "m1", outcome: "done", seconds: 90, inputTokens: 10, outputTokens: null, cachedReadTokens: 500, cachedWriteTokens: 70, costMicros: 1_750_000 });
+      expect(Object.keys(rows[0]).sort()).toEqual(["account", "agent", "cachedReadTokens", "cachedWriteTokens", "costMicros", "endedAt", "id", "inputTokens", "model", "origin", "outcome", "outputTokens", "seconds", "startedAt", "stopReason", "ticket"]);
       await m.close();
     }
     const m = await c.mcp(analyst!.id);

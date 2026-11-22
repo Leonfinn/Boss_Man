@@ -7,7 +7,7 @@ This page is for owners who want to run Boss Man on a Proxmox VE server.
 ## Why a VM
 
 Boss Man mounts the Docker socket and starts runner containers that run agent code. In a VM:
-- **The network guard works.** It stops runners reaching your home network. It needs nftables in the kernel, which a VM has. Most LXC containers have no nftables, so there the guard is "unavailable" and runners run **without that protection** (see [docs/27-netguard.md](27-netguard.md)). Settings → Server and runner shows a warning when that happens.
+- **The network guard works.** It stops runners reaching your home network. It needs nftables in the kernel, which a VM has. Most LXC containers have no nftables, so there the guard is "unavailable" and runners run **without that protection** (see [docs/27-netguard.md](27-netguard.md)). Settings → Server and runner → Runner shows a warning when that happens.
 - **Docker works as normal.** A VM has its own kernel, so Docker uses its normal storage, and nothing depends on LXC nesting, AppArmor or user ID mapping.
 - **Agent code stays behind a hardware boundary,** not just a shared kernel.
 
@@ -30,7 +30,7 @@ It is not supported, and runners will most likely run without the network guard.
 - nesting turned on in the container's options (and usually keyctl), so Docker runs: `docker run --rm hello-world` must work inside it;
 - a working Docker storage driver on the backing store;
 - user ID mapping that lets bind mounts owned by user ID 1000 work;
-- what the network guard reports: Settings → Server and runner → **Network guard**. If it says unavailable, runners can reach your home network.
+- what the network guard reports: Settings → Server and runner → This server → **Network guard**. If it says unavailable, runners can reach your home network.
 
 Tailscale (for HTTPS and phone notifications) needs nothing extra in either a VM or an LXC: Boss Man runs it in userspace mode, so no `/dev/net/tun` is needed.
 

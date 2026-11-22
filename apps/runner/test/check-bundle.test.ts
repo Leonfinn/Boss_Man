@@ -21,7 +21,7 @@ const tmp = (prefix: string) => {
   return d;
 };
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) // retries: git's detached auto-maintenance can still be writing (ENOTEMPTY);
 });
 
 /** An origin with main, a developer clone to commit in, the company runner's shared repo, and an empty worker. */

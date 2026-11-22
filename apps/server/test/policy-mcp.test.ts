@@ -13,7 +13,14 @@ import { openPglite } from "../src/db/client.js";
 import { decisions, engagements, policyRules, projects, runners, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
-async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 15_000): Promise<T> {
+// Each test here makes up to six waits through a real socket and an in-process database. The file-wide 30 s test limit
+// ended one such test on a gate check running thousands of tests at once (BOS-1492's quick check, 15 Nov, "1 failed")
+// without saying which wait was slow. A wait now gets 40 s and the test 90 s, so a stall fails inside waitFor with the
+// last value it saw ("timed out; last ..."), never in vitest's silent test timeout. Nothing is skipped or loosened: a
+// wait that never sees its event still fails.
+const WAIT_MS = 40_000;
+const TEST_MS = 90_000;
+async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = WAIT_MS): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = await fn();
@@ -46,7 +53,7 @@ afterEach(async () => {
   await ctx.close();
 });
 
-describe("permission requests through the policy engine", () => {
+describe("permission requests through the policy engine", { timeout: TEST_MS }, () => {
   it("re-sends verdicts lost in a dropped connection, for requests the runner is still waiting on", async () => {
     const reg = (await ctx.app.inject({ method: "POST", url: `/api/companies/${ctx.homelab.company.id}/runner`, headers: { cookie: ctx.cookie } })).json();
     const runId = randomUUID();
@@ -240,7 +247,7 @@ describe("Boss Man MCP server", () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const { tools } = await c.listTools();
     // This company has no Product Manager, so its CEO runs the workflow retro and has that retro's three tools (retro.test.ts).
-    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "devices", "engagement", "feedback", "handoff", "list_my_work", "merge_line_records", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "permission_report", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "propose_workflow_change", "raise_decision", "rename_agent", "report_key_result", "request_check", "request_engagement", "request_note", "review", "roadmap", "runs", "save_retro", "schedule_check", "server_status", "set_agent_picture", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "submit_plan", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision", "workflow_scorecard"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "devices", "engagement", "feedback", "github_reply", "handoff", "list_my_work", "merge_line_records", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "owner_answers", "pa_verdict", "permission_report", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "propose_workflow_change", "raise_decision", "rename_agent", "report_key_result", "request_check", "request_engagement", "request_note", "review", "roadmap", "runs", "save_retro", "schedule_check", "security_alert", "server_status", "set_agent_picture", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "submit_plan", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision", "workflow_scorecard"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
     expect(tools.find((t) => t.name === "ticket_reply")!.description).toContain("Details:");
     expect(tools.find((t) => t.name === "set_ticket_state")!.description).toContain("plain words");
@@ -318,8 +325,11 @@ describe("Boss Man MCP server", () => {
     const noSteps = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true } });
     expect(noSteps.isError).toBe(true);
     expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"))).toHaveLength(0);
-    const steps = ["Open Settings → Server and runner → Updates.", "Click Build and update runners.", "To undo, click Update runners again after reverting."];
-    const ok = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true, steps } });
+    const steps = ["Open Settings → Server and runner → Updates.", "In Settings → Server and runner → Updates, click Build and update runners.", "To undo, go to Settings → Server and runner → Updates and click Update runners again after reverting."];
+    // BOS-1660: a card with steps opens with why and minutes; without them it is refused, and nothing is raised.
+    const noOpening = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true, steps } });
+    expect(noOpening.isError).toBe(true);
+    const ok = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true, steps, why: "The runners get the new image.", minutes: 3 } });
     expect(ok.isError).toBeFalsy();
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
     expect(d!.context).toMatchObject({ type: "question", triedFirst: tried, steps });

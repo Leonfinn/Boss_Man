@@ -17,7 +17,7 @@ export const FIXES_LIVE_HELP =
 
 /** Shared wording for the "fixes the merge check" mark (BOS-1173). */
 export const FIXES_MERGE_CHECK_HELP =
-  "True on the ticket that fixes a merge check broken for reasons no branch caused (a runner or gate fault that fails every branch). While it is open and its fix isn't merged and live, every other approved ticket in the project waits on it in Review as \"Passed, held / waits on BOS-n\": its check doesn't run, it isn't sent back, and its reviews and sign-off stand. Once the fix is merged and live (runners rebuilt, for runner code), those merges start again by themselves. False clears it. Set it only for a real gate fault, never for a branch's own failure.";
+  "True on the ticket that fixes a merge check broken for reasons no branch caused (a runner or gate fault that fails every branch). While it is open and its fix isn't merged and live, every other approved ticket in the project waits on it in Review as \"Passed, held / waits on BOS-n\": its check doesn't run, it isn't sent back, and its reviews and sign-off stand. Once the fix is merged and live (runners rebuilt, for runner code; a fix that changes only tests, docs or CI counts as live once merged), those merges start again by themselves. False clears it. Set it only for a real gate fault, never for a branch's own failure. On a ticket Boss Man opened for main's GitHub CI (a red the gate's own check doesn't see), it holds only the approved tickets that touch the failing files, .github/ or a root file; the reply says which.";
 
 /** What finished work does while it can't merge yet (BOS-1173): the one sentence every tool that moves tickets repeats. */
 export const FINISHED_STAYS_IN_REVIEW =

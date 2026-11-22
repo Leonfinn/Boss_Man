@@ -1,0 +1,4 @@
+# Test files that may skip at the merge gate, each with the reason (BOS-1729). scripts/check-no-skips.mjs fails the gate when a test
+# skips in a file not listed here. Format: `path relative to apps/web | reason`.
+# Empty on purpose: the gate supplies the web build, a browser and Vite, so no web test may skip there (BOS-1071). Their
+# skipIf guards only matter on a host without those. Add a file only with a reason that holds at the gate.

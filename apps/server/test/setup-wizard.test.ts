@@ -1,7 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
+import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
+import { tickets } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -31,7 +33,7 @@ async function setup(push = true) {
 describe("the setup wizard (R56)", () => {
   it("saves where the owner is, so it resumes, and can be dismissed", async () => {
     const c = (ctx = await setup());
-    expect((await c.req("GET", "/api/setup-progress")).json()).toEqual({ dismissed: false, step: 0, companyId: null });
+    expect((await c.req("GET", "/api/setup-progress")).json()).toEqual({ dismissed: false, step: 0, companyId: null, firstMerge: null });
     await c.req("PUT", "/api/setup-progress", { step: 3 });
     expect((await c.req("GET", "/api/setup-progress")).json()).toMatchObject({ step: 3, dismissed: false });
     await c.req("PUT", "/api/setup-progress", { dismissed: true });
@@ -44,7 +46,7 @@ describe("the setup wizard (R56)", () => {
     const c = (ctx = await setup());
     const { company, ceo } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
     const todo = async () => ((await c.req("GET", `/api/companies/${company.id}/setup-checklist`)).json() as Array<{ id: string; done: boolean }>).filter((i) => !i.done).map((i) => i.id);
-    expect(await todo()).toEqual(["company", "project", "runner", "credential", "git", "checks", "funding", "ticket"]);
+    expect(await todo()).toEqual(["company", "project", "runner", "credential", "git", "checks", "funding", "ticket", "merged"]);
 
     await c.req("PATCH", `/api/companies/${company.id}`, { mission: "Ship the shop." });
     const project = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
@@ -66,7 +68,22 @@ describe("the setup wizard (R56)", () => {
     expect(await todo()).toContain("checks");
     await c.req("PATCH", `/api/projects/${project.id}`, { verifyCommand: "pnpm test" });
     // Only the runner is left: it isn't connected.
-    expect(await todo()).toEqual(["runner"]);
+    expect(await todo()).toEqual(["runner", "merged"]);
+
+    // The first merge: the earliest merged ticket, timed from the owner account's creation, stored once.
+    const mergedAt = new Date(Date.now() + (2 * 60 + 40) * 60_000);
+    const [t] = await c.db.select({ id: tickets.id, number: tickets.number }).from(tickets).where(eq(tickets.projectId, project.id));
+    await c.db.update(tickets).set({ mergedAt, mergeCommit: "abc123" }).where(eq(tickets.id, t!.id));
+    const checklist = async () => (await c.req("GET", `/api/companies/${company.id}/setup-checklist`)).json() as Array<{ id: string; done: boolean; label: string }>;
+    const item = (await checklist()).find((i) => i.id === "merged")!;
+    expect(item.done).toBe(true);
+    expect(item.label).toMatch(/^First ticket merged: .+-\d+, 2 h 4\d min after setup started$/);
+    const fm = ((await c.req("GET", "/api/setup-progress")).json() as { firstMerge: { ref: string; minutes: number } }).firstMerge;
+    expect(fm.minutes).toBeGreaterThanOrEqual(160);
+    // Deleting the ticket doesn't change what was recorded.
+    await c.db.delete(tickets).where(eq(tickets.id, t!.id));
+    expect(((await c.req("GET", "/api/setup-progress")).json() as { firstMerge: unknown }).firstMerge).toEqual(fm);
+    expect((await checklist()).find((i) => i.id === "merged")!.done).toBe(true);
   });
 
   it("says when the token can't push", async () => {

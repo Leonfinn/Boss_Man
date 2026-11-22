@@ -3,6 +3,7 @@ import { api, REVIEW_KINDS, RISKS, type Agent, type ReviewerRef, type ReviewKind
 import { usePoll } from "../hooks";
 import { SaveButton, useSaveState } from "./SaveButton";
 import { Loader } from "./Loader";
+import { LoadError } from "./LoadError";
 import { Advanced, PresetCards } from "./PresetCards";
 import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { matchPreset, REVIEW_PRESETS } from "../lib/presets";
@@ -129,7 +130,8 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
 /** Settings > Reviews: the company's default policy. */
 export function CompanyReviews({ companyId, agents }: { companyId: string; agents: Agent[] }) {
   const url = `/api/companies/${companyId}/review-policy`;
-  const loaded = usePoll((signal) => api<ReviewPolicy>(url, { signal }), 3_600_000, `review-policy-${companyId}`).data;
+  const poll = usePoll((signal) => api<ReviewPolicy>(url, { signal }), 3_600_000, `review-policy-${companyId}`);
+  const loaded = poll.data;
   const [form, setForm] = useState<ReviewPolicy | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -150,6 +152,7 @@ export function CompanyReviews({ companyId, agents }: { companyId: string; agent
       setBusy(false);
     }
   };
+  if (!form && poll.error) return <LoadError what="the review policy" message={poll.error.message} onRetry={poll.reload} />;
   if (!form) return <Loader label="Loading the review policy" />;
   const preset = matchPreset(form, REVIEW_PRESETS);
   return (
@@ -172,7 +175,8 @@ export function CompanyReviews({ companyId, agents }: { companyId: string; agent
 /** In a project: "Use the company's" or "Customise" with the same table. */
 export function ProjectReviews({ projectId, companyId, agents }: { projectId: string; companyId: string; agents: Agent[] }) {
   const url = `/api/projects/${projectId}/review-policy`;
-  const mine = usePoll((signal) => api<{ policy: ReviewPolicy | null }>(url, { signal }), 3_600_000, `project-review-${projectId}`).data;
+  const poll = usePoll((signal) => api<{ policy: ReviewPolicy | null }>(url, { signal }), 3_600_000, `project-review-${projectId}`);
+  const mine = poll.data;
   const [custom, setCustom] = useState<ReviewPolicy | null | undefined>(undefined);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -180,7 +184,7 @@ export function ProjectReviews({ projectId, companyId, agents }: { projectId: st
   useEffect(() => {
     if (mine && custom === undefined) setCustom(mine.policy);
   }, [mine, custom]);
-  if (custom === undefined) return null;
+  if (custom === undefined) return poll.error ? <LoadError what="this project's reviews" message={poll.error.message} onRetry={poll.reload} /> : null;
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
     setErr(null);
@@ -193,8 +197,10 @@ export function ProjectReviews({ projectId, companyId, agents }: { projectId: st
     }
   };
   // Customise starts from the company's table and saves it at once, so the choice is what the server holds.
-  const choose = (on: boolean) =>
-    run(async () => {
+  const choose = (on: boolean) => {
+    // Going back to the company's table deletes the project's own: ask first. On "no" nothing is sent and the controlled select stays on Customise.
+    if (!on && custom && !window.confirm("Use the company's reviews for this project? Its own review table will be deleted.")) return Promise.resolve();
+    return run(async () => {
       if (on) {
         const copy = await api<ReviewPolicy>(`/api/companies/${companyId}/review-policy`);
         await api(url, { method: "PUT", body: copy });
@@ -205,6 +211,7 @@ export function ProjectReviews({ projectId, companyId, agents }: { projectId: st
         setCustom(null);
       }
     });
+  };
   return (
     <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
       <label htmlFor={`rev-${projectId}`}>Reviews for this project</label>

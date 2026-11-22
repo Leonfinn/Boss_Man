@@ -2,7 +2,9 @@ name: Release
 
 # The owner's "beta" button (BOS-973, plan: BOS-935, DR-050): Actions > Release > Run workflow, branch main, type a
 # version such as 0.1.0-beta.1. It builds nothing. It takes the images the Publish workflow already built and signed
-# for the newest commit on main, gives them the version tag and the moving "beta" tag in every registry, and signs and
+# for the newest commit on main (or, when the optional "commit" box holds the full 40-character sha of an older green
+# main commit whose images are published, for that commit: main moves every few minutes while the merge line is busy),
+# gives them the version tag and the moving "beta" tag in every registry, and signs and
 # publishes release.json, the list of exact image digests per architecture that the updater (BOS-941) trusts.
 # Settings are the same as publish.yml (docs/25-published-images.md).
 on:
@@ -11,6 +13,11 @@ on:
       version:
         description: "Version, like 0.1.0-beta.1 (no leading v)"
         required: true
+        type: string
+      commit:
+        description: "Optional: full 40-character sha of a commit on main whose images are published. Blank = main's newest commit"
+        required: false
+        default: ""
         type: string
 
 permissions: {}
@@ -24,6 +31,9 @@ jobs:
     # The signature names this workflow on main, and the updater trusts only that.
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
+    # BOS-2097: no green run yet to time. It builds nothing, only re-tags, signs and uploads (publish.yml's similar
+    # "publish" job: longest 1.3 min), so 15 minutes; a hung step would otherwise hold the publish-images group for 6 hours.
+    timeout-minutes: 15
     # The Docker Hub secrets live in this environment, which only main may use (see docs/25-published-images.md).
     environment: publish
     permissions:
@@ -41,20 +51,27 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-      - uses: sigstore/cosign-installer@v3
         with:
-          cosign-release: v2.4.1
+          fetch-depth: 0 # the commit input is checked against the history of main
+      - uses: docker/setup-buildx-action@v3
+      - name: Install cosign v2.4.1 (retries the download, checks a pinned SHA-256; BOS-1726)
+        run: scripts/install-cosign.sh v2.4.1
       - name: Read and check the publishing settings (fails loudly when Docker Hub is on and a secret is missing)
         id: s
+        env:
+          COMMIT_INPUT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
+          # Refuses a commit that is not 40 hex or not on main, before anything is tagged.
+          SHA="$(scripts/publish-images.sh resolve-commit "$COMMIT_INPUT" "$GITHUB_SHA")"
+          echo "Releasing commit $SHA"
           prefixes="$(scripts/publish-images.sh prefixes)"
           scripts/publish-images.sh images > /dev/null
           {
+            echo "sha=$SHA"
             echo "ghcr=$(if echo "$prefixes" | grep -q '^ghcr.io/'; then echo true; else echo false; fi)"
             echo "hub=$(if echo "$prefixes" | grep -q '^docker.io/'; then echo true; else echo false; fi)"
-            echo "tag=$(scripts/publish-images.sh tag "$GITHUB_SHA")"
+            echo "tag=$(scripts/publish-images.sh tag "$SHA")"
           } >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         if: ${{ steps.s.outputs.ghcr == 'true' }}
@@ -67,7 +84,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: The version is new, and the newest commit on main has its images
+      - name: The version is new, and the commit being released has its images
         env:
           TAG: ${{ steps.s.outputs.tag }}
         run: |
@@ -82,7 +99,7 @@ jobs:
           for name in $(scripts/publish-images.sh images); do
             first="$(scripts/publish-images.sh prefixes | head -n 1)"
             docker buildx imagetools inspect "$first/$name:$TAG" > /dev/null 2>&1 \
-              || { echo "No $name image for the newest commit on main ($TAG). Wait for the 'Publish images' run for that commit to finish, then run this again."; exit 1; }
+              || { echo "No $name image for commit ${{ steps.s.outputs.sha }} ($TAG). Wait for the 'Publish images' run for that commit to finish (or type the sha of an older green main commit in the commit box), then run this again."; exit 1; }
           done
       - name: Check every image in every registry (identical digest, signature, SBOM, provenance)
         env:
@@ -112,10 +129,11 @@ jobs:
       - name: Write release.json from what the registries now hold, and sign it
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
+          SHA: ${{ steps.s.outputs.sha }}
         run: |
           set -euo pipefail
           # Reading the version tag back proves it landed, with the same digest, in every registry.
-          scripts/publish-images.sh release-json "$VERSION" "$GITHUB_SHA" "$VERSION" > release.json
+          scripts/publish-images.sh release-json "$VERSION" "$SHA" "$VERSION" > release.json
           jq . release.json
           cosign sign-blob --yes --bundle release.json.sigstore.json release.json
           cosign verify-blob --bundle release.json.sigstore.json \
@@ -144,9 +162,11 @@ jobs:
               "$f"
           done
       - name: Publish release.json as a pre-release (beta)
+        env:
+          SHA: ${{ steps.s.outputs.sha }}
         run: |
           set -euo pipefail
           assets=(release.json release.json.sigstore.json)
           if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json); fi
-          gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$GITHUB_SHA" \
+          gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$SHA" \
             --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)."

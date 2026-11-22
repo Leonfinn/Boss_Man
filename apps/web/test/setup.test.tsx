@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { Setup } from "../src/pages/Setup";
+import { Setup, SetupChecklist } from "../src/pages/Setup";
 
 afterEach(() => {
   cleanup();
@@ -149,7 +151,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     );
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     expect((await screen.findByTestId("setup-runner-line")).textContent).toContain("not connected");
-    expect(screen.getByText("Settings → Server and runner").getAttribute("href")).toBe("#/settings/c1/system");
+    expect(screen.getByText("Settings → Server and runner → Runner").getAttribute("href")).toBe("#/settings/c1/runner");
     expect(screen.queryByText("Add-ons")).toBeNull();
     expect(screen.queryByTestId("setup-runner-memory")).toBeNull(); // no launcher line: nothing shown
   });
@@ -165,6 +167,56 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     );
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     expect((await screen.findByTestId("setup-runner-memory")).textContent).toBe(`Memory: ${line}`);
+  });
+
+  const runnerWith = async (runner: object) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? runner : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    return screen.findByTestId("setup-runner-line");
+  };
+  const docLink = (testId: string) => screen.getByTestId(testId).querySelector("a")!.getAttribute("href");
+
+  it("BOS-1895: shows the launcher's error with a link to its docs/29 section", async () => {
+    await runnerWith({ registered: false, launcher: { slug: "acme", container: null, error: "connect ECONNREFUSED 192.168.1.50:3105" } });
+    expect(screen.getByTestId("setup-runner-problem-launcher").textContent).toContain("couldn't reach the launcher, which starts the runner. It said: connect ECONNREFUSED 192.168.1.50:3105");
+    expect(docLink("setup-runner-problem-launcher")).toMatch(/docs\/29-tune-and-troubleshoot\.md#the-launcher-cant-be-reached$/);
+    expect(screen.getByText("Start the runner")).toBeTruthy(); // the owner can still retry
+  });
+
+  it("BOS-1895: shows an exited container and the guard's reason, each with its own link", async () => {
+    await runnerWith({ registered: true, connected: false, launcher: { slug: "acme", container: { state: "exited", status: "Exited (1) 2 minutes ago", image: "x", guard: "down", guardReason: "nft rules did not load in 20 s" } } });
+    expect(screen.getByTestId("setup-runner-problem-container").textContent).toContain(`The runner's container is exited (Docker says "Exited (1) 2 minutes ago").`);
+    expect(docLink("setup-runner-problem-container")).toMatch(/#the-runners-container-has-stopped$/);
+    expect(screen.getByTestId("setup-runner-problem-guard").textContent).toContain("network guard didn't start: nft rules did not load in 20 s");
+    expect(docLink("setup-runner-problem-guard")).toMatch(/#the-runners-network-guard-wont-start$/);
+    expect(screen.queryByTestId("setup-runner-problem-launcher")).toBeNull();
+  });
+
+  it("BOS-1895: keeps today's line while a launched runner is only starting", async () => {
+    const line = await runnerWith({ registered: false, launcher: { slug: "acme", container: { state: "running", status: "Up 3 seconds", image: "x", guard: "on" } } });
+    expect(line.textContent).toContain("The runner is not connected yet.");
+    expect(screen.queryByTestId("setup-runner-problems")).toBeNull();
+  });
+
+  it("BOS-1895: shows no problems once the runner is connected", async () => {
+    const line = await runnerWith({ registered: true, connected: true, launcher: { slug: "acme", container: { state: "running", status: "Up", image: "x", guardReason: "old reason" }, error: "stale" } });
+    expect(line.textContent).toContain("The runner is connected.");
+    expect(screen.queryByTestId("setup-runner-problems")).toBeNull();
+  });
+});
+
+describe("docs/29 anchors the runner step links to (BOS-1895)", () => {
+  it("each anchor matches a heading in docs/29", () => {
+    const doc = readFileSync(resolve(process.cwd(), "../../docs/29-tune-and-troubleshoot.md"), "utf8");
+    // GitHub's slug: lower case, punctuation other than - and spaces dropped, spaces to -.
+    const slugs = doc.split("\n").filter((l) => l.startsWith("#")).map((l) => l.replace(/^#+\s*/, "").toLowerCase().replace(/[^a-z0-9 -]/g, "").replace(/ /g, "-"));
+    for (const a of ["the-launcher-cant-be-reached", "the-runners-container-has-stopped", "the-runners-network-guard-wont-start", "the-runner-stays-offline-or-never-says-connected"]) expect(slugs).toContain(a);
   });
 });
 
@@ -190,5 +242,27 @@ describe("setup wizard refresh", () => {
     await screen.findByRole("option", { name: "Max" });
     fireEvent.change(await screen.findByLabelText("The CEO runs on"), { target: { value: "f1" } });
     expect(await screen.findByText("Next")).toBeTruthy();
+  });
+});
+
+describe("the Finish setting up card and the first merge", () => {
+  const ids = ["company", "project", "runner", "credential", "git", "checks", "funding", "ticket"];
+  const show = (merged: boolean) => {
+    const items = [...ids.map((id) => ({ id, label: id, done: true })), { id: "merged", label: merged ? "First ticket merged: BOS-12, 2 h 40 min after setup started" : "First ticket merged", done: merged }];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url === "/api/setup-progress" ? { dismissed: false, step: 0, companyId: "c1", firstMerge: null } : items), { status: 200 })));
+    render(<SetupChecklist companyId="c1" go={() => {}} />);
+  };
+
+  it("stays while only the merge is left", async () => {
+    show(false);
+    expect(await screen.findByText(/First ticket merged/)).toBeTruthy();
+    expect(screen.getByText("Finish setting up")).toBeTruthy();
+  });
+
+  it("stays once the merge is done, showing how long it took", async () => {
+    show(true);
+    expect(await screen.findByText(/First ticket merged: BOS-12, 2 h 40 min after setup started/)).toBeTruthy();
+    expect(screen.getByText("Setup finished")).toBeTruthy();
+    expect(screen.getByText("Dismiss")).toBeTruthy();
   });
 });

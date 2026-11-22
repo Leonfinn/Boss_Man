@@ -5,7 +5,7 @@ import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
-import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -128,6 +128,21 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 0, waiting: 1 });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
     expect(await ctx.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("pausing or resuming a company leaves an activity line, and an unknown company is not found (BOS-2148)", async () => {
+    ctx = await setup();
+    await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true });
+    await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
+    const lines = (await ctx.db.select().from(activity).where(eq(activity.companyId, ctx.company.id))).map((a) => a.summary);
+    expect(lines).toContain("Owner paused this company");
+    expect(lines).toContain("Owner resumed this company");
+    // Pausing twice still works (the second call is a no-op on the flag).
+    expect((await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true })).json()).toEqual({ paused: true });
+    expect((await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true })).json()).toEqual({ paused: true });
+    const res = await ctx.req("POST", "/api/companies/00000000-0000-4000-8000-000000000001/pause", { paused: true });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: "not_found" });
   });
 
   it("Stop all work (BOS-836): a fresh server starts work as today; the hold keeps a wake waiting without cancelling a run already going; Resume launches it", async () => {
@@ -300,6 +315,33 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 0, deferred: 1 });
   });
 
+  // BOS-1916: a limit the account's latest report left out (an old full 5-hour reading) never holds; one it reports does.
+  it("ignores an old reading of a limit the account no longer reports", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    const day = 86_400_000;
+    const later = new Date(Date.now() + 3_600_000);
+    // An hour ago the account reported a full 5-hour window; its latest report has only This week and Fable.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: sub.id, window: "five_hour", utilization: 1, resetsAt: later, observedAt: new Date(Date.now() - 3_600_000) });
+    const now = new Date();
+    await ctx.db.insert(quotaSamples).values([
+      { fundingSourceId: sub.id, window: "seven_day", utilization: 0.3, resetsAt: new Date(Date.now() + 4 * day), observedAt: now },
+      { fundingSourceId: sub.id, window: "seven_day_overage_included", utilization: 0.1, resetsAt: new Date(Date.now() + 4 * day), observedAt: now },
+    ]);
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect(await ctx.tick()).toMatchObject({ launched: 1 });
+    await ctx.endRun(ctx.commands[0]!.runId);
+
+    // As soon as the account reports the 5-hour window again at 100%, it holds.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: sub.id, window: "five_hour", utilization: 1, resetsAt: later, observedAt: new Date(now.getTime() + 1000) });
+    await ctx.db.insert(quotaSamples).values([
+      { fundingSourceId: sub.id, window: "seven_day", utilization: 0.3, resetsAt: new Date(Date.now() + 4 * day), observedAt: new Date(now.getTime() + 1000) },
+    ]);
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect(await ctx.tick()).toMatchObject({ launched: 0, deferred: 1 });
+  });
+
   it("runs an urgent ticket at 96% while routine work is held", async () => {
     ctx = await setup({ agent: 5 });
     const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
@@ -311,6 +353,19 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 1, deferred: 1 });
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, urgent.id)))[0]!.systemState).toBe("in_progress");
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, routine.id)))[0]!.systemState).toBe("backlog");
+  });
+
+  it("holds routine priority-3 wakes (resume, check result) at the hold, but not a review request (BOS-1943)", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("PATCH", `/api/agents/${worker.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.99, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Routine work", assigneeAgentId: worker.id })).json();
+    await ctx.scheduler.notify(worker.id, { ticketId: t.id, reason: "resume", priority: 3, note: "Pick up." });
+    expect(await ctx.tick()).toMatchObject({ launched: 0 });
+    const [held] = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === t.id);
+    expect(held!.statusReason).toBe("subscription seven_day window nearly used up");
   });
 
   it("holds even an urgent ticket under the default pause once the window is at its limit", async () => {
@@ -436,6 +491,39 @@ describe("scheduler", () => {
     // Only the live ticket's run started: the finished one's agent wasn't woken for a replay.
     expect(ctx.commands).toHaveLength(1);
     expect(ctx.commands[0]!.prompt).toContain("Still wanted");
+  });
+
+  it("drops a wake for a ticket that was unassigned and parked in Backlog; it stays there and no run starts (BOS-1791)", async () => {
+    ctx = await setup({ agent: 5 });
+    const a = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer A" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Parked work", assigneeAgentId: a.id })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "assigned", priority: 2, note: "Queued before the park." });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "check due", priority: 2, note: "Queued before the park." });
+    await ctx.db.update(tickets).set({ assigneeAgentId: null, systemState: "backlog" }).where(eq(tickets.id, t.id));
+
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 2 });
+    const rows = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(rows.every((w) => w.status === "dropped" && /parked or unassigned/.test(w.statusReason ?? ""))).toBe(true);
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("backlog");
+    expect(ctx.commands).toHaveLength(0);
+  });
+
+  it("drops an old agent's wake once the ticket is reassigned to another agent (BOS-1791)", async () => {
+    ctx = await setup({ agent: 5 });
+    const a = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer A" })).json();
+    const b = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer B" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Handed over", assigneeAgentId: a.id })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "assigned", priority: 2, note: "For A." });
+    await ctx.db.update(tickets).set({ assigneeAgentId: b.id }).where(eq(tickets.id, t.id));
+
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 1 });
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(w!.status).toBe("dropped");
+    expect(w!.statusReason).toContain("another agent");
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("backlog");
+    expect(ctx.commands).toHaveLength(0);
   });
 
   it("drops a ticketless nudge that waited over two hours, but starts a fresh one (BOS-1136)", async () => {
@@ -570,6 +658,50 @@ describe("scheduler", () => {
     // Not a replay: a watch wake on a closed ticket is how the watcher reports the finish, so it goes ahead.
     await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: t.id, reason: "ticket watch", priority: 1, note: "Watch it once more.", createdAt: new Date(closedAt.getTime() - 60_000) });
     expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+  });
+
+  it("drops each nudge, booked check, check result and old-card wake queued before a ticket closed, even beside a wake that still runs, and logs it (BOS-2172)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Background" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Merged lane ticket", assigneeAgentId: worker.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    await ctx.db.delete(wakes);
+    const closedAt = new Date(Date.now() - 3_600_000);
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, t.id));
+    const before = new Date(closedAt.getTime() - 60_000);
+    // What the retro saw (BOS-2129, BOS-2132, BOS-1984): stale follow-ups queued while the ticket was open...
+    for (const reason of ["nudge", "check due", "check_result", "checking an old card"]) {
+      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason, priority: 2, note: `Old ${reason}.`, createdAt: before });
+    }
+    // ...beside a wake that still has work on a closed ticket. Before BOS-2172 this one kept all of them.
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: t.id, reason: "ticket watch", priority: 1, note: "Watch it once more.", createdAt: before });
+
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 4 });
+    expect(ctx.commands.map((c) => c.agentId)).toEqual([ctx.ceo.id]);
+    const rows = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(rows.filter((w) => w.status === "dropped").map((w) => w.reason).sort()).toEqual(["check due", "check_result", "checking an old card", "nudge"]);
+    expect(rows.find((w) => w.reason === "ticket watch")!.status).toBe("launched");
+    const lines = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).filter((a) => a.kind === "wake_dropped");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.summary).toMatch(/^Dropped 4 wakes \(.*nudge.*\) queued before this ticket was finished, instead of starting a run$/);
+  });
+
+  it("still wakes the assignee for a message sent after the ticket closed, even with an older one queued (BOS-2172)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Background" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Asked about after done", assigneeAgentId: worker.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    await ctx.db.delete(wakes);
+    const closedAt = new Date(Date.now() - 3_600_000);
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, t.id));
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason: "message", priority: 2, note: "Old message.", createdAt: new Date(closedAt.getTime() - 60_000) });
+    // The owner writes on the done ticket now: it must not be folded into the old wake and dropped with it.
+    await ctx.scheduler.notify(worker.id, { ticketId: t.id, reason: "message", note: "A question after it closed." });
+
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 1 });
+    expect(ctx.commands).toHaveLength(1);
+    expect(ctx.commands[0]!.prompt).toContain("A question after it closed.");
+    expect(ctx.commands[0]!.prompt).not.toContain("Old message.");
   });
 
   it("marks a ticket urgent only through the owner path and the managers' tool", async () => {

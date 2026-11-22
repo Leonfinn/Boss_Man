@@ -1,7 +1,7 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { api, ApiError, type ActiveRun, type Company, type Decision, type DecisionTally, type NoticeFeed, type TeamAlert, type AdvisedDecision, type ClosedNoticeCard } from "./api";
 import { art } from "./brand";
-import { Sidebar } from "./components/Sidebar";
+import { companyFigure, Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
@@ -9,31 +9,40 @@ import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
 import { setHold, useHold } from "./hold";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
-import { Board } from "./pages/Board";
-import { Decisions } from "./pages/Decisions";
-import { Engagement, Engagements } from "./pages/Engagements";
-import { Run } from "./pages/Run";
-import { Runs } from "./pages/Runs";
-import { MergeQueue } from "./pages/MergeQueue";
-import { Settings, settingsRedirect } from "./pages/Settings";
-import { ProjectsPage } from "./pages/settings/Projects";
-import { Ticket } from "./pages/Ticket";
-import { Rules } from "./pages/Rules";
-import { Secrets } from "./pages/Secrets";
-import { Notifications } from "./pages/Notifications";
-import { ScrumMaster } from "./pages/ScrumMaster";
-import { Workflow } from "./pages/Workflow";
-import { Plan } from "./pages/Plan";
-import { ChatPage } from "./pages/Chat";
-import { Dashboard } from "./pages/Dashboard";
-import { MergesStuckBannerFor } from "./components/MergesStuckBanner";
-import { Skills } from "./pages/Skills";
-import { Agents } from "./pages/Agents";
-import { Features } from "./pages/Features";
-import { Wiki } from "./pages/Wiki";
-import { Feedback } from "./pages/Feedback";
-import { Roadmap } from "./pages/Roadmap";
-import { Setup, SetupChecklist } from "./pages/Setup";
+import { lazyPage, PageSuspense } from "./lazy-page";
+import { settingsRedirect } from "./pages/settings-redirect";
+import { atTime, drainTiming, waitingFor, wrapUpBannerText, type RunnerCheckView } from "./pages/settings/updates";
+import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
+import { SearchPalette } from "./components/SearchPalette";
+
+// BOS-1843: every page below loads when it is first opened. Login, the shell and the banners stay in the entry file.
+const Board = lazyPage(() => import("./pages/Board"), "Board");
+const Decisions = lazyPage(() => import("./pages/Decisions"), "Decisions");
+const Engagement = lazyPage(() => import("./pages/Engagements"), "Engagement");
+const Engagements = lazyPage(() => import("./pages/Engagements"), "Engagements");
+const Run = lazyPage(() => import("./pages/Run"), "Run");
+const Runs = lazyPage(() => import("./pages/Runs"), "Runs");
+const MergeQueue = lazyPage(() => import("./pages/MergeQueue"), "MergeQueue");
+const Settings = lazyPage(() => import("./pages/Settings"), "Settings");
+const ProjectsPage = lazyPage(() => import("./pages/settings/Projects"), "ProjectsPage");
+const Ticket = lazyPage(() => import("./pages/Ticket"), "Ticket");
+const Rules = lazyPage(() => import("./pages/Rules"), "Rules");
+const Secrets = lazyPage(() => import("./pages/Secrets"), "Secrets");
+const Notifications = lazyPage(() => import("./pages/Notifications"), "Notifications");
+const ScrumMaster = lazyPage(() => import("./pages/ScrumMaster"), "ScrumMaster");
+const Workflow = lazyPage(() => import("./pages/Workflow"), "Workflow");
+const Plan = lazyPage(() => import("./pages/Plan"), "Plan");
+const ChatPage = lazyPage(() => import("./pages/Chat"), "ChatPage");
+const Dashboard = lazyPage(() => import("./pages/Dashboard"), "Dashboard");
+const SpendReport = lazyPage(() => import("./pages/SpendReport"), "SpendReport");
+const Skills = lazyPage(() => import("./pages/Skills"), "Skills");
+const Agents = lazyPage(() => import("./pages/Agents"), "Agents");
+const Features = lazyPage(() => import("./pages/Features"), "Features");
+const Wiki = lazyPage(() => import("./pages/Wiki"), "Wiki");
+const Feedback = lazyPage(() => import("./pages/Feedback"), "Feedback");
+const Roadmap = lazyPage(() => import("./pages/Roadmap"), "Roadmap");
+const Setup = lazyPage(() => import("./pages/Setup"), "Setup");
+const SetupChecklist = lazyPage(() => import("./pages/Setup"), "SetupChecklist");
 
 type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
 
@@ -67,7 +76,7 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 }
 
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
-const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects"]);
+const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects", "spend"]);
 const CHOSEN = "bm-company";
 const SIDE_COLLAPSED = "bm-side-collapsed";
 function remember(id: string, set: (id: string) => void) {
@@ -98,7 +107,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951: merges being pushed to main (named by ticket), and a wait on nothing Boss Man can name. */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2056: when the owner's wrap-up was asked and which update it is for. */ wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -106,27 +115,46 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
   if (m.kind === "wrapup")
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-        Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner.
+        {wrapUpBannerText(m)}
       </p>
     );
-  const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
+  if (m.kind === "building")
+    return (
+      <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
+        A runner update is being built. New runs wait until it has gone in; runs already going carry on. Cancel it on Settings → Server and runner → Updates if you need new work to start now.
+      </p>
+    );
+  const waiting = waitingFor(m);
   if (m.kind === "settings")
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
         {m.blocking === false
-          ? `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update, and new runs are not held while it waits for your answer in Settings → Server and runner.`
+          ? `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update, and new runs are not held while it waits for your answer in Settings → Server and runner → Updates.`
           : `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update: the runner image stays the same. Nothing new starts until it is done.`}
       </p>
     );
   if (m.blocking === false)
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-        Update pending: {waiting}. It is past its deadline and waits for your answer in Settings → Server and runner. New runs are not held for it.
+        Update pending: {waiting}. It is past its deadline and waits for your answer in Settings → Server and runner → Updates. New runs are not held for it.
       </p>
     );
+  const timing = drainTiming(m);
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.
+      Update pending: {waiting}. {timing ? `${timing} ` : ""}Nothing new starts until it is done.{" "}
+      {m.overdue && m.phase === "waiting" ? (
+        <>
+          {m.unknownWait ? "It is running late: Boss Man cannot say what it is waiting for. " : "It is past the time given: "}
+          <a href="#/settings/updates">choose in Settings → Server and runner → Updates</a> to stop the checks and update now, keep waiting, or cancel the update. Nothing that has started is stopped unless you choose that. The chat keeps answering meanwhile.{" "}
+        </>
+      ) : null}
+      {m.wrapSince ? `Wrapping up for this update (asked at ${atTime(m.wrapSince)}): it ends by itself when the update goes in. ` : ""}
+      {m.runs > 0 && !m.wrapSince
+        ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner → Updates.'
+        : (m.checks ?? 0) > 0
+          ? "To go ahead without waiting, use \"Stop the checks and update now\" on Settings → Server and runner → Updates: they restart from the beginning afterwards."
+          : ""}
     </p>
   );
 }
@@ -295,7 +323,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
   // turns the badge to the warning colour when a jam is there to see.
   const mergeQueue = usePoll(
-    (signal) => (current ? api<{ waitingCount: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    (signal) => (current ? api<{ waitingCount: number; lineCount?: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
     20_000,
     `merge-badge-${current?.id}`,
   );
@@ -364,23 +392,25 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         decisionsTally={decisionsTally.data}
         companyTallies={companyTallies.data ?? undefined}
         unread={feed.data?.unread ?? 0}
-        feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
-        mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
+        feedback={companyFigure(unprocessed.data, current?.id)}
+        mergeWaiting={mergeQueue.data ? inLineOf(mergeQueue.data) : 0}
         mergeStuck={mergeQueue.data?.stuckCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
+      <SearchPalette companyId={companyId} go={go} />
       <main>
         <UpdateBanner m={maintenance.data} />
         <HoldBanner />
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
+        <PageSuspense>
         {redirect ? null : page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
-          <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
+          <ChatPage companies={list} companyId={companyId} agentId={route[2]} messageId={route[3]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "agents" ? (
@@ -407,6 +437,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Workflow company={current} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} browserPermission={permission} onEnableBrowser={() => void Notification.requestPermission().then(setPermission)} />
+        ) : page === "spend" ? (
+          <SpendReport company={current} />
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
@@ -418,10 +450,11 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><SetupChecklist companyId={current?.id} go={go} folded={folded} /></>} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: companyTallies.data?.[c.id]?.open ?? (decisions.data ?? []).filter((d) => d.companyId === c.id && !d.waiting).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} loadError={decisions.error !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><PageSuspense fallback={null}><SetupChecklist companyId={current?.id} go={go} folded={folded} /></PageSuspense></>} />
         ) : (
-          <Dashboard company={current} decisions={decisions.data === null ? null : decisions.data.filter((d) => !current || d.companyId === current.id)} tally={decisionsTally.data} />
+          <Dashboard company={current} onChanged={companies.reload}decisions={decisions.data === null ? null : decisions.data.filter((d) => !current || d.companyId === current.id)} tally={decisionsTally.data} />
         )}
+        </PageSuspense>
         </PageGuard>
       </main>
     </div>

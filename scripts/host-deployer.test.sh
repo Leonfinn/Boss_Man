@@ -5,6 +5,11 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d)"; trap 'kill "${hook_pid:-0}" 2>/dev/null || true; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*"; [[ -z ${DEBUG:-} ]] || { cat "${DL:-/dev/null}" "$D/deployer.log"; }; exit 1; }
+# gpush <repo> <push args...>: git push with git's stderr kept; a failed push ends the whole test, naming the helper
+# and printing git's message (BOS-1835). Used inside $(...) too, where exit ends only the subshell, so signal $$.
+gpush() {
+  local err; err="$(git -C "$1" push -q "${@:2}" 2>&1)" || { echo "FAIL: gpush($1 ${*:2}) failed: $err" >&2; kill -TERM "$$"; exit 1; }
+}
 has() { grep -qF -- "$2" "$1" || fail "$1 lacks: $2 (has: $(cat "$1" 2>/dev/null))"; }
 hasnt() { ! grep -qF -- "$2" "$1" 2>/dev/null || fail "$1 should not have: $2"; }
 jget() { node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(o[process.argv[2]]))' "$1" "$2"; }
@@ -12,7 +17,7 @@ jget() { node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(proc
 # --- fixture: origin, a working clone that moves main, and the checkout the host deploys ---
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 git init -q --bare -b main "$T/origin.git"
-git clone -q "$T/origin.git" "$T/w" 2>/dev/null
+git clone -q "$T/origin.git" "$T/w"
 mkdir -p "$T/w/scripts" "$T/w/apps/server"
 cat >"$T/w/scripts/deploy.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -31,13 +36,18 @@ exit "${STUB_RC:-0}"
 STUB
 chmod +x "$T"/w/scripts/*.sh
 echo a >"$T/w/apps/server/a"
-git -C "$T/w" add -A; git -C "$T/w" commit -qm base; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+git -C "$T/w" add -A; git -C "$T/w" commit -qm base; gpush "$T/w" origin HEAD:main
 base="$(git -C "$T/w" rev-parse HEAD)"
-git clone -q "$T/origin.git" "$T/src" 2>/dev/null
+git clone -q "$T/origin.git" "$T/src"
 push() { # file: change a file and push main; prints the new sha
   mkdir -p "$(dirname "$T/w/$1")"; echo "$RANDOM" >"$T/w/$1"
-  git -C "$T/w" add -A; git -C "$T/w" commit -qm "change $1"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
-  git -C "$T/w" rev-parse HEAD
+  git -C "$T/w" add -A; git -C "$T/w" commit -qm "change $1"; gpush "$T/w" origin HEAD:main
+  # Exactly one 40-char sha, or end the whole test naming the helper (BOS-1817): a stray line or an empty
+  # value would otherwise only show up later as the deployer rejecting the request's shape. push runs in a
+  # $(...) subshell, where exit would end only the subshell, so signal the main script ($$ is the parent).
+  local sha; sha="$(git -C "$T/w" rev-parse HEAD)"
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: push($1) did not give one 40-char sha, got: [$sha]" >&2; kill -TERM "$$"; exit 1; }
+  echo "$sha"
 }
 c1="$(push apps/server/a)"
 
@@ -70,7 +80,12 @@ conf() { printf 'REPO=%s\nWEBHOOK_URL=http://127.0.0.1:%s/hook\nWEBHOOK_ON_SUCCE
 conf 0
 host() { "$here/host-deployer.sh" "$@" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero"; }; }
 req() { # target commit [id]: write a request the way the server does
-  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${3:-$(node -e 'console.log(crypto.randomUUID())')}" "$1" "$2" >"$D/inbox/request.json"
+  # Build the id first and check it, so a failed node start under load stops here with a clear message.
+  local rid="${3:-}"
+  [[ -n $rid ]] || rid="$(node -e 'console.log(crypto.randomUUID())')"
+  [[ $rid =~ ^[0-9A-Za-z-]{1,64}$ ]] || { echo "FAIL: req($1) request id is not a plain id, got: [$rid]" >&2; exit 1; }
+  [[ $2 =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: req($1) commit is not one 40-char sha, got: [$2]" >&2; exit 1; }
+  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$rid" "$1" "$2" >"$D/inbox/request.json"
 }
 status() { jget "$D/outbox/status.json" "$1"; }
 calls() { wc -l <"$STUB_LOG" | tr -d ' '; }
@@ -195,7 +210,9 @@ if [[ $1 == ps && $2 == -a && $3 == --filter && $4 == label=com.docker.compose.p
   printf 'aaa\tsrv\t%s\t%s\t2 hours ago\tsrv\tsrv\n' "${FAKE_RUN:-running}" "${FAKE_STATUS:-Up 2 hours}"
   printf 'bbb\tbm-migrate-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tmigrate\n'
   printf 'ccc\tbm-netguard-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tnetguard\n'
-  printf 'ddd\tserver-green\texited\tExited (0) 1 minute ago\t1 minute ago\tbm\tserver-green\n'
+  printf 'ddd\tserver-green\texited\tExited (%s) 1 minute ago\t1 minute ago\tbm\tserver-green\n' "${FAKE_GREEN_EXIT:-0}"
+  # BOS-1584: FAKE_BLUE=running|exited adds the other colour, to test the standby filter with a known live colour.
+  [[ -n ${FAKE_BLUE:-} ]] && printf 'bl1\tserver-blue\t%s\tUp 1 hour\t1 hour ago\tbm\tserver-blue\n' "$FAKE_BLUE"
   printf 'eee\tbm-worker-1\texited\tExited (%s) 2 hours ago\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}"
   printf 'fff\tbm-cache-1\trestarting\tRestarting (255) 1 second ago\t1 minute ago\tbm\tcache\n'
   printf 'ggg\tbm-db-1\texited\tExited (0) 10 minutes ago\t10 minutes ago\tbm\tdb\n'
@@ -210,7 +227,9 @@ if [[ $1 == inspect && $2 == -f && $3 == '{{.State.ExitCode}}' ]]; then
   [[ -n ${FAKE_INSPECT_EMPTY:-} ]] && exit 0
   for id in "$@"; do
     case $id in
-      bbb|ccc|ddd|ggg) echo 0 ;;
+      ddd) echo "${FAKE_GREEN_EXIT:-0}" ;;
+      bl1) echo "${FAKE_BLUE_EXIT:-1}" ;;
+      bbb|ccc|ggg) echo 0 ;;
       eee|hhh) echo "${FAKE_EXIT:-137}" ;;
       fff) echo 255 ;;
       *) echo 0 ;;
@@ -257,6 +276,30 @@ node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=
 # A worker that exited 0 with a normal restart policy is still named, not hidden as a finished one-shot.
 FAKE_EXIT=0 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (all up) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.notRunning!==3)process.exit(1)' "$D/outbox/host.json" || fail "only the migrate/netguard one-shots and the standby colour should be ignored"
+# BOS-1584: with blue/green on and blue the live colour (running), the stopped green standby is meant to be stopped
+# whatever its exit code (docker stop gives 137). Blue/green is on when COMPOSE_FILE names the bluegreen file, and the
+# live colour is read from the proxy include.
+mkdir -p "$D/proxy"; printf 'reverse_proxy server-blue:3100\n' >"$D/proxy/active.caddy"
+bgnames() { COMPOSE_FILE="docker-compose.yml:deploy/truenas-bluegreen.yml" "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (standby) exited non-zero"; }
+  node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=>x.name+":"+x.exit);process.stdout.write(s.sort().join(","))' "$D/outbox/host.json"; }
+for gx in 0 137 143 1; do
+  [[ $(FAKE_BLUE=running FAKE_GREEN_EXIT=$gx bgnames) == "bm-cache-1:255,bm-db-1:0,bm-worker-1:137" ]] || fail "standby green (exit $gx) beside a running blue must be ignored"
+done
+# A crashed live colour is still reported: blue is live but not running, so green's stop is not "meant" and blue is named.
+names="$(FAKE_BLUE=exited FAKE_BLUE_EXIT=137 FAKE_GREEN_EXIT=137 bgnames)"
+[[ $names == *"server-blue:137"* && $names == *"server-green:137"* ]] || fail "a live colour that is down must still be reported, with its standby: $names"
+rm -f "$D/proxy/active.caddy"
+# BOS-1584: the repo probe goes over the same ssh command a deploy uses. A checkout's core.sshCommand (the deploy key)
+# must survive: the probe adds only the no-prompt options. A fake ssh records what it was given and refuses.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s/ssh.args"\nexit 255\n' "$T" >"$T/fd/fakessh"; chmod +x "$T/fd/fakessh"
+git -C "$T/src" config core.sshCommand "$T/fd/fakessh -i /keys/deploy_key -o IdentitiesOnly=yes"
+git -C "$T/src" remote set-url origin "ssh://someone@git.example.test/repo.git"
+rm -f "$D/state/repo-probe" "$T/ssh.args"; host
+has "$T/ssh.args" "-i /keys/deploy_key -o IdentitiesOnly=yes"
+has "$T/ssh.args" "BatchMode=yes"
+git -C "$T/src" config --unset core.sshCommand
+git -C "$T/src" remote set-url origin "$T/origin.git"
+rm -f "$D/state/repo-probe"; host
 # When inspect returns nothing for every container (removed between ps and inspect, or inspect denied), `exit` must
 # still be a string so host.json stays valid JSON and the panel keeps every other fact (Rod's must-fix).
 FAKE_INSPECT_EMPTY=1 "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (empty inspect) exited non-zero"; }
@@ -278,9 +321,13 @@ if [[ $1 == ps && $2 == --filter ]]; then
   esac
   exit 0
 fi
+if [[ $1 == exec && $2 == ntfy-1 && $3 == wget ]]; then
+  printf '# TYPE ntfy_subscribers_total gauge\nntfy_subscribers_total %s\n' "${FAKE_NTFY_SUBS:-2}"
+  exit 0
+fi
 if [[ $1 == inspect && $2 == -f ]]; then
   case $4 in
-    ntfy-1) echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
+    ntfy-1) [[ $3 == *StartedAt* ]] && echo "2026-11-14T10:00:00.123456789Z" || echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
     sg1) echo "bm_front bm_internal " ;;
   esac
   exit 0
@@ -294,6 +341,10 @@ node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.container!=="ntfy-1"||n.
 hasnt "$D/outbox/host.json" 'bm_front'
 FAKE_NTFY_NETS="bm_edge bm_front " "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy on front) exited non-zero"; }
 node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.serverReach!==true)process.exit(1)' "$D/outbox/host.json" || fail "ntfy on the front network must report serverReach true: $(cat "$D/outbox/host.json")"
+# BOS-1589: the report carries when ntfy last started and how many phones are connected now (0 = a silent phone).
+node -e 'const n=require(process.argv[1]).ntfy;if(n.startedAt!=="2026-11-14T10:00:00.123456789Z"||n.subscribers!==2)process.exit(1)' "$D/outbox/host.json" || fail "ntfy facts must carry startedAt and subscribers 2: $(cat "$D/outbox/host.json")"
+FAKE_NTFY_SUBS=0 "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy 0 subscribers) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(n.subscribers!==0)process.exit(1)' "$D/outbox/host.json" || fail "0 subscribers must be reported as 0: $(cat "$D/outbox/host.json")"
 # --facts writes the report on demand, with no request and no deploy run (BOS-986), so a fix can be checked at once.
 printf '{"id":"x"\n' >"$D/inbox/request.json"
 rm -f "$D/outbox/host.json"; : >"$STUB_LOG"
@@ -366,7 +417,7 @@ if(got!==want){console.error("keys: "+got);process.exit(1)}
 # 5. A commit that is not on main is refused (BOS-753: an older commit on main is no longer refused; see 13b).
 rm "$D/state/last-server"
 side="$(git -C "$T/w" commit-tree "$c1^{tree}" -p "$c1" -m "side branch")"
-git -C "$T/w" push -q origin "$side:refs/heads/side" 2>/dev/null
+gpush "$T/w" origin "$side:refs/heads/side"
 printf '%s\n' "$side" >"$D/inbox/checked" # even listed as checked: off main is never deployed
 req server "$side"
 host
@@ -384,7 +435,7 @@ has "$D/outbox/status.json" "deployment files (docker-compose.yml)"
 [[ $(calls) == 1 ]] || fail "infra change was deployed"
 infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
-for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh apps/server/Dockerfile .env.example; do
+for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh scripts/daily-backup.sh apps/server/Dockerfile .env.example; do # daily-backup.sh runs as root in the backup container (BOS-2176)
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
@@ -417,6 +468,18 @@ rm -f "$D/outbox/status.json"
 printf '{"id":"11111111-1111-1111-1111-111111111114","target":"server","commit":"%s\0",%s}\n' "$c3" "$good" >"$D/inbox/request.json"; host
 has "$D/outbox/status.json" "expected format"
 [[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a hostile request ran something"
+
+# 7c. (BOS-2213) The refusal names which check failed, and for an empty id or a short commit (the two ways the
+# original BOS-1817 flake could have looked: status.json then also shows id "" and to_commit "") it says so.
+rm -f "$D/outbox/status.json"; : >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "the file is empty"
+rm -f "$D/outbox/status.json"
+printf '{"id":"","target":"server","commit":"%s",%s}\n' "$c3" "$good" >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "expected format (the id is not"
+rm -f "$D/outbox/status.json"
+printf '{"id":"11111111-1111-1111-1111-111111111114","target":"server","commit":"abc123",%s}\n' "$good" >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "(the commit is not one 40-character hash)"
+[[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a hostile request ran something"
 # 7c. A pretty-printed request (other writers, other spacing) is still read.
 rm -f "$D/outbox/status.json"
 printf '{\n  "id": "11111111-1111-1111-1111-111111111116",\n  "target": "server",\n  "commit": "%s",\n  %s\n}\n' "$c3" "${good/,/,$'\n  '}" >"$D/inbox/request.json"; host
@@ -437,7 +500,7 @@ has "$D/outbox/status.json" "built from the version the server runs now; the car
 has "$STUB_LOG" "update-runner.sh"
 # 8b. A commit that is not part of what the server runs (a switch-back) is refused, in plain words, with what to press.
 # Its own branch name: step 7 already pushed an unrelated "side" branch, and pushing over it failed (silently) every run.
-git -C "$T/w" checkout -q -b switch-back "$base" && echo side >"$T/w/side.txt" && git -C "$T/w" add -A && git -C "$T/w" commit -qm side && git -C "$T/w" push -q origin switch-back 2>/dev/null
+git -C "$T/w" checkout -q -b switch-back "$base" && echo side >"$T/w/side.txt" && git -C "$T/w" add -A && git -C "$T/w" commit -qm side && gpush "$T/w" origin switch-back
 side="$(git -C "$T/w" rev-parse HEAD)"; git -C "$T/w" checkout -q - ; git -C "$T/src" fetch -q origin switch-back
 rm -f "$D/state/last-runner"; before="$(calls)"
 req runner "$side"; host
@@ -450,7 +513,7 @@ has "$STUB_LOG" "update-runner.sh"
 hasnt "$STUB_LOG" "update-runner.sh --now" # the runner target drains; --now is for a person at the host
 
 # 9. A failed deploy reports the failure, keeps the status honest and posts the webhook.
-git -C "$T/w" reset -q --hard "$c2"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop the compose change from main
+git -C "$T/w" reset -q --hard "$c2"; gpush "$T/w" -f origin HEAD:main # drop the compose change from main
 c4="$(push apps/server/c)"
 rm -f "$D/state/last-server"
 STUB_RC=1 STUB_RESULT=partial; export STUB_RC STUB_RESULT
@@ -585,7 +648,7 @@ has "$D/outbox/status.json" "have not passed their merge check yet. ${c5:0:8} is
 # 13h. Deploy latest pressed for the tip, then two more merges land, both checked: the new tip goes out, and the runner
 # change it brings is reported, though the card's own range had none.
 rm -f "$D/state/last-server"
-c7="$(push apps/runner/x)"; c8="$(push apps/server/f)"
+c7="$(push apps/runner/src/x)"; c8="$(push apps/server/f)"
 printf '%s\n' "$c5" "$c6" "$c7" "$c8" >"$D/inbox/checked"
 before="$(calls)"
 req server "$c6"; host
@@ -606,7 +669,7 @@ printf '%s\n' "$c10" "$c11" >"$D/inbox/checked"
 req server "$c10"; host
 [[ $(status result) == deployed && $(status to_commit) == "$c10" ]] || fail "13j: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "the newer commits change deployment files and have to be applied by hand"
-git -C "$T/w" reset -q --hard "$c10"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop the compose change again
+git -C "$T/w" reset -q --hard "$c10"; gpush "$T/w" -f origin HEAD:main # drop the compose change again
 # 13k. A stale card for a commit that already runs: nothing new, never a refusal, and no newer unchecked commit is taken.
 rm -f "$D/state/last-server" "$D/inbox/checked"
 req server "$c10"; host
@@ -655,7 +718,9 @@ case "$a" in
     [[ -z ${FAKE_NO_RENDER:-} ]] || exit 1
     echo "name: p"; echo "services:"; for f in svc-*; do [[ ! -f $f ]] || { echo "  ${f#svc-}:"; echo "    image: $(cat "$f")"; }; done; echo "volumes:"; echo "  data: {}" ;;
   "exec -T db pg_dump"*) echo dump ;;
-  "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
+  "up -d --no-deps backup") # BOS-2176; BOS-2221: the daily folder must already exist (made by the host user, not by Docker)
+    [[ -d $BOSSMAN_BACKUP_DIR/daily ]] && echo "daily folder ready" >>"$DL"; echo "ensure backup service" >>"$DL" ;;
+  "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; [[ -z ${FAKE_BUILD_HANG:-} ]] || exec sleep 30; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
   "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
@@ -752,8 +817,10 @@ bgreq "$b1"; bg
 [[ $(status result) == deployed && $(status to_commit) == "$b1" ]] || fail "bg status: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "green is live"
 has "$D/outbox/status.json" '"soak_seconds": "900"' # the host's own window rides in the status file (BOS-401)
-order "$DL" "pg_dump" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
+order "$DL" "pg_dump" "ensure backup service" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
+order "$DL" "daily folder ready" "ensure backup service" # BOS-2221: folder exists before the service starts
+[[ $(stat -c %u "$BOSSMAN_BACKUP_DIR/daily") == "$(stat -c %u "$BOSSMAN_BACKUP_DIR")" ]] || fail "daily folder owner differs from the backup folder"
 ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"
 for f in "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz; do [[ $(stat -c %a "$f") == 600 ]] || fail "backup $f is not mode 600"; done
 live_is green
@@ -865,7 +932,14 @@ has "$T/hook.out" '"result": "failed"'
 # A failed migration stops before anything starts.
 reset_world blue "$cur"; bgreq "$b4"
 FAKE_MIGRATE_RC=1 bg
-has "$D/outbox/status.json" "migration failed"; hasnt "$DL" "up -d"; hasnt "$DL" "signal"
+has "$D/outbox/status.json" "migration failed"; hasnt "$DL" "up -d --no-deps server";hasnt "$DL" "signal"
+# BOS-2058 (rule b): a build that hangs is stopped at BG_BUILD_SECONDS; the update fails, nothing starts, the live colour stays.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
+FAKE_BUILD_HANG=1 BG_BUILD_SECONDS=1 bg
+[[ $(status result) == failed ]] || fail "hung build: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "did not finish within"
+hasnt "$DL" "migrate"; hasnt "$DL" "up -d --no-deps server"; hasnt "$DL" "signal"; live_is blue
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "hung build: checkout not put back"
 # A proxy that is not running changes nothing.
 reset_world blue "$cur"; rm "$W/running.proxy"; bgreq "$b4"; bg
 has "$D/outbox/status.json" "proxy container is not running"; hasnt "$DL" "pg_dump"
@@ -886,7 +960,7 @@ b5="$(push deploy/caddy/Caddyfile)"; bgreq "$b5"; bg
 has "$D/outbox/status.json" "deployment files (deploy/caddy/Caddyfile)"; hasnt "$DL" "pg_dump"
 
 # 22. Manual rollback, long after the window (no soak file, old colour stopped): back to the other colour.
-git -C "$T/w" reset -q --hard "$b5^"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop case 21 Caddyfile commit
+git -C "$T/w" reset -q --hard "$b5^"; gpush "$T/w" -f origin HEAD:main # drop case 21 Caddyfile commit
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 b6="$(push apps/server/bg6)"; bgreq "$b6"; bg
 [[ $(status result) == deployed ]] || fail "setup swap: $(cat "$D/outbox/status.json")"
@@ -979,7 +1053,7 @@ bg; [[ $(status result) == failed ]] || fail "second tick changed the status"
 svc_check() { rm -f "$D/state/last-server"; : >"$D/inbox/check"; : >"$DL"; bg; } # a refresh, as the cron tick does it
 avail() { jget "$D/outbox/available.json" "$1"; }
 no_changes_made() { ! grep -qE '^docker (up|run|restart|stop|kill|rm|build|exec)' "$DL" || fail "the refresh changed something: $(cat "$DL")"; }
-at() { git -C "$T/src" fetch -q origin 2>/dev/null; git -C "$T/src" reset -q --hard "$1"; }
+at() { git -C "$T/src" fetch -q origin; git -C "$T/src" reset -q --hard "$1"; }
 push svc-db >/dev/null; push svc-proxy >/dev/null; sB="$(push svc-server)"
 reset_world blue "$sB"; at "$sB"; rm -f "$D/state/applied-services" "$D/state/hold"
 touch "$W/running.db"; echo cid1 >"$W/cid.db"; echo 2026-11-07T10:00:00Z >"$W/started.db"
@@ -1002,7 +1076,7 @@ sE="$(push svc-db)"; at "$sD"; svc_check; has "$D/outbox/available.json" '"chang
 sF="$(push svc-proxy)"; at "$sE"; svc_check; has "$D/outbox/available.json" '"changedServices": ["proxy"]'
 at "$sD"; svc_check; has "$D/outbox/available.json" '"changedServices": ["db", "proxy"]'
 # a service added, and one removed, count as changed
-git -C "$T/w" rm -q svc-server; git -C "$T/w" commit -qm "drop svc-server"; git -C "$T/w" push -q origin HEAD:main 2>/dev/null
+git -C "$T/w" rm -q svc-server; git -C "$T/w" commit -qm "drop svc-server"; gpush "$T/w" origin HEAD:main
 sG="$(git -C "$T/w" rev-parse HEAD)"; at "$sF"; svc_check; has "$D/outbox/available.json" '"changedServices": ["server"]'
 sH="$(push svc-extra)"; at "$sG"; svc_check; has "$D/outbox/available.json" '"changedServices": ["extra"]'
 # the same render works for a Compose without --hash (it hashes each service block of the rendered file)
@@ -1012,6 +1086,14 @@ at "$sD"; FAKE_NO_HASH=1 svc_check; has "$D/outbox/available.json" '"changedServ
 FAKE_NO_RENDER=1 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; has "$D/outbox/available.json" '"changedServices": []'
 has "$D/outbox/available.json" "\"tip\": \"$sH\""; has "$D/deployer.log" "could not be rendered"
 [[ ! -e $D/state/render ]] || fail "the render folder was left behind after a failure"
+# it can't unpack the commit: reported as not checked, the reason is logged, and docker is never asked to render the
+# empty folder (BOS-1690: the unpack's failure check is a plain function call now, not a negated subshell with a redirect)
+# shellcheck disable=SC2016  # the fake's own script text: it expands when the fake runs
+printf '#!/usr/bin/env bash\n[[ -z ${FAKE_NO_UNPACK:-} ]] || { echo "tar: fake unpack failure" >&2; exit 2; }\nexec "%s" "$@"\n' "$(command -v tar)" >"$T/bin/tar"; chmod +x "$T/bin/tar"
+FAKE_NO_UNPACK=1 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; has "$D/deployer.log" "could not unpack"
+has "$D/deployer.log" "tar: fake unpack failure"; hasnt "$DL" "config"
+[[ ! -e $D/state/render ]] || fail "the render folder was left behind after a failed unpack"
+rm -f "$T/bin/tar"
 # switched off in host.conf: not compared, and docker is not asked to render anything
 printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\nSERVICE_COMPARE=0\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/host.conf"
 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; hasnt "$DL" "config"; has "$D/deployer.log" "Service compare is off"
@@ -1032,7 +1114,7 @@ for f in host-deployer.sh rebuild-live.sh deploy.sh; do
   # `up -d` or `restart` therefore fails here.
   if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b' "$here/$f" \
     | grep -vE '^[0-9]+:\s*#|exec -T |rm -f |^[0-9]+:\s*finish (partial|failed) ' \
-    | grep -vE '(up|run)\b.*--no-deps .*(server|launcher|migrate|\$\{svcs\[@\]\})|(stop|kill)\b.*"?server' ; then
+    | grep -vE '(up|run)\b.*--no-deps .*(server|launcher|migrate|backup|\$\{svcs\[@\]\})|(stop|kill)\b.*"?server' ; then
     fail "$f has a compose up/run/restart/stop/kill/rm/create/down that is not limited to the server services"
   fi
   if grep -nE '(compose|docker)[^#]* (up|run|restart|stop|kill|rm|create|down)\b[^#]*\b(db|proxy)\b' "$here/$f" | grep -vE '^[0-9]+:\s*#|exec -T (db|proxy)|--no-deps migrate'; then
@@ -1166,6 +1248,139 @@ mv "$T/bin/docker.real" "$T/bin/docker"
 [[ $(status result) == rolled_back ]] || fail "db restarted during the swap: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "whole-stack check found"; live_is blue
 
+# --- The staging lane (BOS-1472): its own request/status files, main-only commits, smoke checks, memory hold ---
+cat >"$T/w/scripts/deploy-staging.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "deploy-staging.sh $* production_dirs=${BOSSMAN_PRODUCTION_DIRS:-}" >>"$STUB_LOG"
+[[ -z ${STUB_STAGING_RC:-} ]] || { echo "build step failed: image pull denied"; echo "login with password=hunter2 rejected"; echo "curl -H Authorization: Bearer faketoken123 failed"; echo "retry Authorization: Basic dXNlcjpwYXNz failed"; echo "sent bearer standalone55 once"; exit "$STUB_STAGING_RC"; }
+git checkout --quiet "$1"
+STUB
+cat >"$T/w/scripts/smoke-staging.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "smoke-staging.sh $2 before=${SMOKE_PRODUCTION_BEFORE-unset}" >>"$STUB_LOG"
+printf 'address\tpass\tanswers\n'
+if [[ -n ${SMOKE_CREDENTIALS:-} && -f $SMOKE_CREDENTIALS ]]; then printf 'signin\tpass\tsigned in\n'; else printf 'signin\tskipped\tnot set up\n'; fi
+printf 'runner\tpass\trunner connected, image abc123\n'
+if [[ -n ${STUB_SMOKE_FAIL:-} ]]; then printf 'board\tfail\tHTTP 500\n'; exit 1; fi
+STUB
+chmod +x "$T"/w/scripts/*.sh
+git -C "$T/w" add -A; git -C "$T/w" commit -qm "staging stubs"; gpush "$T/w" origin HEAD:main
+s1="$(git -C "$T/w" rev-parse HEAD)"
+git clone -q "$T/origin.git" "$T/stg"
+# A commit that is on a side branch only, never on main.
+git -C "$T/w" checkout -q -b side; echo side >"$T/w/side.txt"; git -C "$T/w" add -A; git -C "$T/w" commit -qm side
+side="$(git -C "$T/w" rev-parse HEAD)"; git -C "$T/w" push -q origin HEAD:refs/heads/staging-offmain || fail "could not push the side branch"; git -C "$T/w" checkout -q -
+git -C "$T/w" reset -q --hard "$s1"
+sreq() { # commit [id]
+  printf '{"id":"%s","target":"staging","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${2:-$(node -e 'console.log(crypto.randomUUID())')}" "$1" >"$D/inbox/staging-request.json"
+}
+sstatus() { jget "$D/outbox/staging-status.json" "$1"; }
+: >"$STUB_LOG"; rm -f "$D/outbox/status.json" "$D/outbox/history.jsonl"
+
+# Lane off (no STAGING_DIR): the lane file says so and a request is answered, not left waiting.
+conf 0; host
+has "$D/outbox/staging-lane.json" '"configured": "false"'
+sreq "$s1"; host
+[[ $(sstatus result) == rejected ]] || fail "lane off: $(cat "$D/outbox/staging-status.json")"
+has "$D/outbox/staging-status.json" "not configured"
+[[ ! -e $D/inbox/staging-request.json ]] || fail "lane off left the request in the inbox"
+hasnt "$STUB_LOG" "deploy-staging.sh"
+# A symlinked request is never read (BOS-1775): the id behind it must not reach the world-readable status file.
+printf '{"id":"secret"}\n' >"$T/secret-target.json"; ln -s "$T/secret-target.json" "$D/inbox/staging-request.json"; host
+[[ $(sstatus result) == rejected ]] || fail "lane off, symlink: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-status.json" "secret"
+hasnt "$D/outbox/staging-history.jsonl" "secret"
+# A plain file whose id is not a UUID is not echoed either.
+printf '{"id":"secret"}\n' >"$D/inbox/staging-request.json"; host
+hasnt "$D/outbox/staging-status.json" "secret"
+
+# Lane on: a main commit deploys, then the smoke checks run, with production's folder passed for the isolation checks.
+conf 0; printf 'STAGING_DIR=%s\nSTAGING_RATE_LIMIT_SECONDS=3600\n' "$T/stg" >>"$D/host.conf"
+host
+has "$D/outbox/staging-lane.json" '"configured": "true"'
+sid="$(node -e 'console.log(crypto.randomUUID())')"
+sreq "$s1" "$sid"; host
+[[ $(sstatus result) == deployed && $(sstatus smoke) == passed && $(sstatus check_address) == pass && $(sstatus check_signin) == skipped ]] || fail "staging deploy: $(cat "$D/outbox/staging-status.json")"
+[[ $(sstatus to_commit) == "$s1" && $(sstatus id) == "$sid" && $(sstatus runner_image) == abc123 ]] || fail "staging status fields: $(cat "$D/outbox/staging-status.json")"
+[[ $(git -C "$T/stg" rev-parse HEAD) == "$s1" ]] || fail "the stub did not check out the commit"
+has "$STUB_LOG" "deploy-staging.sh $s1 production_dirs=$(cd "$T/src" && pwd)"
+has "$STUB_LOG" "smoke-staging.sh $s1 before="
+has "$D/outbox/staging-history.jsonl" "$sid"
+[[ ! -e $D/outbox/status.json ]] || fail "a staging deploy wrote production's status.json"
+hasnt "$D/outbox/history.jsonl" "$sid"
+[[ ! -e $D/inbox/staging-request.json ]] || fail "the staging request was not taken"
+
+# Replay: the same id is refused. Rate limit: a new id within the window is refused.
+sreq "$s1" "$sid"; host
+has "$D/outbox/staging-status.json" "already handled"
+sreq "$s1"; host
+has "$D/outbox/staging-status.json" "only one staging deploy"
+[[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "staging deployed more than once: $(cat "$STUB_LOG")"
+
+# Only main: a commit on a side branch is refused before anything runs.
+rm -f "$D/state/last-staging"; sreq "$side"; host
+has "$D/outbox/staging-status.json" "is not on main"
+[[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "a non-main commit reached deploy-staging.sh"
+# A commit from before the lane (no scripts/smoke-staging.sh) is refused, and the lane file says which repository staging follows.
+rm -f "$D/state/last-staging"; sreq "$c1"; host
+has "$D/outbox/staging-status.json" "older than the staging lane"
+[[ $(grep -c "^deploy-staging.sh" "$STUB_LOG") == 1 ]] || fail "a pre-lane commit reached deploy-staging.sh"
+has "$D/outbox/staging-lane.json" "\"origin\": \"$T/origin.git\""
+# A malformed request (shell characters in the commit) is refused.
+# shellcheck disable=SC2016 # the command substitution is literal text in the request: it must never be run
+printf '{"id":"%s","target":"staging","commit":"$(touch %s/pwned)","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$sid" "$T" >"$D/inbox/staging-request.json"; host
+has "$D/outbox/staging-status.json" "expected format"; [[ ! -e $T/pwned ]] || fail "request text was executed"
+# A production request target is not accepted in the staging file.
+printf '{"id":"%s","target":"server","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "$(node -e 'console.log(crypto.randomUUID())')" "$s1" >"$D/inbox/staging-request.json"; host
+has "$D/outbox/staging-status.json" "expected format"
+
+# Memory: held (left in the inbox) while an update would not have room; taken when memory frees up.
+rm -f "$D/state/last-staging"; meminfo 33554432 100; sreq "$s1"; host
+[[ $(sstatus result) == held && -e $D/inbox/staging-request.json ]] || fail "low memory did not hold staging: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-history.jsonl" '"held"'
+meminfo; host
+[[ $(sstatus result) == deployed && ! -e $D/inbox/staging-request.json ]] || fail "held staging request not taken after memory freed: $(cat "$D/outbox/staging-status.json")"
+
+# Smoke account file: used only when it is a plain file with mode 600 of ours; its values are never in the outbox.
+printf 'smoke_username=s\nsmoke_password=hunter2\n' >"$D/smoke-credentials"; chmod 600 "$D/smoke-credentials"
+rm -f "$D/state/last-staging"; sreq "$s1"; host
+[[ $(sstatus check_signin) == pass ]] || fail "smoke account not used: $(cat "$D/outbox/staging-status.json")"
+hasnt "$D/outbox/staging-status.json" hunter2
+chmod 644 "$D/smoke-credentials"; rm -f "$D/state/last-staging"; sreq "$s1"; host
+[[ $(sstatus check_signin) == skipped ]] || fail "a world-readable smoke account file was used"
+rm -f "$D/smoke-credentials"
+
+# A failing smoke check is reported with its name; a failing deploy is "failed" and smoke is not run.
+rm -f "$D/state/last-staging"; sreq "$s1"; STUB_SMOKE_FAIL=1 host
+[[ $(sstatus smoke) == failed && $(sstatus failed_checks) == board && $(sstatus check_board) == fail ]] || fail "smoke failure: $(cat "$D/outbox/staging-status.json")"
+rm -f "$D/state/last-staging"; : >"$STUB_LOG"; sreq "$s1"; STUB_STAGING_RC=1 host
+[[ $(sstatus result) == failed && $(sstatus smoke) == skipped ]] || fail "deploy failure: $(cat "$D/outbox/staging-status.json")"
+hasnt "$STUB_LOG" "smoke-staging.sh"
+# The failed record carries the run's last log lines, with secrets blanked, so nobody has to open the host.
+has "$D/outbox/staging-status.json" "image pull denied"
+has "$D/outbox/staging-status.json" "password=[redacted]"
+hasnt "$D/outbox/staging-status.json" "hunter2"
+# The whole credential after Bearer or Basic goes, not just the scheme word (BOS-2209).
+hasnt "$D/outbox/staging-status.json" "faketoken123"
+hasnt "$D/outbox/staging-status.json" "dXNlcjpwYXNz"
+hasnt "$D/outbox/staging-status.json" "standalone55"
+
+# A staging deploy cut off by a restart leaves "running" behind: the next tick marks it failed, so the lane isn't wedged (review).
+cut="$(node -e 'console.log(crypto.randomUUID())')"
+printf '{"id":"%s","target":"staging","result":"running","message":"Running","to_commit":"%s","started":"2026-10-20T12:00:00Z","ended":"","at":"2026-10-20T12:00:00Z"}\n' "$cut" "$s1" >"$D/outbox/staging-status.json"
+: >"$STUB_LOG"; host
+[[ $(sstatus result) == failed && $(sstatus id) == "$cut" ]] || fail "cut-off staging run not marked failed: $(cat "$D/outbox/staging-status.json")"
+has "$D/outbox/staging-status.json" "cut off"
+hasnt "$STUB_LOG" "deploy-staging.sh"
+
+# A production request waiting is handled first; the staging request waits for the next tick.
+rm -f "$D/state/last-staging" "$D/state/last-server"; sreq "$s1"; : >"$STUB_LOG"
+c2="$(push apps/server/b)"; (cd "$T/src" && git fetch -q origin main); req server "$c2"; host
+[[ -e $D/inbox/staging-request.json ]] || fail "staging ran ahead of a waiting production request"
+rm -f "$D/inbox/staging-request.json"
+# The staging section left host.conf pointing at the staging checkout; the sections below set their own.
+conf 0
+
 # ================= BOS-1004: "Create phone login" (inbox/phone-login.json), fake docker, fake ntfy =================
 # The deployer makes the phone's read-only ntfy user inside the ntfy container and returns the password sealed to the
 # public key in the request. The password must be in no file the deployer writes and on no command line.
@@ -1183,10 +1398,12 @@ if [[ $1 == ps ]]; then printf '%s' "${PL_CIDS-abc123def456}" | tr ' ' '\n' | gr
 shift 3; cid=$1; shift; [[ $1 == ntfy ]] || exit 98; shift
 if [[ -n ${PL_FAIL:-} && $1 == "$PL_FAIL" ]]; then echo "boom: the password is ${NTFY_PASSWORD:-none}" >&2; exit 1; fi
 case "$1 $2" in
-  "user list") printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
+  "token list") grep -q . "$PLW/tokens.$3" 2>/dev/null && printf 'user %s (role: user, tier: none)\n- %s (no label), never expires\n' "$3" "$(cat "$PLW/tokens.$3")" || printf 'user %s (role: user, tier: none)\n' "$3" ;;
+  "token add") [[ $3 == bossman-publish ]] || exit 97; printf 'tk_%s' "$(printf 'a%.0s' $(seq 1 29))" >"$PLW/tokens.$3"; printf 'token %s created for user %s, never expires\n' "$(cat "$PLW/tokens.$3")" "$3" ;;
+  "user list") [[ -n ${PL_NOPUB:-} ]] || printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
   "user add") [[ $3 == --role=user && ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; echo "$4" >>"$PLW/users"; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$4" ;;
   "user change-pass") [[ ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$3" ;;
-  access*) [[ $3 == read-only || $4 == read-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
+  access*) [[ $3 == read-only || $4 == read-only || $4 == write-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
   *) echo "fake ntfy: unhandled: $*" >&2; exit 98 ;;
 esac
 FAKE
@@ -1201,7 +1418,7 @@ plreq() { # action user topic pubkey [id]: write a request the way the server do
   rm -f "$PD/state/last-phone-login"
 }
 plhost() { BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (phone login)"; }; }
-plx() { grep -c '^docker exec' "$PLLOG" || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect don't count)
+plx() { grep '^docker exec' "$PLLOG" | grep -vc ' wget -qO- http://localhost:9090/metrics' || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect and the ntfy metrics read don't count)
 plres() { jget "$PD/outbox/phone-login.json" "$1"; }
 unseal() { jget "$PD/outbox/phone-login.json" sealed | base64 -d | openssl pkeyutl -decrypt -inkey "$PL/key.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256; }
 no_plaintext() { # the password must be in nothing the deployer or the log wrote, nor on any command line
@@ -1258,9 +1475,9 @@ plreq reset phone-read alerts "$PUB"; plhost; plreq reset phone-read alerts "$PU
 if [[ $(plres result) == rejected ]] && has "$PD/outbox/phone-login.json" "30 seconds" && [[ $(plx) == 0 ]]; then :; else fail "PL6: $(cat "$PD/outbox/phone-login.json")"; fi
 # PL7. No ntfy container, or two: nothing is changed.
 plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="" plhost
-[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
 plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="abc123def456 fed654cba321" plhost
-[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
 # PL8. A failing ntfy command is reported without the password, and a failed create leaves no sealed answer.
 : >"$PLW/users"
 plreq create phone-read alerts "$PUB"; PL_FAIL=user plhost
@@ -1273,6 +1490,49 @@ has "$PD/outbox/host.json" '"phoneLogin": {"openssl": true}'
 plreq reset phone-read alerts "$PUB"; : >"$PLLOG"; BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" --dry-run >"$T/out" 2>&1 || fail "PL9 dry run"
 [[ -e $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL9: a dry run handled the request"
 rm -f "$PD/inbox/phone-login.json"
+# PS (BOS-1581): action "setup" makes the publish user, write-only access and a token; the token comes back sealed only.
+export PL_NOPUB=1; : >"$PLW/users"; : >"$PLLOG"
+plreq setup bossman-publish alerts "$PUB"; plhost
+[[ $(plres result) == setup && $(plres id) == "$PLID" ]] || fail "PS1: $(cat "$PD/outbox/phone-login.json")"
+tok1="$(unseal)"; [[ $tok1 =~ ^tk_[a-z0-9]{29}$ && $tok1 == "$(cat "$PLW/tokens.bossman-publish")" ]] || fail "PS1: the sealed token is not the one ntfy made"
+has "$PLLOG" "ntfy user add --role=user bossman-publish"; has "$PLLOG" "ntfy access bossman-publish alerts write-only"; has "$PLLOG" "ntfy token add bossman-publish"
+no_plaintext "$tok1"; no_plaintext "$(cat "$PLW/pw.bossman-publish")"
+# PS2. Pressing it again finds all three: no user add, no token add, the same token comes back, and the answer says nothing changed.
+plreq setup bossman-publish alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == setup && $(unseal) == "$tok1" ]] || fail "PS2: $(cat "$PD/outbox/phone-login.json")"
+hasnt "$PLLOG" "user add"; hasnt "$PLLOG" "token add"; has "$PD/outbox/phone-login.json" "Nothing was changed"
+[[ $(grep -c . "$PLW/users") == 1 ]] || fail "PS2: a second user was made"
+# PS3. Only the publish user can be set up, and phone logins cannot be made for it.
+for bad in "setup phone-read alerts $PUB" "setup admin alerts $PUB" "create bossman-publish alerts $PUB" "reset bossman-publish alerts $PUB"; do
+  # shellcheck disable=SC2086
+  plreq ${bad%% "$PUB"} "$PUB"; : >"$PLLOG"; plhost
+  [[ $(plres result) == rejected && $(plx) == 0 ]] || fail "PS3 ($bad): $(cat "$PD/outbox/phone-login.json")"
+done
+# PS4. A failing ntfy step reports failed with no sealed token.
+rm -f "$PLW/tokens.bossman-publish"
+plreq setup bossman-publish alerts "$PUB"; PL_FAIL=token plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PS4: $(cat "$PD/outbox/phone-login.json")"
+unset PL_NOPUB
+rm -f "$PD/inbox/phone-login.json"
+
+# BOS-1826: the offer is the whole range. It held only the newest 30 commits (git log -n 30), so the card said "30 changes"
+# however many were waiting, and the first 300 paths, so host-deployer.sh (listed late, as paths sort) could drop out.
+# Its own origin and checkout, so the fixture above is untouched: 150 commits, one of them adding 310 files.
+LR="$T/long-range"; mkdir -p "$LR/deployer/inbox" "$LR/deployer/outbox"
+git init -q --bare -b main "$LR/origin.git"
+git clone -q "$LR/origin.git" "$LR/w"
+mkdir -p "$LR/w/apps/server" "$LR/w/scripts"; echo a >"$LR/w/apps/server/a"
+git -C "$LR/w" add -A; git -C "$LR/w" commit -qm base; gpush "$LR/w" origin HEAD:main
+git clone -q "$LR/origin.git" "$LR/src"
+for i in $(seq 1 310); do echo "$i" >"$LR/w/apps/server/f$i"; done
+echo x >"$LR/w/scripts/host-deployer.sh"
+git -C "$LR/w" add -A; git -C "$LR/w" commit -qm "add 311 files"
+for i in $(seq 2 150); do git -C "$LR/w" commit -q --allow-empty -m "commit $i"; done
+gpush "$LR/w" origin HEAD:main
+printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$LR/src" >"$LR/deployer/host.conf"; chmod 600 "$LR/deployer/host.conf"
+BOSSMAN_DEPLOYER="$LR/deployer" "$here/host-deployer.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (long range)"; }
+lr="$(node -e 'const o=require(process.argv[1]);process.stdout.write([o.commits.length,o.paths.length,o.infraPaths.join(","),o.commits.at(-1).subject].join(" "))' "$LR/deployer/outbox/available.json")"
+[[ $lr == "150 311 scripts/host-deployer.sh add 311 files" ]] || fail "long range: wanted 150 commits, 311 paths and host-deployer.sh, got: $lr"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"

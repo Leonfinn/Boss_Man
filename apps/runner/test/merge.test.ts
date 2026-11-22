@@ -4,8 +4,17 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { isClone, Workspaces } from "../src/workspace.js";
+
+// Root fix for the ENOTEMPTY cleanup flake: stop git starting detached background work (gc, maintenance) in the test
+// repos at all. Set on process.env so the Workspaces code under test (which reads it by default) is covered as well.
+process.env.GIT_CONFIG_COUNT = "2";
+process.env.GIT_CONFIG_KEY_0 = "gc.auto";
+process.env.GIT_CONFIG_VALUE_0 = "0";
+process.env.GIT_CONFIG_KEY_1 = "maintenance.auto";
+process.env.GIT_CONFIG_VALUE_1 = "false";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
@@ -16,10 +25,23 @@ const tmp = (prefix: string) => {
   dirs.push(d);
   return d;
 };
-afterEach(() => {
-  // Retries cover ENOTEMPTY: git 2.47+ runs its automatic maintenance detached, so it can still be writing in a repo here.
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
+afterEach(async () => {
+  // Backstop only (background git is switched off above): wait with a deadline, not a fixed sleep, if something
+  // still writes in a repo. Any other error is thrown at once; ENOTEMPTY still fails the test once the deadline passes.
+  const deadline = Date.now() + 30_000;
+  for (const d of dirs.splice(0)) {
+    for (;;) {
+      try {
+        rmSync(d, { recursive: true, force: true });
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY" || Date.now() >= deadline) throw err;
+        // test-lines-ok: retry pause inside a loop bounded by a 30 s deadline
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+  }
+}, 40_000);
 
 /** A bare origin plus a scratch clone for pushing "other people's" commits to it. */
 function origin() {
@@ -33,6 +55,7 @@ function origin() {
   git(seed, "push", "-q", "origin", "HEAD:main");
   const pushChange = (file: string, content: string) => {
     git(seed, "pull", "-q", "origin", "main");
+    mkdirSync(path.dirname(path.join(seed, file)), { recursive: true });
     writeFileSync(path.join(seed, file), content);
     git(seed, "add", ".");
     git(seed, "commit", "-qm", `edit ${file}`);
@@ -43,8 +66,8 @@ function origin() {
 
 const ids = { project: "11111111-1111-4111-8111-111111111111", t: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
 
-async function ticketWithCommit(o: ReturnType<typeof origin>, file: string, content: string) {
-  const ws = new Workspaces(tmp("bm-ws-root-"));
+async function ticketWithCommit(o: ReturnType<typeof origin>, file: string, content: string, env?: NodeJS.ProcessEnv) {
+  const ws = new Workspaces(tmp("bm-ws-root-"), env);
   const spec = { projectId: ids.project, ticketId: ids.t, repoUrl: o.url, baseRef: "main" };
   const w = await ws.ensure(spec);
   writeFileSync(path.join(w.path, file), content);
@@ -162,6 +185,95 @@ describe("merging a ticket's branch (R46)", () => {
       expect(() => execFileSync("test", ["-e", marker])).toThrow();
       expect(o.mainSha()).toBe(before);
     });
+  });
+});
+
+describe("publishing the merge commit for the git host's CI (BOS-1070)", () => {
+  const ciBranch = `bossman-ci/${ids.t}`;
+  const withWorkflow = (o: ReturnType<typeof origin>) => {
+    o.pushChange(".github/workflows/ci.yml", "on: push\n");
+  };
+
+  it("pushes exactly the prepared commit to bossman-ci/<ticket>, leaves main and the agents' view alone, and deletes it after", async () => {
+    const o = origin();
+    withWorkflow(o);
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const before = o.mainSha();
+    const prep = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { commit: string; tree: string };
+    expect(await ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep.commit })).toEqual({ status: "published", branch: ciBranch, commit: prep.commit, hasWorkflows: true });
+    expect(git(o.url, "rev-parse", `refs/heads/${ciBranch}`)).toBe(prep.commit);
+    expect(o.mainSha()).toBe(before);
+    // Not recorded as an origin branch, so a ticket copy never sees it as a branch of its own.
+    const repo = path.join(ws.root, "repos", ids.project);
+    expect(() => git(repo, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${ciBranch}`)).toThrow();
+    // Published again after main moved: the branch is force-moved to the new commit.
+    o.pushChange("other.txt", "someone else\n");
+    const prep2 = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { commit: string };
+    await ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep2.commit });
+    expect(git(o.url, "rev-parse", `refs/heads/${ciBranch}`)).toBe(prep2.commit);
+    expect(await ws.merge(spec, "main", "x", {}, null, { phase: "unpublish" })).toEqual({ status: "unpublished", branch: ciBranch });
+    expect(() => git(o.url, "rev-parse", "--verify", "--quiet", `refs/heads/${ciBranch}`)).toThrow();
+    // Deleting it again is not an error.
+    expect(await ws.merge(spec, "main", "x", {}, null, { phase: "unpublish" })).toEqual({ status: "unpublished", branch: ciBranch });
+  });
+
+  it("refuses to publish any commit but the one prepare built", async () => {
+    const o = origin();
+    withWorkflow(o);
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" });
+    await expect(ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: o.mainSha() })).rejects.toThrow(/isn't the one this ticket's merge prepared/);
+    expect(() => git(o.url, "rev-parse", "--verify", "--quiet", `refs/heads/${ciBranch}`)).toThrow();
+  });
+
+  // BOS-1664: the push makes the commit public, so the scan (with the owner's list) runs on that exact commit first.
+  describe("the scan before the push", () => {
+    const SCANNER = fileURLToPath(new URL("../../../scripts/scan-added-lines.mjs", import.meta.url));
+    // Built at run time so this file holds no secret-looking literal.
+    const fakeToken = "gh" + "p_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fG3hJ5";
+    const listedIp = ["192", "0", "2", "77"].join(".");
+    const scanEnv = () => ({ ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER });
+
+    it("a planted fake key means no push", async () => {
+      const o = origin();
+      withWorkflow(o);
+      const { ws, spec } = await ticketWithCommit(o, "notes.txt", `token ${fakeToken}\n`, scanEnv());
+      const prep = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { commit: string };
+      await expect(ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep.commit })).rejects.toThrow(/Not pushed to GitHub/);
+      expect(() => git(o.url, "rev-parse", "--verify", "--quiet", `refs/heads/${ciBranch}`)).toThrow();
+    });
+
+    it("an address on the owner's list means no push; the same commit without the list is pushed", async () => {
+      const o = origin();
+      withWorkflow(o);
+      const { ws, spec } = await ticketWithCommit(o, "notes.txt", `host ${listedIp}\n`, scanEnv());
+      const prep = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { commit: string };
+      await expect(ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep.commit }, undefined, undefined, `ip\t${listedIp}`)).rejects.toThrow(/Not pushed to GitHub/);
+      expect(() => git(o.url, "rev-parse", "--verify", "--quiet", `refs/heads/${ciBranch}`)).toThrow();
+      // Without the list only the generic rules run: this is why the server sends it.
+      expect(await ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep.commit })).toMatchObject({ status: "published" });
+    });
+  });
+
+  it("a merge with no workflows pushes nothing and says so", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const prep = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { commit: string };
+    expect(await ws.merge(spec, "main", "x", {}, null, { phase: "publish", commit: prep.commit })).toMatchObject({ status: "published", hasWorkflows: false });
+    expect(() => git(o.url, "rev-parse", "--verify", "--quiet", `refs/heads/${ciBranch}`)).toThrow();
+  });
+
+  it("a merge may land only the tree CI passed (expectTree), on the plain and the checked path", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const prep = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { tree: string };
+    o.pushChange("other.txt", "someone else\n"); // main moved: the merged tree is different now
+    const before = o.mainSha();
+    expect(await ws.merge(spec, "main", "Merge", {}, null, null, undefined, prep.tree)).toEqual({ status: "main_moved" });
+    expect(await ws.merge(spec, "main", "Merge", {}, { commands: ["true"] }, null, undefined, prep.tree)).toEqual({ status: "main_moved" });
+    expect(o.mainSha()).toBe(before);
+    const now = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" })) as { tree: string };
+    expect((await ws.merge(spec, "main", "Merge", {}, null, null, undefined, now.tree)).status).toBe("merged");
   });
 });
 

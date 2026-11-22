@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, runs as runsTable, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
+import { decisions, ownerReplies, runners, runs as runsTable, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -63,6 +63,82 @@ describe("ticket conversation (R65)", () => {
     expect(sent.json()).toMatchObject({ author: "owner", delivery: "unassigned" });
     expect(await c.db.select().from(wakes)).toEqual([]);
     expect((await c.req("GET", `/api/tickets/${t.id}/messages`)).json()).toMatchObject({ items: [{ author: "owner", text: "Is this still needed?" }], live: null });
+  });
+
+  it("lists the newest 200 runs of a ticket, oldest first", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Standing review" })).json() as { id: string };
+    const base = Date.UTC(2026, 0, 1);
+    await c.db.insert(runsTable).values(
+      Array.from({ length: 205 }, (_, i) => ({ companyId: c.company.id, agentId: c.worker.id, ticketId: t.id, purpose: "ticket", startedAt: new Date(base + i * 60_000), endedAt: new Date(base + i * 60_000 + 1000) })),
+    );
+    const list = (await c.req("GET", `/api/tickets/${t.id}/runs`)).json() as { startedAt: string }[];
+    expect(list).toHaveLength(200);
+    expect(new Date(list[0]!.startedAt).getTime()).toBe(base + 5 * 60_000);
+    expect(new Date(list[199]!.startedAt).getTime()).toBe(base + 204 * 60_000);
+  });
+
+  it("lists the newest 500 messages of a ticket, oldest first (BOS-1986)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Long thread" })).json() as { id: string };
+    const base = Date.UTC(2026, 0, 1);
+    await c.db.insert(ticketMessages).values(
+      Array.from({ length: 505 }, (_, i) => ({ companyId: c.company.id, ticketId: t.id, author: "owner" as const, text: `m${i}`, delivery: "unassigned", createdAt: new Date(base + i * 60_000) })),
+    );
+    const list = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json() as { items: { text: string }[]; hasMore: boolean };
+    expect(list.items).toHaveLength(500);
+    expect(list.items[0]!.text).toBe("m5");
+    expect(list.items[499]!.text).toBe("m504");
+    expect(list.hasMore).toBe(true);
+  });
+
+  it("pages back through 620 messages with before, keeping each owner message's reply state (BOS-2168)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Standing ticket" })).json() as { id: string };
+    const base = Date.UTC(2026, 0, 1);
+    // Messages 300 and 301 share a timestamp, and the page boundary (the 500th from the end is
+    // m120) is checked below too, so a cursor on time alone would show up as a skip or a repeat.
+    const rows = Array.from({ length: 620 }, (_, i) => ({ companyId: c.company.id, ticketId: t.id, author: "owner" as const, text: `m${i}`, delivery: "woken", createdAt: new Date(base + (i === 301 ? 300 : i) * 60_000) }));
+    const inserted = await c.db.insert(ticketMessages).values(rows).returning({ id: ticketMessages.id, text: ticketMessages.text });
+    const m3 = inserted.find((r) => r.text === "m3")!;
+    await c.db.insert(ownerReplies).values({ companyId: c.company.id, ticketId: t.id, messageId: m3.id, agentId: c.worker.id, state: "delivered", reminders: 2 });
+    type Page = { items: { id: string; text: string; replyState: string | null; replyReminders: number | null }[]; hasMore: boolean };
+    const first = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json() as Page;
+    expect(first.items).toHaveLength(500);
+    expect(first.hasMore).toBe(true);
+    expect(first.items[0]!.text).toBe("m120");
+    expect(first.items[499]!.text).toBe("m619");
+    const older = (await c.req("GET", `/api/tickets/${t.id}/messages?before=${first.items[0]!.id}`)).json() as Page;
+    expect(older.items).toHaveLength(120);
+    expect(older.hasMore).toBe(false);
+    // Oldest first, and together the two pages are every message once, in order.
+    const all = [...older.items, ...first.items].map((m) => m.text);
+    const order = [...rows.keys()].map((i) => `m${i}`);
+    expect(new Set(all).size).toBe(620);
+    expect(all.filter((x) => x !== "m300" && x !== "m301")).toEqual(order.filter((x) => x !== "m300" && x !== "m301"));
+    expect(older.items.find((m) => m.text === "m3")).toMatchObject({ replyState: "delivered", replyReminders: 2 });
+    // A page boundary on the shared timestamp: before m301's id (or m300's) gives the rest, no repeat.
+    const tieA = first.items.find((m) => m.text === "m300")!;
+    const tieB = first.items.find((m) => m.text === "m301")!;
+    const [hi, lo] = tieA.id > tieB.id ? [tieA, tieB] : [tieB, tieA];
+    const fromHi = (await c.req("GET", `/api/tickets/${t.id}/messages?before=${hi.id}`)).json() as Page;
+    expect(fromHi.items.at(-1)!.id).toBe(lo.id);
+    expect(fromHi.items).toHaveLength(301);
+    const fromLo = (await c.req("GET", `/api/tickets/${t.id}/messages?before=${lo.id}`)).json() as Page;
+    expect(fromLo.items).toHaveLength(300);
+    expect(fromLo.items.at(-1)!.text).toBe("m299");
+  });
+
+  it("answers an unknown before with a plain 404 (BOS-2168)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "A" })).json() as { id: string };
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "B" })).json() as { id: string };
+    const [m] = await c.db.insert(ticketMessages).values({ companyId: c.company.id, ticketId: other.id, author: "owner", text: "elsewhere", delivery: "unassigned" }).returning({ id: ticketMessages.id });
+    for (const before of [randomUUID(), m!.id, "not-an-id"]) {
+      const res = await c.req("GET", `/api/tickets/${t.id}/messages?before=${before}`);
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: "ticket_chat", message: "No message with that ID on this ticket." });
+    }
   });
 
   it("sends into the live run, records its last message, then wakes the agent once for later messages", async () => {
@@ -163,12 +239,106 @@ describe("ticket conversation (R65)", () => {
     const client = await c.mcp(c.starts()[0]!.runId);
     // A plain status reply gets no hint.
     expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "The footer is done. Details: the app and the site now match." } }))).toBe("Posted on the ticket's conversation.");
-    // Asking the owner to do something without a decision on their queue gets the hint.
-    const ask = textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } }));
-    expect(ask).toContain("Call raise_decision with blocksTicketId set to this ticket");
-    // Once an open decision blocks this ticket, the reply needs no hint.
+    // Asking the owner to do something without a decision on their queue is held, not posted (BOS-1576; it was only a hint before).
+    const heldAsk = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } });
+    expect(heldAsk).toMatchObject({ isError: true });
+    expect(textOf(heldAsk)).toContain("call raise_decision with blocksTicketId set to this ticket");
+    expect(textOf(heldAsk)).toContain("ownerSetup");
+    expect(await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).toHaveLength(1);
+    // Once an open decision blocks this ticket, the reply posts.
     await client.callTool({ name: "raise_decision", arguments: { question: "Apply the deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
     expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("a card about another ticket, or the agent's own card elsewhere, does not cover a reply; ownerSetup and notAnAsk do (BOS-1576)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the header", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const ask = "Please run scripts/deploy.sh on the server, then let me know.";
+    const posted = async () => (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length;
+    // The agent has an open card, but on another ticket: it must not cover this reply (it did before).
+    await client.callTool({ name: "raise_decision", arguments: { question: "Apply the header deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: other.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
+    expect(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } })).toMatchObject({ isError: true });
+    expect(await posted()).toBe(0);
+    // notAnAsk posts a status reply that only sounds like an ask.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please don't deploy yet.", notAnAsk: true } }))).toBe("Posted on the ticket's conversation.");
+    // Steps for after go-live in ownerSetup cover it.
+    await c.db.update(tickets).set({ ownerSetup: "Settings → Funding → Add funding source" }).where(eq(tickets.id, t.id));
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("holds a reply that names another ticket's open owner card by full id or 8+ char prefix, but not this ticket's own card (R53, BOS-2084)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the header", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const raise = async (blocksTicketId: string, question: string) => {
+      await client.callTool({ name: "raise_decision", arguments: { question, options: ["Yes", "No"], recommended: "Yes", blocksTicketId, triedFirst: "I tried everything from here, but the host refuses the step." } });
+    };
+    await raise(other.id, "Release the header change now?");
+    await raise(t.id, "Release the footer change now?");
+    const open = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    const cardOf = (id: string) => open.find((d) => (d.context as { ticketId?: string }).ticketId === id)!.id;
+    const posted = async () => (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length;
+    const foreign = cardOf(other.id);
+    // A team question still sits at the CEO's tier, off the owner's queue: naming it holds nothing. Once it reaches the owner it does.
+    expect(open.find((d) => d.id === foreign)!.tier).toBe("ceo");
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `Team question ${foreign.slice(0, 8)} is with the CEO.` } }))).toBe("Posted on the ticket's conversation.");
+    await c.db.update(decisions).set({ tier: "owner" }).where(eq(decisions.id, foreign));
+    // Full id, 8-char prefix, upper case, and with notAnAsk: all held, nothing stored.
+    for (const text of [`Go ahead on card ${foreign}.`, `Card order: ${foreign.slice(0, 8)} first.`, `Go ahead on ${foreign.slice(0, 8).toUpperCase()}`]) {
+      const r = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text, notAnAsk: true } });
+      expect(r).toMatchObject({ isError: true });
+      expect(textOf(r)).toContain("belongs in chat");
+    }
+    expect(await posted()).toBe(1); // only the CEO-tier mention above
+    // A 7-character prefix is not an id reference; this ticket's own card is fine.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `Status: ${foreign.slice(0, 7)} is nothing.` } }))).toBe("Posted on the ticket's conversation.");
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `My card is ${cardOf(t.id).slice(0, 8)}.`, notAnAsk: true } }))).toBe("Posted on the ticket's conversation.");
+    // Once the other card is answered it is no longer open, so naming it is fine.
+    await c.db.update(decisions).set({ status: "answered" }).where(eq(decisions.id, foreign));
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `Card ${foreign.slice(0, 8)} is settled.` } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("holds a card-order reply shaped like the 19 Nov BOS-974 one: one own card, three other tickets' cards, a go-ahead on one of them (R53)", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id })).json() as { id: string };
+    const t = await mk("Image install");
+    const others = [await mk("Server update"), await mk("Release"), await mk("Runner update")];
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    for (const [i, id] of [t.id, ...others.map((o) => o.id)].entries()) {
+      await client.callTool({ name: "raise_decision", arguments: { question: `Owner card number ${i + 1}?`, options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, triedFirst: "I tried everything from here, but the host refuses the step." } });
+    }
+    await c.db.update(decisions).set({ tier: "owner" }).where(eq(decisions.status, "open"));
+    const ids = (await c.db.select().from(decisions).where(eq(decisions.status, "open"))).map((d) => d.id.slice(0, 8));
+    const text = `Your cards, in order:\n1. ${ids[1]}: server update. Choose "Not now".\n2. ${ids[2]}: Release. Go ahead, press it.\n3. ${ids[3]}: runner update.\n4. ${ids[0]}: this ticket's card.\nNothing else needs you right now.`;
+    const r = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text } });
+    expect(r).toMatchObject({ isError: true });
+    expect(textOf(r)).toContain("belongs in chat");
+    expect((await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length).toBe(0);
+    await client.close();
+  });
+
+  it("refuses a state note that says the ticket waits on the owner when no card is open, in any state (BOS-1576)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const refused = await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Waiting on the owner to say keep or drop." } });
+    expect(refused).toMatchObject({ isError: true });
+    expect(textOf(refused)).toContain("raise_decision");
+    // A note that only mentions the owner, or negates the wait, is saved.
+    expect(textOf(await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Nothing is waiting on the owner; building the footer." } }))).toContain("is now in_progress");
+    // With a card on the ticket the same note is saved.
+    await client.callTool({ name: "raise_decision", arguments: { question: "Keep or drop the footer fix?", options: ["Keep", "Drop"], recommended: "Keep", blocksTicketId: t.id, triedFirst: "I looked at the cost and it is small, but it is the owner's call." } });
+    expect(textOf(await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Waiting on the owner to say keep or drop." } }))).toContain("is now in_progress");
     await client.close();
   });
 

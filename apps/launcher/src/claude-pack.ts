@@ -4,7 +4,7 @@
 // runner still starts and reports Claude absent: OpenCode and Codex keep working. Nothing here is a bypass:
 // the installer holds no extra capability and mounts no company data, only the shared pack volume.
 import { type Docker } from "./docker.js";
-import { CLAUDE_PACK_TARGET, claudePackVolume, runnerImage, type LauncherConfig } from "./spec.js";
+import { CLAUDE_PACK_TARGET, LOG_CONFIG, claudePackVolume, runnerImage, type LauncherConfig } from "./spec.js";
 
 /** Where the runner image copies the pinned package.json and lockfile (root-owned). */
 export const PACK_SOURCE = "/opt/bossman-claude-pack";
@@ -50,6 +50,7 @@ export function packInstallerSpec(cfg: LauncherConfig, slug: string) {
       // Smaller than a runner: npm ci needs a couple of GB, not a runner's whole budget.
       Memory: Math.min(cfg.memoryBytes, 2 * 1024 ** 3),
       PidsLimit: 512,
+      LogConfig: LOG_CONFIG,
       RestartPolicy: { Name: "no" },
     },
   };

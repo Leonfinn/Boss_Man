@@ -2,7 +2,8 @@
 // One counting rule decides what counts as WIP, for a board column and for an agent alike:
 // tickets whose state is in_progress (a ticket that only waits on a queued check still counts;
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
-import { and, asc, eq, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { figureText, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { openBlockers } from "./ticket-links.js";
 import { ticketBlockerOpenSql } from "./blocker-sql.js";
@@ -31,16 +32,27 @@ export async function countWip(db: Db, where: SQL | undefined, exceptId?: string
 
 /**
  * In-progress tickets that can't move don't count towards a limit (BOS-1172): one with an open waits-on link to an
- * unfinished ticket, a plan-first one whose plan waits on the owner, and a merged one that only waits for its
- * after-merge (go-live) check. A ticket with only a schedule_check booked still counts: nobody visibly holds it.
+ * unfinished ticket, a plan-first one whose plan waits on the owner, and any merged one (BOS-1907: it only waits for its
+ * after-merge check or watch, whether or not it is live yet). A ticket with only a schedule_check booked still counts: nobody visibly holds it.
  */
 /** The tickets table or an alias of it (a subquery's `doing`, `mine`): only the columns the rule reads. */
-type TicketsOrAlias = Record<"id" | "planFirst" | "planApprovedAt" | "plan" | "mergedAt" | "goLiveWait", SQLWrapper>;
+type TicketsOrAlias = Record<"id" | "planFirst" | "planApprovedAt" | "plan" | "mergedAt" | "goLiveWait" | "assigneeAgentId", SQLWrapper>;
+/**
+ * BOS-1908: the assignee has a live run that isn't a chat on another ticket, so this one is parked behind it ("Agent busy on
+ * BOS-N") and counts toward no limit until its agent is free. Same run rule as `isWorkingRun` and `agentBusy`. A run on a ticket still
+ * waiting in Backlog or Ready (a start the limit held, woken to carry on with older work) is not "busy on" it: that agent is working its in-progress tickets.
+ */
+export const agentBusyElsewhereFor = (t: Pick<TicketsOrAlias, "id" | "assigneeAgentId">) => sql`exists (
+  select 1 from runs br join tickets brt on brt.id = br.ticket_id
+  where br.agent_id = ${t.assigneeAgentId} and br.ended_at is null and br.ticket_id <> ${t.id}
+  and (br.purpose is null or br.purpose <> 'chat') and brt.system_state not in ('backlog', 'ready')
+)`;
 export const cantMoveFor = (t: TicketsOrAlias) => sql`(
   exists (select 1 from ticket_dependencies d join tickets b on b.id = d.blocker_ticket_id
           where d.blocked_ticket_id = ${t.id} and ${ticketBlockerOpenSql("d", "b")})
   or (${t.planFirst} and ${t.planApprovedAt} is null and ${t.plan} is not null)
-  or (${t.mergedAt} is not null and ${t.goLiveWait} is not null)
+  or ${t.mergedAt} is not null
+  or ${agentBusyElsewhereFor(t)}
 )`;
 export const cantMoveSql = cantMoveFor(tickets);
 
@@ -71,17 +83,27 @@ export const cantMoveForCompany = (t: TicketsOrAlias) => sql`(${cantMoveFor(t)} 
 export const countInProgress = (db: Db, where: SQL | undefined, exceptId?: string, scope: "agent" | "company" = "agent") =>
   countWip(db, and(eq(tickets.systemState, "in_progress"), sql`not ${scope === "company" ? cantMoveForCompany(tickets) : cantMoveSql}`, where), exceptId);
 
-export type WipExempt = "waits" | "plan" | "live";
+export type WipExempt = "waits" | "plan" | "live" | "busy";
 
-/** Why an in-progress ticket doesn't count towards the limit (same rule as cantMoveSql); null when it counts. `openWaits`: it has an open waits-on link to an unfinished ticket. */
-export function wipExemptKind(t: { planFirst: boolean; planApprovedAt: Date | null; plan: string | null; mergedAt: Date | null; goLiveWait: string | null }, openWaits: boolean): WipExempt | null {
+/** Why an in-progress ticket doesn't count towards the limit (same rule as cantMoveSql); null when it counts. `openWaits`: it has an open waits-on link to an unfinished ticket. `busyOn`: its agent is running this other ticket (BOS-1908). */
+export function wipExemptKind(t: { planFirst: boolean; planApprovedAt: Date | null; plan: string | null; mergedAt: Date | null; goLiveWait: string | null }, openWaits: boolean, busyOn: string | null = null): WipExempt | null {
   if (openWaits) return "waits";
   if (t.planFirst && !t.planApprovedAt && t.plan) return "plan";
-  if (t.mergedAt && t.goLiveWait) return "live";
+  if (t.mergedAt) return "live";
+  if (busyOn) return "busy";
   return null;
 }
 
 export const agentWipCount = (db: Db, agentId: string, exceptId?: string) => countInProgress(db, eq(tickets.assigneeAgentId, agentId), exceptId);
+
+/**
+ * BOS-1906: tickets an agent may have in "Being checked" (in review, held for a quick check) before its next start waits. They
+ * count toward neither WIP limit (they are not in progress), so this is what keeps BOS-1479's brake: an agent can't keep starting
+ * work and adding checks to a long line. A third hand-in is accepted; only the next start waits.
+ */
+export const BEING_CHECKED_CAP = 2;
+export const beingCheckedCount = (db: Db, agentId: string, exceptId?: string) =>
+  countWip(db, and(eq(tickets.systemState, "review"), isNotNull(tickets.checkHoldAt), eq(tickets.assigneeAgentId, agentId)), exceptId);
 
 /** True when the ticket was in progress before: coming back to it is finishing, never a new start. */
 export async function wasStarted(db: Db, ticketId: string): Promise<boolean> {
@@ -92,14 +114,53 @@ export async function wasStarted(db: Db, ticketId: string): Promise<boolean> {
 /** The status reason a wake carries when its launch was refused by a WIP limit: such a wake doesn't use up the day's idle-slot allowance (BOS-1180). */
 export const WIP_REFUSED_REASON = "held by the WIP limit";
 
-export type WipHold = { reason: string; limit: number; scope: "agent" | "company" | "queue" };
+/** `next_up` (BOS-1908): the agent is running another ticket. `second`: it already has a Next up, so this one waits unmarked behind it. */
+export type WipHold = { reason: string; limit: number; scope: "agent" | "company" | "queue" | "next_up"; second?: boolean };
+
+/** How long a Next up may wait before the CEO is asked (BOS-1908). */
+export const NEXT_UP_STALE_MS = 24 * 3_600_000;
+
+/** The ticket a live, non-chat run of the agent is on, other than `exceptTicketId`: why a new start has to wait. Null when the agent isn't running another ticket. */
+export async function runningOtherTicket(db: Db, agentId: string, exceptTicketId: string): Promise<{ id: string; ref: string } | null> {
+  const [r] = await db
+    .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix })
+    .from(runs)
+    .innerJoin(tickets, eq(tickets.id, runs.ticketId))
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .where(and(eq(runs.agentId, agentId), isNull(runs.endedAt), workingRunSql, ne(runs.ticketId, exceptTicketId)))
+    .orderBy(asc(runs.startedAt))
+    .limit(1);
+  return r ? { id: r.id, ref: ticketRef(r.prefix, r.number) ?? "another ticket" } : null;
+}
 
 /**
- * The two counts the start hold reads (BOS-1489): approved merges waiting in the merge line (the Merge queue page's own
- * figure, `mergeQueue.waitingCount`) and quick checks queued in the check queue. app.ts registers the source at start-up,
- * so this module needs no second way to count; with none registered, nothing is held.
+ * BOS-1908: a start for an agent that is running another ticket waits in Ready as that agent's one "Next up"; a second start for
+ * the same busy agent waits unmarked behind it (and says so). Null when the agent isn't running another ticket.
  */
-export type StartHoldCounts = (companyId: string) => Promise<{ merges: number; quickChecks: number }>;
+async function nextUpHold(db: Db, t: typeof tickets.$inferSelect): Promise<WipHold | null> {
+  if (!t.assigneeAgentId) return null;
+  const other = await runningOtherTicket(db, t.assigneeAgentId, t.id);
+  if (!other) return null;
+  const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId));
+  const name = a?.name ?? "the agent";
+  const [taken] = await db
+    .select({ number: tickets.number, prefix: companies.ticketPrefix })
+    .from(tickets)
+    .innerJoin(companies, eq(companies.id, tickets.companyId))
+    .where(and(eq(tickets.assigneeAgentId, t.assigneeAgentId), eq(tickets.systemState, "ready"), isNotNull(tickets.nextUpAt), ne(tickets.id, t.id)))
+    .orderBy(asc(tickets.nextUpAt))
+    .limit(1);
+  if (taken) return { scope: "next_up", limit: 1, second: true, reason: `Waiting: ${name} is busy on ${other.ref} and already has ${ticketRef(taken.prefix, taken.number) ?? "another ticket"} as Next up; this one starts after it.` };
+  return { scope: "next_up", limit: 1, reason: `Next up for ${name}: starts when ${name} finishes ${other.ref}.` };
+}
+
+/**
+ * The counts the start hold reads (BOS-1489): approved merges waiting in the merge line (the Merge queue page's own
+ * figure, `mergeQueue.waitingCount`) and quick checks queued in the check queue. BOS-2196 adds the cards that need the
+ * owner (the Dashboard's Needs you figure, `queueTally().open`), read only when `want.owner` asks for it. app.ts registers
+ * the source at start-up, so this module needs no second way to count; with none registered, nothing is held.
+ */
+export type StartHoldCounts = (companyId: string, want?: { owner?: boolean }) => Promise<{ merges: number; quickChecks: number; ownerWaiting?: number }>;
 // shortcut: one source per server process, set once by app.ts at start-up; lost on restart, harmless because start-up registers it again.
 let startHoldCounts: StartHoldCounts | null = null;
 export function setStartHoldCounts(fn: StartHoldCounts | null): void {
@@ -109,20 +170,42 @@ export function setStartHoldCounts(fn: StartHoldCounts | null): void {
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * "Held: 31 merges waiting (limit 20)" when the company's merge line is at or over its setting, and the same for queued
- * quick checks; both are named when both apply. Null when neither setting is on or both counts are under their limits.
+ * What passes every start limit of queueStartHold: merges waiting, quick checks queued and cards that need the owner
+ * (BOS-2196, BOS-2201: one rule for all three, so they can't drift apart; don't add a per-limit exemption beside it).
+ * An urgent ticket, one that fixes a live problem (`fixesLive`, as in BOS-2088: it must reach the next deploy, not wait
+ * behind a merge jam), or one assigned to the CEO (mostly no-code trackers such as the merge shepherd, which add no
+ * merges and are needed most when the line is jammed). Work already started (review fixes, owner replies) never reaches
+ * a start hold at all (`wasStarted`).
  */
-export async function queueStartHold(db: Db, companyId: string): Promise<WipHold | null> {
+export async function startHoldExempt(db: Db, t: Pick<typeof tickets.$inferSelect, "urgent" | "fixesLive" | "assigneeAgentId">): Promise<boolean> {
+  if (t.urgent || !!t.fixesLive?.trim()) return true;
+  if (!t.assigneeAgentId) return false;
+  const [a] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, t.assigneeAgentId));
+  return a?.role === "ceo";
+}
+
+/**
+ * "Held: 31 merges waiting (limit 20)" when the company's merge line is at or over its setting, and the same for queued
+ * quick checks and for cards that need the owner ("6 need you (limit 5)", the Dashboard badge's own words, R43); every one
+ * that applies is named. Null when no setting is on, every count is under its limit, or the ticket passes them all.
+ */
+export async function queueStartHold(db: Db, t: Pick<typeof tickets.$inferSelect, "companyId" | "urgent" | "fixesLive" | "assigneeAgentId">): Promise<WipHold | null> {
   if (!startHoldCounts) return null;
-  const [c] = await db.select({ merges: companies.holdStartsMergesWaiting, checks: companies.holdStartsQuickChecksQueued }).from(companies).where(eq(companies.id, companyId));
-  if (!c || (c.merges == null && c.checks == null)) return null;
-  const counts = await startHoldCounts(companyId);
+  const [c] = await db.select({ merges: companies.holdStartsMergesWaiting, checks: companies.holdStartsQuickChecksQueued, owner: companies.holdStartsOwnerWaiting }).from(companies).where(eq(companies.id, t.companyId));
+  if (!c || (c.merges == null && c.checks == null && c.owner == null)) return null;
+  // One exemption for all three limits (BOS-2201), read only when a limit is on.
+  if (await startHoldExempt(db, t)) return null;
+  const { merges, checks, owner } = c;
+  const counts = await startHoldCounts(t.companyId, { owner: owner != null });
   const parts: string[] = [];
   let limit = 0;
-  if (c.merges != null && counts.merges >= c.merges) { parts.push(`${plural(counts.merges, "merge", "merges")} waiting (limit ${c.merges})`); limit = c.merges; }
-  if (c.checks != null && counts.quickChecks >= c.checks) { parts.push(`${plural(counts.quickChecks, "quick check", "quick checks")} queued (limit ${c.checks})`); limit ||= c.checks; }
+  if (merges != null && counts.merges >= merges) { parts.push(`${plural(counts.merges, "merge", "merges")} waiting (limit ${merges})`); limit = merges; }
+  if (checks != null && counts.quickChecks >= checks) { parts.push(`${plural(counts.quickChecks, "quick check", "quick checks")} queued (limit ${checks})`); limit ||= checks; }
+  const ownerOver = owner != null && counts.ownerWaiting != null && counts.ownerWaiting >= owner;
+  if (ownerOver) { parts.push(`${figureText("decisions.needYou", counts.ownerWaiting!)} (limit ${owner})`); limit ||= owner!; }
   if (!parts.length) return null;
-  return { scope: "queue", limit, reason: `Held: ${parts.join("; ")}. It starts by itself when the line is shorter.` };
+  const when = ownerOver && parts.length === 1 ? "when fewer need you" : "when the line is shorter";
+  return { scope: "queue", limit, reason: `Held: ${parts.join("; ")}. It starts by itself ${when}.` };
 }
 
 /**
@@ -130,7 +213,7 @@ export async function queueStartHold(db: Db, companyId: string): Promise<WipHold
  * are held, and never one that was in progress before. An urgent ticket may start one over (the caller
  * says so on the ticket).
  */
-export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect): Promise<{ hold: WipHold | null; urgentOver: boolean }> {
+export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect, opts: { by?: string | null } = {}): Promise<{ hold: WipHold | null; urgentOver: boolean }> {
   const none = { hold: null, urgentOver: false };
   if (!t.assigneeAgentId || (t.systemState !== "backlog" && t.systemState !== "ready")) return none;
   if (await wasStarted(db, t.id)) return none;
@@ -142,6 +225,11 @@ export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect): Prom
       const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId));
       hold = { limit: limits.agent, scope: "agent", reason: `Waiting: ${a?.name ?? "the agent"} is at the limit of ${limits.agent} in-progress ticket${limits.agent === 1 ? "" : "s"}; starts when one finishes.` };
     }
+    // BOS-1906: with no room-limit hit, too many tickets waiting for their check also hold the next start (the owner's "No limit" lifts this too).
+    if (!hold && (await beingCheckedCount(db, t.assigneeAgentId)) >= BEING_CHECKED_CAP) {
+      const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId));
+      hold = { limit: BEING_CHECKED_CAP, scope: "agent", reason: `Waiting: ${a?.name ?? "the agent"} has ${BEING_CHECKED_CAP} tickets being checked; starts when one clears.` };
+    }
   }
   if (!hold && limits.company != null) {
     const n = await countInProgress(db, eq(tickets.companyId, t.companyId), t.id, "company");
@@ -150,10 +238,12 @@ export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect): Prom
   if (hold && t.urgent) return { hold: null, urgentOver: true };
   // The queue hold (BOS-1489) is checked first and named first: a long merge line is why nothing starts, whatever the agent's own room.
   // An urgent ticket carries on, as it does over a WIP limit; work already started never reaches here (wasStarted above).
-  if (!t.urgent) {
-    const queue = await queueStartHold(db, t.companyId);
-    if (queue) return { hold: queue, urgentOver: false };
-  }
+  // BOS-2201: queueStartHold lets urgent, live-fix and CEO tickets past all three of its limits (startHoldExempt).
+  const queue = await queueStartHold(db, t);
+  if (queue) return { hold: queue, urgentOver: false };
+  // BOS-1908: the agent is running another ticket, so a start for it waits as its Next up. A limit's own hold above wins; an urgent
+  // ticket and the agent's own move of its own ticket start as before (parked in progress).
+  if (!hold && !t.urgent && !(opts.by && opts.by === t.assigneeAgentId)) hold = await nextUpHold(db, t);
   return { hold, urgentOver: false };
 }
 
@@ -174,7 +264,7 @@ export async function wipQueuedNote(db: Db, ticketId: string | null | undefined)
   const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
   if (!t) return "";
   const { hold } = await agentWipHold(db, t);
-  if (hold?.scope === "queue") return ` Queued in Ready, not started. ${hold.reason}`;
+  if (hold?.scope === "queue" || hold?.scope === "next_up") return ` Queued in Ready, not started. ${hold.reason}`;
   return hold ? ` Queued in Ready: the agent is at its WIP limit (${hold.limit} in-progress ticket${hold.limit === 1 ? "" : "s"}), so this has not started; it starts when one of their tickets finishes.` : "";
 }
 

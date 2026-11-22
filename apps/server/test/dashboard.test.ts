@@ -106,6 +106,19 @@ describe("dashboard (R74)", () => {
     ]);
     expect(data.runsByDay.reduce((n, d) => n + d.succeeded + d.failed + d.other, 0)).toBe(3);
   });
+  it("counts only work that can move as in progress, and counts next up, being checked and merged apart (BOS-1909)", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => ((await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id })).json() as { id: string }).id;
+    const [work, merged, next, checking] = [await mk("Working"), await mk("Merged"), await mk("Next"), await mk("Checking")];
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, work));
+    await c.db.update(tickets).set({ systemState: "blocked", mergedAt: new Date(), mergeCommit: "abc1234" }).where(eq(tickets.id, merged));
+    await c.db.update(tickets).set({ systemState: "ready", nextUpAt: new Date() }).where(eq(tickets.id, next));
+    await c.db.update(tickets).set({ systemState: "review", checkHoldAt: new Date() }).where(eq(tickets.id, checking));
+    const stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ inProgressCounted: 1, nextUp: 1, beingChecked: 1, watching: 1 });
+    const agent = ((await c.req("GET", `/api/companies/${c.company.id}/agents`)).json() as Array<{ id: string; beingChecked: number; nextUp: number }>).find((x) => x.id === c.worker.id)!;
+    expect(agent).toMatchObject({ beingChecked: 1, nextUp: 1 });
+  });
   it("shows a ticket under its state, even when its column was left behind by an older move", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Research" })).json() as { id: string };
@@ -128,7 +141,7 @@ describe("QA: home screen 'Need your answer' equals the Decisions menu badge (BO
     await c.db.update(decisions).set({ staleAt: new Date(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, stale.id));
     await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", tier: "owner", question: "Lesson?", options: ["Apply", "Skip"], recommendedOption: "Skip", context: { type: "lesson", lesson: "Say it plainly." } as never });
     const tally = (await c.req("GET", "/api/decisions/tally")).json() as { open: number; waiting: number };
-    expect(tally).toEqual({ open: 2, waiting: 1 });
+    expect(tally).toMatchObject({ open: 2, waiting: 1 });
     const data = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json();
     expect(data.stats.decisionsWaiting).toBe(tally.open);
   });

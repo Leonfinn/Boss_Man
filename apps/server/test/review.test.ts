@@ -523,8 +523,12 @@ describe("server-owned check queue (BOS-316)", () => {
     expect(checkNeverFinished(v({ exitCode: null }))).toBe("killed");
     expect(checkNeverFinished(v({ output: "FATAL ERROR: JavaScript heap out of memory" }))).toBe("out_of_memory");
     expect(checkNeverFinished(v({ output: "Error: Worker exited unexpectedly" }))).toBe("killed");
+    // BOS-2218: a test process lost to SIGKILL is the kernel's out-of-memory kill, whatever step it was in.
+    expect(checkNeverFinished(v({ output: "Error: Worker exited unexpectedly with signal SIGKILL" }))).toBe("out_of_memory");
+    expect(checkNeverFinished(v({ output: "check-all: ran out of memory: the machine killed 2 processes for lack of memory" }))).toBe("out_of_memory");
+    expect(checkNeverFinished(v({ output: "check-all: memory: limit 7.0 GB, memory-limit kills (oom_kill) during this check: 0" }))).toBeNull();
     expect(checkNeverFinished(v({ output: "FAIL limit.test.ts\n expected 1000 got 100" }))).toBeNull();
-    expect(landingText({ outcome: "check_stuck" }, { branch: "main", assignee: null })).toContain("it's in your Decisions");
+    expect(landingText({ outcome: "check_stuck" }, { branch: "main", assignee: null })).toContain("a merge card is open in Decisions");
   });
 
   it("starts the merge when every review is already in and a reviewer confirms, instead of refusing with no open review", async () => {
@@ -586,7 +590,8 @@ describe("server-owned check queue (BOS-316)", () => {
       await landed(c);
       expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(LOCK_RETRY_ATTEMPTS);
       expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
-      expect(await c.db.select().from(wakes)).toHaveLength(0);
+      // The agent is left alone; the CEO is woken once, the card being on the CEO's rung first (BOS-1873).
+      expect((await c.db.select().from(wakes)).map((w) => w.agentId)).toEqual([c.ceo.id]);
       expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("shared lock");
     }, 30_000);
 
@@ -657,12 +662,17 @@ describe("server-owned check queue (BOS-316)", () => {
       const c = await stuck();
       const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
       expect(t.systemState).toBe("review");
-      expect(await c.db.select().from(wakes)).toHaveLength(0);
+      // The agent is left alone; only the CEO is woken, once (BOS-1873).
+      expect((await c.db.select().from(wakes)).map((w) => w.agentId)).toEqual([c.ceo.id]);
       const [d, ...rest] = await open(c);
       expect(rest).toHaveLength(0);
       expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1 + INFRA_RETRY_ATTEMPTS);
       expect(d).toMatchObject({ tier: "ceo", options: ["Run the check again", "Send it back to the agent", "Merge without the check"] });
       expect(d!.question).toContain("`pnpm test` couldn't finish (it was killed)");
+      // BOS-1873: on the CEO's rung of the alert ladder, so the owner's queue doesn't show it for the first hour; the CEO's wake names it.
+      expect((d!.context as { ladder?: unknown }).ladder).toMatchObject({ rung: "ceo", minutes: 60, ticketId: c.ticket.id });
+      expect((await c.decisions.queue({ companyId: c.company.id })).map((x) => x.id)).not.toContain(d!.id);
+      expect((await c.db.select().from(wakes))[0]!.note).toContain(d!.id);
       // The same stuck check again doesn't pile up a second question.
       await approveAndWait(c.req, c.ticket.id);
       expect(await open(c)).toHaveLength(1);

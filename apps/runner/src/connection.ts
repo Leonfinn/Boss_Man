@@ -3,7 +3,7 @@
 // goes quiet for three heartbeats is dropped and redialled.
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
-import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type HarnessVersions, type RunnerCommand, type RunnerEvent, type RunnerMessage, type WorkerMessage, type WorkerRepos } from "@boss-man/shared";
+import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type HarnessVersions, type Toolchain, type RunnerCommand, type RunnerEvent, type RunnerMessage, type WorkerMessage, type WorkerRepos } from "@boss-man/shared";
 import type { Journal } from "./journal.js";
 
 export type ConnectionOptions = {
@@ -16,6 +16,8 @@ export type ConnectionOptions = {
   imageVersion?: string | null;
   /** The git commit the image was built from (BOS-764), told to the server in hello. */
   imageCommit?: string;
+  /** The tools checks run with and their fingerprint (BOS-1570), told to the server in hello. */
+  toolchain?: Toolchain;
   /** Versions of the harnesses in the image, told to the server in hello (BOS-305). */
   harnessVersions?: HarnessVersions;
   heartbeatMs?: number;
@@ -36,8 +38,25 @@ export type ConnectionOptions = {
    * BOS-1435: this process is a check worker (BOSSMAN_ROLE=check-worker). Its hello carries only what the worker socket
    * reads (check features, its slot count, running checks), and it keeps no journal: the worker socket takes no events.
    */
-  checkWorker?: { slots: number; features: readonly string[]; /** BOS-1436: the commits it holds per project, for thin bundles. */ repos?: () => WorkerRepos };
+  checkWorker?: { slots: number; /** BOS-2217: the machine's memory for checks, in MB. */ memoryMb?: number; features: readonly string[]; /** BOS-1436: the commits it holds per project, for thin bundles. */ repos?: () => WorkerRepos };
 };
+
+/**
+ * BOS-1601: what a failed dial means in plain words. A name that does not resolve (ENOTFOUND, EAI_AGAIN) is the usual
+ * first-install slip: the address is a Tailscale (MagicDNS) name and this host is not on the tailnet. Only the host
+ * name of the address is printed, never the token (which is in a header, not the URL).
+ */
+export function describeConnectError(message: string, url: string): string {
+  let host = "";
+  try {
+    host = new URL(url).host;
+  } catch {
+    // not a URL: the raw message is all there is
+  }
+  if (!host || !/ENOTFOUND|EAI_AGAIN/.test(message)) return message;
+  const tailscale = /\.ts\.net$/i.test(new URL(url).hostname);
+  return `${message}. Can't find the address ${host} from this machine.${tailscale ? " It is a Tailscale name and this host is not on your tailnet" : " If it is a Tailscale name, this host is not on your tailnet"}: use the server's LAN address instead (BOSSMAN_URL=ws://<server LAN address>:<port>/api/check-worker/connect), or check this host's DNS.`;
+}
 
 export class RunnerConnection {
   private ws: WebSocket | null = null;
@@ -121,13 +140,13 @@ export class RunnerConnection {
 
   private helloAsWorker(w: NonNullable<ConnectionOptions["checkWorker"]>) {
     const repos = w.repos?.();
-    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), features: [...w.features], bootId: this.bootId, checkSlots: w.slots, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(repos?.length ? { repos } : {}) });
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), features: [...w.features], bootId: this.bootId, checkSlots: w.slots, ...(w.memoryMb ? { memoryMb: w.memoryMb } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(repos?.length ? { repos } : {}) });
   }
 
   private helloAsRunner() {
     const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
     const liveRuns = this.opts.liveRuns?.();
-    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(this.opts.checkSlots ? { checkSlots: this.opts.checkSlots } : {}),...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(this.opts.checkSlots ? { checkSlots: this.opts.checkSlots } : {}),...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
   }
 
   private listen(ws: WebSocket) {
@@ -195,7 +214,7 @@ export class RunnerConnection {
       }
     });
 
-    ws.on("error", (err) => this.opts.log?.(`connection error: ${err.message}`));
+    ws.on("error", (err) => this.opts.log?.(`connection error: ${describeConnectError(err.message, this.opts.url)}`));
     ws.on("close", () => {
       this.teardown();
       if (this.stopped) return;

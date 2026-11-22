@@ -9,8 +9,10 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks, useTicketLinks } from "../components/TicketLinks";
+import { BranchOverlaps } from "../components/BranchOverlaps";
 import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
+import { TicketRecord } from "../components/TicketRecord";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { criterionText, criteriaText, goLiveWaitWords, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
@@ -18,12 +20,14 @@ import { usePoll } from "../hooks";
 import { clearDraft, readDraft, saveDraft as keepDraftText } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { NotFoundBlock } from "../components/NotFoundBlock";
+import { Loader } from "../components/Loader";
 import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
 import { ago } from "./Dashboard";
 import { StatusLineView, type StatusLine } from "./MergeQueue";
+import { CopyLinkButton } from "../components/CopyLinkButton";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -217,23 +221,46 @@ function CriteriaEdit({ draftKey, initial, save, busy }: { draftKey: string; ini
 /** The owner's setup steps (DR-011): what they do once this change is live, written by whoever built it. */
 function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const steps = (t.ownerSetup ?? "").trim();
+  const why = (t.ownerSetupWhy ?? "").trim();
+  const ifSkipped = (t.ownerSetupIfSkipped ?? "").trim();
   const n = steps.split("\n").filter(Boolean).length;
   return (
     <DetailRow title="After it goes live" count={n ? `${n} step${n === 1 ? "" : "s"} for you` : "nothing for you"} tone={n ? "amber" : undefined}>
-      <OwnerSetupEdit draftKey={`ticket-owner-setup/${t.id}`} key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v }).then((ok) => ok ?? false)} />
+      <OwnerSetupEdit
+        draftKey={`ticket-owner-setup/${t.id}`}
+        key={`${steps}\u0000${why}\u0000${ifSkipped}`}
+        initial={steps}
+        initialWhy={why}
+        initialIfSkipped={ifSkipped}
+        busy={busy}
+        save={(body) => patch(body).then((ok) => ok ?? false)}
+      />
     </DetailRow>
   );
 }
 
-/** One step per line; saving nothing clears them. The typing is kept in this browser (DR-045). */
-function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; initial: string; save: (v: string) => Promise<boolean>; busy: boolean }) {
+/** One step per line; saving nothing clears them. The "why" and "if skipped" lines sit above, one line each. The typing is kept in this browser (DR-045). */
+function OwnerSetupEdit({ draftKey, initial, initialWhy, initialIfSkipped, save, busy }: { draftKey: string; initial: string; initialWhy: string; initialIfSkipped: string; save: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const [text, setText] = useState(() => readDraft(draftKey) || initial);
+  const whyKey = `${draftKey}/why`;
+  const skipKey = `${draftKey}/if-skipped`;
+  const [why, setWhy] = useState(() => readDraft(whyKey) || initialWhy);
+  const [skip, setSkip] = useState(() => readDraft(skipKey) || initialIfSkipped);
   // What Save should send: the box's text, unless it still shows a kept draft from before this edit.
-  const shown = readDraft(draftKey);
-  const [open, setOpen] = useState(!initial && !shown);
+  const shown = readDraft(draftKey) || readDraft(whyKey) || readDraft(skipKey);
+  const [open, setOpen] = useState(!initial && !initialWhy && !initialIfSkipped && !shown);
+  const oneLine = { padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%", resize: "vertical" as const };
   return open ? (
     <div className="field">
-      <label htmlFor="t-owner-setup" style={{ fontWeight: 600 }}>
+      <label htmlFor="t-owner-setup-why" style={{ fontWeight: 600 }}>
+        Why it matters (opens the card)
+      </label>
+      <DraftTextarea draftKey={whyKey} id="t-owner-setup-why" rows={1} maxLength={240} placeholder="What this setup changes for you" value={why} onChange={setWhy} style={oneLine} />
+      <label htmlFor="t-owner-setup-skip" style={{ fontWeight: 600, marginTop: 6 }}>
+        If you skip it
+      </label>
+      <DraftTextarea draftKey={skipKey} id="t-owner-setup-skip" rows={1} maxLength={240} placeholder="What happens if you leave this undone" value={skip} onChange={setSkip} style={oneLine} />
+      <label htmlFor="t-owner-setup" style={{ fontWeight: 600, marginTop: 6 }}>
         What you have to do, one step per line
       </label>
       <DraftTextarea
@@ -251,15 +278,24 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
         <button
           type="button"
           className="btn primary"
-          disabled={busy || text === initial}
+          disabled={busy || (text === initial && why === initialWhy && skip === initialIfSkipped)}
           onClick={() => {
-            // Clear only once the server has taken the steps; a failed save keeps them.
-            void save(text.trim()).then((ok) => ok && clearDraft(draftKey));
+            // Send only what changed; empty clears it. Clear drafts only once the server has taken them; a failed save keeps them.
+            const body: Record<string, unknown> = {};
+            if (text !== initial) body.ownerSetup = text.trim();
+            if (why !== initialWhy) body.ownerSetupWhy = why.trim() || null;
+            if (skip !== initialIfSkipped) body.ownerSetupIfSkipped = skip.trim() || null;
+            void save(body).then((ok) => {
+              if (!ok) return;
+              clearDraft(draftKey);
+              clearDraft(whyKey);
+              clearDraft(skipKey);
+            });
           }}
         >
           Save steps
         </button>
-        {initial && (
+        {(initial || initialWhy || initialIfSkipped) && (
           <button type="button" className="btn" onClick={() => setOpen(false)}>
             Done
           </button>
@@ -267,9 +303,21 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
       </div>
     </div>
   ) : (
-    <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
-      Edit steps
-    </button>
+    <>
+      {initialWhy && (
+        <p style={{ margin: "0 0 4px" }}>
+          <strong>Why:</strong> {initialWhy}
+        </p>
+      )}
+      {initialIfSkipped && (
+        <p style={{ margin: "0 0 4px" }}>
+          <strong>If you skip it:</strong> {initialIfSkipped}
+        </p>
+      )}
+      <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
+        Edit steps and lines
+      </button>
+    </>
   );
 }
 
@@ -306,7 +354,7 @@ type Landing =
 const elapsed = (ms: number) => `${Math.floor(Math.max(0, ms) / 60_000)}:${String(Math.floor(Math.max(0, ms) / 1000) % 60).padStart(2, "0")}`;
 const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 /** Who started a merge, in the owner's words. */
-const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted" };
+const PHASE_WORDS: Record<string, string> = { queued: "Queued for a check slot", checking: "Checking and merging", merging: "Merging", waiting_to_retry: "Trying again after the runner restarted", retrying_git: "Retrying after a push/fetch failure to the git host" };
 const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
 const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
@@ -662,7 +710,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   };
 
   if (ticket.error && !away(ticket.error)) return ticket.error.status === 404 ? <NotFoundBlock title="Ticket not found" backHref="#/board" backLabel="Back to Tickets">This ticket doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{ticket.error.message}</p>;
-  if (!t) return null;
+  if (!t) return <Loader label="Loading the ticket" />;
   const made = outputs.data ?? [];
   // Collapsed, a long description still shows its first 8 lines.
   const longBody = (t.body?.split("\n").length ?? 0) > 8 || (t.body?.length ?? 0) > 800;
@@ -741,6 +789,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </p>
           <h1>{t.title}</h1>
         </div>
+        <CopyLinkButton />
       </header>
 
       {statusLine.data?.statusLine && (
@@ -777,6 +826,11 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
       {/* Only when the ticket's next step really needs its agent to run (BOS-471): in review, waiting on the
           owner, or done, the hold changes nothing for this ticket, so it is not shown. */}
+      {t.workingHoursNote && (t.systemState === "backlog" || t.systemState === "ready" || t.systemState === "in_progress") && (
+        <div className="card" role="status" data-testid="ticket-working-hours-note" style={{ marginBottom: 16 }}>
+          <strong>{t.workingHoursNote}.</strong> <span className="muted">It starts by itself when the hours open. Urgent tickets and your replies still start it now.</span>
+        </div>
+      )}
       {t.quotaHeldUntil && (t.systemState === "ready" || t.systemState === "in_progress") && (
         <div className="card quota-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
@@ -788,7 +842,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               Run now
             </button>
             <button type="button" className="btn" disabled={busy || !!t.urgent} onClick={() => void patch({ urgent: true })}>
-              {t.urgent ? "Marked urgent" : "Mark urgent"}
+              {t.urgent ? "Priority 1 is on" : "Make Priority 1"}
             </button>
           </div>
         </div>
@@ -797,6 +851,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
           <TicketOpenCards ticketId={t.id} />
+          <TicketRecord ticketId={t.id} />
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -873,7 +928,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
             <span>
-              Urgent<span className="muted">: runs even when the subscription is close to its limit</span> <code className="mono">quota hold</code>
+              Priority 1<span className="muted">: goes first everywhere (runs past the subscription limit, first in the check queue and the merge line, keeps its place after a send-back) and you get one page when it has merged and is ready to put live</span> <code className="mono">quota hold</code>
             </span>
           </label>
 
@@ -940,6 +995,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <DetailRow title="Roadmap and dependencies" count={links.data?.waitsOn.length ? `waits on ${links.data.waitsOn.length}` : links.error ? "couldn't load" : links.data ? "none" : ""}>
               <TicketLinks t={t} onChanged={ticket.reload} bare links={links} />
             </DetailRow>
+            <BranchOverlaps t={t} />
 
             {t.repoUrl && (
               <DetailRow title="Changes" count={buildWord(ci) ?? (t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "on its branch" : "")}>

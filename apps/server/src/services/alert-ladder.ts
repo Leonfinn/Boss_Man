@@ -14,12 +14,13 @@
 // reason, it parks on the CEO's rung with its clock stopped and is offered again when the reason
 // is gone. Only a kind allowed to reach the owner goes past the CEO.
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { readWatchdogSettings, sinceHours, untrusted } from "@boss-man/shared";
+import { readWatchdogSettings, sinceHours, splitOwnerSteps, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
 import type { ClearWhen } from "./alert-clearing.js";
 import { adviceOf, CANCEL_RUN, checkAsk } from "./decisions.js";
+import type { LintOverrideInput } from "./lint-override.js";
 import type { HostFacts } from "./steps.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { mergeContext } from "./decision-context.js";
@@ -370,7 +371,7 @@ export function alertLadder(
   async function openAlert(companyId: string, decisionId: string) {
     const [d] = await db.select().from(decisions).where(and(eq(decisions.id, decisionId), eq(decisions.companyId, companyId), eq(decisions.status, "open")));
     const ladder = (d?.context as { ladder?: Ladder } | undefined)?.ladder;
-    if (!d || !ladder) throw new WatchdogError(404, "No open alert with that ID.");
+    if (!d || !ladder) throw new WatchdogError(404, "No open card with that ID (an alert, or a team question waiting with the CEO).");
     return { d, ladder };
   }
 
@@ -626,9 +627,9 @@ export function alertLadder(
     },
 
     /** The CEO can't settle it: it goes to the owner with what was tried and the steps (the raise_decision rules). */
-    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; /** The owner must act now (BOS-1097): the card also reaches their phone. */ urgentWhy?: string; steps?: string[]; ownerMustDo?: boolean; lintOverride?: string; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
+    async escalate(companyId: string, ceoId: string, input: { alertId: string; triedFirst: string; /** The owner must act now (BOS-1097): the card also reaches their phone. */ urgentWhy?: string; steps?: string[]; /** BOS-1660: the opening of a card with steps. */ why?: string; minutes?: number; ownerMustDo?: boolean; lintOverride?: LintOverrideInput; setsUp?: Addon; proof?: string; adviceNeeded?: string; adviceDeny?: string }) {
       const [ceo] = await db.select().from(agents).where(and(eq(agents.id, ceoId), eq(agents.companyId, companyId), eq(agents.role, "ceo")));
-      if (!ceo) throw new WatchdogError(403, "Only the CEO passes alerts to the owner.");
+      if (!ceo) throw new WatchdogError(403, "Only the CEO passes cards to the owner.");
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
       // The card's own options are buttons the owner sees, so R7 accepts "press <option>" (BOS-421).
@@ -648,7 +649,7 @@ export function alertLadder(
       }
       // The CEO has looked at it and decided only the owner can settle it: that is the one way a CEO-ceiling
       // card may reach the owner (DR-017 A), so the ceiling doesn't apply to a deliberate escalation.
-      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.urgentWhy ? { urgentPush: { by: ceo.name, at: now().toISOString(), why: input.urgentWhy } } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(ask.lint ? { lint: ask.lint } : {}), ...(advice ? { advice } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
+      if (!(await place(d, { ...ladder, topRung: "owner" }, "owner", `${ceo.name} couldn't settle it`, { triedFirst: input.triedFirst.trim(), ...(input.urgentWhy ? { urgentPush: { by: ceo.name, at: now().toISOString(), why: input.urgentWhy } } : {}), ...(input.steps?.length ? splitOwnerSteps(input.steps) : {}), ...(input.steps?.length && ask.opening ? { opening: ask.opening } : {}), ...(ask.lint ? { lint: ask.lint } : {}), ...(advice ? { advice } : {}) }))) throw new WatchdogError(409, "That alert was answered meanwhile.");
       return { id: d.id };
     },
   };

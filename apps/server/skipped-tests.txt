@@ -1,0 +1,6 @@
+# Test files that may skip at the merge gate, each with the reason (BOS-1729). scripts/check-no-skips.mjs fails the gate when a test
+# skips in a file not listed here. Format: `path relative to apps/server | reason`. Listing a file is a decision: a test that skips
+# quietly here may run, and fail, on GitHub, so prefer fixing what makes it skip.
+test/db-restart.test.ts | needs a real Postgres URL in the environment; the default suite uses PGlite
+test/db-pool-limits.test.ts | the real-Postgres half needs a real Postgres URL in the environment; the default suite uses PGlite
+test/leader.test.ts | needs a real Postgres URL in the environment; the default suite uses PGlite

@@ -102,6 +102,14 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(await s.d.capacity(s.co.id)).toBe(1);
   });
 
+  it("a worker that never connected shows the can't-find-the-address hint, not only 'has not connected yet' (BOS-1601)", async () => {
+    const s = await setup({ runnerSlots: 1 });
+    const { worker: w } = await s.workers.register({ name: "never", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+    const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+    expect(row.reason).toMatch(/Has not connected yet/);
+    expect(row.reason).toMatch(/Can't find the address.*ENOTFOUND.*Tailscale name.*tailnet.*local network address/s);
+  });
+
   it("gives no job to a worker that can't fetch code yet, is built from another commit, is off or isn't set up for the company, and says why", async () => {
     const s = await setup({ runnerSlots: 1 });
     const other = await s.company("Other");
@@ -117,7 +125,7 @@ describe("check workers: scheduling (BOS-1435)", () => {
     const by = (id: string) => list.find((x) => x.id === id)!;
     expect(by(noBundle.id).reason).toMatch(/can't fetch the code/);
     expect(by(oldCommit.id).reason).toBeNull();
-    expect(by(oldCommit.id).companies[0]).toMatchObject({ ready: false, reason: expect.stringMatching(/different commit than the company's runner/) });
+    expect(by(oldCommit.id).companies[0]).toMatchObject({ ready: false, reason: expect.stringMatching(/its commit differs from your runner's.*one time only/) });
     expect(by(off.id).reason).toBe("Turned off.");
     expect(by(elsewhere.id).companies[0]!.id).toBe(other.id);
     const w = await s.workers.get(elsewhere.id);
@@ -135,7 +143,67 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(ran(s.toWorker)).toEqual([]);
     await s.db.update(runners).set({ imageCommit: COMMIT }).where(eq(runners.id, s.co.runnerId));
     const quiet = await s.worker({ commit: null });
-    expect((await s.workers.list()).find((x) => x.id === quiet.id)!.reason).toMatch(/hasn't said which commit/);
+    expect((await s.workers.list()).find((x) => x.id === quiet.id)!.reason).toMatch(/hasn't said which tools or commit/);
+  });
+
+  // BOS-1570: a runner update (new commit, same tools) must not idle a worker; only a tool change does, and it says which.
+  describe("toolchain match (BOS-1570)", () => {
+    const TOOLS = { node: "22.11.0", pnpm: "10.28.0", git: "2.39.5" };
+    const tc = (tools: Record<string, string>, fingerprint?: string) => ({ fingerprint: fingerprint ?? JSON.stringify(Object.entries(tools).sort()).replace(/\W/g, "").padEnd(64, "0").slice(0, 64), tools });
+    const withTools = async (s: Awaited<ReturnType<typeof setup>>, workerTc: ReturnType<typeof tc> | null, runnerTc: ReturnType<typeof tc> | null, o: { workerCommit?: string | null; runnerCommit?: string | null } = {}) => {
+      await s.db.update(runners).set({ toolchain: runnerTc, imageCommit: o.runnerCommit === undefined ? COMMIT : o.runnerCommit }).where(eq(runners.id, s.co.runnerId));
+      const { worker: w } = await s.workers.register({ name: `W${Math.random()}`, companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+      await s.workers.touch(w.id, { imageCommit: o.workerCommit === null ? undefined : (o.workerCommit ?? OTHER), toolchain: workerTc ?? undefined, imageVersion: "1", features: ["check-jobs", BUNDLE_FEATURE] });
+      s.workers.connect(w.id, () => true, () => undefined, ["check-jobs", BUNDLE_FEATURE]);
+      return (await s.workers.get(w.id))!;
+    };
+
+    it("takes jobs with a different commit when the tools match, with no owner action", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const w = await withTools(s, tc(TOOLS), tc(TOOLS));
+      expect(s.workers.readiness(w, s.co.id, COMMIT, tc(TOOLS))).toEqual({ ok: true, limit: 1 });
+      expect((await s.workers.eligible(s.co.id)).map((e) => e.id)).toEqual([w.id]);
+      // The commit is information only: a worker with no commit at all still matches.
+      const bare = await withTools(s, tc(TOOLS), tc(TOOLS), { workerCommit: null });
+      expect((await s.workers.eligible(s.co.id)).map((e) => e.id)).toContain(bare.id);
+    });
+
+    // BOS-1606: playwright is one-way. Same fingerprint either way; only a worker lacking what the runner has goes idle.
+    it("keeps a worker without playwright idle when the runner has it, but lets one with an extra playwright work", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const PW = { ...TOOLS, playwright: "1.64.1" };
+      const fp = tc(TOOLS).fingerprint;
+      const lacking = await withTools(s, tc(TOOLS, fp), tc(PW, fp));
+      expect(s.workers.readiness(lacking, s.co.id, COMMIT, tc(PW, fp))).toMatchObject({ ok: false, reason: expect.stringMatching(/playwright missing here, 1\.64\.1 on your runner/) });
+      const extra = await withTools(s, tc(PW, fp), tc(TOOLS, fp));
+      expect(s.workers.readiness(extra, s.co.id, COMMIT, tc(TOOLS, fp))).toEqual({ ok: true, limit: 1 });
+      expect(s.workers.readiness(extra, s.co.id, COMMIT, tc(PW, fp))).toEqual({ ok: true, limit: 1 });
+      expect(s.workers.readiness(lacking, s.co.id, COMMIT, tc(TOOLS, fp))).toEqual({ ok: true, limit: 1 });
+    });
+
+    it("goes idle when a tool differs, and the reason names the tool", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const w = await withTools(s, tc({ ...TOOLS, node: "22.10.0" }), tc(TOOLS));
+      expect(await s.workers.eligible(s.co.id)).toEqual([]);
+      const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+      expect(row.companies[0]!.reason).toMatch(/Out of date.*node 22\.10\.0 here, 22\.11\.0 on your runner.*Redeploy.*no file edit/);
+    });
+
+    it("says 'worker code too old' when a worker's protocol is refused, instead of a bare Offline", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const { worker: w } = await s.workers.register({ name: "Old", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+      s.workers.refuse(w.id, 0);
+      const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+      expect(row.reason).toMatch(/Out of date: worker code too old \(it speaks protocol 0, your server needs 1\).*Redeploy/);
+    });
+
+    it("falls back to the commit when either side can't report its tools", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const oldWorker = await withTools(s, null, tc(TOOLS), { workerCommit: COMMIT });
+      expect(s.workers.readiness(oldWorker, s.co.id, COMMIT, tc(TOOLS))).toEqual({ ok: true, limit: 1 });
+      const oldRunner = await withTools(s, tc(TOOLS), null, { workerCommit: OTHER });
+      expect(s.workers.readiness(oldRunner, s.co.id, COMMIT, null)).toMatchObject({ ok: false, reason: expect.stringMatching(/rebuild the runner/) });
+    });
   });
 
   it("caps a worker at the smaller of the owner's slots and what it reports, and counts its slots across companies", async () => {
@@ -240,6 +308,37 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(await s.job(a.id)).toMatchObject({ state: "queued", workerId: null, reason: expect.stringMatching(/went offline/) });
   });
 
+  // BOS-1917: a worker may run a full merge check. If it drops mid-check the merge goes back in line, the company runner runs
+  // it, and exactly one result counts: a late answer from the dropped worker can't pass it a second time or change it.
+  it("a merge check on a worker that drops mid-check is re-run once by the runner, and the late worker result is ignored", async () => {
+    const s = await setup({ runnerSlots: 1, graceMs: 30 });
+    s.setRunnerUp(false); // the runner has no free slot, so the worker takes the merge (the default policy takes merges)
+    const w = await s.worker();
+    const m = await s.req(s.co, { kind: "merge", scope: "full" });
+    await s.d.pump();
+    expect(await s.job(m.id)).toMatchObject({ state: "running", workerId: w.id, runnerId: null, kind: "merge" });
+    const done = { jobId: m.id, commit: m.commit, exitCode: 0, timedOut: false, tail: "worker" };
+    // The worker drops for good and the runner has room again.
+    w.release();
+    s.setRunnerUp(true);
+    s.d.onWorkerGone(w.id);
+    const end = Date.now() + 5000;
+    while ((await s.job(m.id)).runnerId === null && Date.now() < end) await new Promise((r) => setTimeout(r, 10));
+    expect(await s.job(m.id)).toMatchObject({ state: "running", runnerId: s.co.runnerId, workerId: null });
+    // Sent to the runner once, and only once to the worker.
+    expect(ran(s.toRunner)).toEqual([m.id]);
+    expect(ran(s.toWorker)).toEqual([m.id]);
+    // The worker's late answer is refused; the runner's counts once; a second answer changes nothing.
+    await s.d.onWorkerDone(w.id, done);
+    expect((await s.job(m.id)).state).toBe("running");
+    await s.d.onDone(s.co.runnerId, { ...done, tail: "runner" });
+    const passed = await s.job(m.id);
+    expect(passed.state).toBe("passed");
+    await s.d.onWorkerDone(w.id, { ...done, exitCode: 1 });
+    await s.d.onDone(s.co.runnerId, { ...done, exitCode: 1 });
+    expect(await s.job(m.id)).toMatchObject({ state: "passed", endedAt: passed.endedAt });
+  });
+
   it("on hello, re-queues a job the worker lost and stops one it runs that the server didn't give it", async () => {
     const s = await setup({ runnerSlots: 1 });
     s.setRunnerUp(false);
@@ -335,5 +434,45 @@ describe("check workers: scheduling (BOS-1435)", () => {
     await expect(s.workers.register({ ...base, slots: 0 })).rejects.toThrow(/Slots/);
     await expect(s.workers.register({ ...base, slots: 1, checkThreads: 0 })).rejects.toThrow(/threads/);
     await expect(s.workers.register({ ...base, slots: 1, checkMemoryMb: 10 })).rejects.toThrow(/Memory/);
+  });
+});
+
+describe("check workers: memory the machine reports (BOS-2217)", () => {
+  const add = async (s: Awaited<ReturnType<typeof setup>>, o: { slots: number; memoryMb: number | null; reported?: number }) => {
+    const { worker } = await s.workers.register({ name: `W${Math.random()}`, companyIds: [s.co.id], slots: o.slots, checkThreads: null, checkMemoryMb: o.memoryMb, enabled: true });
+    await s.workers.touch(worker.id, { imageCommit: COMMIT, imageVersion: "1", checkSlots: o.slots, memoryMb: o.reported, features: ["check-jobs", BUNDLE_FEATURE] });
+    return worker.id;
+  };
+
+  it("warns on 2 checks at once × 12,544 MB for a worker that reports 8 GB, and names a fix", async () => {
+    const s = await setup();
+    const id = await add(s, { slots: 2, memoryMb: 12_544, reported: 8192 });
+    const row = (await s.workers.list()).find((w) => w.id === id)!;
+    expect(row.reportedMemoryMb).toBe(8192);
+    expect(row.memoryWarning).toMatch(/2 checks at once/);
+    expect(row.memoryWarning).toMatch(/24\.5 GB/);
+    expect(row.memoryWarning).toMatch(/8 GB/);
+    expect(row.memoryWarning).toMatch(/lower/);
+  });
+
+  it("says nothing when it fits, when the machine has not reported, or when the memory per check is unset and the real peak fits", async () => {
+    const s = await setup();
+    const fits = await add(s, { slots: 2, memoryMb: 4096, reported: 8192 });
+    const silent = await add(s, { slots: 2, memoryMb: 12_544 });
+    const unset = await add(s, { slots: 2, memoryMb: null, reported: 16_384 });
+    const unsetTight = await add(s, { slots: 2, memoryMb: null, reported: 8192 });
+    const list = await s.workers.list();
+    const w = (id: string) => list.find((x) => x.id === id)!;
+    expect(w(fits).memoryWarning).toBeNull();
+    expect(w(silent).memoryWarning).toBeNull();
+    expect(w(unset).memoryWarning).toBeNull();
+    expect(w(unsetTight).memoryWarning).toMatch(/lower the checks at once to 1/);
+  });
+
+  it("uses the checks the worker will really run (its own slot count lowers the owner's)", async () => {
+    const s = await setup();
+    const { worker } = await s.workers.register({ name: "W", companyIds: [s.co.id], slots: 4, checkThreads: null, checkMemoryMb: 6144, enabled: true });
+    await s.workers.touch(worker.id, { imageCommit: COMMIT, imageVersion: "1", checkSlots: 1, memoryMb: 8192, features: ["check-jobs", BUNDLE_FEATURE] });
+    expect((await s.workers.list()).find((x) => x.id === worker.id)!.memoryWarning).toBeNull();
   });
 });

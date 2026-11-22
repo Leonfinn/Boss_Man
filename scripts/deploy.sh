@@ -78,7 +78,7 @@ require_readable() {
 
 # True when the files changed between two commits mean the runners need a new image.
 needs_runner() { # old new
-  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
+  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 }
 
 DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0 RECREATE=0 COMMIT=
@@ -129,6 +129,25 @@ wait_healthy() {
   return 1
 }
 
+# The daily backup service (BOS-2176) is started here too: an update names the services it restarts and uses --no-deps,
+# so an install made before that service existed would never start it otherwise. A no-op when it already runs. It never
+# stops an update: the daily backup is a safety net, and the update has just made its own backup.
+ensure_daily_backup() {
+  if ((DRY)); then say "[dry-run] docker compose up -d --no-deps backup (daily backup service, if the stack has one)"; return 0; fi
+  docker compose config --services 2>/dev/null | grep -qx backup || return 0
+  # The service sees only this folder (a `daily` folder inside the backup folder). Make it as the host user, so the files
+  # in it end up readable by the host user; Docker would make it root-owned.
+  mkdir -p "${BOSSMAN_BACKUP_DIR:-..}/daily" 2>/dev/null || true
+  # Hosts with overlay files name them in COMPOSE_FILE (":"-separated); the hand command needs them as -f flags.
+  local cfl="${COMPOSE_FILE:-$(grep -s '^COMPOSE_FILE=' .env | tail -1 | cut -d= -f2- || true)}" fflags="" cf
+  if [[ -n $cfl ]]; then
+    local -a cfs
+    IFS=: read -ra cfs <<<"$cfl"
+    for cf in "${cfs[@]}"; do [[ -z $cf ]] || fflags+=" -f $cf"; done
+  fi
+  docker compose up -d --no-deps backup || say "Warning: the daily backup service did not start. Start it by hand: docker compose${fflags} up -d --no-deps backup"
+}
+
 rebuild_and_start() {
   local svcs=(server)
   # The launcher is only part of the stack when its profile is on.
@@ -141,6 +160,7 @@ rebuild_and_start() {
   # With --force and nothing new the image is unchanged, so `up -d` leaves the running server alone: recreate it, or
   # "restart" would do nothing (BOS-647). Only the server: the launcher is left as it is.
   if ((RECREATE)); then run docker compose up -d --no-deps --force-recreate server; fi
+  ensure_daily_backup
   step "Waiting for the server to be healthy (up to ${HEALTH_TIMEOUT}s)"
   wait_healthy
 }
@@ -247,6 +267,8 @@ main() {
   run git merge --ff-only --quiet "$new"
   rebuild_and_start || { RESULT=failed; MESSAGE="server not healthy after ${HEALTH_TIMEOUT}s"; write_status; print_rollback_help; exit 1; }
   say "The server is healthy."
+  # BOS-1588: keep the host's own copy of the deployer script current; a failure here never fails the deploy.
+  if ((! DRY)) && [[ -x scripts/install-deployer.sh ]]; then scripts/install-deployer.sh || say "Warning: the deployer copy was not refreshed (see above); the deploy itself is fine."; fi
 
   local do_runner=0
   case $RUNNER in

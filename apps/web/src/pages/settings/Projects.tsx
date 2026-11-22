@@ -2,6 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, type Agent, type Company, type Project } from "../../api";
 import { usePoll } from "../../hooks";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
+import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 import { ProjectReviews } from "../../components/ReviewPolicy";
 import { QuickAdd } from "../Board";
 import { StarButton } from "../Agents";
@@ -182,6 +184,116 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
   );
 }
 
+type GithubWatchView = {
+  enabled: boolean;
+  repo: string;
+  intervalMinutes: number;
+  watchAlerts: boolean;
+  alertsHeldBy: string | null;
+  watchIssues: boolean;
+  watchDiscussions: boolean;
+  skipLogins: string[];
+  status: string;
+  lastError: string | null;
+  lastRunAt: string | null;
+  lastNewNotes: number;
+  backoffUntil: string | null;
+  hasToken: boolean;
+  tokenName: string;
+};
+
+/**
+ * The GitHub feedback watcher (BOS-1393): off by default. New issues, discussions and comments on a GitHub repo land in
+ * the feedback inbox for Support to triage. Read-only: the token only reads. The token itself lives in Secrets.
+ */
+export function GithubWatch({ projectId }: { projectId: string }) {
+  const url = `/api/projects/${projectId}/github-watch`;
+  const [w, setW] = useState<GithubWatchView | null>(null);
+  const [form, setForm] = useState<{ enabled: boolean; repo: string; intervalMinutes: string; watchAlerts: boolean; watchIssues: boolean; watchDiscussions: boolean; skip: string } | null>(null);
+  const act = useAction();
+  const sv = useSaveState(form);
+  const load = (v: GithubWatchView) => {
+    setW(v);
+    const f = { enabled: v.enabled, repo: v.repo, intervalMinutes: String(v.intervalMinutes), watchAlerts: v.watchAlerts, watchIssues: v.watchIssues, watchDiscussions: v.watchDiscussions, skip: v.skipLogins.join(", ") };
+    setForm(f);
+    sv.reset(f);
+  };
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const fetchWatch = () => {
+    setLoadError(null);
+    api<GithubWatchView>(url).then(load).catch((e: Error) => setLoadError(e.message));
+  };
+  useEffect(fetchWatch, [projectId]);
+  if (loadError && !w) return <LoadError what="the GitHub feedback watcher" message={loadError} onRetry={fetchWatch} />;
+  if (!w || !form) return <Loader label="Loading the GitHub feedback watcher" />;
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const v = await api<GithubWatchView>(url, {
+        method: "PUT",
+        body: { enabled: form.enabled, repo: form.repo.trim(), intervalMinutes: Number(form.intervalMinutes), watchAlerts: form.watchAlerts, watchIssues: form.watchIssues, watchDiscussions: form.watchDiscussions, skipLogins: form.skip.split(/[,\s]+/).filter(Boolean) },
+      });
+      setW(v);
+      sv.markSaved();
+      return "Saved.";
+    });
+  };
+  const checkNow = () =>
+    void act.run(async () => {
+      const v = await api<GithubWatchView>(`${url}/check-now`, { method: "POST" });
+      setW(v);
+      return v.status === "ok" ? `Checked. ${v.lastNewNotes} new note${v.lastNewNotes === 1 ? "" : "s"} in the feedback inbox.` : undefined;
+    });
+  return (
+    <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "start", paddingTop: 12, borderTop: "1px solid var(--line)" }}>
+      <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>GitHub feedback watcher</p>
+      <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
+        Files new issues, discussions and comments from a GitHub repo into the feedback inbox for Support to triage. Off until you switch it on. It changes only two things on GitHub: Support's replies on issues and discussions (and closing them once the outcome is known), and a security alert the security reviewer closes after checking it. It never labels or edits anything. The token is a fine-grained token (Metadata: read; Issues, Discussions, Secret scanning alerts and Dependabot alerts: read and write), saved in Secrets and granted to the company as <span className="mono">{w.tokenName}</span>. {w.hasToken ? "A token is granted." : "No token is granted yet."}
+      </p>
+      <div className="field" style={{ gridColumn: "1 / -1" }}>
+        <label>
+          <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> Watch this repo
+        </label>
+      </div>
+      <div className="field">
+        <label htmlFor={`gw-repo-${projectId}`}>GitHub repo (owner/name)</label>
+        <input id={`gw-repo-${projectId}`} className="mono" placeholder="your-name/your-repo" value={form.repo} onChange={(e) => setForm({ ...form, repo: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={`gw-int-${projectId}`}>Check every (minutes, at least 15)</label>
+        <input id={`gw-int-${projectId}`} type="number" min={15} max={1440} value={form.intervalMinutes} onChange={(e) => setForm({ ...form, intervalMinutes: e.target.value })} />
+      </div>
+      <div className="field">
+        <label>
+          <input type="checkbox" checked={form.watchIssues} onChange={(e) => setForm({ ...form, watchIssues: e.target.checked })} /> Issues
+        </label>
+        <label>
+          <input type="checkbox" checked={form.watchDiscussions} onChange={(e) => setForm({ ...form, watchDiscussions: e.target.checked })} /> Discussions
+        </label>
+        <label>
+          <input type="checkbox" checked={form.watchAlerts} onChange={(e) => setForm({ ...form, watchAlerts: e.target.checked })} /> Security alerts (this project owns the repo's alerts)
+        </label>
+        {w.alertsHeldBy ? <span className="error" style={{ fontSize: 13 }}>Project "{w.alertsHeldBy}" also watches this repo's alerts. Turn alerts off on one of them.</span> : null}
+      </div>
+      <div className="field" style={{ gridColumn: "1 / -1" }}>
+        <label htmlFor={`gw-skip-${projectId}`}>Skip posts by these GitHub logins (yours, Boss Man's account)</label>
+        <input id={`gw-skip-${projectId}`} className="mono" placeholder="login-one, login-two" value={form.skip} onChange={(e) => setForm({ ...form, skip: e.target.value })} />
+      </div>
+      <p style={{ gridColumn: "1 / -1", fontSize: 14, margin: 0 }} className={w.status === "error" ? "error" : "muted"}>
+        {w.status === "idle" ? "Not run yet." : w.status === "ok" ? `Working. Last check ${w.lastRunAt ? new Date(w.lastRunAt).toLocaleString() : ""}: ${w.lastNewNotes} new.` : w.lastError}
+        {w.status !== "ok" && w.backoffUntil ? ` Next try after ${new Date(w.backoffUntil).toLocaleString()}.` : ""}
+      </p>
+      <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
+        <SaveButton {...sv} busy={act.busy} />
+        <button type="button" className="btn" disabled={act.busy || !w.enabled || sv.dirty} onClick={checkNow}>
+          Check now
+        </button>
+      </div>
+      <div style={{ gridColumn: "1 / -1" }}>{act.view}</div>
+    </form>
+  );
+}
+
 /** The project's brief page (a map of the code the CEO writes for other agents), and the button that asks for it. */
 export function ProjectBrief({ p }: { p: Project }) {
   const brief = usePoll((signal) => api<{ slug: string; exists: boolean; commit: string | null; branch: string | null; updatedAt: string | null; ticketId: string | null }>(`/api/projects/${p.id}/brief`, { signal }), 30_000, `brief-${p.id}`);
@@ -225,10 +337,45 @@ export function ProjectBrief({ p }: { p: Project }) {
   );
 }
 
+/**
+ * One project as a collapsed row: name, star, Kanban button and a one-line summary. "Edit settings" opens the form.
+ * The form stays mounted while collapsed (just hidden), so unsaved edits are never lost by collapsing.
+ */
+function ProjectCard({ p, go, agents, onStar, starBusy, onChanged }: { p: Project; go: (to: string) => void; agents: Agent[]; onStar: () => void; starBusy?: boolean; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const summary = `${p.repoUrl ? "Repo set" : "No repo"} · ${p.landing === "pull_request" ? "opens pull requests" : "merges into the default branch"}`;
+  return (
+    <div style={{ borderTop: "1px solid var(--line)", padding: "10px 0" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <a href={`#/board/${p.id}`} style={{ fontWeight: 600 }}>{p.name}</a>
+        <StarButton agent={p} where="Projects" onToggle={onStar} disabled={starBusy} />
+        <button type="button" className="btn small" onClick={() => go(`board/${p.id}`)}>
+          Open {p.name}'s Kanban
+        </button>
+        <button type="button" className="btn small" aria-expanded={open} aria-controls={`settings-${p.id}`} onClick={() => setOpen(!open)}>
+          {open ? "Hide settings" : "Edit settings"}
+        </button>
+      </div>
+      <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>{summary}</p>
+      <div id={`settings-${p.id}`} hidden={!open} style={{ marginTop: 10 }}>
+        <ProjectRow p={p} agents={agents} onChanged={onChanged} />
+        <GithubWatch projectId={p.id} />
+      </div>
+    </div>
+  );
+}
+
 /** Every project of the chosen company: create one, open its Kanban, set its repo, checks and reviews. */
 export function ProjectsPage({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged?: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const projects = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([])), 60_000, `projects-${company?.id ?? "none"}`);
+  const act = useAction();
+  const patch = (id: string, body: Record<string, boolean>) =>
+    void act.run(async () => {
+      await api(`/api/projects/${id}`, { method: "PATCH", body });
+      projects.reload();
+      onChanged?.();
+    });
   return (
     <>
       <header className="page-head">
@@ -255,24 +402,18 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
             </p>
             {projects.data?.length
               ? projects.data.filter((p) => !p.archivedAt).map((p) => (
-                  <div key={p.id}>
-                    <a href={`#/board/${p.id}`} style={{ fontWeight: 600, marginRight: 8 }}>{p.name}</a>
-                    <StarButton agent={p} where="Projects" onToggle={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { starred: !p.starred } }).then(() => { projects.reload(); onChanged?.(); })} />
-                    <button type="button" className="btn small" onClick={() => go(`board/${p.id}`)}>
-                      Open {p.name}'s Kanban
-                    </button>
-                    <ProjectRow p={p} agents={company.agents} />
-                  </div>
+                  <ProjectCard key={p.id} p={p} go={go} agents={company.agents} onStar={() => patch(p.id, { starred: !p.starred })} starBusy={act.busy} onChanged={() => { projects.reload(); onChanged?.(); }} />
                 ))
               : projects.data && <p>No projects yet.</p>}
+            {act.view}
             {projects.data?.some((p) => p.archivedAt) && (
               <details>
                 <summary>Archived ({projects.data.filter((p) => p.archivedAt).length})</summary>
                 {projects.data.filter((p) => p.archivedAt).map((p) => (
                   <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
                     <a href={`#/board/${p.id}`}>{p.name}</a>
-                    <button type="button" className="btn small" onClick={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { archived: false } }).then(() => { projects.reload(); onChanged?.(); })}>
-                      Unarchive
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => patch(p.id, { archived: false })}>
+                      {act.busy ? "Saving…" : "Unarchive"}
                     </button>
                   </div>
                 ))}

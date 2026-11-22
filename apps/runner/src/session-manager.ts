@@ -17,9 +17,28 @@ import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
-import { gitAuthorEnv, isClone, RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { gitAuthorEnv, isClone, RepoLockTimeout, type MergePhase, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
+
+/**
+ * A merge request's step. A step named without what it needs is "invalid" and refused: before BOS-1070 a "finish" with
+ * no commit fell through to a plain merge, which pushes to the target unchecked.
+ */
+export function mergePhaseOf(c: Extract<RunnerCommand, { type: "workspace.merge" }>): MergePhase | null | "invalid" {
+  switch (c.phase) {
+    case undefined:
+      return null;
+    case "prepare":
+      return { phase: "prepare", ...(c.base ? { base: c.base } : {}), ...(c.carryFrom ? { carryFrom: c.carryFrom } : {}) };
+    case "unpublish":
+      return { phase: "unpublish" };
+    case "publish":
+      return c.commit ? { phase: "publish", commit: c.commit } : "invalid";
+    case "finish":
+      return c.commit && c.tree ? { phase: "finish", commit: c.commit, tree: c.tree, ...(c.expectBase ? { expectBase: c.expectBase } : {}), ...(c.carry ? { carry: true } : {}) } : "invalid";
+  }
+}
 
 /** How long one preflight attempt may take before it counts as failed, and how many attempts a run makes. */
 const MCP_PREFLIGHT_TIMEOUT_MS = 10_000;
@@ -78,6 +97,8 @@ export type SessionManagerOptions = {
   coordDir?: string;
   /** Runs and stops server-queued check jobs (BOS-316). */
   checkJobs?: import("./check-jobs.js").CheckJobs;
+  /** BOS-2182: holds a new run while the workspace volume is almost full. */
+  diskGuard?: import("./disk-guard.js").DiskGuard;
   log?: (msg: string) => void;
 };
 
@@ -371,6 +392,13 @@ export function killGroup(child: ChildProcess, graceMs = 5000) {
 
 export class SessionManager {
   private readonly runs = new Map<string, RunState>();
+  /** The last cumulative cost the agent reported per session id (BOS-1865): a resumed run counts from here. Capped, oldest dropped. */
+  private readonly sessionCosts = new Map<string, number>();
+  private rememberSessionCost(sessionId: string, costMicros: number) {
+    this.sessionCosts.delete(sessionId);
+    this.sessionCosts.set(sessionId, costMicros);
+    if (this.sessionCosts.size > 500) this.sessionCosts.delete(this.sessionCosts.keys().next().value as string);
+  }
   /** Short names of the temp folders live fenced runs use (BOS-1087), so two runs never share one and the sweep spares them. */
   private readonly liveTmpNames = new Set<string>();
   /** The model list last reported per agent kind, so it's sent only when it changes. */
@@ -669,6 +697,36 @@ export class SessionManager {
           );
         return;
       }
+      case "workspace.mainLog": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.mainLog(command.projectId, command.target, command.max, command.filesFor ?? [], secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
+      case "workspace.secretScan": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.secretScan(command.projectId, command.target, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
       case "workspace.clash": {
         const reply = this.opts.reply ?? (() => {});
         const ws = this.opts.workspaces;
@@ -720,7 +778,9 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets, command.pin)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare", ...(command.base ? { base: command.base } : {}) } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree, ...(command.expectBase ? { expectBase: command.expectBase } : {}) } : null, command.pin),
+                      : mergePhaseOf(command) === "invalid"
+                        ? Promise.reject(new Error(`The "${command.phase}" merge step needs its commit${command.phase === "finish" ? " and tree" : ""}; nothing was merged.`))
+                        : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, mergePhaseOf(command) as MergePhase | null, command.pin, command.expectTree, command.scanList),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),
@@ -966,6 +1026,7 @@ export class SessionManager {
   private async start(cmd: StartCommand) {
     const { emit } = this.opts;
     let lastCostMicros = 0;
+    let costBaselineNeeded = false;
     let lastContextUsed = -Infinity;
     let lastQuota = "";
     let messageText = "";
@@ -981,6 +1042,22 @@ export class SessionManager {
     if (cmd.fence && !cmd.boardToolsOnly && (this.opts.fence?.level ?? "unavailable") === "unavailable") {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: FENCE_UNAVAILABLE_ERROR });
       return;
+    }
+
+    // BOS-2182: no new run while the disk is almost full; it starts by itself once space is back. Runs already going are left alone.
+    if (this.opts.diskGuard) {
+      const room = await this.opts.diskGuard.waitForRoom({
+        cancelled: () => this.cancelledEarly.has(cmd.runId),
+        onHold: (reason) => {
+          emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: reason } });
+          emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId} is held: ${reason}` });
+        },
+      });
+      if (!room) {
+        this.cancelledEarly.delete(cmd.runId);
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: "cancelled", error: null });
+        return;
+      }
     }
 
     let env: NodeJS.ProcessEnv;
@@ -1250,8 +1327,14 @@ export class SessionManager {
           const cost = parseAcpUsageCost(u);
           if (cost) {
             // Treated as cumulative per session; a drop means the counter reset (R34).
-            const delta = cost.costMicros >= lastCostMicros ? cost.costMicros - lastCostMicros : cost.costMicros;
+            // A reopened session carries its earlier total (BOS-1865): the first figure of a resumed run starts
+            // from where the session's last run ended. If this runner has no figure for the session (it restarted
+            // since), that first figure is only a baseline: counting it whole would charge the session's whole
+            // history again, so one turn's cost is lost rather than the history counted twice.
+            const delta = costBaselineNeeded ? 0 : cost.costMicros >= lastCostMicros ? cost.costMicros - lastCostMicros : cost.costMicros;
+            costBaselineNeeded = false;
             lastCostMicros = cost.costMicros;
+            if (state.sessionId) this.rememberSessionCost(state.sessionId, cost.costMicros);
             if (delta > 0) emit({ type: "run.cost", runId: cmd.runId, fundingSourceId: cmd.fundingSourceId, costMicrosDelta: delta, model: cost.model });
           }
           const meta = u._meta as Record<string, unknown> | undefined;
@@ -1438,6 +1521,11 @@ export class SessionManager {
       // Claude Code has read the file by now. Production runs are unfenced and share one user, so don't leave the token readable for the whole run (BOS-553 review).
       if (cmd.agentKind === "claude") dropMcp();
       state.sessionId = session.sessionId;
+      if (session.resumed) {
+        const earlier = this.sessionCosts.get(session.sessionId);
+        if (earlier === undefined) costBaselineNeeded = true;
+        else lastCostMicros = earlier;
+      }
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
       // Steering (BOS-1016): claude-agent-acp and codex-acp advertise it; OpenCode doesn't, so its messages wait for the turn to end.
       // promptRequired makes the adapter hand an idle session's message back to us instead of starting a detached turn,

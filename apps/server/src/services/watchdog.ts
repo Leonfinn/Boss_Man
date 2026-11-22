@@ -3,16 +3,21 @@
 // wakes the Scrum Master once with the list of flags that are due. The Scrum Master's few
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
-import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { GO_LIVE_WAIT_MAX_MS, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { GO_LIVE_WAIT_MAX_MS, currentReportSamples, watchEndsAt, splitOwnerSteps, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
-import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import { PREFLIGHT_KIND, PREFLIGHT_STARTED_KIND } from "./ci-preflight.js";
+/** A GitHub CI pre-flight "started" row with no result after this long is treated as lost, not as a wait. */
+const PREFLIGHT_MAX_WAIT_MS = 3 * 60 * 60_000;
+import { activity, agents, checkJobs, checkResults, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
+import { type CardOpening, checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
-import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
+import { recentOwnerAnswer } from "./stale-requests.js";
+import { checkOwnerAsk } from "./owner-answers.js";
+import type { Embedder } from "./wiki-semantic.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { busyAgentIds } from "./agent-wip.js";
 import { heldTicketIds } from "./review-holds.js";
@@ -20,6 +25,7 @@ import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } fr
 import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
+import { dayFacts, dayLines } from "./weekly-summary.js";
 import { backoffGapMs, evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
 
 /** Why the Scrum Master is woken: the note lists the due flags. */
@@ -66,7 +72,7 @@ export type WatchdogDeps = {
   addons?: () => Promise<AddonFacts>;
   notify: Notify;
   nudge: Nudge;
-  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; ownerMustDo?: boolean }) => Promise<{ id: string }>;
+  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; lint?: CardLint; ownerMustDo?: boolean; opening?: CardOpening }) => Promise<{ id: string }>;
   assign: (ticketId: string, agentId: string | null) => Promise<unknown>;
   /** Puts a ticket back in the state it was in (through the normal ticket update, so it is versioned and logged). */
   restoreState: (ticketId: string, state: SnapTicket["state"]) => Promise<unknown>;
@@ -79,10 +85,12 @@ export type WatchdogDeps = {
    * The idle-capacity rules (BOS-659) read both; absent, those rules do nothing.
    */
   capacity?: (companyId: string) => Promise<{ busy: number; limit: number }>;
-  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string; /** Feed and browser only, never the phone (BOS-1097). */ noPush?: boolean }) => Promise<unknown>;
+  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string; /** Feed and browser only, never the phone (BOS-1097). */ noPush?: boolean; /** For the owner's Slack, Discord and webhook destinations (BOS-2199). */ kind?: "daily_summary" }) => Promise<unknown>;
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
   hosts?: () => Promise<HostFacts[]>;
+  /** The company's embedder for owner-answer meaning search in the re-ask check (BOS-1593). Absent or null: word search alone. */
+  ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
   /** The name the host deployer reports for the server itself (BOS-774), for the card lint's R6: a card that names
    * another host is refused. Absent: only the name the facts carry stands in. */
   serverHost?: () => Promise<string | null>;
@@ -396,6 +404,48 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       if (rr.length && evaluateReviews(rr) === "passed") mergeWaiting.add(r.id);
     }
     const heldIds = await heldTicketIds(db, rows.map((r) => r.id));
+    // BOS-1760: what each in-progress ticket waits on in the check queue: its merges, and its quick or full checks on its
+    // current head (the commit of its newest check; a newer commit's request cancels the older queued ones). Only jobs
+    // still live or ended since the ticket last moved matter to the rules.
+    const checks = new Map<string, Array<{ from: Date; to: Date | null }>>();
+    const inProgress = rows.filter((r) => r.systemState === "in_progress").map((r) => r.id);
+    if (inProgress.length) {
+      const jobs = await db
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, commit: checkJobs.commit, state: checkJobs.state, queuedAt: checkJobs.queuedAt, endedAt: checkJobs.endedAt })
+        .from(checkJobs)
+        .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
+        .where(and(inArray(checkJobs.ticketId, inProgress), inArray(checkJobs.kind, ["pre_review", "merge"]), or(inArray(checkJobs.state, ["queued", "running"]), gte(checkJobs.endedAt, tickets.stateChangedAt))))
+        .orderBy(desc(checkJobs.queuedAt));
+      const head = new Map<string, string>();
+      for (const j of jobs) if (j.kind === "pre_review" && !head.has(j.ticketId)) head.set(j.ticketId, j.commit);
+      for (const j of jobs) {
+        if (j.kind === "pre_review" && j.commit !== head.get(j.ticketId)) continue;
+        const live = j.state === "queued" || j.state === "running";
+        checks.set(j.ticketId, [...(checks.get(j.ticketId) ?? []), { from: j.queuedAt, to: live ? null : (j.endedAt ?? j.queuedAt) }]);
+      }
+      // BOS-1836: GitHub's CI before review (ci-preflight.ts). Its "started" row is a wait until a result row for the same head
+      // follows; a start with no result for PREFLIGHT_MAX_WAIT_MS counts as lost (a restart that recover() missed), so it can't hide a stall.
+      const pre = await db
+        .select({ ticketId: checkResults.ticketId, sha: checkResults.sha, kind: checkResults.kind, at: checkResults.at })
+        .from(checkResults)
+        .innerJoin(tickets, eq(tickets.id, checkResults.ticketId))
+        .where(and(inArray(checkResults.ticketId, inProgress), inArray(checkResults.kind, [PREFLIGHT_STARTED_KIND, PREFLIGHT_KIND]), gte(checkResults.at, tickets.stateChangedAt)))
+        .orderBy(asc(checkResults.at));
+      const started = new Map<string, { sha: string | null; at: Date }>();
+      for (const r of pre) {
+        if (r.kind === PREFLIGHT_STARTED_KIND) {
+          started.set(r.ticketId, { sha: r.sha, at: r.at });
+        } else {
+          const s = started.get(r.ticketId);
+          if (!s || s.sha !== r.sha) continue;
+          started.delete(r.ticketId);
+          checks.set(r.ticketId, [...(checks.get(r.ticketId) ?? []), { from: s.at, to: r.at }]);
+        }
+      }
+      for (const [ticketId, s] of started) {
+        if (Date.now() - s.at.getTime() < PREFLIGHT_MAX_WAIT_MS) checks.set(ticketId, [...(checks.get(ticketId) ?? []), { from: s.at, to: null }]);
+      }
+    }
     const snapTickets: SnapTicket[] = rows.map((r) => ({
       id: r.id,
       state: r.systemState,
@@ -404,6 +454,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       stateChangedAt: r.stateChangedAt,
       blockedUntil: r.blockedUntil,
       // Waiting for go-live (BOS-1021) is a plan, not a stall; after GO_LIVE_WAIT_MAX_MS nobody may have deployed, so it counts again.
+      // BOS-1907: a merged ticket is quiet until its watch ends (the agent's date, else 14 days after go-live); then the usual hand-offs apply.
+      watching: !!r.mergeCommit && (watchEndsAt(r)?.getTime() ?? 0) > now().getTime(),
       scheduled: !!r.monitorAt || (!!r.goLiveWait && !!r.goLiveWaitSince && Date.now() - r.goLiveWaitSince.getTime() < GO_LIVE_WAIT_MAX_MS) || (!!r.assigneeAgentId && waiting.has(`${r.assigneeAgentId}:${r.id}`)),
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),
@@ -411,6 +463,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       held: heldIds.has(r.id),
       unblockedAt: releasedAt(r),
       bounces: bounces.get(r.id) ?? 0,
+      checks: checks.get(r.id),
     }));
     return {
       tickets: snapTickets,
@@ -499,8 +552,10 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
 
   /** Whether an account has room: it has readings and none of its windows is past its hold threshold. The scheduler's own test (hasRoom). */
   async function accountHasRoom(source: typeof fundingSources.$inferSelect, t: Date) {
-    const samples = await db.selectDistinctOn([quotaSamples.window]).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
-    if (!samples.length) return false;
+    const newest = await db.selectDistinctOn([quotaSamples.window]).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
+    if (!newest.length) return false;
+    // Only limits the latest report included (BOS-1916).
+    const samples = source.provider === "synthetic" ? newest : currentReportSamples(newest);
     const off = new Set(source.quotaDisabledWindows ?? []);
     return !samples.some((x) => !off.has(x.window) && !windowHasReset(x.resetsAt, t) && x.utilization >= source.quotaHoldAt);
   }
@@ -981,6 +1036,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         openedAt: r.flag.openedAt,
       })),
       decisions: await ownerDecisions(companyId),
+      dayLines: dayLines(await dayFacts(db, companyId, t)),
     });
     if (!s) return false;
     if (recordOnly) {
@@ -988,7 +1044,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       await log({ companyId, kind: "daily_summary", reason: `Record only: would have sent the daily summary (${s.title.toLowerCase()})`, after: { stuck: s.stuck, oldest: s.oldestRef, body: s.body }, summary: "Record only: Boss Man wrote this daily summary down instead of sending it. Nothing was sent." });
       return false;
     }
-    await deps.notifyOwner({ companyId, level: "note", title: s.title, body: s.body, link: "#/scrum-master" });
+    await deps.notifyOwner({ companyId, level: "note", title: s.title, body: s.body, link: "#/scrum-master", kind: "daily_summary" });
     await log({ companyId, kind: "daily_summary", reason: s.title, after: { stuck: s.stuck, oldest: s.oldestRef }, summary: "Boss Man sent the owner the Scrum Master's daily summary" });
     return true;
   }
@@ -1378,23 +1434,22 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       companyId: string,
       agentId: string,
       runId: string,
-      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string; stillNeeded?: string; proof?: string },
+      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; why?: string; minutes?: number; reason: string; stillNeeded?: string; proof?: string },
     ) {
       const reason = oneLine(input.reason);
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ triedFirst: input.triedFirst, question: input.question, why: input.why, minutes: input.minutes, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
-        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id));
-        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: input.question });
-        if (earlier) throw new WatchdogError(409, `${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
+        const asked = await checkOwnerAsk(db, { companyId, ticketId: t.id, question: input.question }, { embedder: deps.ownerAnswerEmbedder });
+        if (asked.refusal) throw new WatchdogError(409, `${asked.refusal}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
       }
       const f = await handedFlag(companyId, t.id, "raise_decision");
       await capOrFail(companyId, s);
-      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), steps: input.steps?.length ? input.steps : undefined, stillNeeded: input.stillNeeded?.trim() || undefined, lint: ask.lint, ownerMustDo: input.ownerMustDo || undefined });
+      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? (({ steps, stepSources }) => ({ steps, ...(stepSources ? { stepSources } : {}) }))(splitOwnerSteps(input.steps)) : {}), ...(input.steps?.length && ask.opening ? { opening: ask.opening } : {}), stillNeeded: input.stillNeeded?.trim() || undefined, lint: ask.lint, ownerMustDo: input.ownerMustDo || undefined });
       return log({ companyId, kind: "raise_decision", ticketId: t.id, flagId: f.id, actorAgentId: sm.id, actorRunId: runId, reason, before: { state: t.systemState }, after: { decisionId: d.id }, undoable: true, summary: `${sm.name} asked the owner a question about it: ${reason}` });
     },
 
@@ -1483,7 +1538,10 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     async update(companyId: string, patch: Partial<WatchdogSettings> & { scrumMasterAgentId?: string | null }) {
       const c = await company(companyId);
       const { scrumMasterAgentId, ...rest } = patch;
-      const next = WatchdogSettings.parse({ ...readWatchdogSettings(c.watchdog), ...rest });
+      const prev = readWatchdogSettings(c.watchdog);
+      const next = WatchdogSettings.parse({ ...prev, ...rest });
+      const prevSm = scrumMasterAgentId !== undefined ? await scrumMaster(companyId) : null;
+      let nextSmName: string | null = null;
       await db.transaction(async (tx) => {
         if (scrumMasterAgentId !== undefined) {
           if (scrumMasterAgentId) {
@@ -1491,6 +1549,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
             if (!a) throw new WatchdogError(404, "No active agent with that ID in this company.");
             if (a.role === "ceo") throw new WatchdogError(422, "The CEO can't be the Scrum Master: the Scrum Master's tools are limited to the watchdog's actions.");
             if (a.duty && a.duty !== SCRUM_MASTER_DUTY) throw new WatchdogError(422, `${a.name} already has a standing job.`);
+            nextSmName = a.name;
           }
           await tx.update(agents).set({ duty: null }).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY)));
           if (scrumMasterAgentId) await tx.update(agents).set({ duty: SCRUM_MASTER_DUTY }).where(eq(agents.id, scrumMasterAgentId));
@@ -1507,6 +1566,19 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           .set({ watchdog: next, ...(next.enabled ? { watchdogTrippedAt: null, watchdogTrippedReason: null } : {}) })
           .where(eq(companies.id, companyId));
       });
+      // Each change the save made leaves a line in the activity log (BOS-2150), like the fence and run-limit
+      // settings in app.ts (BOS-2063): switching the watchdog off silences it, so the owner must be able to see when.
+      // Written after the transaction, so a refused save leaves none; a field sent with its old value leaves none.
+      const lines: Array<{ summary: string; detail: Record<string, unknown> }> = [];
+      if (next.enabled !== prev.enabled) lines.push({ summary: `Owner switched the watchdog ${next.enabled ? "on" : "off"}`, detail: { enabled: next.enabled } });
+      if (next.recordOnly !== prev.recordOnly) lines.push({ summary: `Owner switched the watchdog's record-only mode ${next.recordOnly ? "on" : "off"}`, detail: { recordOnly: next.recordOnly } });
+      if (next.progressContract !== prev.progressContract) lines.push({ summary: `Owner switched the progress contract ${next.progressContract ? "on" : "off"}`, detail: { progressContract: next.progressContract } });
+      if (scrumMasterAgentId !== undefined && (scrumMasterAgentId ?? null) !== (prevSm?.id ?? null))
+        lines.push({ summary: nextSmName ? `Owner set the Scrum Master to ${nextSmName}` : "Owner removed the Scrum Master", detail: { scrumMasterAgentId: scrumMasterAgentId ?? null, previous: prevSm?.id ?? null } });
+      const SWITCHES = new Set(["enabled", "recordOnly", "progressContract"]);
+      const limits = (Object.keys(next) as Array<keyof WatchdogSettings>).filter((k) => !SWITCHES.has(k) && next[k] !== prev[k]);
+      if (limits.length) lines.push({ summary: "Owner changed the watchdog limits", detail: Object.fromEntries(limits.map((k) => [k, { from: prev[k], to: next[k] }])) });
+      for (const l of lines) await record(db, { companyId, kind: "settings", summary: l.summary, detail: l.detail, at: now() });
       return this.status(companyId);
     },
 

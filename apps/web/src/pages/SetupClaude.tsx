@@ -74,7 +74,25 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
   );
 }
 
-type RunnerState = { registered: boolean; connected?: boolean; launcher?: unknown; memoryLine?: string | null };
+/** What GET /runner says of the launcher (services/launcher.ts status()); null or absent when there is no launcher. */
+type Launched = { slug: string; container: { state: string; status: string; guard?: string; guardReason?: string } | null; error?: string } | null;
+type RunnerState = { registered: boolean; connected?: boolean; launcher?: Launched; memoryLine?: string | null };
+
+const TROUBLESHOOT = "https://github.com/Leonfinn/Boss_Man/blob/main/docs/29-tune-and-troubleshoot.md";
+
+/**
+ * BOS-1895: why a launched runner isn't connected, in plain words, each with the docs/29 section that fixes it.
+ * Empty when nothing is known to be wrong (not started yet, or still starting): the step keeps "not connected yet".
+ */
+function runnerProblems(l: Launched | undefined): { key: string; text: string; anchor: string }[] {
+  if (!l) return [];
+  const out: { key: string; text: string; anchor: string }[] = [];
+  if (l.error) out.push({ key: "launcher", text: `Boss Man couldn't reach the launcher, which starts the runner. It said: ${l.error}`, anchor: "the-launcher-cant-be-reached" });
+  const c = l.container;
+  if (c && c.state !== "running") out.push({ key: "container", text: `The runner's container is ${c.state}${c.status ? ` (Docker says "${c.status}")` : ""}.`, anchor: "the-runners-container-has-stopped" });
+  if (c?.guardReason) out.push({ key: "guard", text: `The runner's network guard didn't start: ${c.guardReason}`, anchor: "the-runners-network-guard-wont-start" });
+  return out;
+}
 
 /** Runner step: connected or not, and if not the one thing to do. The full panel is Settings → Runner. */
 export function RunnerStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -83,6 +101,7 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
   const s = status.data;
   if (!s) return <p className="muted">Checking the runner…</p>;
   const connected = s.registered && s.connected;
+  const problems = connected ? [] : runnerProblems(s.launcher);
   const start = () =>
     void act.run(async () => {
       await api(`/api/companies/${company.id}/runner/launch`, { method: "POST" });
@@ -97,12 +116,28 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
           <>
             <span className="tag green">Connected</span> The runner is connected.
           </>
+        ) : problems.length ? (
+          <>
+            <span className="tag red">Not connected</span> The runner is not connected, and something is wrong:
+          </>
         ) : (
           <>
             <span className="tag amber">Not connected</span> The runner is not connected yet.
           </>
         )}
       </p>
+      {problems.length > 0 && (
+        <ul style={{ margin: 0, paddingLeft: 20 }} data-testid="setup-runner-problems">
+          {problems.map((p) => (
+            <li key={p.key} data-testid={`setup-runner-problem-${p.key}`}>
+              {p.text}{" "}
+              <a href={`${TROUBLESHOOT}#${p.anchor}`} target="_blank" rel="noreferrer">
+                How to fix it
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
       {/* BOS-1498: what the runner is given and why ("11 GB: 6 agents at once and 1 check, on a 16 GB machine."). */}
       {s.memoryLine && (
         <p className="muted" style={{ margin: 0, fontSize: 14 }} data-testid="setup-runner-memory">
@@ -116,7 +151,7 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
           </button>
         ) : (
           <p style={{ margin: 0 }}>
-            To connect it, open <a href={`#/settings/${company.id}/system`}>Settings → Server and runner</a> and follow the steps there.
+            To connect it, open <a href={`#/settings/${company.id}/runner`}>Settings → Server and runner → Runner</a> and follow the steps there.
           </p>
         ))}
       {act.view}

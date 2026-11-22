@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkAsk } from "../src/services/decisions.js";
-import { lintOwnerSteps } from "../src/services/steps.js";
+import { THIS_HOST_POINTER, lintOwnerSteps } from "../src/services/steps.js";
 
 // R8 (the screen a step sends the owner to) and R13 (the value of a field a step tells them to fill in), BOS-442.
 // The 3 Nov cards' own text isn't kept anywhere the tests can read, so their wording below is rebuilt from the
@@ -126,11 +126,62 @@ describe("R13: a field the owner fills in has its value", () => {
 
 describe("R8 and R13 in checkAsk", () => {
   it("refuse a card, and the CEO can override them with a reason", () => {
-    const base = { triedFirst: "Read the Secrets page in the web app code." };
+    const base = { triedFirst: "Read the Secrets page in the web app code.", why: "The owner finds the right screen.", minutes: 2 };
     const steps = ["Open Settings → Notifications and fill in Topic."];
     expect(checkAsk({ ...base, steps }).error).toMatch(/Notifications isn't under Settings/);
     const ceo = checkAsk({ ...base, steps, lintOverride: "Checked the screen by hand; the list is behind.", byCeo: true });
     expect(ceo.error).toBeNull();
     expect(ceo.lint?.override?.findings.map((x) => x.rule).sort()).toEqual(["R13", "R8"]);
+  });
+});
+
+// BOS-1649 (16 Nov): an owner card sent the owner to "Settings → Server and runner → Network guard"-style paths whose last
+// part isn't on any page. R8 used to skip a word it didn't know; now a part after Settings, a Settings page or a project
+// tab must be a tab, a listed heading, a button or a field. These rows fail on the code before BOS-1649 (R8 and R17 passed them).
+describe("R8: a path part must exist (BOS-1649)", () => {
+  it("refuses a made-up part after Settings, a group or a page, and lists what is there", () => {
+    for (const s of [
+      "Open Settings → Server and runner → Network settings and look at the guard.",
+      "Open Settings → Network settings.",
+      "Open Settings → Reviews → Approval matrix.",
+      "Open Settings → Server and runner → This server → Facts nobody gave.",
+      "Open Projects → Development → Budget → Money box.",
+    ]) {
+      const [f, ...more] = r8([s]);
+      expect(more, s).toEqual([]);
+      expect(f?.problem, s).toMatch(/there is no ".+" under /);
+      expect(f?.problem, s).toContain("What is there:");
+    }
+    expect(r8(["Open Settings → Server and runner → Network settings."])[0]!.problem).toContain("Updates, Limits and checks, Runner");
+  });
+
+  it("passes real tabs, headings and buttons, and words in plain sentences", () => {
+    for (const s of [
+      "Open Settings → Server and runner → This server → Network guard.",
+      "Open Settings → Server and runner → Updates → Build and update runners.",
+      "Open Settings → Server and runner → Checks → Check workers.",
+      "Open Settings → Permissions → Agent fence → Setting up a host.",
+      "Open Settings → Server and runner → Checks lands tickets one at a time meanwhile.",
+      "Open Projects → Development → Budget → Spending limit.",
+      "Open Projects → Development → Config → Re-detect.",
+      "Open Settings and look around for the thing that suits you.",
+    ])
+      expect(r8([s]), s).toEqual([]);
+  });
+
+  it("does not hold a menu item without a page list to unknown words", () => {
+    expect(r8(["Open Dashboard → Overview."])).toEqual([]);
+  });
+});
+
+describe("R17 counts a Settings path only if it walks (BOS-1649)", () => {
+  const r17 = (step: string) => lintOwnerSteps([step]).refuse.filter((f) => f.rule === "R17");
+  it("refuses a host action whose only how-to is a path to nowhere, and passes a real one", () => {
+    expect(r17("Delete the NTFY_IMAGE line from the stack's .env file: Settings → Server and runner → Network settings.")).not.toEqual([]);
+    expect(r17("Restart the ntfy service (Settings → Server and runner → Updates).")).toEqual([]);
+  });
+  it("accepts Boss Man's own This server pointer", () => {
+    expect(r17(`Remove the NTFY_IMAGE line from the .env file the stack starts with (${THIS_HOST_POINTER} shows it).`)).toEqual([]);
+    expect(r8([`Open ${THIS_HOST_POINTER}.`])).toEqual([]);
   });
 });

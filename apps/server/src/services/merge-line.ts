@@ -13,14 +13,29 @@
 //   check_ended    it ended: passed true/false, or null when it never finished (killed, runner gone, stuck)
 //   restacked      merge train (BOS-1366): prepared again on a new base (why: ahead_left | ahead_changed | main_moved)
 //   rerun          merge train: a failed check that stood ran once more on the same tree (passed: true is a flaky pass)
-//   hold_started   the line held it: hold carried | sign_off | card | host | unchecked | waits_on | train (waiting for a seat), with carried/note/decisionId
+//   hold_started   the line held it: hold carried | sign_off | card | host | unchecked | waits_on | train (waiting for a seat)
+//                  | turn (BOS-1762: waiting to push while another ticket has the landing turn), with carried/note/decisionId
 //   hold_ended     the hold ended (hold, since, heldMs); written by the next event that moves the line (a check,
 //                  a merge, leaving, another hold), so a hold always closes. A retry ("attempt") or a repeat
 //                  approval that is held again doesn't end it, so one jam reads as one hold, not many short ones.
 //   merged         it merged (commit; null when there was nothing to merge)
 //   attempt_failed a merge attempt did not land (reason: check_failed | landing_refused | main_moved | conflict |
-//                  lock_timeout | restart | gate_fault; jobId; note). BOS-1461: server_status counts the last hour
-//                  by reason, and three of one reason in 30 minutes raise one CEO alert (merge-failures.ts).
+//                  lock_timeout | restart | gate_fault | git_transport_retried | git_transport; jobId; note). BOS-1461:
+//                  server_status counts the last hour by reason, and three of one reason in 30 minutes raise one CEO
+//                  alert (merge-failures.ts), except git_transport_retried (BOS-1860: a blip the merge retried by itself).
+//   train_clash    merge train (BOS-1515): on ahead = held to land on main alone (with: the members it clashed with, files),
+//                  on main = a trial merge on main clashed after main moved, so it is sent back at once (files)
+//   carried_across BOS-1762: its passed merge landed on a main that moved since it was tested, because main's new
+//                  commits touched none of its files (from, to, commits, files: how many files main changed)
+//   rebuilt        BOS-1762: main moved after its check and GitHub passed, so it is built and tested again
+//   ci_wait_started BOS-1871: the landing began waiting for GitHub CI on its merge copy (commit)
+//   ci_wait_ended  BOS-1871: that wait ended (commit, outcome: passed | failed | timeout | stopped | error | …, waitedMs)
+//                  (rebuilds: how many times this merge; why/files: why it couldn't be carried, when it was asked).
+//                  BOS-1821: also written while it waits for another ticket's landing turn, as soon as the carry is refused
+//   refreshed      BOS-1820: with GitHub CI gating, main moved while its check waited for a slot in a way a pass couldn't
+//                  be carried across, so the queued job took the new merge (and a new GitHub run) before it started
+//                  (why/files: why no carry; refreshes: how many times this attempt)
+//   landing_turn   BOS-1762: its landing turn was taken | queued | ended | expired (rebuilds, capMin)
 //   left           it left review without merging (to: the state it moved to)
 //   takeover       a server took charge (by: the cause, see TakeoverCause; commit: the live commit). One row per
 //                  company per takeover, with ticket_id null, written whether or not a merge is waiting; the
@@ -33,14 +48,14 @@
 // lookup off the company-wide range), so it survives a server restart. Recording never fails the merge it
 // describes: a write error is swallowed. The rows carry no agent, so the brief and "what did this run do"
 // readers that count an agent's activity never see them; the brief also skips the kind outright.
-import { and, desc, eq, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { activity, companies, settings } from "../db/schema.js";
 import { record } from "./activity.js";
 
 export const MERGE_LINE_KIND = "merge_line";
 
-export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on" | "train";
+export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on" | "train" | "turn";
 export type CheckWay = "gate" | "merged" | "queue";
 
 export type MergeLineEvent =
@@ -59,8 +74,25 @@ export type MergeLineEvent =
   | { event: "merged"; commit: string | null }
   /** BOS-1461: a merge attempt that did not land, with why (`reason`) and the check job it was about, when there is one. */
   | { event: "attempt_failed"; reason: FailReason; jobId?: string; note?: string }
+  /**
+   * BOS-1515: a merge-train clash. on "ahead": it didn't merge cleanly on the members ahead (`with`), so it waits to land on main
+   * alone (action land_alone). on "main": a trial merge on main clashed after main moved, so it goes back now (action sent_back);
+   * `with` then names the tickets it was held alone for, if any. `files` is capped at TRAIN_CLASH_FILES.
+   */
+  | { event: "train_clash"; on: "ahead" | "main"; with: Array<{ ticketId: string; ref: string | null; title: string }>; files: string[]; fileCount?: number; action: "land_alone" | "sent_back" }
   | { event: "left"; to: string }
-  | { event: "takeover"; by: TakeoverCause; commit: string | null };
+  | { event: "takeover"; by: TakeoverCause; commit: string | null }
+  /** BOS-1762: landed on a moved main without a new test; main's `commits` new commits touched `files` files, none of its own. */
+  | { event: "carried_across"; from: string; to: string; commits: number; files: number }
+  /** BOS-1762: main moved after both passed, so the merge is built and tested again; `why`/`files`: why no carry. */
+  | { event: "rebuilt"; rebuilds: number; why?: string; files?: string[] }
+  /** BOS-1820: main moved while its check still waited for a slot, in a way a pass couldn't be carried across, so the queued job took the new merge first (place kept). */
+  | { event: "refreshed"; why: string; files?: string[]; refreshes: number }
+  | { event: "landing_turn"; action: "taken" | "queued" | "ended" | "expired"; rebuilds?: number; capMin?: number }
+  /** BOS-1871: the landing began waiting for GitHub CI on its merge copy (`commit`). */
+  | { event: "ci_wait_started"; commit: string }
+  /** BOS-1871: that wait ended: `outcome` is how (passed, failed, timeout, stopped, error, …), `waitedMs` how long it took. */
+  | { event: "ci_wait_ended"; commit: string; outcome: string; waitedMs: number };
 
 /**
  * Why a server took charge of the merge line (BOS-1399). A restart and a crash look the same from inside, so
@@ -106,8 +138,21 @@ export async function recordTakeover(db: Db, t: { cause: TakeoverCause; commit: 
   }
 }
 
+/** At most this many files are kept on a train_clash row (the count says how many there were). */
+export const TRAIN_CLASH_FILES = 30;
+
+/** "BOS-1471 in 7 files (a.ts, b.ts, c.ts, …)": the clash in words, for the record, the merge queue and the stall alarm. */
+export function clashWords(withRefs: string[], files: string[], total = files.length): string {
+  const who = withRefs.length ? withRefs.join(", ") : "the tickets ahead";
+  const shown = files.slice(0, 3).join(", ");
+  const list = shown ? ` (${shown}${total > 3 ? ", …" : ""})` : "";
+  return `${who}${total ? ` in ${total} file${total === 1 ? "" : "s"}${list}` : ""}`;
+}
+
 /** Why a merge attempt did not land (BOS-1461). */
-export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault"] as const;
+// BOS-1860: git_transport_retried = a push or fetch to the git host failed on the network and the merge retries once by itself
+// (never alerted); git_transport = it failed again on the retry, so a merge card went to the CEO.
+export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault", "git_transport_retried", "git_transport"] as const;
 export type FailReason = (typeof FAIL_REASONS)[number];
 export const FAIL_REASON_TEXT: Record<FailReason, string> = {
   check_failed: "the merge check failed",
@@ -117,6 +162,8 @@ export const FAIL_REASON_TEXT: Record<FailReason, string> = {
   lock_timeout: "the merge check gave up waiting for a check slot",
   restart: "the runner restarted or went away under the merge",
   gate_fault: "the merge gate itself failed (check stuck or an error)",
+  git_transport_retried: "a push or fetch to the git host failed on the network; retried once by itself",
+  git_transport: "a push or fetch to the git host failed on the network twice",
 };
 
 const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { event: K }>) => string } = {
@@ -130,12 +177,32 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   rerun: (e) => `Merge line: failed check run once more${e.passed === true ? ": passed (a flaky failure)" : e.passed === false ? ": failed again" : ""}`,
   check_started: () => "Merge line: check started",
   check_ended: (e) => `Merge line: check ${e.passed === true ? "passed" : e.passed === false ? "failed" : "did not finish"}`,
-  hold_started: (e) => `Merge line: held (${e.hold})${e.note ? `: ${e.note}` : ""}`,
+  hold_started: (e) => (e.hold === "turn" ? `Merge line: waiting behind another ticket's landing turn${e.note ? `: ${e.note}` : ""}` : `Merge line: held (${e.hold})${e.note ? `: ${e.note}` : ""}`),
   hold_ended: (e) => `Merge line: hold (${e.hold}) ended after ${Math.round(e.heldMs / 60_000)} min`,
   merged: (e) => `Merge line: merged${e.commit ? ` as ${e.commit.slice(0, 12)}` : ""}`,
   attempt_failed: (e) => `Merge line: merge attempt failed (${e.reason})${e.note ? `: ${e.note}` : ""}`,
+  train_clash: (e) => {
+    const names = e.with.map((w) => w.ref ?? `"${w.title}"`);
+    const total = e.fileCount ?? e.files.length;
+    return e.on === "ahead"
+      ? `Merge line: held to land alone: clashes with ${clashWords(names, e.files, total)}`
+      : `Merge line: sent back: clashes with ${clashWords(["main"], e.files, total)}${names.length ? `, after ${names.join(", ")} landed` : ""}`;
+  },
   left: (e) => `Merge line: left without merging (moved to ${e.to})`,
   takeover: (e) => `Merge line: a server took charge (${e.by}${e.commit ? `, ${e.commit.slice(0, 12)}` : ""})`,
+  carried_across: (e) => `Merge line: main moved ${e.commits} commit${e.commits === 1 ? "" : "s"} since its tests passed, touching ${e.files} file${e.files === 1 ? "" : "s"}, none of this ticket's; landed without a new test`,
+  rebuilt: (e) => `Merge line: main moved after its checks passed, so it is built and tested again (${e.rebuilds} time${e.rebuilds === 1 ? "" : "s"})${e.why ? `; no carry, ${e.why}${e.files?.length ? ` (${e.files.slice(0, 3).join(", ")}${e.files.length > 3 ? ", …" : ""})` : ""}` : ""}`,
+  refreshed: (e) => `Merge line: main changed since this merge was built (${e.why}${e.files?.length ? `: ${e.files.slice(0, 3).join(", ")}${e.files.length > 3 ? ", …" : ""}` : ""}), so it was rebuilt before its check started, keeping its place`,
+  landing_turn: (e) =>
+    e.action === "taken"
+      ? `Merge line: took the landing turn after ${e.rebuilds} rebuilds; other merges wait to push for up to ${e.capMin} min`
+      : e.action === "queued"
+      ? `Merge line: next in line for the landing turn after ${e.rebuilds} rebuilds`
+      : e.action === "expired"
+      ? `Merge line: the landing turn ran out after ${e.capMin} min; other merges push again`
+      : "Merge line: the landing turn ended",
+  ci_wait_started: (e) => `Merge line: waiting for GitHub CI on the merge copy ${e.commit.slice(0, 12)}`,
+  ci_wait_ended: (e) => `Merge line: GitHub CI wait ended (${e.outcome}) after ${Math.round(e.waitedMs / 60_000)} min`,
 };
 
 const summaryOf = (e: MergeLineEvent) => (SUMMARY[e.event] as (x: MergeLineEvent) => string)(e);
@@ -154,7 +221,21 @@ async function lastEvent(db: Db, ticketId: string, skipPassive = false): Promise
   return row ? { at: row.at, detail: row.detail as unknown as MergeLineEvent } : null;
 }
 
-const sameHold = (a: Extract<MergeLineEvent, { event: "hold_started" }>, b: Extract<MergeLineEvent, { event: "hold_started" }>) =>
+/**
+ * BOS-1769: true when the ticket left review (a "left" row) at or after `since`, even if it is back in review now. A landing
+ * started before that belongs to a pass through the line that is over: asking "is it in review now?" misses a quick
+ * out-and-back, which left BOS-1706's old landing polling for hours and refusing every retry. Through the partial index.
+ */
+export async function leftLineSince(db: Db, ticketId: string, since: Date): Promise<boolean> {
+  const [row] = await db
+    .select({ at: activity.at })
+    .from(activity)
+    .where(and(eq(activity.ticketId, ticketId), eq(activity.kind, MERGE_LINE_KIND), gte(activity.at, since), sql`${activity.detail}->>'event' = 'left'`))
+    .limit(1);
+  return !!row;
+}
+
+const sameHold = (a:Extract<MergeLineEvent, { event: "hold_started" }>, b: Extract<MergeLineEvent, { event: "hold_started" }>) =>
   a.hold === b.hold &&
   (a.carried ?? []).map((c) => c.ticketId).sort().join(",") === (b.carried ?? []).map((c) => c.ticketId).sort().join(",");
 

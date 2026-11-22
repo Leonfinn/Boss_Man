@@ -8,7 +8,7 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, notifications, runners, settings, skills } from "../src/db/schema.js";
-import { cleanPath, normalise, parseGitHub, parseSkillMd, skillName } from "../src/services/skills.js";
+import { cleanPath, normalise, parseGitHub, parseSkillMd, skillInstructions, skillMarkdown, skillName, skillNameOf } from "../src/services/skills.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -100,6 +100,51 @@ describe("skill files (R71)", () => {
     expect(parseSkillMd(files["skills/triage/SKILL.md"]!).description).toBe("Sorts bug reports by severity.");
     expect(parseSkillMd("# Title\n\nNo frontmatter here.")).toMatchObject({ name: null, description: "No frontmatter here." });
     expect(skillName("My Great Skill!")).toBe("my-great-skill");
+  });
+
+  it("names a fetched skill from its frontmatter, slugged, or its folder when there is no name", () => {
+    const skill = (folder: string, files: Record<string, string>) => ({ folder, files: Object.entries(files).map(([path, text]) => ({ path, content: b64(text) })) });
+    // The frontmatter name wins over the folder, and is slugged as a written or uploaded name is.
+    expect(skillNameOf(skill("from-folder", { "SKILL.md": "---\nname: Release Notes\ndescription: Writes them.\n---\nBody." }))).toBe("release-notes");
+    expect(skillNameOf(skill("from-folder", { "SKILL.md": '---\nname: "My Great Skill!"\n---\nBody.' }))).toBe("my-great-skill");
+    // No name in the frontmatter (no match): the folder is the name, slugged too.
+    expect(skillNameOf(skill("My Skill Folder", { "SKILL.md": "---\ndescription: No name here.\n---\nBody." }))).toBe("my-skill-folder");
+    // No frontmatter at all: still the folder.
+    expect(skillNameOf(skill("plain-skill", { "SKILL.md": "# Title\n\nNo frontmatter." }))).toBe("plain-skill");
+    // Only SKILL.md's name is read, among supporting files and a README.
+    expect(skillNameOf(skill("notes", { "README.md": "---\nname: not-this\n---", "SKILL.md": "---\nname: real\n---\nBody.", "assets/x.md": "x" }))).toBe("real");
+  });
+
+  it("builds a SKILL.md from the form: the name slugged, the description quoted, the body trimmed", () => {
+    expect(skillMarkdown({ name: "My Great Skill!", description: "  Writes   release\n notes.  ", body: "  # Steps\n\nDo it.  " })).toBe(
+      '---\nname: my-great-skill\ndescription: "Writes release notes."\n---\n\n# Steps\n\nDo it.\n',
+    );
+    // Quotes in the description are JSON-escaped, so the frontmatter stays valid YAML.
+    expect(skillMarkdown({ name: "Quotes", description: 'Says "hi".', body: "Body." })).toContain('description: "Says \\"hi\\"."');
+    // A pasted frontmatter block is dropped: the form's name and description replace it.
+    expect(skillMarkdown({ name: "web-fetch", description: "Fetch pages.", body: "---\nname: old\ndescription: old\n---\n# Rules\n\nOne page." })).toBe(
+      '---\nname: web-fetch\ndescription: "Fetch pages."\n---\n\n# Rules\n\nOne page.\n',
+    );
+    // CRLF frontmatter is found too.
+    expect(skillMarkdown({ name: "crlf", description: "CRLF.", body: "---\r\nname: old\r\n---\r\nSteps." })).toBe('---\nname: crlf\ndescription: "CRLF."\n---\n\nSteps.\n');
+    // An empty name falls back to "skill", and an empty body leaves just the frontmatter.
+    expect(skillMarkdown({ name: "", description: "Says what it does.", body: "   " })).toBe('---\nname: skill\ndescription: "Says what it does."\n---\n\n\n');
+  });
+
+  it("reads a skill's instructions: the body after the frontmatter, trimmed, or why there is none", () => {
+    const md = (text: string) => [{ path: "SKILL.md", content: b64(text) }];
+    expect(skillInstructions(md("---\nname: style\ndescription: House style.\n---\n\n# Rules\n\nUse UK spelling.\n\n"))).toEqual({ path: "SKILL.md", body: "# Rules\n\nUse UK spelling.", empty: false, unreadable: false });
+    // Headings are part of the instructions; only the frontmatter is taken off.
+    expect(skillInstructions(md("# Title\n\nSteps.")).body).toBe("# Title\n\nSteps.");
+    // No SKILL.md at all, and a SKILL.md with no body, both read as empty.
+    expect(skillInstructions([{ path: "README.md", content: b64("Hello") }])).toEqual({ path: null, body: null, empty: true, unreadable: false });
+    expect(skillInstructions(md("---\nname: empty\ndescription: Nothing yet.\n---\n\n"))).toEqual({ path: "SKILL.md", body: "", empty: true, unreadable: false });
+    // A legacy lower-case path is found; a real SKILL.md wins over it.
+    expect(skillInstructions([{ path: "skill.md", content: b64("---\ndescription: Legacy.\n---\n\nLegacy body.") }])).toEqual({ path: "skill.md", body: "Legacy body.", empty: false, unreadable: false });
+    expect(skillInstructions([{ path: "skill.md", content: b64("Old.") }, ...md("---\ndescription: New.\n---\n\nNew body.")])).toMatchObject({ path: "SKILL.md", body: "New body." });
+    // A NUL byte means the file is not text: the page flags it rather than showing an empty body.
+    const binary = Buffer.concat([Buffer.from("---\ndescription: Binary.\n---\n\n"), Buffer.from([0, 1])]);
+    expect(skillInstructions([{ path: "SKILL.md", content: binary.toString("base64") }])).toEqual({ path: "SKILL.md", body: null, empty: true, unreadable: true });
   });
 
   it("parses GitHub links and refuses paths outside the folder", () => {

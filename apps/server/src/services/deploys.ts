@@ -6,13 +6,15 @@
 // A target may name a deploy tag (DR-033, rules.liveTag): after a deploy to it reports success,
 // the runner's daemon moves that tag on the project's remote to the commit the deploy was asked
 // for, with the merge token. No agent ever names the tag, the refspec or the commit pushed.
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { DEPLOY_REF, deployTagNameProblem, findCredential, riskOf, stagingFirst, type ResolveResult, type RUNNER_FEATURES, type RunnerCommand, type TagResult } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, decisions, deploys, deployTargets, projects, runners as runnersTable, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { readyUrgentFor } from "./priority-group.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { ownerActed } from "./stale-requests.js";
+import { withStagingLock } from "./staging-lock.js";
 
 export class DeployError extends Error {
   constructor(
@@ -27,7 +29,39 @@ type Target = typeof deployTargets.$inferSelect;
 type Deploy = typeof deploys.$inferSelect;
 /** The deploy tag a target moves after a successful deploy (DR-033): one tag in one project's repo. */
 export type LiveTag = { projectId: string; name: string };
-export type TargetRules = { requiresApproval?: boolean; liveTag?: LiveTag | null };
+export type TargetRules = { requiresApproval?: boolean; liveTag?: LiveTag | null; /** BOS-1472: the host deployer's staging lane. Such a target carries no secrets and wakes no run: the request goes to the host. */ hostStaging?: boolean };
+/** The name of the target Boss Man lists for the host's staging lane, and the sentinel endpoint it carries (nothing connects to it). */
+export const HOST_STAGING_NAME = "staging";
+export const HOST_STAGING_ENDPOINT = "host-deployer:staging";
+/** What the deploys service needs of the host's staging lane (selfDeployService.stagingLane / writeStagingRequest / stagingStatus). */
+export type StagingLane = {
+  on: () => Promise<boolean>;
+  submit: (id: string, commit: string, by: "agent-request") => Promise<void>;
+  /** The repository the staging checkout follows, as the host reports it; null when it didn't say. */
+  origin: () => Promise<string | null>;
+  status: () => Promise<{ id: string; result: string; message: string; to_commit: string; smoke?: string; failed_checks?: string; runner_image?: string; [k: string]: string | undefined } | null>;
+  /** A request is still waiting in the host's inbox (held, or not taken yet). */
+  pending: () => Promise<boolean>;
+};
+/**
+ * Whether two git remote addresses are the same repository: https, ssh:// and git@host:path forms, with or without .git,
+ * any credentials and any capital letters ignored. The staging lane belongs to the company whose project is the repository
+ * the host's staging checkout follows; a fork or any other repository is a different one.
+ */
+export function sameRepo(a: string | null | undefined, b: string | null | undefined): boolean {
+  const norm = (u: string | null | undefined) => {
+    if (!u) return "";
+    let s = u.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "");
+    s = s.replace(/^[a-z+]+:\/\//, "").replace(/^[^@/]*@/, "");
+    return s.replace(/^([^/:]+):(?!\d+\/)/, "$1/");
+  };
+  const x = norm(a);
+  return x !== "" && x === norm(b);
+}
+/** A staging deploy the host never answers (the lane was switched off, the host is down) is failed after this long. */
+const STAGING_GIVE_UP_MS = 3 * 60 * 60_000;
+/** A staging status still "running" this long after it was written is stale: the host's limit is 30 minutes (STAGING_TIMEOUT_SECONDS). */
+const STAGING_RUNNING_STALE_MS = 60 * 60_000;
 export type TargetInput = { name: string; kind: Target["kind"]; endpoint: string; isProduction?: boolean; requiresApproval?: boolean; liveTag?: LiveTag | null };
 type WakeHook = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number; deployId?: string; causedByRunId?: string | null }) => Promise<unknown>;
 
@@ -89,6 +123,8 @@ export function deploysService(
     /** Raises a Boss Man alert (the alert ladder). */
     alert?: (input: AlertInput) => Promise<unknown>;
     log?: (message: string) => void;
+    /** The host deployer's staging lane (BOS-1472). Without it a staging target can be listed but not used. */
+    staging?: StagingLane;
     /** Test hooks: how long the tag job waits for an offline runner before the CEO alert, and before giving up. */
     tagRunnerAlertMs?: number;
     tagRunnerGiveUpMs?: number;
@@ -293,12 +329,139 @@ export function deploysService(
     return next;
   }
 
+  // ---------- The host's staging lane (BOS-1472) ----------
+
+  /**
+   * A request for the host deployer's staging lane. Not production, so no approval; and no run holds secrets, because the
+   * host does the work: the request file is written, the deploy row is "running", and sync (below) records the host's answer
+   * and wakes the requester. Staging takes merged commits only; the host checks that again.
+   */
+  async function requestHostStaging(actor: { companyId: string; agentId: string | null }, t: Target, input: { ref: string; notes?: string; ticketId?: string }, commit: string | null) {
+    const lane = deps.staging;
+    if (!lane || !(await lane.on())) throw new DeployError(409, "Staging isn't set up on this host yet (the host deployer's staging lane is off). The owner's one-time setup is in docs/22-staging.md. Don't wait for it: say 'not checked' and check live.");
+    if (!commit) throw new DeployError(422, `Couldn't read the commit that ${input.ref} names, so it can't go to staging. Name a merged commit or main.`);
+    // One writer at a time (staging-lock.ts): the check and the request-file write must not interleave with another request.
+    const d = await withStagingLock(async () => {
+      const busy = await db
+        .select({ id: deploys.id })
+        .from(deploys)
+        .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
+        .where(and(eq(deploys.status, "running"), sql`${deployTargets.rules}->>'hostStaging' = 'true'`))
+        .limit(1);
+      if (busy.length || (await lane.pending())) throw new DeployError(409, "A staging deploy is already queued or running. Staging does one at a time; ask again when you're woken with its result.");
+      const [row0] = await db
+        .insert(deploys)
+        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, status: "running", createdAt: now(), commit })
+        .returning();
+      try {
+        await lane.submit(row0!.id, commit, "agent-request");
+      } catch (err) {
+        const [row] = await db.update(deploys).set({ status: "failed", outcome: `Couldn't hand the request to the host: ${(err as Error).message}`, finishedAt: now() }).where(eq(deploys.id, row0!.id)).returning();
+        throw new DeployError(502, row!.outcome!);
+      }
+      return row0;
+    });
+    return { deploy: d!, note: `Sent to the host's staging lane for ${short(commit)} (main commits only). No approval is needed and no secrets are involved. You'll be woken with the result and each smoke check; don't wait in this turn.` };
+  }
+
+  /** The smoke checks in a staging status, in a line: "address pass; signin skipped (not set up); ...". */
+  function checksLine(st: NonNullable<Awaited<ReturnType<StagingLane["status"]>>>): string {
+    const names = Object.keys(st).filter((k) => k.startsWith("check_")).map((k) => k.slice(6));
+    return names.map((n) => `${n} ${st[`check_${n}`]}${st[`check_${n}`] !== "pass" && st[`why_${n}`] ? ` (${st[`why_${n}`]})` : ""}`).join("; ");
+  }
+
+  /**
+   * One pass: records the host's answer for the staging deploy that is running, and wakes whoever asked. Only a request
+   * this server wrote (its id is a deploy row) is matched; an answer for anything else (the Settings button) is ignored here.
+   * A deploy the host never answers is failed after a few hours, so it can't stay "running" for ever.
+   */
+  async function syncHostStaging() {
+    const lane = deps.staging;
+    if (!lane) return 0;
+    const running = await db
+      .select({ d: deploys, t: deployTargets })
+      .from(deploys)
+      .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
+      .where(and(eq(deploys.status, "running"), sql`${deployTargets.rules}->>'hostStaging' = 'true'`));
+    if (!running.length) return 0;
+    const st = await lane.status();
+    let done = 0;
+    for (const { d, t } of running) {
+      let outcome: string | null = null;
+      let ok = false;
+      if (st && st.id === d.id && (st.result === "deployed" || st.result === "failed" || st.result === "rejected")) {
+        ok = st.result === "deployed" && st.smoke !== "failed";
+        const checks = checksLine(st);
+        outcome = `${st.message}${st.result === "deployed" ? ` Smoke checks: ${st.smoke ?? "not run"}${checks ? ` (${checks})` : ""}.` : ""}${st.runner_image ? ` Runner image ${st.runner_image}.` : ""}`.slice(0, 4000);
+      } else if (now().getTime() - d.createdAt.getTime() > STAGING_GIVE_UP_MS && !(await lane.pending()) && (!st || st.id !== d.id)) {
+        outcome = "The host never answered this staging request (the staging lane may have been switched off or the host deployer isn't running).";
+      } else if (st && st.id === d.id && st.result === "running" && now().getTime() - Date.parse(st.at ?? "") > STAGING_RUNNING_STALE_MS) {
+        // The host marks a cut-off run failed itself when it restarts; this is the backstop if that never happens
+        // (the deployer is off for good), so a "running" that outlived the host's own 30-minute limit can't wedge the lane.
+        outcome = "The staging deploy has said \"running\" for far longer than the host allows, so it was cut off (the host restarted or the deployer stopped). Check what staging runs, then ask again.";
+      }
+      if (outcome === null) continue;
+      const [row] = await db.update(deploys).set({ status: ok ? "succeeded" : "failed", outcome, finishedAt: now() }).where(and(eq(deploys.id, d.id), eq(deploys.status, "running"))).returning();
+      if (!row) continue;
+      done++;
+      if (d.agentId && wake) {
+        await wake({ agentId: d.agentId, ticketId: d.ticketId, reason: "staging deploy finished", priority: 3, deployId: d.id, note: `Staging deploy ${d.id} of ${short(d.commit)} to ${t.name} ${ok ? "passed" : "did not pass"}. ${outcome}` });
+      }
+    }
+    return done;
+  }
+
   /** A deploy that didn't succeed leaves the tag alone; say why on the record. */
   const skipTagUpdate = (reason: string) => ({ tagResult: `skipped: ${reason}` });
 
   return {
     setWakeHook(hook: WakeHook) {
       wake = hook;
+    },
+
+    syncHostStaging,
+
+    /**
+     * The poller's pass (main.ts): offers the staging target only to a company with a project that is the repository the host's
+     * staging checkout follows (never to another company, whatever its project is, so a fork can't use the lane) and takes it
+     * away from any other company, then records the host's answer.
+     */
+    async syncStaging() {
+      if (!deps.staging) return;
+      const origin = (await deps.staging.origin()) ?? null;
+      const rows = await db.select({ companyId: projects.companyId, repoUrl: projects.repoUrl }).from(projects).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      const own = [...new Set(rows.filter((r) => sameRepo(r.repoUrl, origin)).map((r) => r.companyId))];
+      await this.ensureHostStagingTargets(own);
+      // An unreadable origin (one bad tick of the host's git call) must not look like "nobody owns it": that would delete every
+      // staging target, and deploys.targetId cascades, so every deploy row would go with them (BOS-1796).
+      if (origin && (await deps.staging.on())) {
+        const stale = await db.select({ id: deployTargets.id, companyId: deployTargets.companyId }).from(deployTargets).where(sql`${deployTargets.rules}->>'hostStaging' = 'true'`);
+        for (const t of stale) {
+          if (own.includes(t.companyId)) continue;
+          // A target with a deploy still running keeps its row (and the deploy's history) until the deploy is recorded.
+          const live = await db.select({ id: deploys.id }).from(deploys).where(and(eq(deploys.targetId, t.id), eq(deploys.status, "running"))).limit(1);
+          if (live.length) continue;
+          await db.delete(deployTargets).where(eq(deployTargets.id, t.id));
+        }
+      }
+      await syncHostStaging();
+    },
+
+    /**
+     * BOS-1472: lists a non-production "staging" target, backed by the host's staging lane, for each of `companyIds` (the caller
+     * passes only companies that own the repository staging follows), once the host says the lane is on. It is not offered while
+     * the lane is off, and it never replaces a target the owner already made with that name. Returns how many it added.
+     */
+    async ensureHostStagingTargets(companyIds: string[]) {
+      if (!deps.staging || !(await deps.staging.on())) return 0;
+      let added = 0;
+      for (const companyId of companyIds) {
+        const existing = await db.select({ id: deployTargets.id }).from(deployTargets).where(and(eq(deployTargets.companyId, companyId), sql`lower(${deployTargets.name}) = ${HOST_STAGING_NAME}`));
+        if (existing.length) continue;
+        await db.insert(deployTargets).values({ companyId, name: HOST_STAGING_NAME, kind: "docker", endpoint: HOST_STAGING_ENDPOINT, isProduction: false, rules: { hostStaging: true } satisfies TargetRules });
+        added++;
+      }
+      return added;
     },
 
     async createTarget(companyId: string, input: TargetInput) {
@@ -309,6 +472,8 @@ export function deploysService(
         .insert(deployTargets)
         .values({ companyId, name: input.name, kind: input.kind, endpoint: input.endpoint.trim(), isProduction: input.isProduction ?? false, rules })
         .returning();
+      // BOS-2100: the owner can see when a target appeared. Name only; the endpoint can hold a user name, so it stays out.
+      await record(db, { companyId, kind: "settings", summary: `Owner added deploy target ${t!.name}` });
       return t!;
     },
 
@@ -330,12 +495,43 @@ export function deploysService(
         })
         .where(eq(deployTargets.id, id))
         .returning();
+      // BOS-2100: name each of the three settings that really changed. Values are never written, only the fact (an
+      // endpoint can carry a user name); the target's secrets are not part of this row.
+      const approval = (r: unknown) => !!(r as TargetRules | null)?.requiresApproval;
+      const changed: string[] = [];
+      if (row!.isProduction !== t.isProduction) changed.push(`production turned ${row!.isProduction ? "on" : "off"}`);
+      if (approval(row!.rules) !== approval(t.rules)) changed.push(`approval needed turned ${approval(row!.rules) ? "on" : "off"}`);
+      if (row!.endpoint !== t.endpoint) changed.push("endpoint changed");
+      if (row!.name !== t.name) changed.push(`renamed (was ${t.name})`);
+      if (changed.length) await record(db, { companyId: t.companyId, kind: "settings", summary: `Owner changed deploy target ${row!.name}: ${changed.join(", ")}` });
       return row!;
     },
 
-    async deleteTarget(id: string) {
-      const rows = await db.delete(deployTargets).where(eq(deployTargets.id, id)).returning({ id: deployTargets.id });
-      return rows.length > 0;
+    /**
+     * BOS-2158: removing a target erases its deploys and secret grants (cascade). A deploy that is waiting, approved or
+     * running is never wiped ("live"); past deploys are only erased when the owner confirmed (`force`).
+     */
+    async deleteTarget(id: string, force = false): Promise<{ result: "not_found" | "deleted" } | { result: "live"; detail: string } | { result: "has_history"; count: number }> {
+      const [target] = await db.select({ id: deployTargets.id }).from(deployTargets).where(eq(deployTargets.id, id));
+      if (!target) return { result: "not_found" };
+      const past = await db.select({ id: deploys.id, ref: deploys.ref, status: deploys.status }).from(deploys).where(eq(deploys.targetId, id));
+      const live = past.find((d) => d.status === "pending_approval" || d.status === "approved" || d.status === "running");
+      if (live) return { result: "live", detail: `The deploy of ${live.ref} to this target is ${live.status === "pending_approval" ? "waiting for approval" : live.status}.` };
+      if (past.length > 0 && !force) return { result: "has_history", count: past.length };
+      // No card may be left pointing at an erased deploy: close any still open with a plain reason.
+      const ids = past.map((d) => d.id);
+      if (ids.length) {
+        const at = now();
+        const open = await db.select({ id: decisions.id, context: decisions.context }).from(decisions).where(eq(decisions.status, "open"));
+        for (const d of open) {
+          const ctx = d.context as { type?: string; deployId?: string };
+          if (ctx.type !== "deploy" || !ctx.deployId || !ids.includes(ctx.deployId)) continue;
+          await db.update(decisions).set({ status: "withdrawn", answeredAt: at, dedupeKey: null, context: sql`${decisions.context} || ${JSON.stringify({ withdrawn: { by: "system", note: "The deploy target was removed, so this deploy no longer exists.", at: at.toISOString() } })}::jsonb` }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
+        }
+      }
+      const rows = await db.delete(deployTargets).where(eq(deployTargets.id, id)).returning({ id: deployTargets.id, companyId: deployTargets.companyId, name: deployTargets.name });
+      if (rows[0]) await record(db, { companyId: rows[0].companyId, kind: "settings", summary: `Owner removed deploy target ${rows[0].name}` });
+      return { result: rows.length > 0 ? "deleted" : "not_found" };
     },
 
     async listTargets(companyId: string) {
@@ -384,7 +580,16 @@ export function deploysService(
         }
       }
       // The commit is fixed now (DR-033): the tag goes to what was approved, never to the ref read again later.
+      // A staging request with no ticket reads the ref from the company's oldest project that has a repo.
+      // Only a project that is the repository the host's staging checkout follows may use the lane: another company's fork can't.
+      if ((t.rules as TargetRules).hostStaging === true) {
+        const origin = (await deps.staging?.origin()) ?? null;
+        const mine = (await db.select({ id: projects.id, repoUrl: projects.repoUrl }).from(projects).where(and(eq(projects.companyId, actor.companyId), isNotNull(projects.repoUrl), isNull(projects.archivedAt))).orderBy(asc(projects.createdAt))).filter((p) => sameRepo(p.repoUrl, origin));
+        if (!mine.length || (ticketProjectId && !mine.some((p) => p.id === ticketProjectId))) throw new DeployError(403, "Staging is for the repository this install deploys from, and this ticket's project isn't it.");
+        ticketProjectId = ticketProjectId ?? mine[0]!.id;
+      }
       const resolved = await resolveFor(t, input.ref, ticketProjectId);
+      if ((t.rules as TargetRules).hostStaging === true) return requestHostStaging(actor, t, input, resolved.commit);
       const [d] = await db
         .insert(deploys)
         .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, createdAt: now(), ...resolved })
@@ -394,15 +599,18 @@ export function deploysService(
 
       const [agent] = actor.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, actor.agentId)) : [];
       const ships = resolved.commit ? ` (ships ${short(resolved.commit)})` : "";
+      // BOS-1516: a deploy that carries the owner's Priority 1 work, once its whole group has merged, is headed "Ready to put live"
+      // and paged once (the same urgent path as a live fix; a later card for the same ticket is a plain ask).
+      const ready = input.ticketId ? await readyUrgentFor(db, input.ticketId) : undefined;
       await db.insert(decisions).values({
         companyId: actor.companyId,
         kind: "approval",
-        question: `${agent?.name ?? "An agent"} wants to deploy ${input.ref}${ships} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}${tagNote}`,
+        question: `${ready ? `${ready.heading}.\n\n` : ""}${agent?.name ?? "An agent"} wants to deploy ${input.ref}${ships} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}${tagNote}`,
         options: ["Approve", "Reject"],
         recommendedOption: "Approve",
         raisedByAgentId: actor.agentId,
         tier: "owner",
-        context: { type: "deploy", deployId: d!.id, ...(resolved.commit ? { commit: resolved.commit } : {}) },
+        context: { type: "deploy", deployId: d!.id, ...(resolved.commit ? { commit: resolved.commit } : {}), ...(ready ? { urgent: ready } : {}) },
       });
       return { deploy: d!, note: `Waiting for the owner to approve. You'll be woken with the answer; don't wait in this turn.${tagNote}` };
     },

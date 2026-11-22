@@ -1,7 +1,8 @@
 // Skill proposals (BOS-86): the CEO proposes a skill (its own draft, or an internet link); the
 // Security Reviewer checks it where the owner's rule requires; the owner decides every one.
 // Nothing here writes to `skills`: only the install step (below, once decided) does.
-import { and, asc, desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lt, sql } from "drizzle-orm";
+import { olderThan, pageLimit, type Page } from "./list-page.js";
 import type { Db } from "../db/client.js";
 import { agentSkills, agents, decisions, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -110,6 +111,8 @@ export { hashFiles, scriptFilesOf };
 export type ProposeInput = {
   companyId: string;
   byAgentId: string | null;
+  /** The agent run proposing, if any: the company's git token is read with that run's grants (BOS-1891). */
+  runId?: string;
   why: string;
   agentIds: string[];
   /** A caller that must record the id before this call (the retro links a change to its proposal first). */
@@ -223,7 +226,9 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
         if (!md.description) throw new SkillError(400, "SKILL.md needs a description saying what the skill does and when to use it.");
       } else {
         if (!/^https:\/\//.test(input.url)) throw new SkillError(400, "Give an https link to a GitHub repository, folder or SKILL.md.");
-        const gh = await skillsSvc.readGitHub(input.url);
+        // An agent's proposal reads with its run's grants: an agent kept away from GIT_TOKEN can't read private repos through the server (BOS-1891).
+        const scope = { companyId: input.companyId, runId: input.runId };
+        const gh = await skillsSvc.readGitHub(input.url, undefined, scope);
         if (gh) {
           const picked = input.skill ? gh.found.filter((f) => skillNameOf(f) === skillName(input.skill!)) : gh.found;
           if (picked.length !== 1) throw new SkillError(400, picked.length ? `That link holds ${picked.length} skills; propose one at a time, naming it (${picked.map(skillNameOf).join(", ")}).` : `No skill called ${input.skill} at that link.`);
@@ -233,7 +238,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
           pinnedRef = gh.commit;
         } else {
           // A link straight to one SKILL.md file: nothing versions it, so it is pinned by the hash of its bytes.
-          const bytes = await skillsSvc.fetchBytes(input.url);
+          const bytes = await skillsSvc.fetchBytes(input.url, scope);
           pinnedRef = `sha256:${sha256(bytes)}`;
           files = normalise([{ path: "SKILL.md", content: bytes.toString("base64") }]).files;
           name = skillName(parseSkillMd(bytes.toString("utf8")).name ?? "");
@@ -390,12 +395,13 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       let again: SkillFile[] | null = null;
       try {
         if (p.pinnedRef?.startsWith("sha256:")) {
-          const bytes = await skillsSvc.fetchBytes(p.sourceUrl!);
+          // The owner's install: the company's git token, so a private repository can be re-read (BOS-1891).
+          const bytes = await skillsSvc.fetchBytes(p.sourceUrl!, { companyId: p.companyId });
           if (`sha256:${sha256(bytes)}` !== p.pinnedRef) return { ok: false, reason: "the file at the link has changed since the review" };
           again = normalise([{ path: "SKILL.md", content: bytes.toString("base64") }]).files;
         } else if (p.pinnedRef) {
           if (!/^[0-9a-f]{40}$/.test(p.pinnedRef)) return { ok: false, reason: "the pinned version isn't an exact commit" };
-          const gh = await skillsSvc.readGitHub(p.sourceUrl!, p.pinnedRef);
+          const gh = await skillsSvc.readGitHub(p.sourceUrl!, p.pinnedRef, { companyId: p.companyId });
           const f = gh?.found.find((x) => x.url === p.sourceUrl);
           again = f ? normalise(f.files).files : null;
         } else {
@@ -663,10 +669,15 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       };
     },
 
-    /** Proposals without the file bytes, newest first. */
-    async list(companyId: string) {
-      const rows = await db.select().from(skillProposals).where(eq(skillProposals.companyId, companyId)).orderBy(desc(skillProposals.createdAt));
-      return rows.map(({ files, ...p }) => ({ ...p, fileCount: files.length }));
+    /** Proposals without the file bytes, newest first, one page at a time. The files (up to 1 MB each) are counted in SQL, never read. */
+    async list(companyId: string, page: Page = {}) {
+      const { files: _files, ...cols } = getTableColumns(skillProposals);
+      return db
+        .select({ ...cols, fileCount: sql<number>`jsonb_array_length(${skillProposals.files})`.mapWith(Number) })
+        .from(skillProposals)
+        .where(and(eq(skillProposals.companyId, companyId), page.before ? olderThan(skillProposals, skillProposals, page.before) : undefined))
+        .orderBy(desc(skillProposals.createdAt), desc(skillProposals.id))
+        .limit(pageLimit(page.limit));
     },
   };
 }

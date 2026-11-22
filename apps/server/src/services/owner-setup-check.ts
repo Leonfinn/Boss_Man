@@ -6,7 +6,10 @@
 // Host values come from the host deployer's report (host-facts.ts), never from text: authors write
 // `{{host.env.file}}` or `{{host.compose.cmd}} restart <service>`, and the card shows this server's real values.
 import { type CompanyFacts, fillCompanyFacts } from "./company-facts.js";
-import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
+import { composeFactsFrom } from "./compose-steps.js";
+import { type WhenFacts, branchingFindings, settleWhen } from "./owner-setup-when.js";
+import { type LintOverrideInput, type OverrideEntry, cleanOverride, overrideTooShort, resolveOverride, serializeOverride } from "./lint-override.js";
+import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps, placeFindings } from "./steps.js";
 
 /**
  * The host facts a setup step may name, and the plain words the card uses when the host hasn't reported one
@@ -54,7 +57,29 @@ export function fillOwnerSetup(steps: readonly string[], values: Readonly<Record
 }
 
 /** `company` (DR-057): other companies' records for `{{company.…}}` tokens, branches and R18b (company-facts.ts). */
-export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[]; company?: CompanyFacts };
+export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[]; company?: CompanyFacts; /** BOS-1650: settled `[when <fact>]` values (owner-setup-when.ts); read at raise time only. */ when?: WhenFacts };
+
+/** The one-line limit for the "why" and "if skipped" fields of a ticket's owner setup (BOS-1650). */
+export const SETUP_LINE_MAX = 240;
+/** What the card says when a ticket was written before these fields existed: raised anyway, never dropped. */
+export const NOT_GIVEN = "not given";
+
+/**
+ * BOS-1650: a ticket with owner setup steps says why (what it changes for the owner) and what happens if skipped
+ * ("nothing breaks" is an answer). Checks presence and shape (one line), not prose quality. Null when fine or when
+ * there are no steps.
+ */
+export function ownerSetupShapeProblem(steps: readonly string[], why: string | null | undefined, ifSkipped: string | null | undefined): string | null {
+  if (!steps.length) return null;
+  const bad = (label: string, field: string, v: string | null | undefined) => {
+    const t = v?.trim() ?? "";
+    if (!t) return `${field} is missing: one line saying ${label}.`;
+    if (/[\r\n]/.test(t) || t.length > SETUP_LINE_MAX) return `${field} must be one line of at most ${SETUP_LINE_MAX} characters.`;
+    return null;
+  };
+  const problems = [bad("what this changes for the owner", "ownerSetupWhy", why), bad('what happens if they skip it (write "nothing breaks" if that is true)', "ownerSetupIfSkipped", ifSkipped)].filter((p): p is string => !!p);
+  return problems.length ? `The owner setup needs two one-line fields besides its steps, and the card opens with them. ${problems.join(" ")}` : null;
+}
 
 /** The facts both checks use, read from the host-facts service: every recorded fact's value, the server's
  * reported name and the hosts for R6. The same inputs raise_decision gives checkAsk. */
@@ -71,6 +96,10 @@ export type OwnerSetupCheck = {
   /** Refusals a CEO override can let through, with a reason. */
   soft: LintFinding[];
   warn: LintFinding[];
+  /** BOS-1880: the card's "Where" lines, one per place in the order first met. */
+  where: string[];
+  /** BOS-1650: steps left out because their `[when <fact>]` is false (raise mode). */
+  dropped: { step: number; fact: string }[];
 };
 
 /**
@@ -83,17 +112,23 @@ export type OwnerSetupCheck = {
  */
 export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts, mode: "write" | "raise"): OwnerSetupCheck {
   // Company facts first (DR-057): a branch the record settles is dropped before anything else reads the steps.
-  const company = fillCompanyFacts(steps, facts.company, mode);
+  const settled = settleWhen(steps, facts.when, mode);
+  const company = fillCompanyFacts(settled.steps, facts.company, mode);
   const filled = fillOwnerSetup(company.steps, facts.values ?? {});
   const shown = fillServerHost(filled.steps, facts.serverHost);
-  const lint = lintOwnerSteps(shown, { ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
-  const refuse = [...company.findings, ...lint.refuse];
+  const compose = composeFactsFrom(facts.values);
+  const lint = lintOwnerSteps(shown, { ...(compose ? { compose } : {}), ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
+  // R20 (BOS-1650) runs on the steps as the owner will read them, after every marker is settled.
+  // BOS-1880: the same place check a card gets (BOS-1660), on the steps as the owner reads them, so a go-live card
+  // can't send the owner to "the card" for a place. Its Where lines go on the card.
+  const place = placeFindings(shown, facts.serverHost);
+  const refuse = [...settled.findings, ...company.findings, ...lint.refuse, ...branchingFindings(shown), ...place.findings];
   const warn = lint.warn;
   // When written, a company token may have no record yet (the other company adds its target before go-live); a
   // known host fact may be unreported. At go-live both stay, and the steps go to the CEO.
   const knownGap = (f: LintFinding) => f.rule === "R4" && (Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "") || /^has \{\{company\.[a-z0-9-]+\.deployTarget\.(?:name|kind|address|tagName)\}\}/.test(f.problem));
   const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)));
-  return { steps: shown, generic: filled.generic, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn };
+  return { steps: shown, generic: filled.generic, where: place.where, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn, dropped: settled.dropped };
 }
 
 /**
@@ -101,15 +136,20 @@ export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts
  * nothing needed one). `lintOverride` is the CEO's alone, with a reason of 10 characters or more, as on raise_decision
  * (DR-008); it can't let through a hard refusal.
  */
-export function ownerSetupWriteCheck(steps: readonly string[], facts: OwnerSetupFacts, o: { lintOverride?: string; byCeo: boolean }): { error: string } | { error: null; override: string | null } {
-  const override = o.lintOverride?.replace(/\s+/g, " ").trim();
+export function ownerSetupWriteCheck(steps: readonly string[], facts: OwnerSetupFacts, o: { lintOverride?: LintOverrideInput; byCeo: boolean; /** R35: false when re-checking an override stored earlier, where an entry whose refusal has since gone is just unused. */ strict?: boolean }): { error: string } | { error: null; override: string | null } {
+  const override = cleanOverride(o.lintOverride);
   if (override !== undefined && !o.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the setup steps instead." };
-  if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
+  if (override !== undefined && overrideTooShort(override)) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
   if (!steps.length) return { error: null, override: null };
   const c = checkOwnerSetup(steps, facts, "write");
   const head = "These owner setup steps can't go to the owner as written (one step per line):";
   const tail = `The owner pastes each command exactly as written and has no other document open. ${HOST_TOKEN_HELP}`;
   if (c.hard.length) return { error: `${head}\n${lintLines([...c.hard, ...c.soft])}\n${tail}` };
   if (c.soft.length && !override) return { error: `${head}\n${lintLines(c.soft)}\n${tail}${o.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
-  return { error: null, override: c.soft.length ? override! : null };
+  // R35: the override must name each refused step; one it doesn't name stays refused.
+  const resolved = resolveOverride(c.soft, override, { strict: o.strict !== false });
+  if (resolved.error !== null) return { error: `${head}\n${resolved.uncovered?.length ? lintLines(resolved.uncovered) : resolved.error}\n${resolved.uncovered?.length ? `${resolved.error}\n` : ""}${tail}` };
+  // What is stored is what was let through, step by step, so go-live reads the same scope.
+  const kept: OverrideEntry[] = resolved.covered.map((cv) => ({ steps: [...new Set(cv.findings.map((f) => f.step))].sort((a, b) => a - b), rules: [...new Set(cv.findings.map((f) => f.rule))], reason: cv.reason }));
+  return { error: null, override: kept.length ? serializeOverride(kept) : null };
 }

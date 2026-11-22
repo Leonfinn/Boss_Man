@@ -115,6 +115,11 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     repos: z.array(z.object({ projectId: z.string(), bytes: z.number().nonnegative() })),
     /** Each ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592); absent from an older runner. */
     scratch: z.array(z.object({ ticketId: Uuid, bytes: z.number().nonnegative() })).optional(),
+    /** Free and total bytes on the workspace volume (BOS-2182); absent from an older runner. */
+    freeBytes: z.number().nonnegative().optional(),
+    totalBytes: z.number().nonnegative().optional(),
+    /** True when the runner is holding new runs and checks for lack of space. */
+    holding: z.boolean().optional(),
     /** Ticket folders git no longer knew about (or scratch folders past their keep), removed in this pass. */
     removed: z.array(z.string()),
   }),
@@ -175,7 +180,7 @@ export const CheckAckCommand = z.object({ type: z.literal("check.ack"), jobId: U
 /** A running check job printed something: the log tail so far (BOS-316). */
 export const CheckProgressMessage = z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) });
 /** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
-export const CheckDoneMessage = z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000), fullLog: z.string().max(2_000_000).optional() });
+export const CheckDoneMessage = z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000), fullLog: z.string().max(2_000_000).optional(), /** BOS-1923: each step's seconds and whether the full check ran, read from the output on the machine (a passing check sends no log). */ stages: z.array(z.object({ name: z.string().max(60), seconds: z.number().int().min(0) })).max(60).optional(), ranFull: z.boolean().optional() });
 
 export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({
@@ -255,16 +260,38 @@ export const RunnerCommand = z.discriminatedUnion("type", [
    * above this one in the line, oldest first; nothing is built, pushed or linked.
    */
   z.object({ type: z.literal("workspace.mergeLine"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), branches: z.array(z.object({ ticketId: Uuid, branch: z.string().min(1) })).max(500) }),
+  /**
+   * The target's newest first-parent commits after a fetch (BOS-1645): what landed on main, so the server can record a merge
+   * whose answer it never got. `filesFor`: commits (from an earlier answer) whose changed files to list too. Read-only.
+   */
+  z.object({ type: z.literal("workspace.mainLog"), requestId: z.string(), projectId: Uuid, target: z.string().min(1), max: z.number().int().min(1).max(200), filesFor: z.array(z.string().regex(/^[0-9a-f]{40}$/)).max(20).optional() }),
+  /**
+   * The whole-tree secrets pass over the target after a fetch (BOS-1932): the runner's own installed scanner
+   * (BOSSMAN_SCAN_SCRIPT) with --tree, read from git objects. Read-only; the answer never holds a matched value.
+   */
+  z.object({ type: z.literal("workspace.secretScan"), requestId: z.string(), projectId: Uuid, target: z.string().min(1).max(200) }),
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish", "publish", "unpublish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(), expectTree: z.string().min(7).optional(),
     /** BOS-1413: the branch head the reviews and sign-off covered; a branch at any other commit is not merged (branch_moved). */
     pin: z.string().min(7).optional(),
     /** Merge train (BOS-1366, runner feature "merge-base"): prepare on this commit (main's tip or a train member ahead) instead of main's tip. */
     base: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     /** Merge train: finish pushes only if main's tip is exactly this commit, the base the checked tree was prepared on. */
-    expectBase: z.string().regex(/^[0-9a-f]{40}$/).optional() }),
+    expectBase: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    /**
+     * BOS-1762 (runner feature "merge-carry"): finish may land the passed merge on a main that moved since prepare, when main's
+     * new commits touch none of the ticket's files and nothing that re-tests the whole repo. Otherwise main_moved as before.
+     */
+    carry: z.boolean().optional(),
+    /**
+     * BOS-1820 (runner feature "merge-refresh"): on prepare, the merge prepared earlier for a queued check. The answer then says
+     * (prepared.carry) whether a pass of that merge could be carried onto the new one, so the gate rebuilds only when it couldn't.
+     */
+    carryFrom: z.object({ commit: z.string().min(7), tree: z.string().min(7) }).optional(),
+    /** BOS-1664 (runner feature "ci-publish-scan"): the owner's private-details list, applied to the secrets scan that runs before the "publish" push makes the commit public. */
+    scanList: z.string().max(60_000).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -328,6 +355,43 @@ export type RunnerCommand = z.infer<typeof RunnerCommand>;
 export const HarnessVersions = z.record(z.string().max(40), z.string().max(60));
 export type HarnessVersions = z.infer<typeof HarnessVersions>;
 
+/**
+ * The tools a check runs with (BOS-1570): `tools` maps a tool name to its version, `fingerprint` is the sha256 of the
+ * compared ones. A check worker takes a company's checks when its fingerprint equals the runner's, so a runner update
+ * that leaves the tools alone leaves every worker working. Sent in hello; absent from an image built before this.
+ */
+export const Toolchain = z.object({
+  fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  tools: z.record(z.string().max(40), z.string().max(80)).refine((t) => Object.keys(t).length <= 40),
+});
+export type Toolchain = z.infer<typeof Toolchain>;
+
+/** Tools left out of the fingerprint: shown to the owner, never compared (a runner may lack the browser add-on a worker has). */
+export const TOOLCHAIN_NOT_COMPARED = ["chromium"] as const;
+
+/**
+ * BOS-1606: tools compared one way. The worker must have each one the runner has (the web tests need playwright), but an
+ * extra one on the worker is fine, so a runner built without the optional add-on still works with a worker that has it.
+ * Not part of the fingerprint.
+ */
+export const TOOLCHAIN_ONE_WAY = ["playwright"] as const;
+
+/** One-way tools the runner has and the worker lacks, in the owner's words. Empty when the worker has all it needs. */
+export function toolchainMissing(worker: Record<string, string>, runner: Record<string, string>): string[] {
+  return TOOLCHAIN_ONE_WAY.filter((n) => runner[n] && !worker[n]).map((n) => `${n} missing here, ${runner[n]} on your runner`);
+}
+
+/** In the owner's words, which compared tools differ between a worker and the runner ("Node 22.11 here, 22.12 on your runner"). Empty when none. */
+export function toolchainDifferences(worker: Record<string, string>, runner: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const name of [...new Set([...Object.keys(worker), ...Object.keys(runner)])].sort()) {
+    if ((TOOLCHAIN_NOT_COMPARED as readonly string[]).includes(name)) continue;
+    if ((TOOLCHAIN_ONE_WAY as readonly string[]).includes(name)) continue;
+    if (worker[name] !== runner[name]) out.push(`${name} ${worker[name] ?? "missing"} here, ${runner[name] ?? "missing"} on your runner`);
+  }
+  return out;
+}
+
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
   /**
@@ -343,6 +407,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
     harnessVersions: HarnessVersions.optional(),
+    /** The tools checks run with (BOS-1570); absent from an older image. */
+    toolchain: Toolchain.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
     /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
@@ -370,8 +436,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base", "merge-conflicts", "merge-pin", "check-bundle"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "ci-publish": workspace.merge's "publish" and "unpublish" phases and its expectTree (BOS-1070); an older runner would read an unknown phase as a plain merge, so the server only sends them to a runner that says this. "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. "ci-publish-scan" (BOS-1664): runs the secrets scan, with the owner's private-details list from workspace.merge's scanList, before a "publish" push; the early GitHub run (pre-flight) is offered only to a runner that says this. "main-log": answers workspace.mainLog (BOS-1645). "merge-carry" (BOS-1762): honours workspace.merge's carry on finish; the server sends it only to a runner that says this. "merge-refresh" (BOS-1820): honours prepare's carryFrom and answers prepared.carry; without it the gate never refreshes a queued merge while GitHub CI gates. "secret-scan" (BOS-1932): answers workspace.secretScan. */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan", "main-log", "merge-carry", "merge-refresh", "secret-scan"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -401,10 +467,14 @@ export const WorkerMessage = z.discriminatedUnion("type", [
     runnerVersion: z.string().max(100),
     imageVersion: z.string().max(200).nullable(),
     imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+    /** BOS-1570: the tools it checks with; the match against the runner is on this, not on the commit. */
+    toolchain: Toolchain.optional(),
     features: z.array(z.string().max(40)).max(50).optional(),
     bootId: z.string().max(100).optional(),
     checkJobs: z.array(Uuid).max(100).optional(),
     checkSlots: z.number().int().min(1).max(64).optional(),
+    /** BOS-2217: the memory this machine really has for its checks, in MB (container limit, or the host's memory when unlimited). Absent from an older worker. */
+    memoryMb: z.number().int().min(1).max(100_000_000).optional(),
     /** BOS-1436: the commits it holds per project, so the next bundle for it is thin. */
     repos: WorkerRepos.optional(),
   }),
@@ -443,11 +513,17 @@ export type WorkspaceDiff = {
    * work area from the shared repo, so a check of head would fail with "invalid reference": request_check refuses instead.
    */
   unsynced?: string;
+  /**
+   * BOS-1647: set (only on a diff measured against a fetched base branch) when the ticket's head is already inside that
+   * branch, with the commit on it that brought the head in (the merge commit, or head itself for a fast-forward) and,
+   * for a merge commit, the files it changed. A push that landed but was never recorded shows up as exactly this.
+   */
+  mergedInto?: { commit: string; files?: string[] };
 };
 
 /** The outcome of a ticket's check (R47). */
 /** fenced: set only when the check was asked to run fenced, saying whether it was. */
-export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean; /** BOS-1228: the whole log of a server-queued job, cut and redacted by the runner (see prepareFullLog). */ fullLog?: string; /** BOS-1228: set by the server when the failed job's whole log is kept (read with the check_log tool). */ keptLog?: { jobId: string; chars: number; ticketId: string } };
+export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean; /** BOS-1228: the whole log of a server-queued job, cut and redacted by the runner (see prepareFullLog). */ fullLog?: string; /** BOS-1923: per-step seconds and whether the full check ran, for a queued job. */ stages?: Array<{ name: string; seconds: number }>; ranFull?: boolean; /** BOS-1228: set by the server when the failed job's whole log is kept (read with the check_log tool). */ keptLog?: { jobId: string; chars: number; ticketId: string } };
 /**
  * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
  * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.
@@ -485,6 +561,12 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 export type MigrationRenamed = { from: string; to: string };
 
 /**
+ * The branch the merge gate publishes a ticket's merge commit to for the git host's CI (BOS-1070). Not bossman/<id>:
+ * the runner fetches every origin branch into the agents' view, and there that name is the ticket's own branch.
+ */
+export const ciBranchFor = (ticketId: string) => `bossman-ci/${ticketId}`;
+
+/**
  * The ticket's copy holds changes its branch doesn't (R46). `files` are the author's to commit. `foreign` (BOS-1231): the
  * copy fell behind its own branch (the branch moved on from another folder) and couldn't be moved up safely; these files
  * differ only because the branch moved on, so they are never the author's to commit. While any are there, the CEO is
@@ -494,11 +576,29 @@ export type Uncommitted = { status: "uncommitted"; files: string[]; foreign?: st
 
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
-  | { status: "prepared"; commit: string; tree: string; targetSha: string; /** BOS-1413: the branch commit the merge was built from; a runner without it can't be pinned. */ branchSha?: string; renamed?: MigrationRenamed[] }
+  | {
+      status: "prepared"; commit: string; tree: string; targetSha: string; /** BOS-1413: the branch commit the merge was built from; a runner without it can't be pinned. */ branchSha?: string; renamed?: MigrationRenamed[];
+      /**
+       * BOS-1820 (runner feature "merge-refresh"): asked with `carryFrom`, whether a pass of that earlier merge could still be
+       * carried onto this new one (the BOS-1762 rule finish applies). Absent when the tree is unchanged or carryFrom wasn't sent.
+       */
+      carry?: { ok: true } | { ok: false; why: string; files?: string[] };
+    }
   /** BOS-1413: the branch is not at the pinned head (a commit came in after the approval). Nothing was built, kept or pushed. */
   | { status: "branch_moved"; head: string; pinned: string }
+  /**
+   * Phase "publish" (BOS-1070): the prepared merge commit was force-pushed to `branch` (bossman-ci/<ticket>) so the git host's
+   * CI tests exactly what would land. `hasWorkflows` false: the commit has no .github/workflows, so nothing was pushed and no CI will run.
+   */
+  | { status: "published"; branch: string; commit: string; hasWorkflows: boolean }
+  /** Phase "unpublish": the CI branch is gone from origin (or was never there). */
+  | { status: "unpublished"; branch: string }
   /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
-  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
+  /**
+   * `carried` (BOS-1762): the passed merge landed on a main that had moved since it was tested (`from` the tested base, `to` the
+   * tip it landed on), because main's `commits` new commits touched none of the ticket's files; `files` is how many they touched.
+   */
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[]; carried?: MergeCarried }
   | { status: "already_merged"; commit: string }
   /** `why`: the migration renumber (BOS-690) looked at the clash and refused; its reason, for the send-back text (BOS-1540). */
   | { status: "conflicts"; files: string[]; why?: string }
@@ -507,8 +607,15 @@ export type MergeResult =
   | { status: "migration_journal"; problems: string[] }
   /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
   | { status: "check_failed"; command: string; result: VerifyResult }
-  /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
-  | { status: "main_moved" };
+  /**
+   * The target kept moving while its merged result was checked; nothing was pushed, try again. BOS-1762: `carryEligible` means a
+   * carry was allowed but the push lost a race, so finish may be asked again without preparing; `notCarried` says why a carry
+   * that was asked for was not allowed (for the merge-line record).
+   */
+  | { status: "main_moved"; carryEligible?: boolean; notCarried?: { why: string; files?: string[] } };
+
+/** BOS-1762: a passed merge landed on a moved main (see MergeResult "merged"). */
+export type MergeCarried = { from: string; to: string; commits: number; files: number };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
 /** `contained`: this ticket's branch holds the other branch's whole tip, so merging this one lands it too (BOS-372). */
@@ -523,6 +630,21 @@ export type MergeLineConflict = { ticketId: string; branch: string; ahead: boole
 
 /** The answer to workspace.mergeLine (BOS-1411): only the branches that really conflict, with their files. */
 export type MergeLineConflictsResult = { conflicts: MergeLineConflict[] };
+
+/**
+ * The answer to workspace.mainLog (BOS-1645): newest first. `at` is the committer time (ISO 8601); `files` only for the
+ * commits named in filesFor (against the first parent). Empty when the runner has no copy of the repo or no such target.
+ * `message`: the full message, trimmed; only it says which ticket a merge is (`subject` is the first paragraph, for display).
+ */
+export type MainLogResult = { commits: Array<{ sha: string; subject: string; message: string; at: string; files?: string[] }> };
+
+/** One match of the whole-tree secrets pass (BOS-1932). `line` and `fingerprint` are null for a file whose name is the finding (.env, *.pem). `commit`: the commit that last changed that line. Never the value. */
+export type SecretScanFinding = { kind: string; file: string; line: number | null; commit: string | null; fingerprint: string | null; length: number | null };
+/**
+ * The answer to workspace.secretScan (BOS-1932). `scanned`: the target commit read, or null when there was nothing to read
+ * (no copy of the repo, no such branch, or no scanner installed: `reason` says which). `skipped`: files too large to read.
+ */
+export type SecretScanResult = { scanned: string | null; reason?: string; files: number; skipped: Array<{ file: string; bytes: number }>; findings: SecretScanFinding[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
 export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "branch_moved"; head: string; pinned: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;

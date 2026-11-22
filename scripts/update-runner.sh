@@ -60,6 +60,21 @@ profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cu
 BOSSMAN_DEPLOYER="${BOSSMAN_DEPLOYER:-$(grep -s '^BOSSMAN_DEPLOYER=' .env | tail -1 | cut -d= -f2- || true)}"
 # Optional runner add-ons (docs/12), e.g. RUNNER_ADDONS=agent-browser,webkit in .env; empty builds the plain image.
 addons="${RUNNER_ADDONS:-$(grep -s '^RUNNER_ADDONS=' .env | tail -1 | cut -d= -f2- || true)}"
+# BOS-1583: the owner's tick boxes (Settings > Runner > Add-ons) are saved by the server as inbox/runner-addons in the deployer
+# folder, one line of comma-separated ids. Once saved, it wins over .env (the boxes started ticked from what was built, so
+# nothing is lost); until then .env keeps working as before. The server can write inbox, so the file is only trusted when it is
+# a plain file (never a symlink) holding nothing but ids, and anything else is ignored with a warning.
+addons_file=""
+[[ -z $BOSSMAN_DEPLOYER ]] || addons_file="$BOSSMAN_DEPLOYER/inbox/runner-addons"
+if [[ -n $addons_file && -f $addons_file && ! -L $addons_file ]]; then
+  saved_addons="$(head -c 400 "$addons_file" | tr -d '\r\n ')"
+  if [[ $saved_addons =~ ^([a-z0-9-]+(,[a-z0-9-]+)*)?$ ]]; then
+    addons="$saved_addons"
+  else
+    echo "WARNING: $addons_file is not a plain list of add-on ids; ignoring it and using RUNNER_ADDONS from .env." >&2
+  fi
+fi
+if [[ -n $addons && ! $addons =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then echo "RUNNER_ADDONS must be comma-separated add-on ids (letters, digits, dashes), got: $addons" >&2; exit 1; fi
 compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
 launcher_id() { docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher; }
 
@@ -96,12 +111,47 @@ request_drain() {
     printf '{"requestedAt":"%s","by":"update-runner.sh"%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${reason:+,\"reason\":\"$reason\"}" >"$tmp"
     chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
     mv -fT "$tmp" "$d/inbox/drain.json"
+    BUILD_HOLD=0 # the real drain replaced the early hold's file and takes the hold over: nothing left to cancel
     echo "Asked Boss Man to drain: nothing new starts, runs finish, each runner is swapped when its company is idle."
     echo "Boss Man notifies you when it is done. To stop it: Settings > Server and runner > Updates > Cancel the runner update."
   else
     echo "The new image is tagged, and the runners still run the old one. Start the drain in Boss Man:"
     echo "Settings > Server and runner > Updates > Update runners (finish runs first). With the host deployer set up, the button is under \"For a hand-built runner image\". (Or rerun with --now to cut runs off and restart at once.)"
   fi
+}
+
+# BOS-1955: an early "building" hold, written before the first docker build, so a run that starts while the image is built,
+# checked and the launcher rebuilt is not waited on in full afterwards (19 Nov: a run began at 21:18:54, mid-build). It holds
+# new starts and swaps nothing. Same write-then-rename as request_drain. Nothing happens without a deployer folder and a
+# launcher (no drain would follow), so a host without self-deploy behaves as before. Boss Man also drops it by itself after
+# 45 minutes, so a script that is killed without running its trap cannot hold work for long.
+BUILD_HOLD=0
+write_inbox_file() { # name, json: the root-only state folder, then renamed into inbox
+  local d="$BOSSMAN_DEPLOYER" tmp
+  mkdir -p "$d/state" && chmod 700 "$d/state"
+  tmp="$(mktemp "$d/state/$1.XXXXXX")"
+  printf '%s\n' "$2" >"$tmp"
+  chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
+  mv -fT "$tmp" "$d/inbox/$1"
+}
+request_build_hold() {
+  ((NOW)) && return 0 # --now cuts runs off and recreates at once: there is nothing to hold for
+  [[ -n ${BOSSMAN_DEPLOYER:-} && -d $BOSSMAN_DEPLOYER/inbox && -n "$(launcher_id)" ]] || return 0
+  if write_inbox_file drain.json "$(printf '{"requestedAt":"%s","by":"update-runner.sh","reason":"building"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"; then
+    BUILD_HOLD=1
+    echo "Asked Boss Man to hold new work while the image is built (it lifts by itself if the build fails)."
+  else
+    echo "WARNING: could not ask Boss Man to hold new work during the build; the update goes ahead without the early hold." >&2
+  fi
+}
+# Runs on every exit. A build hold still asked for (the drain was never requested) is cancelled, so new work starts again.
+end_build_hold() {
+  local rc=$?
+  if ((BUILD_HOLD)); then
+    write_inbox_file drain-cancel.json "$(printf '{"requestedAt":"%s","by":"update-runner.sh"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" \
+      || echo "WARNING: could not cancel the build hold; Boss Man lifts it by itself after 45 minutes." >&2
+  fi
+  return "$rc"
 }
 
 move_runners() {
@@ -163,6 +213,11 @@ if ((ROLLBACK)); then
   exit 0
 fi
 
+# BOS-1913: how long each step took, one "Timing:" line each, so a slow update shows which step it was (build, canary or
+# launcher) in the deployer log instead of one unexplained gap.
+LAP_START=$SECONDS
+lap() { echo "Timing: $1 took $((SECONDS - LAP_START))s"; LAP_START=$SECONDS; }
+
 stamp="$(date -u +%Y%m%d%H%M)"
 # The commit the image is built from (BOS-764): Boss Man skips a "Build and update runners" ask when the image already has the change.
 # Empty outside a git checkout, and then the runner reports none and the ask is made as before.
@@ -174,7 +229,10 @@ NETGUARD_PREV="$(docker image inspect --format '{{.Id}}' boss-man-netguard:curre
 # Hold the old guard under a name of its own while the new one is built: rebuilding :current untags it, and on a host whose image
 # store drops untagged images the bare id is gone by the time the canary has passed (BOS-1417: "No such image", exit 1).
 if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:pending-previous || NETGUARD_PREV=; fi
+request_build_hold
+trap end_build_hold EXIT
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
+lap "network guard build"
 
 echo "Building $IMAGE:candidate (no Anthropic code; Claude Code comes from the pack on first start)${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
@@ -182,14 +240,32 @@ docker build --pull -f apps/runner/Dockerfile \
   --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
+lap "runner image build"
 
 echo "Running the canary (no network): Codex, OpenCode and each add-on. Claude is proven by its pack installer, not here (DR-050)..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
   "$IMAGE:candidate" node_modules/.bin/tsx src/canary-main.ts; then
-  echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2
+  if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then
+    echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2
+    echo "The failed build is still tagged $IMAGE:candidate if you want to look at it." >&2
+    exit 1
+  fi
+  # BOS-1893: a first install has no :current image and no runner. Boss Man itself does not need one to start, so bring up the
+  # database, the server and the launcher, so the owner has a web page, and say what is left to do.
+  echo "The runner image did not pass its safety check (the canary), so there is no runner image yet." >&2
+  echo "This is a first install: Boss Man itself can start without it, so it is starting the database, the server and the launcher now." >&2
   echo "The failed build is still tagged $IMAGE:candidate if you want to look at it." >&2
+  lp="${profiles:-runners}"
+  case ",$lp," in *,launcher,*) ;; *) lp="$lp,launcher" ;; esac
+  if COMPOSE_PROFILES="$lp" docker compose up -d --no-build db server launcher; then
+    echo "Boss Man is starting. Open its web page; agents cannot run until the runner image is built." >&2
+  else
+    echo "Could not start Boss Man either. Start it by hand with: docker compose up -d --no-build db server launcher" >&2
+  fi
+  echo "Next step: scroll up to see why the canary failed (a network blip or a full disk are the usual causes), fix that, then run scripts/update-runner.sh again." >&2
   exit 1
 fi
+lap "canary"
 
 if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then docker tag "$IMAGE:current" "$IMAGE:previous"; fi
 # The guard's :previous is tagged here too (not before the build), so a failed canary and a re-run can't leave --rollback
@@ -200,7 +276,20 @@ if [[ -n "$NETGUARD_PREV" ]]; then
 fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
+# BOS-1583: tell the server which add-ons this image holds (outbox/runner-addons.built, one line, may be empty), so the tick boxes
+# start from what is really built, including add-ons that were only ever set by hand in .env. Written in the root-only state
+# folder, then renamed in, like the drain request.
+if [[ -n ${BOSSMAN_DEPLOYER:-} && -d $BOSSMAN_DEPLOYER/outbox ]]; then
+  mkdir -p "$BOSSMAN_DEPLOYER/state" && chmod 700 "$BOSSMAN_DEPLOYER/state"
+  built_tmp="$(mktemp "$BOSSMAN_DEPLOYER/state/addons.XXXXXX")"
+  printf '%s\n' "$addons" >"$built_tmp"
+  chmod 644 "$built_tmp"; chown 1000:1000 "$built_tmp" 2>/dev/null || true
+  mv -fT "$built_tmp" "$BOSSMAN_DEPLOYER/outbox/runner-addons.built" || echo "WARNING: could not record the built add-ons for Settings." >&2
+fi
 # Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.
 rebuild_launcher
+lap "launcher rebuild"
 move_runners
+lap "runner switch (drain request sent; the drain itself runs in the deployer and server)"
+echo "Timing: total $SECONDS s. A routine update should build in about 5 minutes; read these lines in the deployer log (Settings > Server and runner > Updates)."
 echo "The new runner image ($stamp) is current. To undo: scripts/update-runner.sh --rollback"

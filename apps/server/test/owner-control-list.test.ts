@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
+import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_SECTIONS, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
 import { checkAsk } from "../src/services/decisions.js";
 import { lintOwnerSteps } from "../src/services/steps.js";
 
@@ -60,11 +60,12 @@ describe("R7: a card names a button that doesn't exist", () => {
   });
 
   it("is a refusal checkAsk passes on, with the card's options counted as buttons", () => {
-    const base = { triedFirst: "Checked the ticket screen in the web app code; there is no such button." };
+    const base = { triedFirst: "Checked the ticket screen in the web app code; there is no such button.", why: "The owner sees the right button named.", minutes: 2 };
     expect(checkAsk({ ...base, steps: ["Open BOS-368 and press Overrule and merge."] }).error).toMatch(/Overrule and merge/);
-    expect(checkAsk({ ...base, steps: ["Press Merge it on this card."], options: ["Merge it", "Not yet"] }).error).toBeNull();
+    expect(checkAsk({ ...base, steps: ["Press Merge it on this card, shown in Settings → Server and runner → This host."], options: ["Merge it", "Not yet"] }).error).toBeNull();
     // Overridable by the CEO with a reason, like R1 and R2 (the list can't see a label set in code).
-    const ceo = checkAsk({ ...base, steps: ["Press Copied under the command."], lintOverride: "The Copy button says Copied after a press.", byCeo: true });
+    // "Copy done" is a made-up label on no screen ("Copied" is listed under Ticket and Run since BOS-2233).
+    const ceo = checkAsk({ ...base, steps: ["Press Copy done under the command, shown in Settings → Server and runner → This host."], lintOverride: "The Copy button says Copy done after a press.", byCeo: true });
     expect(ceo.error).toBeNull();
     expect(ceo.lint?.override?.findings.map((x) => x.rule)).toEqual(["R7"]);
   });
@@ -81,16 +82,30 @@ describe("R7: a card names a button that doesn't exist", () => {
 const FILE_SCREEN: Record<string, OwnerScreen> = {
   "App.tsx": "Any screen",
   "components/ImageAttach.tsx": "Any screen",
+  // The Dashboard's "Company paused" notice has a Resume button: the same "Resume" the stop-all banner lists.
+  "components/DashboardPanels.tsx": "Any screen",
   // Opened from a picture in any Markdown text.
   "components/Lightbox.tsx": "Any screen",
+  "components/LoadError.tsx": "Any screen",
   // The owner's message box, on five screens (Ticket, Board, Chat, Decisions, Run).
   "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
+  // The Ctrl+K search box and its sidebar button, mounted once in App.tsx (BOS-2192).
+  "components/SearchPalette.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
   // The page-intro fold, on four screens (P7, BOS-1278).
   "components/MoreAbout.tsx": "Any screen",
+  // The "Show older" button under a paged list (BOS-2165): Skills and Engagements render it.
+  "components/ShowOlder.tsx": "Any screen",
+  // "Copy link" in the Ticket and Run headers (BOS-2233). Not "Any screen", so it takes its screens from where
+  // it is rendered (screensOf): Ticket and Run.
+  "components/CopyLinkButton.tsx": "Ticket",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
+  // The health line's Retry (BOS-2249): shown on the board and on the Scrum Master page, so it takes its screens from where it is rendered.
+  "components/WatchdogHealth.tsx": "Any screen",
+  // The weekly email switch on Settings → Notifications (BOS-2195).
+  "components/WeeklySummaryForm.tsx": "Notifications",
   "components/TicketActivity.tsx": "Ticket",
   "components/TicketLinks.tsx": "Ticket",
   "components/TicketOutputs.tsx": "Ticket",
@@ -103,7 +118,10 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Agents.tsx": "Agents",
   "pages/Auth.tsx": "Log in",
   "pages/Board.tsx": "Board",
+  // A project's Budget tab (also shown on Settings → Funding).
+  "pages/ProjectBudget.tsx": "Board",
   "pages/Chat.tsx": "Chat",
+  "pages/Dashboard.tsx": "Any screen",
   "pages/Decisions.tsx": "Decisions",
   "pages/Features.tsx": "Features",
   "pages/Feedback.tsx": "Feedback",
@@ -111,6 +129,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Funding.tsx": "Funding",
   "pages/MergeQueue.tsx": "Merge queue",
   "pages/Notifications.tsx": "Notifications",
+  // The "Other places to send alerts" card on the Notifications page (BOS-2199).
+  "components/AlertDestinations.tsx": "Notifications",
   "pages/Plan.tsx": "Plan",
   "pages/Portal.tsx": "Feedback portal",
   "pages/Roadmap.tsx": "Roadmap",
@@ -132,17 +152,22 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Runner.tsx": "Server and runner",
   "pages/settings/System.tsx": "Server and runner",
   "pages/settings/CheckWorkers.tsx": "Server and runner",
+  "pages/settings/SlotSplit.tsx": "Server and runner",
   "pages/settings/Team.tsx": "Team and CEO",
   "pages/settings/ThisHost.tsx": "Server and runner",
   "pages/settings/Tools.tsx": "Tools and deploys",
   "pages/settings/Transfer.tsx": "Import and export",
+  "pages/settings/Account.tsx": "Account",
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
   "pages/SetupClaude.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
+  "pages/SpendReport.tsx": "Spend",
   "pages/Ticket.tsx": "Ticket",
   "pages/Wiki.tsx": "Wiki",
+  "components/DeletedPages.tsx": "Wiki",
+  "components/WikiCompare.tsx": "Wiki",
   "pages/Workflow.tsx": "Workflow",
 };
 
@@ -166,14 +191,17 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>RunLimits": "Server and runner",
   "pages/Settings.tsx>WipLimits": "Server and runner",
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
+  "pages/Settings.tsx>MainCiSetting": "Server and runner",
   "pages/Settings.tsx>PrivateDetails": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
   "pages/Settings.tsx>EmailSetting": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
+  "pages/Settings.tsx>Account": "Account",
   "pages/Settings.tsx>ToolServers": "Tools and deploys",
   "pages/Settings.tsx>DeployTargets": "Tools and deploys",
+  "pages/Settings.tsx>PenpotSettings": "Tools and deploys",
   "pages/Settings.tsx>Funding": "Funding",
   "pages/Settings.tsx>ProjectBudgets": "Funding",
   "pages/Settings.tsx>FundingCards": "Funding",
@@ -181,6 +209,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>CompanyReviews": "Reviews",
   "pages/Settings.tsx>TicketPrefix": "Team and CEO",
   "pages/Settings.tsx>GoalCheck": "Reviews",
+  "pages/Settings.tsx>CompanyPause": "Team and CEO",
   "pages/Settings.tsx>NudgeCap": "Team and CEO",
   "pages/Settings.tsx>RunTimeLimit": "Team and CEO",
   "pages/Settings.tsx>WorkspaceDisk": "Server and runner",
@@ -197,7 +226,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
 /** Components the Settings page renders that hold no controls of their own (a wrapper), so need no tab above. */
 // JumpLinks is the "on this page" nav, which holds no controls of its own; HTMLHeadingElement is the focused page
 // title's type in the useRef call.
-const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement"]);
+const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement", "NoCompany"]);
 /** Components whose `label` prop is a form field's label (rendered as a <label> from the prop). */
 const FIELD_COMPONENTS = new Set(["CheckPicker"]);
 
@@ -210,9 +239,11 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   // The sign-off button: its label is a variable that depends on how the project lands work (BOS-471).
   Ticket: ["Approve", "Approve and open a pull request", "Approve and merge"],
   // The two tabs are drawn by one helper (tabButton) that adds the count, so their text is a variable (BOS-1239).
-  "Merge queue": ["Merges", "Queued checks"],
+  "Merge queue": ["Merges", "Quick checks"],
   // Retire is an item in the row's ⋯ menu (RowMenu), whose label is built from the agent's name (BOS-1256).
   Agents: ["Retire"],
+  // The heading of the last Settings group (BOS-1492): cards still say "Click Settings, then click Server and runner".
+  Settings: ["Server and runner"],
   // The Board's filters panel (BOS-1194): Working now is the panel's switch, labelled by a heading span, so its
   // text is not a <button>'s. The test checks the switch is still in FilterPanel.tsx instead.
   Board: ["Working now"],
@@ -420,6 +451,32 @@ describe("OWNER_CONTROLS matches the web app", () => {
     const settings = all.find((c) => c.file === "pages/Settings.tsx" && c.name === "Settings")!;
     const rendered = [...new Set([...settings.src.matchAll(/<([A-Z]\w*)[\s/>]/g)].map((m) => m[1]!))].filter((n) => !SETTINGS_WRAPPERS.has(n));
     expect(rendered.filter((n) => !SITE_SCREEN[`pages/Settings.tsx>${n}`]), "add each to SITE_SCREEN with its Settings tab").toEqual([]);
+  });
+
+  // BOS-1649: the section headings a card's path may name after a tab (OWNER_SECTIONS), kept in step with the pages.
+  const webFiles = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? webFiles(join(dir, e.name)) : /\.tsx$/.test(e.name) ? [join(dir, e.name)] : []));
+  const pageText = webFiles(join(WEB, "pages")).map((f) => readFileSync(f, "utf8")).join("\n");
+  const listedSections = Object.values(OWNER_SECTIONS).flat() as string[];
+
+  it("lists no section heading the app no longer shows", () => {
+    const stale = listedSections.filter((h) => !pageText.includes(`"${h}"`) && !pageText.includes(`>${h}<`) && !pageText.includes(`>${h}\n`));
+    expect(stale, `remove from OWNER_SECTIONS in packages/shared/src/owner-controls.ts (or fix its spelling): ${stale.join(" | ")}`).toEqual([]);
+  });
+
+  it("lists every section heading the Settings pages show", () => {
+    // Only the pages a Settings tab or a project tab shows; other screens (Skills, Agents) have their own headings.
+    const settingsText = webFiles(join(WEB, "pages/settings")).map((f) => readFileSync(f, "utf8")).join("\n")
+      + ["Settings", "Funding", "Secrets", "Rules", "ProjectBudget"].map((n) => readFileSync(join(WEB, `pages/${n}.tsx`), "utf8")).join("\n");
+    const shown = [
+      ...[...settingsText.matchAll(/<Section\s+id="[^"]+"\s+title="([^"{]+)"/g)].map((m) => m[1]!),
+      ...[...settingsText.matchAll(/<h3[^>]*>([A-Z][^<{]+)<\/h3>/g)].map((m) => m[1]!.trim()),
+    ];
+    expect(shown.length).toBeGreaterThan(20); // the scan found the headings, so an empty pass can't hide a miss
+    // Headings of other screens (a project's brief, an agent's page) are not on a Settings tab: leave those out here.
+    const OTHER = new Set(["New project", "Archive this project", "Archived", "Project brief", "Export", "Your devices"]);
+    const missing = shown.filter((h) => !listedSections.includes(h) && !OTHER.has(h) && !h.startsWith("Export "));
+    expect(missing, `add each to OWNER_SECTIONS under its tab in packages/shared/src/owner-controls.ts: ${missing.join(" | ")}`).toEqual([]);
   });
 
   it("knows every screen a step can name: the side menu, the Settings tabs and the project tabs", () => {

@@ -18,6 +18,8 @@ afterEach(async () => {
 
 const DIFF = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "x", added: 1, removed: 0 }], diff: "diff --git a/x b/x", truncated: false };
 const PLAN = "1. Read the limiter.";
+// The branch tip the fake runner reports (BOS-1528): tests move it between two reviewers' approvals.
+const branch: { head: string | null; covers: boolean } = { head: null, covers: false };
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
 async function setup() {
@@ -42,12 +44,14 @@ async function setup() {
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
-    if (c.type === "workspace.diff") ok(DIFF);
+    if (c.type === "workspace.diff") ok({ ...DIFF, head: branch.head ?? DIFF.head });
+    // BOS-1528: whether main's merges since an older head were clean (signoffCovers).
+    if (c.type === "workspace.covers") ok({ covers: branch.covers, reason: "", newCommits: 0, handMerges: 0 });
     if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
     if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
     if (c.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
     return true;
-  });
+  }, ["signoff-covers"]);
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runner!, { seq: ++seq, at: new Date().toISOString(), event });
   const ticket = async (fields: Record<string, unknown> = {}) => {
@@ -121,6 +125,182 @@ describe("review kinds", () => {
     expect((await c.row(c.t.id)).systemState).toBe("review");
     expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
     await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("done"));
+  });
+
+  describe("each approval carries the head its reviewer read (BOS-1528)", () => {
+    const NEW_HEAD = "d".repeat(40);
+    afterEach(() => {
+      branch.head = null;
+      branch.covers = false;
+    });
+
+    it("stamps each reviewer's own head, and reopens an earlier reviewer when the branch moved with new code", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" });
+      expect((await c.rows()).filter((r) => r.status === "approved").map((r) => r.head)).toEqual([DIFF.head, DIFF.head]);
+      branch.head = NEW_HEAD; // the author commits before the last reviewer answers
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("reopened");
+      const rows = await c.rows();
+      expect(rows.find((r) => r.kind === "infra")).toMatchObject({ status: "approved", head: NEW_HEAD });
+      expect(rows.filter((r) => r.kind !== "infra").map((r) => [r.status, r.head])).toEqual([["pending", null], ["pending", null]]);
+      expect((await c.row(c.t.id)).systemState).toBe("review");
+      expect((await c.db.select().from(activity).where(eq(activity.ticketId, c.t.id))).some((a) => a.kind === "review_reopened")).toBe(true);
+    });
+
+    it("lets the round pass when the later head only took clean merges of main", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" });
+      branch.head = NEW_HEAD;
+      branch.covers = true;
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
+      expect((await c.rows()).filter((r) => r.status === "pending")).toHaveLength(0);
+      // The covered rows are restamped, so the merge sees one reviewed head and goes ahead instead of sending the ticket back.
+      expect((await c.rows()).map((r) => r.head)).toEqual([NEW_HEAD, NEW_HEAD, NEW_HEAD]);
+      await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("done"));
+      expect(c.sent.some((m) => m.type === "workspace.merge")).toBe(true);
+    });
+
+    it("refuses to merge when one approval has no recorded head, and sends the ticket back", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" });
+      // This approval's head is unknown (as if the runner could not say it when it was given).
+      await c.db.update(reviewRequests).set({ head: null }).where(and(eq(reviewRequests.ticketId, c.t.id), eq(reviewRequests.kind, "security")));
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
+      await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("in_progress"));
+      expect(c.sent.some((m) => m.type === "workspace.merge")).toBe(false);
+    });
+
+    // The merge is blocked while the rows are set up by hand; restoring the spy lets landOnce run for real.
+    const approvedButNotLanded = async () => {
+      const c = await kinds();
+      const spy = vi.spyOn(c.review, "landOnce").mockRejectedValue(new TypeError("blocked for the test"));
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" });
+      await c.call(c.infra.id, { action: "submit", verdict: "approved" });
+      await vi.waitFor(() => expect(spy).toHaveBeenCalled());
+      spy.mockRestore();
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, c.t.id));
+      return c;
+    };
+
+    it("sends nothing to merge when two approvals are stamped on different heads (BOS-1528 test)", async () => {
+      const c = await approvedButNotLanded();
+      // Set directly, bypassing the restamp that submit() does, as if a race had left two heads.
+      await c.db.update(reviewRequests).set({ head: NEW_HEAD }).where(and(eq(reviewRequests.ticketId, c.t.id), eq(reviewRequests.kind, "security")));
+      const before = c.sent.length;
+      const r = await c.review.landOnce(c.t.id, "test");
+      expect(r.outcome).toBe("branch_changed");
+      expect(c.sent.slice(before).some((m) => m.type === "workspace.merge")).toBe(false);
+    });
+
+    it("still merges an old round that has no stamped heads at all (BOS-1528 test)", async () => {
+      const c = await approvedButNotLanded();
+      await c.db.update(reviewRequests).set({ head: null, readHead: null }).where(eq(reviewRequests.ticketId, c.t.id));
+      const before = c.sent.length;
+      await c.review.landOnce(c.t.id, "test");
+      expect(c.sent.slice(before).some((m) => m.type === "workspace.merge")).toBe(true);
+    });
+  });
+
+  describe("an approval is stamped with the head the reviewer read (BOS-1567)", () => {
+    const NEW_HEAD = "d".repeat(40);
+    afterEach(() => {
+      branch.head = null;
+      branch.covers = false;
+    });
+
+    it("refuses an approval when the branch moved after the diff, then accepts it after a fresh diff", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" });
+      expect((await c.rows()).find((r) => r.kind === "code")?.readHead).toBe(DIFF.head);
+      branch.head = NEW_HEAD;
+      expect(await c.call(c.senior.id, { action: "submit", verdict: "approved" })).toContain("moved since you read it");
+      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "pending", head: null, readHead: DIFF.head });
+      // A retry with no fresh diff is refused again.
+      expect(await c.call(c.senior.id, { action: "submit", verdict: "approved" })).toContain("moved since you read it");
+      expect((await c.rows()).find((r) => r.kind === "code")?.status).toBe("pending");
+      await c.call(c.senior.id, { action: "diff" });
+      expect(await c.call(c.senior.id, { action: "submit", verdict: "approved" })).toContain("waiting");
+      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "approved", head: NEW_HEAD });
+    });
+
+    it("never refuses changes requested, even when the branch moved", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" });
+      branch.head = NEW_HEAD;
+      await c.call(c.senior.id, { action: "submit", verdict: "changes_requested", summary: "Escape the filter." });
+      expect((await c.rows()).find((r) => r.kind === "code")?.status).toBe("changes_requested");
+    });
+
+    it("stamps the current head (not the older one read) when the branch only took clean merges of main since", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" });
+      branch.head = NEW_HEAD;
+      branch.covers = true;
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "approved", head: NEW_HEAD });
+    });
+
+    it("does not reopen a reviewer already approved on the newer head when a later reviewer read the older one", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" }); // reads the old head
+      branch.head = NEW_HEAD; // main merged in cleanly
+      branch.covers = true;
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" }); // approves on the newer head
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" }); // read the older head
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
+      const rows = await c.rows();
+      expect(rows.filter((r) => r.status === "pending")).toHaveLength(0);
+      expect(rows.map((r) => r.head)).toEqual([NEW_HEAD, NEW_HEAD, NEW_HEAD]);
+      expect((await c.db.select().from(activity).where(eq(activity.ticketId, c.t.id))).some((a) => a.kind === "review_reopened")).toBe(false);
+    });
+
+    it("stamps the submit-time head as before when no diff was read", async () => {
+      const c = await kinds();
+      branch.head = NEW_HEAD;
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "approved", head: NEW_HEAD });
+    });
+
+    it("tells a reviewer reading a later page that the branch moved since the first page", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" });
+      branch.head = NEW_HEAD;
+      expect(await c.call(c.senior.id, { action: "diff", offset: 10 })).toContain("The branch moved since your first page");
+      expect((await c.rows()).find((r) => r.kind === "code")?.readHead).toBe(NEW_HEAD);
+    });
+  });
+
+  describe("a move to review while still in review asks changes-requested reviewers again (BOS-1958)", () => {
+    afterEach(() => {
+      branch.head = null;
+    });
+    const move = async (c: Awaited<ReturnType<typeof kinds>>) =>
+      textOf(await (await c.mcp(c.worker.id)).callTool({ name: "set_ticket_state", arguments: { ticketId: c.t.id, state: "review", summary: "Fixed the filter." } }));
+
+    it("re-asks only the reviewer who asked for changes, and only once the head moved", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" });
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "diff" });
+      await c.call(c.sec.id, { action: "submit", verdict: "changes_requested", summary: "Escape the filter." });
+      expect((await c.row(c.t.id)).systemState).toBe("review");
+      await c.woken();
+      // Same head: nothing new to read, nobody is asked.
+      expect(await move(c)).toContain("no reviews were re-requested");
+      expect((await c.rows()).find((r) => r.kind === "security")?.status).toBe("changes_requested");
+      // The author committed a fix: the security reviewer is asked again; the approved code review is left alone.
+      branch.head = "e".repeat(40);
+      const reply = await move(c);
+      expect(reply).toContain("asked to review again");
+      const rows = await c.rows();
+      expect(rows.find((r) => r.kind === "security")).toMatchObject({ status: "pending", head: null });
+      expect(rows.find((r) => r.kind === "code")?.status).toBe("approved");
+      expect(await c.woken()).toEqual([c.sec.id]);
+    });
   });
 
   it("sends the work back once everyone has answered if one asks for changes", async () => {

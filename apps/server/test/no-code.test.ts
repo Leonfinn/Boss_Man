@@ -86,6 +86,38 @@ describe("a ticket whose change shipped on another ticket", () => {
     expect(await toDone(t.id)).toMatch(/move the ticket to "review" instead/);
     expect((await row(t.id)).systemState).toBe("in_progress");
   });
+
+  it("BOS-1837: the assignee of an already merged, done ticket can replace its state note", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { systemState: "done", outcome: "completed", mergeCommit: "c".repeat(40), stateNote: "merge running" });
+    const out = await toDone(t.id);
+    expect(out).not.toMatch(/no changes of its own/);
+    expect(await row(t.id)).toMatchObject({ systemState: "done", stateNote: "Shipped on HOL-375; live since 23 Oct." });
+  });
+});
+
+describe("BOS-2204: a merged ticket Blocked for an after-merge check", () => {
+  const live = { text: "The banner shows on the live server", after: "merge" as const };
+  const done = async (id: string, summary: string) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", outcome: "completed", summary } }));
+  const merged = (extra: Partial<typeof tickets.$inferInsert> = {}) => ctx.ticket(ctx.withRepo.id, { systemState: "blocked", mergeCommit: "a".repeat(40), acceptanceCriteria: ["Health check returns 200", live], ...extra });
+
+  it("its assignee can set done once every criterion reports pass", async () => {
+    const t = await merged();
+    const out = await done(t.id, "1 pass; 2 pass: banner seen live");
+    expect(out).not.toMatch(/no changes of its own/);
+    expect((await row(t.id)).systemState).toBe("done");
+  });
+
+  it("still holds back done while an after-merge criterion is not reported", async () => {
+    const t = await merged();
+    expect(await done(t.id, "1 pass")).toMatch(/after-merge acceptance criteria aren't reported/);
+    expect((await row(t.id)).systemState).toBe("blocked");
+  });
+
+  it("an unmerged ticket with an empty diff is still refused", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { systemState: "blocked", acceptanceCriteria: ["Health check returns 200"] });
+    expect(await done(t.id, "1 pass")).toMatch(/no changes of its own, so it can't be merged/);
+    expect((await row(t.id)).systemState).toBe("blocked");
+  });
 });
 
 describe("a ticket that changed nothing", () => {

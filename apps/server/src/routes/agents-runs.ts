@@ -11,6 +11,7 @@ import { agentAvatars, agentNotes, agents } from "../db/schema.js";
 import { AgentError, type agentsService } from "../services/agents.js";
 import { NOTE_LIMITS, NoteError, type notesService } from "../services/agent-notes.js";
 import { logoType } from "../services/image-type.js";
+import { permissionsForRun } from "../services/permission-store.js";
 import { RunError, type runsService } from "../services/runs.js";
 import type { schedulerService } from "../services/scheduler.js";
 import { sendLogo } from "../portal.js";
@@ -66,7 +67,7 @@ export function agentRunsRoutes(
   owner.patch("/api/agents/:id", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const b = z
-      .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean() })
+      .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean(), workingHours: z.object({ days: z.array(z.number().int().min(0).max(6)).min(1).max(7), start: z.string(), end: z.string(), timeZone: z.string().min(1).max(80) }).nullable() })
       .partial()
       .parse(req.body);
     // Who reviews what is set only in Settings > Reviews now (BOS-198); say so rather than drop it quietly.
@@ -80,7 +81,7 @@ export function agentRunsRoutes(
     }
     return agentsSvc.update(id, patch).then((a) => {
       // Unpausing lets its waiting work start now rather than at the next tick.
-      if (b.paused === false && before.paused) void scheduler.tick().catch((err) => log.error({ err }, "tick after unpause failed"));
+      if ((b.paused === false && before.paused) || (b.workingHours !== undefined && JSON.stringify(b.workingHours) !== JSON.stringify(before.workingHours))) void scheduler.tick().catch((err) => log.error({ err }, "tick after unpause failed"));
       return a;
     }, agentErrors(reply));
   });
@@ -131,14 +132,25 @@ export function agentRunsRoutes(
     return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
   });
   owner.get("/api/runs/recent", async (req) => {
-    const q = z.object({ companyId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
-    return runsSvc.recent(q.limit, q.companyId);
+    const q = z
+      .object({
+        companyId: Uuid.optional(),
+        limit: z.coerce.number().int().min(1).max(200).optional(),
+        agentId: Uuid.optional(),
+        result: z.enum(["finished", "failed", "interrupted"]).optional(),
+        // "Show more": only runs that ended before this moment (the oldest one already shown).
+        before: z.coerce.date().optional(),
+      })
+      .parse(req.query);
+    return runsSvc.recent(q.limit, q.companyId, { agentId: q.agentId, result: q.result, before: q.before });
   });
   owner.get("/api/runs/:id/transcript", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);
     return runsSvc.transcript(id, q).catch(runErrors(reply));
   });
+  // What each permission rule decided in one run (BOS-2185), kept 60 days.
+  owner.get("/api/runs/:id/permissions", async (req) => permissionsForRun(db, IdParam.parse(req.params).id));
   // End every run going now, in every company (BOS-837): the owner's emergency stop, behind the Runs page's confirm.
   owner.post("/api/runs/cancel-all", async () => runsSvc.cancelAll());
   owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));

@@ -68,13 +68,13 @@ export async function mergedAwaitingChecks(db: Db, ticketId: string): Promise<bo
   return !!t?.mergeCommit && unreportedAfterMerge(t.criteria, t.note).length > 0;
 }
 
-export type BlockedHold = { kind: "date" | "blocker" | "card" | "checks" | "go_live" };
+export type BlockedHold = { kind: "date" | "blocker" | "card" | "go_live" | "merged_watch" };
 
 /**
  * DR-061 Q2a, the one answer to "is this ticket held in Blocked?" (BOS-1532): what Blocked accepts on the way in
  * and what it must keep on the way out are the same list. Held while any of these is true: a "blocked until" time
- * still ahead; an open blocker (`openBlockers`); an open card naming the ticket, linked or not; a merged ticket with
- * after-merge criteria not yet reported; a go-live wait. An empty list means nothing holds it.
+ * still ahead; an open blocker (`openBlockers`); an open card naming the ticket, linked or not; a go-live wait (a merged
+ * ticket not yet live; once it is live its after-merge checks hold nothing, R36). An empty list means nothing holds it.
  *
  * `blockedUntil` is the date to judge: pass the one being set on the way in (null for none); leave it out to read
  * the stored one. A date that has passed holds nothing. A state note that says "parked" is not a hold here: the
@@ -82,14 +82,18 @@ export type BlockedHold = { kind: "date" | "blocker" | "card" | "checks" | "go_l
  */
 export async function blockedHolds(db: Db, ticketId: string, opts: { now?: Date; blockedUntil?: Date | null } = {}): Promise<BlockedHold[]> {
   const at = opts.now ?? new Date();
-  const [t] = await db.select({ blockedUntil: tickets.blockedUntil, goLiveWait: tickets.goLiveWait }).from(tickets).where(eq(tickets.id, ticketId));
+  const [t] = await db.select({ blockedUntil: tickets.blockedUntil, goLiveWait: tickets.goLiveWait, mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
   const until = opts.blockedUntil !== undefined ? opts.blockedUntil : (t?.blockedUntil ?? null);
   const holds: BlockedHold[] = [];
   if (until && until.getTime() > at.getTime()) holds.push({ kind: "date" });
   if ((await openBlockers(db, ticketId)).length) holds.push({ kind: "blocker" });
   if ((await openCardIds(db, ticketId)).length) holds.push({ kind: "card" });
-  if (await mergedAwaitingChecks(db, ticketId)) holds.push({ kind: "checks" });
+  // R36 (BOS-1679): a merged ticket's after-merge checks hold it only until it is live (the go-live wait, which wakes the
+  // assignee). After that nothing ends such a hold, so a ticket whose checks need someone must link them or use a date.
   if (t?.goLiveWait) holds.push({ kind: "go_live" });
+  // BOS-1907: BOS-1905 group 2. A merged ticket with after-merge criteria still unreported is held ("Merged, watching"):
+  // it waits for its live check or watch, so Blocked needs no made-up date, link or card for it (R36 no longer refuses it).
+  if (t?.mergeCommit && unreportedAfterMerge(t.criteria, t.note).length > 0) holds.push({ kind: "merged_watch" });
   return holds;
 }
 
@@ -193,13 +197,30 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
  */
 export const holdsMergeSql = sql`(${decisions.context}->>'type' = 'review_loop' or (${decisions.context}->>'type' = 'question' and ${decisions.context}->>'holdsMerge' = 'true'))`;
 
-/** An open card that holds this ticket's merge (see holdsMergeSql), or null. */
+/**
+ * BOS-1755: a ticket's own owner-only question (owner_choice, owner_setup, secret...) that blocks it holds it in
+ * "Passed, held" (a merge for a code ticket, closing for a no-code one) until the owner answers it. A plan card and an after-merge card (criterion, steps or setsUp: the owner does those after the code is live) never hold, or the ticket would deadlock.
+ */
+export const ownerOnlyQuestionSql = sql`(${decisions.context}->>'type' = 'question' and ${decisions.context}->>'ownerOnly' is not null and coalesce(${decisions.context}->>'plan', '') <> 'true' and ${decisions.context}->'criterionIndexes' is null and ${decisions.context}->'steps' is null and ${decisions.context}->'setsUp' is null)`;
+
+/** The ticket's own open owner-only question card that blocks it (ownerOnlyQuestionSql), or null. A ticket can't be closed as completed while one is open. */
+export async function openOwnerOnlyCard(db: Db, ticketId: string): Promise<string | null> {
+  const [d] = await db
+    .select({ id: decisions.id })
+    .from(ticketDependencies)
+    .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+    .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open"), ownerOnlyQuestionSql))
+    .limit(1);
+  return d?.id ?? null;
+}
+
+/** An open card that holds this ticket's merge (see holdsMergeSql), or null. A ticket is also held by its own owner-only card. */
 export async function openHoldingCard(db: Db, ticketId: string): Promise<string | null> {
   const [d] = await db
     .select({ id: decisions.id })
     .from(ticketDependencies)
     .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-    .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open"), holdsMergeSql))
+    .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open"), sql`(${holdsMergeSql} or ${ownerOnlyQuestionSql})`))
     .limit(1);
   return d?.id ?? null;
 }

@@ -10,7 +10,7 @@ t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/nul
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -21,7 +21,16 @@ cat >"$t/bin/pnpm" <<'S'
 #!/usr/bin/env bash
 echo "pnpm $*" >>"$LOG"
 echo "threads=${BOSSMAN_CHECK_THREADS:-} go=${GOMAXPROCS:-} rayon=${RAYON_NUM_THREADS:-} tokio=${TOKIO_WORKER_THREADS:-} for $*" >>"$LOG"
-if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1; fi
+# FAIL_ONCE=<file>: the first matching call fails (and makes the file), later ones pass (BOS-1628).
+if [ -n "${FAIL_ONCE:-}" ] && [[ "$*" == *install* ]] && [ ! -e "$FAIL_ONCE" ]; then : >"$FAIL_ONCE"; echo "${FAIL_MSG:-boom}"; exit 1; fi
+if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "${FAIL_MSG:-boom}"; exit 1; fi
+# SLOW_ON=<text> (BOS-2219): a matching call prints two finished vitest files, then stays running until check-quick's output
+# ($SLOW_OUT) shows a progress line, so the line is proven to appear while the step still runs. No line in 30 s (SLOW_TRIES tenths): it fails.
+if [ -n "${SLOW_ON:-}" ] && [[ "$*" == *"$SLOW_ON"* ]]; then
+  printf ' ✓ test/a.test.ts (2 tests) 5ms\n ✓ test/b.test.ts (1 test) 3ms\n'
+  for _ in $(seq "${SLOW_TRIES:-300}"); do grep -qF "still running (2 test files done)" "$SLOW_OUT" 2>/dev/null && exit 0; sleep 0.1; done
+  echo "no progress line while the step ran"; exit 1
+fi
 S
 cat >"$t/bin/node" <<'S'
 #!/usr/bin/env bash
@@ -68,6 +77,26 @@ logged "pnpm --filter @boss-man/web exec vitest related --run src/a.ts" "web"
 logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
+# BOS-1727: the list guards run first, each only for the files it reads, and a failure names the file and the line to add.
+logged "pnpm --filter @boss-man/web exec vitest run test/screen-inventory.test.ts" "guard: screen inventory for a web change"
+notlogged "test/owner-control-list.test.ts" "guard: owner controls not for a change outside pages and components"
+notlogged "test/wake-classes.test.ts" "guard: wake classes not for a web-only change"
+[ "$(grep -n 'PASS  guard: screen inventory' "$t/out" | cut -d: -f1)" -lt "$(grep -n 'PASS  merge with' "$t/out" | cut -d: -f1)" ] || fail "guards must print before the merge step: $(cat "$t/out")"
+# BOS-2219: a long step says it is still running (with the test files done so far) before it ends, not only when it ends.
+run 0 "slow step prints progress" env SLOW_ON="vitest related" SLOW_OUT="$t/out" CHECK_QUICK_PROGRESS_SECONDS=1
+grep -qE "^      tests related to @boss-man/web changes: [0-9]+s, still running \(2 test files done\)$" "$t/out" || fail "progress line: $(cat "$t/out")"
+[ "$(grep -n 'web changes: .*still running' "$t/out" | head -n 1 | cut -d: -f1)" -lt "$(grep -n 'PASS  tests related to @boss-man/web' "$t/out" | cut -d: -f1)" ] || fail "progress before the PASS line: $(cat "$t/out")"
+run 1 "a quiet step that never prints progress fails the stub" env SLOW_ON="vitest related" SLOW_OUT="$t/out" CHECK_QUICK_PROGRESS_SECONDS=600 SLOW_TRIES=30
+grep -q "no progress line while the step ran" "$t/out" || fail "stub must fail without a progress line: $(cat "$t/out")"
+run 1 "screen inventory guard fails" env FAIL_ON=screen-inventory.test
+grep -q "^FAIL  guard: screen inventory" "$t/out" || fail "guard FAIL line: $(cat "$t/out")"
+grep -qF "screen-inventory.txt is out of date" "$t/out" || fail "guard hint names the file: $(cat "$t/out")"
+grep -qF "vitest run test/screen-inventory.test.ts -u" "$t/out" || fail "guard hint gives the command: $(cat "$t/out")"
+commit apps/web/src/pages/P.tsx
+run 0 "a page change" env
+logged "pnpm --filter @boss-man/server exec vitest run test/owner-control-list.test.ts" "guard: owner controls for a page change"
+run 1 "owner controls guard fails" env FAIL_ON=owner-control-list.test
+grep -qF "packages/shared/src/owner-controls.ts" "$t/out" || fail "owner-controls hint names the file: $(cat "$t/out")"
 # BOS-979: the secrets scan runs only when the branch has the script, and a finding fails the check.
 notlogged "scan-added-lines" "no scan script, no scan step"
 mkdir -p "$repo/scripts"; echo "// stub" >"$repo/scripts/scan-added-lines.mjs"; g add -A; g commit -q -m "scan script"
@@ -93,6 +122,14 @@ run 0 "server and migration change" env
 logged "node scripts/lint-migrations.mjs" "migration"
 logged "pnpm --filter @boss-man/server typecheck" "server"
 logged "vitest related --run src/b.ts" "server"
+logged "pnpm --filter @boss-man/server exec vitest run test/wake-classes.test.ts" "guard: wake classes for a server change"
+run 1 "wake classes guard fails" env FAIL_ON=wake-classes.test
+grep -qF "WAKE_CLASS in apps/server/src/services/wake-classes.ts" "$t/out" || fail "wake hint names the file: $(cat "$t/out")"
+# BOS-2058: the update-waits guard runs on the same server change, and its failure names the table to edit.
+run 0 "server change runs the update-waits guard" env
+logged "pnpm --filter @boss-man/server exec vitest run test/update-waits-guard.test.ts" "guard: update waits for a server change"
+run 1 "update waits guard fails" env FAIL_ON=update-waits-guard.test
+grep -qF "WAIT_RULES" "$t/out" || fail "update-waits hint names the table: $(cat "$t/out")"
 
 commit scripts/x.sh
 run 0 "shell change" env
@@ -183,33 +220,79 @@ if command -v flock >/dev/null; then
   notlogged "typecheck" "signalled run"
 fi
 
-# A path-reading test (BOS-881): a change to the paths it reads runs it, even though it imports none of them, and from the
-# package the test lives in. Its entry reads apps/web/src/pages/, apps/web/src/components/ and packages/shared/src/owner-controls.ts.
-own="pnpm --filter @boss-man/server exec vitest related --run test/owner-control-list.test.ts"
-g checkout -q -B pathpages origin/main; commit apps/web/src/pages/Plan.tsx
-run 0 "web page change runs the owner-controls list" env
-logged "$own" "web page"
-logged "pnpm --filter @boss-man/server typecheck" "web page typecheck"
-grep -q "^PASS  path-reading test owner-control-list.test.ts (apps/server)" "$t/out" || fail "no PASS line: $(cat "$t/out")"
-g checkout -q -B pathcomponents origin/main; commit apps/web/src/components/Sidebar.tsx
-run 0 "web component change runs it" env
-logged "$own" "web component"
-g checkout -q -B pathshared origin/main; commit packages/shared/src/owner-controls.ts
-run 0 "owner-controls list change runs it" env
-logged "$own" "shared owner-controls"
-# A web change that is neither a page nor a component, and other shared code, leave it out.
-g checkout -q -B pathother origin/main; commit apps/web/src/lib/format.ts packages/shared/src/other.ts
-run 0 "an unrelated web and shared change leaves it out" env
-notlogged "owner-control-list" "unrelated web change"
-# A page change on top of a broad server list still runs it (the broad list is skipped, the path-reading test is not).
-g checkout -q -B pathbroad origin/main; commit apps/web/src/pages/Decisions.tsx apps/server/src/mcp.ts
-run 0 "a page change beside a broad server change" env
-grep -qF "SKIP related tests: too broad" "$t/out" || fail "expected the broad list skipped: $(cat "$t/out")"
-logged "$own" "broad beside page"
-notlogged "vitest related --run src/mcp.ts" "broad beside page"
-# The merge gate never skips it either.
-run 0 "merge check runs it" env BOSSMAN_MERGE_CHECK=1
-logged "$own" "merge check"
+# Whole-repo tests (BOS-1732): at the merge gate every test of a touched package that reads repo files by path, or renders the
+# built web app in a browser, runs; found by what the file contains, so new tests need no list. A hand run skips them.
+# The test files live in the base commit (they are not what the branch changes), as in a real repo.
+g checkout -q main
+wr() { mkdir -p "$repo/$(dirname "$1")"; printf '%s\n' "$2" >"$repo/$1"; }
+wr apps/server/test/ratchet.test.ts 'import { readFileSync } from "node:fs"; const root = new URL(".", import.meta.url); readFileSync(root);'
+wr apps/server/test/plain.test.ts 'import { readFileSync } from "node:fs"; readFileSync("/tmp/fixture-made-by-the-test");'
+wr apps/server/test/locate-only.test.ts 'const here = __dirname; it("x", () => here);'
+wr apps/web/test/scan.ts 'import { readdirSync } from "node:fs"; export const SRC = new URL("..", import.meta.url); readdirSync(SRC);'
+wr apps/web/test/inventory.test.ts 'import { SRC } from "./scan"; it("x", () => SRC);'
+wr apps/web/test/shell-layout.test.ts 'import { launch } from "./real-page"; await launch();'
+wr apps/web/test/pure.test.ts 'it("adds", () => 1 + 1);'
+wr apps/runner/test/fence.test.ts '// mentions chromium only in a comment'
+# BOS-1789: a server test that reads the web pages by path; a test that reaches a reading helper through an alias, two folders
+# down and through a second helper; a runner test whose helper reads another package.
+wr apps/server/test/reads-web.test.ts 'import { readFileSync } from "node:fs"; const WEB = new URL("../../web/src/", import.meta.url); readFileSync(WEB);'
+wr apps/server/test/lib/deep/scan.ts 'import { readdirSync } from "node:fs"; export const ROOT = new URL("..", import.meta.url); readdirSync(ROOT);'
+wr apps/server/test/lib/mid.ts 'import { ROOT } from "./deep/scan.js"; export const R = ROOT;'
+wr apps/server/test/aliased.test.ts 'import { R } from "@/lib/mid"; it("x", () => R);'
+wr apps/runner/test/helpers/read-root.ts 'import { readFileSync } from "node:fs"; export const D = readFileSync(process.cwd() + "/apps/web/Dockerfile");'
+wr apps/runner/test/via-helper.test.ts 'const { D } = await import("~/helpers/read-root"); it("x", () => D);'
+g add -A; g commit -q -m "test files"; g update-ref refs/remotes/origin/main HEAD
+wrt() { grep -qF "$1" "$t/out" || fail "$2: expected '$1' in: $(cat "$t/out")"; }
+# Not at the gate and not asked for: skipped.
+g checkout -q -B wr1 origin/main; commit apps/server/src/other.ts
+run 0 "a hand run leaves whole-repo tests out" env
+notlogged "ratchet.test.ts" "hand run whole-repo"
+# At the gate: the server's reading tests run, as one named-file run from the package; a test that reads only its own fixture
+# and a test that only finds its folder do not.
+run 0 "the gate runs the whole-repo tests of a touched package" env BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "gate server"
+notlogged "plain.test.ts" "gate server plain"
+notlogged "locate-only.test.ts" "gate server locate-only"
+notlogged "@boss-man/web exec vitest run" "gate untouched web package"
+# BOS-1789 criterion 2: the test that imports a reading helper through an alias, two folders down and through a second helper is picked up.
+logged "test/aliased.test.ts" "aliased nested helper"
+# Criterion 1 (the other side): a server change does not run the runner test whose helper reads apps/web.
+notlogged "via-helper.test.ts" "gate server change, runner test reads web"
+wrt "PASS  whole-repo tests (apps/server, 3 files)" "gate PASS line"
+# CHECK_QUICK_WHOLE_REPO=1 asks for them in a hand run.
+run 0 "a hand run can ask for them" env CHECK_QUICK_WHOLE_REPO=1
+logged "pnpm --filter @boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "asked for"
+# A web change runs the browser tests and the tests that read through a helper; a pure test stays out.
+g checkout -q -B wr2 origin/main; commit apps/web/src/lib/format.ts
+run 0 "a web change at the gate" env BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/web exec vitest run test/inventory.test.ts test/shell-layout.test.ts" "gate web"
+notlogged "pure.test.ts" "gate web pure"
+# BOS-1789 criterion 1: a web-page-only change runs the server test that reads apps/web by path, and the runner test whose helper
+# reads apps/web, but not the server tests that read only the server's own files.
+logged "pnpm --filter @boss-man/server exec vitest run test/reads-web.test.ts" "web change runs the server test that reads the web pages"
+notlogged "ratchet.test.ts" "web change, server test that reads only server files"
+notlogged "aliased.test.ts" "web change, server test that reads only server files (helper)"
+logged "exec vitest run test/via-helper.test.ts" "web change runs the runner test whose helper reads the web app"
+wrt "PASS  whole-repo tests (apps/server, 1 files)" "web change server PASS line"
+# A hand run of the same change leaves them out.
+run 0 "a hand run of a web change skips cross-package tests" env
+notlogged "reads-web.test.ts" "hand run web change"
+run 0 "a web change at the gate (again, for the build)" env BOSSMAN_MERGE_CHECK=1
+# The browser tests open apps/web/dist and skip without it: the build runs first, once, before the whole-repo run.
+[ "$(grep -cF "pnpm --filter @boss-man/web build" "$LOG")" -eq 1 ] || fail "web built not exactly once: $(cat "$LOG")"
+[ "$(grep -nF "pnpm --filter @boss-man/web build" "$LOG" | head -n 1 | cut -d: -f1)" -lt "$(grep -nF "pnpm --filter @boss-man/web exec vitest run test/inventory" "$LOG" | head -n 1 | cut -d: -f1)" ] || fail "web build after the browser tests: $(cat "$LOG")"
+# A hand run (no whole-repo tests) still builds after the slot, as before.
+run 0 "a hand run of a web change builds once" env
+[ "$(grep -cF "pnpm --filter @boss-man/web build" "$LOG")" -eq 1 ] || fail "hand run: web built not exactly once: $(cat "$LOG")"
+# A failing whole-repo test fails the check.
+run 1 "a failing whole-repo test fails the gate" env BOSSMAN_MERGE_CHECK=1 FAIL_ON=inventory.test
+grep -q "^FAIL  whole-repo tests (apps/web" "$t/out" || fail "no FAIL line: $(cat "$t/out")"
+# A shared change touches every package.
+g checkout -q -B wr3 origin/main; commit packages/shared/src/other.ts
+run 0 "a shared change at the gate" env BOSSMAN_MERGE_CHECK=1
+logged "@boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "gate shared server"
+logged "@boss-man/web exec vitest run" "gate shared web"
+g checkout -q -B feature origin/main
 
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
 g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
@@ -253,6 +336,19 @@ grep -q "^FAIL  install packages" "$t/out" || fail "failed install: no FAIL line
 grep -q "^SKIP  typecheck, related tests, web build: the install failed" "$t/out" || fail "failed install: no SKIP line: $(cat "$t/out")"
 for s in typecheck "vitest related" build; do notlogged "$s" "failed install"; done
 grep -q "check-quick: FAILED" "$t/out" || fail "failed install: no FAILED summary: $(cat "$t/out")"
+[ "$(grep -c "^pnpm install" "$LOG")" -eq 1 ] || fail "failed install (not a machine error) was retried: $(cat "$LOG")"
+# BOS-1628: an install that dies of the machine (EAGAIN) is tried again with fewer files at once, and passes the second time.
+eagain="ERR_PNPM_EAGAIN: resource temporarily unavailable, copyfile 'store/v10/files/ab' -> 'job/node_modules/.pnpm/ab'"
+rm -f "$t/once"
+run 0 "EAGAIN once" env CHECK_QUICK_INSTALL_PAUSE=0 FAIL_ONCE="$t/once" FAIL_MSG="$eagain"
+grep -q "^PASS  install packages" "$t/out" || fail "EAGAIN once: no install PASS: $(cat "$t/out")"
+logged "pnpm install --frozen-lockfile --prefer-offline --network-concurrency 2 --child-concurrency 1" "EAGAIN once: gentler retry"
+logged "pnpm --filter @boss-man/web typecheck" "EAGAIN once: later steps still run"
+# Still failing after three tries: exit 75 and the marker the server reads, never the plain FAILED line.
+run 75 "EAGAIN always" env CHECK_QUICK_INSTALL_PAUSE=0 FAIL_ON=install FAIL_MSG="$eagain"
+[ "$(grep -c "^pnpm install" "$LOG")" -eq 3 ] || fail "EAGAIN always: not three tries: $(cat "$LOG")"
+grep -q "^check-quick: install stopped on a machine fault" "$t/out" || fail "EAGAIN always: no marker: $(cat "$t/out")"
+! grep -q "check-quick: FAILED" "$t/out" || fail "EAGAIN always: said FAILED: $(cat "$t/out")"
 # A change with no pnpm step (a shell script only) installs nothing.
 g checkout -q -B freshsh origin/main; commit scripts/only.sh
 run 0 "shell-only change does not install" env

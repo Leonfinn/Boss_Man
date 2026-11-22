@@ -1,10 +1,14 @@
 // The Dashboard's two lead panels (BOS-1507, design BOS-1490): "Needs you" (what is waiting for the owner,
 // with a button to each item) and "Right now" (four fixed health lines). Every state has a symbol and words,
 // never colour alone, and a line that couldn't be read says "not known" instead of turning green.
+import { useState } from "react";
 import type { Decision, DecisionTally } from "../api";
 import { raisedAgo } from "../age";
-import type { MergeHealthView, StuckSummary } from "./MergesStuckBanner";
-import { waitedText } from "./MergesStuckBanner";
+import type { MergeHealthView, SlowSummary, StuckSummary } from "./MergesStuckBanner";
+import { heldSummary, heldText, inLineOf, pausedSlotsText, pausedSummary, pausedText, slowText, waitedText } from "./MergesStuckBanner";
+// R43 (BOS-1716): each count in these panels is written with its one label from the shared list.
+import { figureText } from "@boss-man/shared";
+import { inForceHeadline, inForceReason, type LimitInForce } from "../limit-in-force";
 
 export const NEEDS_YOU_MAX = 5;
 
@@ -13,6 +17,8 @@ export type HealthData = {
   runner?: { registered: boolean; connected: boolean; lastSeenAt: string | null } | null;
   usage?: { agents: number; accounts: string[]; firstResetAt: string | null } | null;
   update?: { waiting: boolean; phase: string | null; deadline: string | null } | null;
+  /** BOS-1634: agents at once across all companies, as saved and in force; absent from an older server. */
+  runLimit?: LimitInForce | null;
 };
 
 export type LineTone = "ok" | "warn" | "bad" | "unknown";
@@ -35,26 +41,36 @@ const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hou
 const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)));
 
 /** The four lines, always in this order: Runner, Merges, Usage limits, Update. */
-export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
-  const { health, merges, stuck, running, companyId } = input;
+export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
+  const { health, merges, stuck, slow, running, companyId } = input;
   const now = input.now ?? Date.now();
-  const system = `#/settings/${companyId}/system`;
+  const system = `#/settings/${companyId}/updates`;
+  const runnerHref = `#/settings/${companyId}/runner`;
 
   let runner: HealthLine;
   const r = health?.runner;
-  if (r == null) runner = { key: "runner", tone: "unknown", symbol: "?", state: "Runner: not known", pill: "Runner not known", text: "Couldn't check. Trying again in 10 s.", href: system, linkText: "Runner settings" };
-  else if (!r.registered) runner = { key: "runner", tone: "warn", symbol: "‖", state: "No runner set up", pill: "No runner set up", text: "Nothing can run until a runner connects.", href: system, linkText: "Runner settings" };
+  if (r == null) runner = { key: "runner", tone: "unknown", symbol: "?", state: "Runner: not known", pill: "Runner not known", text: "Couldn't check. Trying again in 10 s.", href: runnerHref, linkText: "Runner settings" };
+  else if (!r.registered) runner = { key: "runner", tone: "warn", symbol: "‖", state: "No runner set up", pill: "No runner set up", text: "Nothing can run until a runner connects.", href: runnerHref, linkText: "Runner settings" };
   else if (!r.connected) {
     const since = r.lastSeenAt ? `Since ${clock(r.lastSeenAt)} (${hoursText(now - new Date(r.lastSeenAt).getTime())}). ` : "";
-    runner = { key: "runner", tone: "bad", symbol: "✕", state: "Runner offline", pill: "Runner offline", text: `${since}Runs and checks can't start.`, href: system, linkText: "Runner settings" };
-  } else runner = { key: "runner", tone: "ok", symbol: "✓", state: "Runner connected", pill: "Runner connected", text: running === 1 ? "1 agent running now." : `${running} agents running now.`, href: system, linkText: "Runner settings" };
+    runner = { key: "runner", tone: "bad", symbol: "✕", state: "Runner offline", pill: "Runner offline", text: `${since}Runs and checks can't start.`, href: runnerHref, linkText: "Runner settings" };
+  } else runner = { key: "runner", tone: "ok", symbol: "✓", state: "Runner connected", pill: "Runner connected", text: `${figureText("runs.running", running)}.`, href: runnerHref, linkText: "Runner settings" };
 
   let mergesLine: HealthLine;
   if (!merges) mergesLine = { key: "merges", tone: "unknown", symbol: "?", state: "Merges: couldn't check", pill: "Merges not known", text: "The server didn't answer. Trying again in 20 s.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
   else if (stuck) {
-    const behind = merges.waitingCount > 0 ? ` ${merges.waitingCount} in the line.` : "";
+    const behind = inLineOf(merges) > 0 ? ` ${figureText("mergeQueue.inLine", inLineOf(merges))}.` : "";
     mergesLine = { key: "merges", tone: "bad", symbol: "!", state: "Merges stuck", pill: "Merges stuck", text: `${stuck.title}.${behind}`, href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
-  } else mergesLine = { key: "merges", tone: "ok", symbol: "✓", state: "Merges moving", pill: "Merges moving", text: merges.waitingCount > 0 ? `${merges.waitingCount} waiting, none stuck.` : "Nothing waiting to merge.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else if (slow) {
+    mergesLine = { key: "merges", tone: "warn", symbol: "…", state: "Merging, but slowly", pill: "Merging slowly", text: slowText(slow), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else if (pausedSummary(merges)) {
+    const p = pausedSummary(merges)!;
+    mergesLine = { key: "merges", tone: "warn", symbol: "‖", state: "Merges paused", pill: "Merges paused", text: `${pausedText(p)} ${pausedSlotsText(p)}.`, href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else if (heldSummary(merges)) {
+    // R28: calm amber, never the red "stuck" line: merges wait on the main fix on purpose.
+    const h = heldSummary(merges)!;
+    mergesLine = { key: "merges", tone: "warn", symbol: "‖", state: "Merges held behind the main fix", pill: "Merges held", text: heldText(h), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else mergesLine = { key: "merges", tone: "ok", symbol: "✓", state: "Merges moving", pill: "Merges moving", text: inLineOf(merges) > 0 ? `${figureText("mergeQueue.inLine", inLineOf(merges))}, none stuck.` : "Nothing in the merge line.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
 
   let usage: HealthLine;
   const u = health?.usage;
@@ -62,7 +78,7 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   else if (u.agents > 0) {
     const who = u.accounts.length === 1 ? `${u.accounts[0]} account` : u.accounts.length > 1 ? `${u.accounts.length} accounts` : "An account";
     const reset = u.firstResetAt ? (u.accounts.length > 1 ? `, first resets at ${clock(u.firstResetAt)}` : ` resets at ${clock(u.firstResetAt)}`) : " has no reset time yet";
-    usage = { key: "usage", tone: "warn", symbol: "‖", state: `${u.agents} ${u.agents === 1 ? "agent" : "agents"} held by a usage limit`, pill: u.firstResetAt ? `${u.agents} held till ${clock(u.firstResetAt)}` : `${u.agents} held`, text: `${who}${reset}.`, href: "#/agents", linkText: "Agents" };
+    usage = { key: "usage", tone: "warn", symbol: "‖", state: figureText("usage.held", u.agents), pill: u.firstResetAt ? `${u.agents} held till ${clock(u.firstResetAt)}` : `${u.agents} held`, text: `${who}${reset}.`, href: "#/agents", linkText: "Agents" };
   } else usage = { key: "usage", tone: "ok", symbol: "✓", state: "No agent held by a usage limit", pill: "No limit holds", text: "Every agent can start when it has work.", href: "#/agents", linkText: "Agents" };
 
   let update: HealthLine;
@@ -70,11 +86,18 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   if (up == null) update = { key: "update", tone: "unknown", symbol: "?", state: "Updates: not known", pill: "Updates not known", text: "Couldn't check.", href: system, linkText: "Updates" };
   else if (up.waiting) update = { key: "update", tone: "warn", symbol: "↑", state: "Update waiting", pill: "Update waiting", text: up.deadline ? `Server update waits for a quiet machine; you'll be asked at ${clock(up.deadline)}.` : "Server update waits for a quiet machine.", href: system, linkText: "Updates" };
   else update = { key: "update", tone: "ok", symbol: "✓", state: "No update waiting", pill: "No update waiting", text: "Nothing is waiting to be installed.", href: system, linkText: "Updates" };
+  // BOS-1634: while the update's hold keeps fewer agents running than the owner saved, this line says so, with the
+  // server's numbers and reason, and links to the waiting update. It also covers the standby window after an update
+  // goes live, when the hold is still on.
+  const held = inForceHeadline(health?.runLimit);
+  if (held && health?.runLimit) update = { key: "update", tone: "warn", symbol: "↑", state: `Agents at once: ${held}`, pill: `Agents ${health.runLimit.inForce} of ${health.runLimit.saved}`, text: `${up?.waiting && up.deadline ? `Server update waits for a quiet machine; you'll be asked at ${clock(up.deadline)}. ` : ""}${inForceReason(health.runLimit)}`, href: `#/settings/${companyId}/updates`, linkText: "the waiting update" };
 
   return [runner, mergesLine, usage, update];
 }
 
-export function RightNow({ lines, paused, companyId, loading }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean }) {
+export function RightNow({ lines, paused, companyId, loading, onResume }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean; /** Resumes this company; the notice shows a Resume button when given. */ onResume?: () => Promise<void> }) {
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   return (
     <section className="card dash-panel dash-right" aria-labelledby="dash-right">
       <h2 id="dash-right" className="dash-panel-head">
@@ -84,7 +107,24 @@ export function RightNow({ lines, paused, companyId, loading }: { lines: HealthL
       {paused && (
         <p className="dash-line tone-warn">
           <span className="dash-sym" aria-hidden="true">‖</span>
-          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/system`}>Settings</a></span>
+          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/team`}>Settings</a></span>
+          {onResume && (
+            <button
+              type="button"
+              className="btn"
+              disabled={resuming}
+              onClick={() => {
+                setResuming(true);
+                setResumeError(null);
+                onResume()
+                  .catch((e: unknown) => setResumeError(e instanceof Error ? e.message : "Could not resume."))
+                  .finally(() => setResuming(false));
+              }}
+            >
+              {resuming ? "Resuming…" : "Resume"}
+            </button>
+          )}
+          {resumeError && <span role="alert" className="muted"> {resumeError}</span>}
         </p>
       )}
       <ul className="dash-lines">
@@ -116,6 +156,24 @@ export function needsList(decisions: Decision[]): Decision[] {
   return decisions.filter((d) => !d.waiting).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 }
 
+function spanText(ms: number): string {
+  const m = Math.floor(Math.max(0, ms) / 60_000);
+  if (m < 1) return "under a minute";
+  if (m < 60) return m === 1 ? "1 minute" : `${m} minutes`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return h === 1 ? "1 hour" : `${h} hours`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? "1 day" : `${d} days`;
+}
+
+/** (BOS-2174) "Oldest waiting 3 days · usually answered in 5 hours"; a part the server couldn't work out is left out. */
+export function waitLine(tally: DecisionTally | null | undefined, now = Date.now()): string | null {
+  const parts: string[] = [];
+  if (tally?.oldestOpenAt) parts.push(`Oldest waiting ${spanText(now - new Date(tally.oldestOpenAt).getTime())}`);
+  if (tally?.medianAnswerMs != null) parts.push(`usually answered in ${spanText(tally.medianAnswerMs)}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 export function NeedsYou({ decisions, tally }: { decisions: Decision[] | null; tally: DecisionTally | null | undefined }) {
   if (!decisions) {
     return (
@@ -132,13 +190,14 @@ export function NeedsYou({ decisions, tally }: { decisions: Decision[] | null; t
   const waiting = tally?.waiting ?? decisions.filter((d) => !!d.waiting).length;
   const shown = queue.slice(0, NEEDS_YOU_MAX);
   const more = Math.max(0, open - shown.length);
-  const waitingText = waiting > 0 ? `${waiting} with the team, nothing to do yet` : null;
+  const waitingText = waiting > 0 ? `${figureText("decisions.withTeam", waiting)}, nothing to do yet` : null;
   return (
     <section className="card dash-panel dash-needs" aria-labelledby="dash-needs">
       <h2 id="dash-needs" className="dash-panel-head">
         Needs you
-        {open > 0 && <span className="dash-count" aria-label={`${open} ${open === 1 ? "item needs" : "items need"} you`}>{open}</span>}
+        {open > 0 && <span className="dash-count" aria-label={figureText("decisions.needYou", open)}>{open}</span>}
       </h2>
+      {open > 0 && waitLine(tally) && <p className="muted dash-needs-wait">{waitLine(tally)}</p>}
       {shown.length === 0 && open === 0 ? (
         <p className="dash-calm">
           <span className="dash-sym" aria-hidden="true">✓</span>

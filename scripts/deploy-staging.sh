@@ -99,6 +99,8 @@ wait_healthy() {
 # Builds and starts the stack at the checked-out commit.
 rebuild_and_start() { # old-commit new-commit
   local svcs=(server) built=(server) profiles
+  # The commit the server image is built from, so /api/health and the smoke checks can say what staging runs (BOS-1472).
+  export BOSSMAN_COMMIT="$2"
   profiles="${COMPOSE_PROFILES:-$(env_get .env COMPOSE_PROFILES)}" # the same precedence docker compose uses
   if [[ ,$profiles, == *,launcher,* ]]; then svcs+=(launcher); built+=(launcher netguard); fi
   # A failed build must die, not fall through: callers run this inside "if !", where bash switches set -e off for
@@ -106,9 +108,10 @@ rebuild_and_start() { # old-commit new-commit
   local built_fail="An image build failed (see above), so nothing was started; the running staging, if any, is unchanged. Fix the cause and run this again."
   step "Building (${built[*]})"
   run dc build "${built[@]}" || die "$built_fail"
-  # The runner image the launcher starts: built when it is missing or the runner's code changed.
+  # The runner image the launcher starts: built when it is missing or the runner's code changed (the same rule as
+  # needs_runner in deploy.sh: what the image builds COPY in, BOS-1648).
   if [[ ,$profiles, == *,launcher,* ]]; then
-    if ((DRY)) || ! docker image inspect boss-man-staging-runner:current >/dev/null 2>&1 || { [[ -n ${1:-} ]] && git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'; }; then
+    if ((DRY)) || ! docker image inspect boss-man-staging-runner:current >/dev/null 2>&1 || { [[ -n ${1:-} ]] && git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'; }; then
       step "Building the staging runner image"
       run dc --profile runners build runner-app-co || die "$built_fail"
       RUNNER_NEW=1

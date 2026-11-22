@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, notifications, runs, tickets } from "../src/db/schema.js";
+import { activity, agents, checkJobs, notifications, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { closeHold, ensureSystemHold, openHold } from "../src/services/review-holds.js";
+import { HELD_AGENT } from "../src/services/fair-share.js";
 import { judge, OWNER_AFTER_MS, priorityWatchService, QUIET_AFTER_MS, stopped, type Facts } from "../src/services/priority-watch.js";
 import { WAKE_CLASS } from "../src/services/wake-classes.js";
 
@@ -81,6 +83,19 @@ describe("priority watch: what counts as a next step", () => {
 
   it("registers its wake as one that is never dropped", () => {
     expect(WAKE_CLASS["priority watch"]).toBe("waiting");
+  });
+});
+
+describe("priority watch: held on a recorded hold (BOS-1717)", () => {
+  const quietReview = { state: "review", lastActiveAt: ago(3 * 60 * MIN), movedBack: { id: "a1", text: "in_progress -> review" } } as const;
+  it("raises no alarm for a review ticket held on a waits-on link or system hold", () => {
+    expect(causes(facts({ ...quietReview, heldOnRecord: true }))).toEqual([]);
+  });
+  it("still alarms for the same quiet review ticket when no hold is recorded", () => {
+    expect(causes(facts({ ...quietReview, heldOnRecord: false }))).toContain("nothing");
+  });
+  it("a hold on a ticket that isn't in review doesn't silence the alarm", () => {
+    expect(causes(facts({ state: "in_progress", lastActiveAt: ago(3 * 60 * MIN), heldOnRecord: true }))).toContain("nothing");
   });
 });
 
@@ -184,6 +199,78 @@ describe("priority watch: the sweep", () => {
     expect(n!.readAt).not.toBeNull();
   });
 
+  it("an urgent review ticket held on an open waits-on link or an open system hold is left alone; with the hold closed it alarms again (BOS-1717)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const quiet = async (title: string) => {
+      const t = await c.ticket(title);
+      await c.db.update(tickets).set({ urgent: true, systemState: "review", lastActivityAt: ago(3 * 60 * MIN) }).where(eq(tickets.id, t.id));
+      return t;
+    };
+    const blocker = await c.ticket("What it waits on");
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, blocker.id));
+    const onLink = await quiet("Held on a waits-on link");
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: onLink.id, blockerTicketId: blocker.id });
+    const onHold = await quiet("Held on a system hold");
+    await ensureSystemHold(c.db, onHold.id, [blocker.id], "waits on another ticket");
+    const control = await quiet("No hold recorded");
+    const told = async () => (c.told.map((x) => x.ticketId));
+    await c.watch.run(true);
+    // Only the ticket with no recorded hold is told to the CEO.
+    expect(await told()).toEqual([control.id]);
+    // Close the system hold and finish the link: both alarm like the control.
+    await closeHold(c.db, (await openHold(c.db, onHold.id))!, "released", "test");
+    await c.db.update(tickets).set({ systemState: "done", mergeCommit: "c".repeat(40) }).where(eq(tickets.id, blocker.id));
+    c.told.length = 0;
+    await c.watch.run(true);
+    // (The control was told on the first pass and isn't told twice for the same stop.)
+    expect((await told()).sort()).toEqual([onLink.id, onHold.id].sort());
+  });
+
+  it("an urgent Ready ticket whose wake waits 30 minutes behind a busy agent wakes the CEO once, naming the agent, the run and the free foreground agents (BOS-1635)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const [dylan] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Dylan", title: "Background Developer", role: "worker", agentKind: "claude" }).returning();
+    await c.db.insert(agents).values({ companyId: c.company.id, name: "Ada", title: "Developer", role: "worker", agentKind: "claude" });
+    await c.db.insert(agents).values({ companyId: c.company.id, name: "Bea", title: "Background Developer", role: "worker", agentKind: "claude" });
+    const long = await c.ticket("Long low-priority job");
+    const t = await c.ticket("Main's CI is failing");
+    await c.db.update(tickets).set({ assigneeAgentId: dylan!.id }).where(eq(tickets.id, long.id));
+    await c.db.update(tickets).set({ urgent: true, systemState: "ready", assigneeAgentId: dylan!.id, lastActivityAt: ago(MIN) }).where(eq(tickets.id, t.id));
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: dylan!.id, ticketId: long.id, startedAt: ago(100 * MIN) });
+    const held = async (heldFor: number) => {
+      await c.db.delete(wakes).where(eq(wakes.ticketId, t.id));
+      await c.db.insert(wakes).values({ companyId: c.company.id, agentId: dylan!.id, ticketId: t.id, reason: "assigned", status: "queued", statusReason: HELD_AGENT, createdAt: ago(heldFor) });
+    };
+    // Held 29 minutes: not yet.
+    await held(29 * MIN);
+    await c.watch.run(true);
+    expect(c.told.filter((x) => x.note.includes("is busy"))).toHaveLength(0);
+    // Held 31 minutes: the CEO hears once, with the agent, the run, and the free foreground agent (not the background one).
+    await held(31 * MIN);
+    await c.watch.run(true);
+    const heard = c.told.filter((x) => x.note.includes("is busy"));
+    expect(heard).toHaveLength(1);
+    expect(heard[0]!.note).toContain("Dylan is busy");
+    expect(heard[0]!.note).toContain("Long low-priority job");
+    expect(heard[0]!.note).toContain("Ada (Developer)");
+    expect(heard[0]!.note).not.toContain("Bea");
+    // Later passes on the same held wake say nothing more.
+    c.advance(10 * MIN);
+    await c.watch.run(true);
+    expect(c.told.filter((x) => x.note.includes("is busy"))).toHaveLength(1);
+  });
+
+  it("a non-urgent ticket held behind a busy agent does not wake the CEO (BOS-1635)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const [dylan] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Dylan", role: "worker", agentKind: "claude" }).returning();
+    const t = await c.ticket("Ordinary work");
+    await c.db.update(tickets).set({ systemState: "ready", assigneeAgentId: dylan!.id }).where(eq(tickets.id, t.id));
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: dylan!.id, ticketId: t.id, reason: "assigned", status: "queued", statusReason: HELD_AGENT, createdAt: ago(90 * MIN) });
+    expect(await c.watch.run(true)).toMatchObject({ checked: 0, told: 0 });
+  });
+
   it("a cut-off run is told to the CEO with the run's outcome, and a ticket with a live run is left alone", async () => {
     ctx = await setup();
     const t = await ctx.ticket("Urgent thing");
@@ -195,5 +282,22 @@ describe("priority watch: the sweep", () => {
     ctx.told.length = 0;
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, ticketId: t.id, startedAt: ago(MIN) });
     expect(await ctx.watch.run(true)).toMatchObject({ told: 0, cleared: 1 });
+  });
+
+  it("review -> blocked made by the merge (merged, waiting for go-live) raises nothing; the same move with no merge still alarms (BOS-1774)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const move = async (title: string, merged: boolean) => {
+      const t = await c.ticket(title);
+      await c.db.update(tickets).set({ urgent: true, systemState: "blocked", lastActivityAt: ago(MIN), goLiveWait: "server", goLiveWaitSince: ago(2 * MIN), ...(merged ? { mergedAt: ago(2 * MIN) } : {}) }).where(eq(tickets.id, t.id));
+      await c.db.insert(activity).values({ companyId: c.company.id, ticketId: t.id, kind: "state", summary: "review -> blocked", at: ago(2 * MIN) });
+      return t;
+    };
+    const mergedMove = await move("Merged, waiting", true);
+    const plainMove = await move("Blocked from review, no merge", false);
+    await c.watch.run(true);
+    expect(c.told.map((x) => x.ticketId)).toEqual([plainMove.id]);
+    expect(c.told[0]!.note).toContain("moved backwards (review -> blocked)");
+    expect(mergedMove.id).not.toBe(plainMove.id);
   });
 });

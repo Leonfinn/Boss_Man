@@ -28,7 +28,15 @@ export type ClearWhen =
   /** A roadmap feature that had no open ticket now has one (BOS-595, closer in alert-clearing.ts). */
   | { kind: "featureHasTicket"; featureId: string }
   /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
-  | { kind: "serverCalm"; rule: "memory" | "freezes" };
+  | { kind: "serverCalm"; rule: "memory" | "freezes" }
+  /** The cost sanity check's card (BOS-1866): the company's latest checked runs are all in band. */
+  | { kind: "costBackInBand"; companyId: string }
+  /** The idle-slots alert (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
+  | { kind: "idleSlotsGone"; companyId: string }
+  /** The daily-backup alert (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
+  | { kind: "backupFresh" }
+  /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
+  | { kind: "sweepStepOk"; step: string };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
@@ -86,6 +94,11 @@ export const ALERT_KINDS = {
   // run-time-limit.ts (BOS-846): a run was stopped for passing the owner's per-run time limit. The limit is the
   // owner's own setting, so the card starts with them. One card per stopped run; it doesn't clear by itself.
   run_time_limit: {
+    topRung: "owner",
+  },
+  // github-watch.ts (BOS-1393): the GitHub watcher can't read the repo (bad token, missing permission, repo not found).
+  // The owner's own token and setting, so it starts with them; one card per project, withdrawn by the watcher itself on the next good pass.
+  github_watch: {
     topRung: "owner",
   },
   // sweeps.ts missedWork (BOS-1015): a ticket woken again and again with nothing running on it. The Scrum Master
@@ -223,6 +236,32 @@ export const ALERT_KINDS = {
   // closes by itself (mergeFailuresCalm) after 30 minutes without another of that reason.
   merge_failures: {
     topRung: "ceo",
+  },
+  // cost-check.ts (BOS-1866): a run's recorded cost is far from its tokens at list price. Stops at the CEO, never the
+  // owner; one card per company, closes by itself (costBackInBand) once the latest checked runs are in band.
+  cost_out_of_band: {
+    topRung: "ceo",
+  },
+  // idle-slots-alert.ts (BOS-1881): free run slots outnumbered the startable Ready tickets, with an agent idle, for 30
+  // minutes. Stops at the CEO, never the owner; one card per company, closes by itself (idleSlotsGone).
+  idle_slots: {
+    topRung: "ceo",
+  },
+  // daily-backup.ts (BOS-2176): the newest automatic database backup is over 36 hours old. Only the owner can start the
+  // backup service or free the disk on the host, so it starts with them: one card, closed by itself (backupFresh).
+  daily_backup_stale: {
+    topRung: "owner",
+    clearWhen: () => [{ kind: "backupFresh" }],
+  },
+  // sweep-step-guard.ts (BOS-2160): a background safety step failed in 3 sweeps in a row. Only the owner can fix or
+  // restart the server; one card per step, closes by itself (sweepStepOk) after the step's next success.
+  sweep_step_failing: {
+    topRung: "owner",
+  },
+  // spend-rate.ts (BOS-2173): a day's spend is over 3 times the usual daily rate. Only the owner can judge whether the
+  // spend is expected; one alert per company per UTC day. A plain notice: it has no cause to close on.
+  spend_rate: {
+    topRung: "owner",
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {

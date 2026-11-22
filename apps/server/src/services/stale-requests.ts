@@ -3,9 +3,13 @@
 // and the agent that wrote them is woken once to confirm or withdraw. A request the owner
 // has already answered is refused, quoting the earlier answer.
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, decisions, deploys, runs, ticketDependencies, ticketMessages, tickets } from "../db/schema.js";
-import { closeInvalidCards, RECHECK_AUTHOR_MS, RECHECK_CEO_MS } from "./card-validity.js";
+import { agents, companies, decisions, deploys, runs, ticketDependencies, ticketMessages, tickets } from "../db/schema.js";
+import { closeInvalidCards, hiddenWhileRechecked, RECHECK_AUTHOR_MS, RECHECK_CEO_MS } from "./card-validity.js";
+import { engagedRecently, reachedOwner, recheckBackBy, recheckLine } from "./closed-notice.js";
+import type { NotifyInput } from "./notifications.js";
+import { GIT_RETRY_CARD_NOTE, GIT_RETRY_NOTE } from "./git-transport-fault.js";
 
 type DecisionRow = typeof decisions.$inferSelect;
 
@@ -81,7 +85,7 @@ type FlaggedCard = { id: string; raisedByAgentId: string | null; recheckedAt?: D
  * minutes to settle them. A card with no author, a paused or deleted author, the CEO as author, or one confirmed twice
  * in the last day goes straight to the CEO's stage. Returns the cards now in re-check, and which of them are at the CEO.
  */
-async function enterRecheck(db: Db, input: { cards: FlaggedCard[]; reason: string; now: Date }): Promise<{ rechecking: FlaggedCard[]; atCeo: Set<string> }> {
+async function enterRecheck(db: Db, input: { cards: FlaggedCard[]; reason: string; now: Date; notify?: ((n: NotifyInput) => Promise<unknown>) | null }): Promise<{ rechecking: FlaggedCard[]; atCeo: Set<string> }> {
   if (!input.cards.length) return { rechecking: [], atCeo: new Set() };
   await closeInvalidCards(db, { now: () => input.now }, { ids: input.cards.map((c) => c.id) });
   const still = await db
@@ -104,7 +108,27 @@ async function enterRecheck(db: Db, input: { cards: FlaggedCard[]; reason: strin
   const base = { staleAt: input.now, staleReason: input.reason, recheckStageAt: input.now };
   if (toAuthor.length) await db.update(decisions).set({ ...base, recheckStage: "author" }).where(and(inArray(decisions.id, toAuthor), eq(decisions.status, "open"), isNull(decisions.staleAt)));
   if (toCeo.length) await db.update(decisions).set({ ...base, recheckStage: "ceo" }).where(and(inArray(decisions.id, toCeo), eq(decisions.status, "open"), isNull(decisions.staleAt)));
+  if (input.notify) await tellOwnerIfOpen(db, rechecking.map((c) => c.id), input.now, input.notify).catch(() => undefined);
   return { rechecking, atCeo };
+}
+
+/**
+ * BOS-1691: a card the owner had open in the last 30 minutes (closed-notice.ts engagedRecently) that now leaves their
+ * list for a re-check gets a feed note, so it doesn't just vanish from under them. Decisions shows the line in its place.
+ */
+async function tellOwnerIfOpen(db: Db, ids: string[], now: Date, notify: (n: NotifyInput) => Promise<unknown>) {
+  if (!ids.length) return;
+  const rows = await db
+    .select({ id: decisions.id, companyId: decisions.companyId, createdAt: decisions.createdAt, context: decisions.context, tier: decisions.tier, question: decisions.question, staleAt: decisions.staleAt, staleReason: decisions.staleReason, recheckStage: decisions.recheckStage, recheckStageAt: decisions.recheckStageAt, by: agents.name })
+    .from(decisions)
+    .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
+    .where(and(inArray(decisions.id, ids), eq(decisions.status, "open")));
+  const hidden = await hiddenWhileRechecked(db, rows);
+  for (const r of rows) {
+    if (!hidden.has(r.id) || !reachedOwner(r) || !engagedRecently(r, now)) continue;
+    const line = recheckLine({ by: r.by ?? "the agent", reason: r.staleReason, backBy: recheckBackBy(r, RECHECK_AUTHOR_MS, RECHECK_CEO_MS) });
+    await notify({ companyId: r.companyId, level: "flag", title: "A card you had open is being re-checked", body: `"${r.question.split("\n")[0]!.slice(0, 120)}": ${line}`, link: "#/decisions" });
+  }
 }
 
 /** The author could not be woken (the wake was dropped): their cards go to the CEO now rather than after 30 minutes. */
@@ -149,7 +173,7 @@ type ActedResult ={ flaggedDecisions: string[]; flaggedTickets: string[]; woken:
  * waits on them) "may be out of date", mark their state notes stale, and wake each author
  * once to confirm or withdraw. Anything already flagged is left alone, so one action is one wake.
  */
-export async function ownerActed(db: Db, input: { companyId: string; ticketIds: string[]; reason: string; wake?: WakeFn | null; now?: Date; /** Agents already being woken for this action, so they get one note, not two. */ skipAgents?: Array<string | null> }): Promise<ActedResult> {
+export async function ownerActed(db: Db, input: { companyId: string; ticketIds: string[]; reason: string; wake?: WakeFn | null; now?: Date; /** Agents already being woken for this action, so they get one note, not two. */ skipAgents?: Array<string | null>; /** The owner's feed, told when a card they had open leaves their list for a re-check (BOS-1691). */ notify?: ((n: NotifyInput) => Promise<unknown>) | null }): Promise<ActedResult> {
   const now = input.now ?? new Date();
   const roots = [...new Set(input.ticketIds.filter((id): id is string => !!id))];
   if (!roots.length) return { flaggedDecisions: [], flaggedTickets: [], woken: [] };
@@ -160,7 +184,8 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   const noted = await db
     .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, state: tickets.systemState })
     .from(tickets)
-    .where(and(eq(tickets.companyId, input.companyId), inArray(tickets.id, scope), isNull(tickets.stateNoteStaleAt), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
+    // BOS-1860: the merge gate's own "retrying after a push/fetch failure" flag gives way to a real event like this one.
+    .where(and(eq(tickets.companyId, input.companyId), inArray(tickets.id, scope), or(isNull(tickets.stateNoteStaleAt), inArray(tickets.stateNoteStaleReason, [GIT_RETRY_NOTE, GIT_RETRY_CARD_NOTE])), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
   const flaggedTickets = noted.map((n) => n.id);
   if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now, stateNoteStaleReason: input.reason }).where(inArray(tickets.id, flaggedTickets));
 
@@ -188,7 +213,7 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
     .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), sql`not (${system})`, or(named, blocking, deployTicket, engagementCard)));
   // The query above already picked out the cards about these tickets (BOS-175). Boss Man checks them before any
   // author is asked (BOS-1193): a card it can see is dead closes, the rest go into "being re-checked".
-  const { rechecking: flagged, atCeo } = await enterRecheck(db, { cards: open, reason: input.reason, now });
+  const { rechecking: flagged, atCeo } = await enterRecheck(db, { cards: open, reason: input.reason, now, notify: input.notify });
   const flaggedDecisions = flagged.map((d) => d.id);
 
   // One wake per agent, naming what changed and what to do about it. Only an agent that actually
@@ -276,6 +301,19 @@ export async function runnerRebuilt(db: Db, input: { companyId: string; wake?: W
 }
 
 /**
+ * BOS-2085 (R54): a repo security alert opened or closed, so every open go-live card in the company may no longer be safe
+ * to approve (a release tagged before a high alert opened, or one an alert's closing now unblocks). Each goes into the
+ * re-check at the author stage with the alert named in the reason; a card already in re-check is left alone, so one alert is one wake.
+ */
+export async function securityAlertChanged(db: Db, input: { companyId: string; change: "opened" | "closed"; alert: string; wake?: WakeFn | null; now?: Date }) {
+  const open = await db
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, recheckedAt: decisions.recheckedAt, recheckCount: decisions.recheckCount })
+    .from(decisions)
+    .where(and(agentCardFilter(input.companyId), sql`(${decisions.context} ->> 'goLive') = 'true'`));
+  return flagCards(db, { cards: open, reason: `a repo security alert ${input.change} (${input.alert.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 120)})`, wake: input.wake, now: input.now ?? new Date(), companyId: input.companyId });
+}
+
+/**
  * A card's own ticket changed state well after the card was raised (BOS-1161): the work went on without the answer, or
  * someone moved it. Compared to the card's age plus a grace period, because raising a card that blocks its ticket moves
  * the ticket too. Run from the sweep, since ticket state moves from many places (a database trigger stamps each one).
@@ -322,7 +360,20 @@ export async function recheckDeadlines(db: Db, input: { wake?: WakeFn | null; no
   return { lapsed: lapsed.map((l) => l.id), movedToCeo: toCeo.map((c) => c.id) };
 }
 
-export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date };
+export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date; /** The answered card, for a decision (BOS-1591). */ cardId?: string; /** The ticket the card was about, like "BOS-976" (BOS-1591). */ ticketRef?: string | null; /** The owner's note on the card answer (BOS-1593). */ note?: string };
+
+/**
+ * Whether an answered card's answer stays true, so the same question asked again is a repeat (BOS-1591):
+ * not one the CEO settled (not the owner's word), and not a plan or a job for the owner's hands ("Done"),
+ * which can be asked again. Shared with the owner-answer search's refusal (BOS-1593).
+ */
+export function answerHoldsAsFact(ctx: { settled?: unknown; plan?: boolean; ownerMustDo?: boolean; steps?: unknown[] } | null | undefined): boolean {
+  if (!ctx) return true;
+  return !ctx.settled && !ctx.plan && !ctx.ownerMustDo && !ctx.steps?.length;
+}
+
+/** How far back a company-wide look for an answered question goes (BOS-1591). */
+export const ANSWERED_LOOKBACK_MS = 30 * 86_400_000;
 
 const askWords = (s: string) =>
   new Set(
@@ -366,9 +417,16 @@ export async function recentOwnerAnswer(db: Db, input: {
   decisionId?: string | null;
   /** Only a decision whose question closely matches `question` counts, whoever asked it (BOS-175). */
   question?: string;
+  /**
+   * Look at every question the owner answered in the company, not only cards about `ticketIds` (BOS-1591):
+   * the answer to "is the repo public?" sits on whichever ticket asked first. Needs `question`; defaults to
+   * the last 30 days; leaves out a question the CEO settled, which isn't the owner's word.
+   */
+  companyWide?: boolean;
 }): Promise<OwnerAnswer | null> {
   const ids = [...new Set(input.ticketIds.filter((id): id is string => !!id))];
-  const since = input.since ?? new Date(Date.now() - 7 * 86_400_000);
+  const wide = !!input.companyWide && input.question !== undefined && !input.decisionId;
+  const since = input.since ?? new Date(Date.now() - (wide ? ANSWERED_LOOKBACK_MS : 7 * 86_400_000));
   const found: OwnerAnswer[] = [];
 
   // The ticket ids this card holds up are already known, so the check is one row read, no extra query.
@@ -389,6 +447,31 @@ export async function recentOwnerAnswer(db: Db, input: {
     if (input.decisionTypes && !input.decisionTypes.includes(type ?? "")) return null;
     if (input.question !== undefined && !similarQuestion(input.question, d.question)) return null;
     found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt });
+  } else if (wide) {
+    const answered = await db
+      .select({ id: decisions.id, context: decisions.context, question: decisions.question, answer: decisions.answer, answeredAt: decisions.answeredAt })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "answered"), gt(decisions.answeredAt, since)))
+      .orderBy(desc(decisions.answeredAt))
+      .limit(500);
+    for (const d of answered) {
+      if (!d.answer || !d.answeredAt) continue;
+      const ctx = (d.context as { type?: string; ticketId?: string; settled?: unknown; plan?: boolean; ownerMustDo?: boolean; steps?: unknown[] } | null) ?? {};
+      if (input.decisionTypes && !input.decisionTypes.includes(ctx.type ?? "")) continue;
+      if (!answerHoldsAsFact(ctx)) continue;
+      if (!similarQuestion(input.question!, d.question)) continue;
+      let ticketId = ctx.ticketId ?? null;
+      if (!ticketId) {
+        const [dep] = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id)).limit(1);
+        ticketId = dep?.id ?? null;
+      }
+      // The company's own prefix (BOS-1593: it was always "BOS-", wrong for every other company).
+      const [tk] = ticketId ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId)) : [];
+      const note = (d.context as { answerNote?: unknown } | null)?.answerNote;
+      // The owner's note is often the real answer ("Yes" + "Done, I've made it public."), so it is quoted too (BOS-1593).
+      found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt, cardId: d.id, ticketRef: tk ? ticketRef(tk.prefix, tk.number) : null, ...(typeof note === "string" && note.trim() ? { note: note.trim() } : {}) });
+      break; // newest first: the latest match is the one quoted
+    }
   } else if (ids.length) {
     // A card is about a ticket when its context names it by id, or when it blocks one. Both filters
     // run in SQL, so an owner action doesn't run one query per answered card (BOS-175). Compared as
@@ -423,8 +506,23 @@ export async function recentOwnerAnswer(db: Db, input: {
   return found.sort((a, b) => b.at.getTime() - a.at.getTime())[0] ?? null;
 }
 
+/**
+ * The duplicate-ask check every new owner card and "needs you" notice runs (BOS-123, BOS-1591): an answer to a
+ * close question on this ticket or the tickets it waits on, else one anywhere in the company in the last 30 days.
+ */
+export async function answeredBefore(db: Db, input: { companyId: string; ticketId?: string | null; question: string }): Promise<OwnerAnswer | null> {
+  const ticketIds: string[] = [];
+  if (input.ticketId) {
+    const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
+    ticketIds.push(input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id));
+  }
+  const base = { companyId: input.companyId, includeMessages: false, decisionTypes: ["question"], question: input.question };
+  return (ticketIds.length ? await recentOwnerAnswer(db, { ...base, ticketIds }) : null) ?? (await recentOwnerAnswer(db, { ...base, ticketIds: [], companyWide: true }));
+}
+
 /** A short quoted reading of an earlier owner answer, for a refusal or a card. */
 export function quotedAnswer(a: OwnerAnswer, at = (d: Date) => d.toISOString().slice(0, 16).replace("T", " ")): string {
   const what = a.kind === "decision" && a.question ? `your question "${a.question}"` : "this ticket";
-  return `The owner already answered ${what} on ${at(a.at)} UTC: "${a.answer}"`;
+  const where = a.cardId ? ` (card ${a.cardId}${a.ticketRef ? ` on ${a.ticketRef}` : ""})` : "";
+  return `The owner already answered ${what}${where} on ${at(a.at)} UTC: "${a.answer}"${a.note ? `; their note: "${a.note.length > 300 ? `${a.note.slice(0, 299)}…` : a.note}"` : ""}`;
 }

@@ -2,9 +2,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
+import { issueRunToken } from "../src/mcp.js";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, decisions, engagements, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, costEvents, decisions, ticketDependencies, engagements, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 afterEach(async () => {
@@ -17,7 +20,7 @@ async function setup() {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH" | "DELETE", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const mk = async (name: string) => (await req("POST", "/api/companies", { name })).json() as { company: { id: string }; ceo: { id: string } };
   const appCo = await mk("App Co");
   const homelab = await mk("Homelab Co");
@@ -39,6 +42,39 @@ async function setup() {
   const status = async (id: string) => (await db.select().from(engagements).where(eq(engagements.id, id)))[0]!.status;
   return { ...built, db, close, req, appCo, homelab, appProject, opsProject, request, act, status };
 }
+
+describe("waiting on an engagement twice (BOS-1978)", () => {
+  it("returns the existing wait: one row, one activity line", async () => {
+    ctx = await setup();
+    const e = await ctx.request();
+    const launch = (await ctx.req("POST", `/api/projects/${ctx.appProject.id}/tickets`, { title: "Launch beta", state: "blocked", assigneeAgentId: ctx.appCo.ceo.id })).json();
+    const first = (await ctx.req("POST", `/api/tickets/${launch.id}/dependencies`, { engagementId: e.id })).json();
+    const second = (await ctx.req("POST", `/api/tickets/${launch.id}/dependencies`, { engagementId: e.id })).json();
+    expect(second.id).toBe(first.id);
+    expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, launch.id))).toHaveLength(1);
+    const lines = (await ctx.db.select().from(activity).where(eq(activity.ticketId, launch.id))).filter((a) => a.kind === "dependency");
+    expect(lines).toHaveLength(1);
+  });
+});
+
+describe("old duplicate engagement waits (BOS-1978)", () => {
+  it("still loads, and either row can be removed", async () => {
+    ctx = await setup();
+    const e = await ctx.request();
+    const launch = (await ctx.req("POST", `/api/projects/${ctx.appProject.id}/tickets`, { title: "Launch beta", state: "blocked", assigneeAgentId: ctx.appCo.ceo.id })).json();
+    const rows = await ctx.db
+      .insert(ticketDependencies)
+      .values([
+        { blockedTicketId: launch.id, blockerEngagementId: e.id },
+        { blockedTicketId: launch.id, blockerEngagementId: e.id },
+      ])
+      .returning();
+    expect((await ctx.req("GET", `/api/tickets/${launch.id}`)).statusCode).toBe(200);
+    expect((await ctx.req("DELETE", `/api/dependencies/${rows[0]!.id}`)).statusCode).toBe(204);
+    expect((await ctx.req("DELETE", `/api/dependencies/${rows[1]!.id}`)).statusCode).toBe(204);
+    expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, launch.id))).toHaveLength(0);
+  });
+});
 
 describe("engagement lifecycle (R23)", () => {
   it("runs from request to sign-off, freeing the requester's waiting ticket", async () => {
@@ -106,7 +142,7 @@ describe("engagement lifecycle (R23)", () => {
   it("refuses anything that looks like a credential (R24)", async () => {
     ctx = await setup();
     const e = await ctx.request();
-    const res = await ctx.act(e.id, "requester", { action: "message", message: "Use this token: sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUv" });
+    const res = await ctx.act(e.id, "requester", { action: "message", message: `Use this token: ${"sk-ant-oat01"}-AbCdEfGhIjKlMnOpQrStUv` /* joined: no key-shaped line for the secret scans (BOS-1932) */ });
     expect(res.statusCode).toBe(422);
     expect(res.json().message).toMatch(/an Anthropic key or token/);
     const view = (await ctx.req("GET", `/api/engagements/${e.id}`)).json();
@@ -158,7 +194,7 @@ describe("charge-back (R26)", () => {
     const reg = (await ctx.req("POST", `/api/companies/${ctx.homelab.company.id}/runner`)).json() as { runnerId: string };
     const sent: RunnerCommand[] = [];
     ctx.runners.connect(reg.runnerId, (c) => (sent.push(c), true));
-    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Roll out v1.4", engagementId: e.id }).returning();
+    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Roll out v1.4", engagementId: e.id, assigneeAgentId: ctx.homelab.ceo.id }).returning();
     await ctx.db.delete(wakes);
     await ctx.scheduler.wake({ agentId: ctx.homelab.ceo.id, ticketId: t!.id, reason: "assigned" });
     await ctx.scheduler.tick();
@@ -193,5 +229,63 @@ describe("charge-back (R26)", () => {
     const all = await ctx.engagements.view(e.id, ctx.homelab.company.id, true);
     expect(all.thread).toHaveLength(25);
     expect(all).not.toHaveProperty("earlierNotShown");
+  });
+});
+
+// BOS-2165: the page polls the list every 15 s and an agent's list goes into its context, so both come 50 at a time, newest first.
+describe("engagement list paging", () => {
+  // 55 engagements; pairs share a created time, as rows saved in one batch can.
+  const seed = async (c: Awaited<ReturnType<typeof setup>>) => {
+    const t0 = Date.parse("2026-11-01T00:00:00Z");
+    await c.db.insert(engagements).values(
+      Array.from({ length: 55 }, (_, i) => ({ requesterCompanyId: c.appCo.company.id, providerCompanyId: c.homelab.company.id, title: `e${i}`, scope: "s", createdAt: new Date(t0 + Math.floor(i / 2) * 1000) })),
+    );
+  };
+
+  it("pages newest first for the owner, with no row twice or missed", async () => {
+    ctx = await setup();
+    await seed(ctx);
+    const first = (await ctx.req("GET", "/api/engagements")).json() as Array<{ id: string; title: string }>;
+    expect(first).toHaveLength(50);
+    expect(first[0]!.title).toBe("e54");
+    // e4 and e5 share a created time, so either is the 50th.
+    expect(["e4", "e5"]).toContain(first.at(-1)!.title);
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 40; page++) {
+      const rows = (await ctx.req("GET", `/api/engagements?limit=2${before ? `&before=${before}` : ""}`)).json() as Array<{ id: string; title: string }>;
+      seen.push(...rows.map((r) => r.title));
+      if (rows.length < 2) break;
+      before = rows.at(-1)!.id;
+    }
+    expect(seen).toHaveLength(55);
+    expect(new Set(seen).size).toBe(55);
+    expect((await ctx.req("GET", "/api/engagements?limit=100000")).json()).toHaveLength(55);
+    expect((await ctx.req("GET", "/api/engagements?limit=0")).statusCode).toBe(400);
+    expect((await ctx.req("GET", "/api/engagements?limit=abc")).statusCode).toBe(400);
+  });
+
+  it("gives an agent 50 with a note on how to see older ones", async () => {
+    ctx = await setup();
+    await seed(ctx);
+    await ctx.app.listen({ host: "127.0.0.1", port: 0 });
+    const token = await issueRunToken(ctx.db, { companyId: ctx.homelab.company.id, agentId: ctx.homelab.ceo.id, runId: randomUUID() });
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(ctx.app.server.address() as { port: number }).port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    try {
+      const txt = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]!.text;
+      const page = JSON.parse(txt(await client.callTool({ name: "engagement", arguments: { action: "list" } }))) as { engagements: Array<{ id: string; title: string }>; more: string };
+      expect(page.engagements).toHaveLength(50);
+      expect(page.engagements[0]!.title).toBe("e54");
+      const last = page.engagements.at(-1)!.id;
+      expect(page.more).toBe(`Showing the 50 newest. For older ones, list again with before: "${last}".`);
+      const rest = JSON.parse(txt(await client.callTool({ name: "engagement", arguments: { action: "list", before: last } }))) as Array<{ title: string }>;
+      // A plain array once nothing is left: no "more" note.
+      expect(Array.isArray(rest)).toBe(true);
+      expect(rest).toHaveLength(5);
+      expect(new Set([...page.engagements, ...rest].map((e) => e.title)).size).toBe(55);
+    } finally {
+      await client.close();
+    }
   });
 });

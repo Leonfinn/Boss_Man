@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# A 2-5 minute check of what this branch changed, for authors and reviewers. Only the merge gate runs the full
-# scripts/check-all.sh. Prints one PASS/FAIL line per step (output of a failed step follows it) and exits 1 on any failure,
+# A 2-5 minute check of what this branch changed, for authors and reviewers. What runs at the merge gate depends on the
+# ticket's risk (deepChecks in packages/shared/src/risk.ts): high and critical get the full scripts/check-all.sh after this
+# script (BOSSMAN_FULL_CHECK_NEXT); trivial, low and medium get only this script, with BOSSMAN_MERGE_CHECK set, which adds the
+# whole-repo tests of each touched package (BOS-1732) and never skips related tests. GitHub CI is the first full run for those.
+# Prints one PASS/FAIL line per step (output of a failed step follows it) and exits 1 on any failure,
 # or 75 when nothing failed but the heavy phase never got a check slot (check-all exit 75; the merge gate retries).
 # BASE (default origin/main) is the branch to compare with. Tests stub the commands through PATH.
 # Typecheck and vitest are heavy (1-1.5 GB, up to an hour), so they run only while holding the merge gate's one-slot check lock
@@ -52,7 +55,7 @@ failed=0 skipped=0 partial=0
 # the same tree and base reuses it instead of running again; any change to the files or to the base runs it again.
 # A FORCE_RELATED run reuses only a coverage=all pass. The merge gate (BOSSMAN_MERGE_CHECK) never reuses, and
 # CHECK_QUICK_RERUN=1 runs anyway. The slot log is shared and writable by every agent, so a reused pass is a convenience,
-# not evidence: the merge gate's own full check is what decides a merge.
+# not evidence: the merge gate's own run decides a merge.
 slotlog=${CHECK_ALL_SLOT_LOG:-${CHECK_ALL_LOCK:-/tmp/bossman-check-all}.slotlog}
 clean_tree() { [ -z "$(git status --porcelain 2>/dev/null)" ] && git rev-parse 'HEAD^{tree}' 2>/dev/null; }
 tree="" base_commit=""
@@ -73,42 +76,163 @@ if [ -n "$tree" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_QUICK_RE
     cov=${prev#* coverage=}; cov=${cov%% *}
     echo "PASS  reused: this exact tree ($tree) already passed check-quick against $base at ${prev%% *} (coverage=$cov); not running it again (CHECK_QUICK_RERUN=1 runs it anyway)"
     quick_log quick-reuse "$cov"
-    echo "check-quick: all steps passed (the merge gate still runs the full check)"
+    echo "check-quick: all steps passed (the merge gate also runs the whole-repo tests of the packages you touched; high and critical tickets get the full check too)"
     return 0
   fi
 fi
 
 step() { # step <label> <command...>
-  local label=$1 out rc=0; shift
-  out="$("$@" 2>&1)" || rc=$?
+  local label=$1 out rc=0 f pid began next took n naps=0 every; shift
+  # BOS-2219: a step's output is held until it ends, so the server tests printed nothing for 14 to 16 minutes on a slow check
+  # host, against the queue's 20-minute no-output limit (a slow run looked like a hang). While a step runs, a line every
+  # CHECK_QUICK_PROGRESS_SECONDS (default 180) says it is still going, with the test files vitest has finished so far.
+  # The command runs in the background with its output in a file, and this shell polls it with short sleeps it waits for:
+  # a separate ticker process would outlive the step in its last sleep and keep the check slot's lock fd open.
+  every="${CHECK_QUICK_PROGRESS_SECONDS:-180}"; [[ "$every" =~ ^[1-9][0-9]*$ ]] || every=180
+  if ! f="$(mktemp 2>/dev/null)"; then out="$("$@" 2>&1)" || rc=$?
+  else
+    "$@" >"$f" 2>&1 </dev/null &
+    pid=$! began=$SECONDS next=$every
+    while kill -0 "$pid" 2>/dev/null; do
+      # Quick steps (most of them) end within the first short naps; a long one is looked at once a second.
+      if [ "$naps" -lt 20 ]; then naps=$((naps + 1)); sleep 0.1; else sleep 1; fi
+      took=$((SECONDS - began))
+      [ "$took" -ge "$next" ] || continue
+      next=$((next + every))
+      # vitest prints one " ✓ test/x.test.ts (n tests)" line per finished file (❯ or × when it failed, ↓ when skipped).
+      n=$(grep -cE '^ *(✓|×|❯|↓) [^ ]+\.(test|spec)\.' "$f" 2>/dev/null) || n=0
+      echo "      $label: $([ "$took" -ge 60 ] && echo "$((took / 60))m" || echo "${took}s"), still running$([ "$n" -gt 0 ] && echo " ($n test files done)")"
+    done
+    wait "$pid" || rc=$?
+    out="$(cat "$f")"; rm -f "$f"
+  fi
   if [ "$rc" -eq 0 ]; then echo "PASS  $label"; else echo "FAIL  $label (exit $rc)"; printf '%s\n' "$out" | tail -n 40 | sed 's/^/      /'; failed=1; fi
 }
 has() { grep -Eq "$1" <<<"$changed"; }
+
+# BOS-1628: install_packages (retry on a machine fault, exit 75 plus the marker) is shared with check-all.sh.
+# shellcheck source=scripts/install-packages.sh
+. "$(dirname "${BASH_SOURCE[0]}")/install-packages.sh"
+env_fault=0
+# The list guards first (BOS-1727): four lists kept by hand (in-memory state notes, the owner's controls, wake classes, the screen
+# inventory) failed 25 quick checks in 3 days, each only after 9 to 13 minutes. They run in the first minute, each only when a
+# file it reads changed, and a failure names the file to edit and the line to add (scripts/check-guards.sh). Each still fails
+# for a screen, control or wake reason changed without its record: only the order changed, nothing was loosened.
+if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
+  if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
+  g_wake=0 g_owner=0 g_screen=0
+  # The full check that runs next (BOSSMAN_FULL_CHECK_NEXT) starts with these guards itself (check-all.sh), after its own install.
+  [ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ] || {
+  has '^apps/server/src/|^apps/server/test/wake-classes\.test\.ts$|^scripts/check-guards\.sh$' && g_wake=1
+  has '^apps/web/src/pages/|^apps/web/src/components/|^packages/shared/src/owner-controls\.ts$|^apps/server/test/owner-control-list\.test\.ts$|^scripts/check-guards\.sh$' && g_owner=1
+  has '^apps/web/src/|^apps/web/test/screen-(inventory|scan)|^scripts/check-guards\.sh$' && g_screen=1
+  }
+  if [ $((g_wake + g_owner + g_screen)) -gt 0 ] && [ ! -d node_modules ]; then
+    # A fresh tree (the queued check job) has no packages yet; install them here, as the later install step would.
+    before=$failed failed=0 irc=0
+    iout="$(install_packages 2>&1)" || irc=$?
+    if [ "$irc" -eq 0 ]; then echo "PASS  install packages (fresh tree, no node_modules)"
+    else
+      echo "FAIL  install packages (fresh tree, no node_modules) (exit $irc)"; printf '%s\n' "$iout" | tail -n 40 | sed 's/^/      /'; failed=1
+      [ "$irc" -ne 75 ] || [ "$before" -ne 0 ] || env_fault=1
+    fi
+    install_failed=$failed failed=$((before | failed))
+    install_tried=1 install_tried_failed=$install_failed
+    [ "$install_failed" -eq 0 ] || { g_wake=0 g_owner=0 g_screen=0; echo "SKIP  list guards: the install failed"; }
+  fi
+  [ "$g_wake" -eq 0 ] || step "guard: wake classes (every wake reason has a class)" scripts/check-guards.sh wake-classes
+  # BOS-2058: same trigger (any server source): every update wait has a rule, and no new file reads an update hold.
+  [ "$g_wake" -eq 0 ] || step "guard: update waits (every wait has an end and words)" scripts/check-guards.sh update-waits
+  [ "$g_owner" -eq 0 ] || step "guard: owner controls (every button and field is listed)" scripts/check-guards.sh owner-controls
+  [ "$g_screen" -eq 0 ] || step "guard: screen inventory (screen-inventory.txt is current)" scripts/check-guards.sh screen-inventory
+fi
 
 # Tests that find their source files by path (readFileSync, readdirSync) instead of importing them: vitest related can't
 # see a change to those files, so only an entry here makes the test run for it (BOS-881). Add an entry when a test reads
 # files by path; one line per test, its package and the path prefixes it reads:
 #   "<package dir> <test file under that package> <path prefix> [<path prefix>...]"
-path_reads=(
-  "apps/server test/owner-control-list.test.ts apps/web/src/pages/ apps/web/src/components/ packages/shared/src/owner-controls.ts"
-  # DR-050/BOS-972: the image-holds-no-Anthropic test reads the Dockerfile and package.json by path; the pack
-  # test reads apps/runner/claude-pack by path. Either changing must re-run its test.
-  "apps/runner test/no-anthropic-code.test.ts apps/runner/Dockerfile apps/runner/package.json"
-  "apps/runner test/claude-pack.test.ts apps/runner/claude-pack/"
-)
-path_read_tests() { # path_read_tests <package dir>: the path-reading tests of that package whose paths the branch changed
-  local d=$1 f p hit
-  for entry in "${path_reads[@]}"; do
-    # shellcheck disable=SC2086  # split the entry into its words: package dir, test file, then its path prefixes
-    set -- $entry
-    [ "$1" = "$d" ] || continue
-    f=$2 hit=0
-    for p in "${@:3}"; do
-      if [ -d "$p" ]; then has "^${p%/}/" && hit=1
-      else has "^${p}$" && hit=1; fi
+#
+# BOS-1732: the hand list that stood here (about 10 tests) is gone. At the merge gate every "whole-repo" test of each package
+# the branch touches runs, found by what the test contains, so a new test of either kind is picked up with nothing to add:
+#   - it reads repo files by path: a read call (readFileSync, readdirSync, ...) and a way to find the repo (import.meta.url,
+#     __dirname, process.cwd()) in the same file: ratchets, inventories, lints;
+#   - it renders the built app in a browser (apps/web only): the file uses real-page, playwright or chromium.
+# Without that, main went red at our gate five times (BOS-1733) on tests that reach the code without importing it.
+# A hand run does not run them (up to about 100 files); CHECK_QUICK_WHOLE_REPO=1 runs them anyway.
+whole_repo_read='readFileSync|readdirSync|readFile\(|readdir\(|statSync|existsSync|git ls-files'
+whole_repo_locate='import\.meta\.(url|dirname)|__dirname|process\.cwd\(\)'
+whole_repo_browser='real-page|playwright|chromium'
+whole_repo_on() { [ -n "${BOSSMAN_MERGE_CHECK:-}" ] || [ -n "${CHECK_QUICK_WHOLE_REPO:-}" ]; }
+# BOS-1789: a whole-repo test also reads files of another package (the server's owner-control-list.test.ts reads apps/web, the
+# runner tests read apps/runner/Dockerfile). Which packages a test reads is taken from the package paths its text names (and its
+# helpers' text): "apps/web", "packages/shared", or the relative form "../../web/src". The gate then runs such a test when the
+# branch changes that other package, not only its own. Known limit: a path built from pieces that never name the package is missed.
+whole_repo_pkg_re='(apps|packages)/(launcher|runner|server|web|site|shared)([^A-Za-z0-9_-]|$)|\.\./(launcher|runner|server|web|site|shared)/'
+whole_repo_pkgs_in() { # whole_repo_pkgs_in <file>...: the package dirs those files name by path, one per line
+  { grep -ohE "$whole_repo_pkg_re" "$@" 2>/dev/null || true; } | sed -E 's#^(apps|packages)/([a-z]+).*#\1/\2#; s#^\.\./shared/#packages/shared#; s#^\.\./([a-z]+)/#apps/\1#' | sort -u
+}
+whole_repo_imports() { # whole_repo_imports <file> <helper>: the file imports the helper (relative, aliased, .js suffix, import() or require())
+  local b
+  b="$(basename "$2")"; b="${b%.*}"
+  grep -qE "(from|import|require)[[:space:](]*[\"']([^\"']*[/#])?$b(\.(js|jsx|ts|tsx|mjs|mts))?[\"']" "$1" 2>/dev/null
+}
+whole_repo_closure() { # whole_repo_closure <file> <helper>...: the file and every helper it imports, directly or through other helpers
+  local seen=" $1 " queue=$1 next f h
+  shift
+  while [ -n "$queue" ]; do
+    next=""
+    for f in $queue; do
+      for h in "$@"; do
+        case "$seen" in *" $h "*) continue ;; esac
+        if whole_repo_imports "$f" "$h"; then seen="$seen$h "; next="$next $h"; fi
+      done
     done
-    [ "$hit" -eq 1 ] && echo "$f"
+    queue=$next
   done
+  echo "$seen"
+}
+whole_repo_tests() { # whole_repo_tests <package dir> [<touched dir>...]: its whole-repo test files to run, relative to the package, sorted
+  # With no touched list the package itself counts as touched. A test runs when its package is touched, or when a package it reads is.
+  local d=$1 all cands helpers new f t h reads p want out=""
+  shift
+  local touched=("$@")
+  [ "${#touched[@]}" -gt 0 ] || touched=("$d")
+  all="$(find "$d" -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) -print 2>/dev/null)" || all=""
+  [ -n "$all" ] || return 0
+  # A test may read through a helper in its test folder, at any depth (screen-inventory.test.ts imports screen-scan.ts): the helper
+  # counts too, and so does a helper that only imports a reading helper, until no new one turns up.
+  cands="$(find "$d/test" -name node_modules -prune -o -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.js' -o -name '*.mjs' \) ! -name '*.test.*' -print 2>/dev/null)" || cands=""
+  # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+  helpers=" $({ grep -lE "$whole_repo_read" $cands 2>/dev/null || true; } | { xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true; } | tr '\n' ' ')"
+  while :; do
+    new=""
+    for f in $cands; do
+      case "$helpers" in *" $f "*) continue ;; esac
+      for h in $helpers; do
+        if whole_repo_imports "$f" "$h"; then new="$new $f"; break; fi
+      done
+    done
+    [ -n "$new" ] || break
+    helpers="$helpers$new "
+  done
+  # shellcheck disable=SC2086
+  want="$({
+    { grep -lE "$whole_repo_read" $all 2>/dev/null || true; } | xargs -r grep -lE "$whole_repo_locate" 2>/dev/null || true
+    for t in $all; do
+      for h in $helpers; do
+        if whole_repo_imports "$t" "$h"; then echo "$t"; break; fi
+      done
+    done
+    [ "$d" != apps/web ] || grep -lE "$whole_repo_browser" $all 2>/dev/null || true
+  } | sort -u)"
+  for t in $want; do
+    # shellcheck disable=SC2046,SC2086  # one argument per file; paths have no spaces
+    reads="$d $(whole_repo_pkgs_in $(whole_repo_closure "$t" $helpers))"
+    for p in $reads; do
+      case " ${touched[*]} " in *" $p "*) out="$out$t"$'\n'; break ;; esac
+    done
+  done
+  printf '%s' "$out" | sed "s#^$d/##"
   return 0
 }
 
@@ -120,12 +244,6 @@ done
 if has '^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*\.json)$' || has '^packages/shared/'; then
   pkgs=(apps/launcher apps/runner apps/server apps/web packages/shared)
 fi
-# A path-reading test lives in a package the branch may not have touched (the owner-controls test reads web pages from
-# apps/server), so its package joins the list whenever one of its paths changed.
-for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
-  [ -z "$(path_read_tests "$d")" ] && continue
-  [[ " ${pkgs[*]} " == *" $d "* ]] || pkgs+=("$d")
-done
 
   if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
   # The merge gate renumbers a branch's new migration when migration bookkeeping is the only clash (BOS-690, DR-037), so
@@ -180,8 +298,14 @@ done
   if [ -f scripts/scan-added-lines.mjs ]; then
     step "secrets scan" node scripts/scan-added-lines.mjs "$base"
   fi
-  # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
-  if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
+  # BOS-1549: two guides in docs/ must not share a number, counting pages main added since this branch left it. Runs on
+  # every branch (it takes well under a second), since a clash can come from main even when the branch touched no doc.
+  step "docs numbers are unique" node scripts/check-doc-numbers.mjs "$base"
+  # BOS-1894: a secret file docker-compose.yml names must be created in step 3 of docs/00 (compose refuses to start without it).
+  if has '^docker-compose\.yml$|^docs/00-first-time-install\.md$|^scripts/check-compose-secrets-docs'; then step "compose secrets are in the install guide" node scripts/check-compose-secrets-docs.mjs; fi
+  # The in-memory-state lint (BOS-460, 492, 516, 702) now runs with the other list guards, first (BOS-1727).
+  # BOS-1728: the ratchet for bare sleeps, elapsed-time limits, fresh Date.now() sums and fixed-length reads in test files (CLAUDE.md "Writing tests").
+  if has '(^|/)test/|\.(test|spec)\.(ts|tsx|mjs|js)$|^scripts/(check-test-lines|test-lines-baseline)'; then step "test-lines ratchet" node scripts/check-test-lines.mjs; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
   # Compose files and CI workflows (BOS-1036): validated by the Docker CLI's compose plugin (no daemon, no socket) and actionlint.
   # A runner image built before they were added has neither tool: that is a SKIP naming the fix, not a failure.
@@ -218,14 +342,22 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     # shellcheck disable=SC2086  # one argument per file; paths have no spaces
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
   done
-  # A path-reading test the related list can't reach runs on its own, from its package (same slot, its setup files apply).
-  for d in "${pkgs[@]}"; do
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
+  # Whole-repo tests (BOS-1732) the related list can't reach: one vitest run per package, from its package folder (same slot,
+  # its setup files apply). Named files, so vitest-guard accepts it inside the slot.
+  if whole_repo_on; then
+    # BOS-1789: every package is looked at, not only the touched ones: a test that reads a touched package runs too.
+    for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
+      [ "${#pkgs[@]}" -gt 0 ] || break
+      files="$(whole_repo_tests "$d" "${pkgs[@]}")"
+      [ -n "$files" ] || continue
       name="$(node -p "require('./$d/package.json').name")"
-      step "path-reading test ${f##*/} ($d)" pnpm --filter "$name" exec vitest related --run "$f"
-    done <<<"$(path_read_tests "$d")"
-  done
+      # The browser tests of apps/web open the built app (apps/web/dist) and skip when it is missing: build it first, here in
+      # the slot, so they really run. The build step after the slot wait is then left out (web_built_early).
+      if [ "$d" = apps/web ] && [[ " ${pkgs[*]} " == *" apps/web "* ]]; then step "build web (before the browser tests)" pnpm --filter @boss-man/web build; fi
+      # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+      step "whole-repo tests ($d, $(grep -c . <<<"$files") files)" pnpm --filter "$name" exec vitest run $files
+    done
+  fi
   return "$failed"
 fi
 
@@ -243,7 +375,6 @@ need_slot=0
 [ "${#pkgs[@]}" -eq 0 ] || need_slot=1
 for d in "${pkgs[@]}" apps/site; do
   files="$(related_files "$d")"
-  [ -n "$(path_read_tests "$d")" ] && need_slot=1
   [ -n "$files" ] || continue
   if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"; partial=1
   else need_slot=1; fi
@@ -253,9 +384,20 @@ done
 # the install never holds a check slot. The queue job sets the shared pnpm store (BOS-655), so this is quick when warm.
 # A tree that already has node_modules (an agent's checkout) is left as it is.
 web_build=0; ! has '^apps/web/|^packages/shared/' || web_build=1
-if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
-  before=$failed failed=0
-  step "install packages (fresh tree, no node_modules)" pnpm install --frozen-lockfile --prefer-offline
+if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ -n "${install_tried:-}" ] && [ ! -d node_modules ]; then
+  # The list guards above already tried the install on this tree: do not try (and retry) it a second time.
+  if [ "$install_tried_failed" -ne 0 ]; then
+    echo "SKIP  typecheck, related tests, web build: the install failed"; need_slot=0 web_build=0
+  fi
+elif { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
+  before=$failed failed=0 irc=0
+  iout="$(install_packages 2>&1)" || irc=$?
+  if [ "$irc" -eq 0 ]; then echo "PASS  install packages (fresh tree, no node_modules)"
+  else
+    echo "FAIL  install packages (fresh tree, no node_modules) (exit $irc)"; printf '%s\n' "$iout" | tail -n 40 | sed 's/^/      /'; failed=1
+    # A machine fault with nothing else wrong so far: say so, so the check is retried, not blamed on the branch.
+    [ "$irc" -ne 75 ] || [ "$before" -ne 0 ] || env_fault=1
+  fi
   install_failed=$failed failed=$((before | failed))
   # Without packages every later pnpm step fails too: don't take a check slot just to say so again.
   if [ "$install_failed" -ne 0 ]; then
@@ -274,11 +416,17 @@ if [ "$need_slot" -eq 1 ]; then
   elif [ "$rc" -ne 0 ]; then failed=1; fi
 fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
-if [ "$web_build" -eq 1 ]; then step "build web" pnpm --filter @boss-man/web build; fi
+# At the gate the heavy phase already built the web app when apps/web has whole-repo tests (web_built_early).
+web_built_early=0
+if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web "${pkgs[@]}")" ]; then
+  for d in "${pkgs[@]}"; do [ "$d" != apps/web ] || web_built_early=1; done
+fi
+if [ "$web_build" -eq 1 ] && [ "$web_built_early" -eq 0 ]; then step "build web" pnpm --filter @boss-man/web build; fi
 
+if [ "$failed" -ne 0 ] && [ "$env_fault" -eq 1 ]; then echo "$ENV_FAULT_MARKER: nothing of the branch was checked (exit 75)"; return 75; fi
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
-echo "check-quick: all steps passed (the merge gate still runs the full check)"
+echo "check-quick: all steps passed (the merge gate also runs the whole-repo tests of the packages you touched; high and critical tickets get the full check too)"
 # Recorded only when the files are still exactly the tree the run started on (nothing edited while it ran).
 [ -z "$tree" ] || [ "$(clean_tree)" != "$tree" ] || quick_log quick-pass "$([ "$partial" = 1 ] && echo partial || echo all)"
 return 0

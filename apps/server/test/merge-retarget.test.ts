@@ -14,6 +14,7 @@ import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
 import { checkJobs, projects, settings, tickets } from "../src/db/schema.js";
 import { approveAndWait } from "./helpers.js";
+import { holdView } from "../src/services/review-holds.js";
 
 let shared: Awaited<ReturnType<typeof sharedDatabase>>;
 let app: ReturnType<typeof buildApp> | undefined;
@@ -37,7 +38,7 @@ async function setup() {
   const { db } = shared;
   const built = await (app ??= buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" }));
   const cookie = await signedInOwner(db);
-  const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Customer app" })).json() as { id: string };
@@ -104,7 +105,8 @@ describe("a waiting merge takes the new main (BOS-1344)", () => {
 
   it("leaves the job alone when the setting is off", async () => {
     const c = await setup();
-    await c.db.insert(settings).values({ key: "merge_retarget", value: false });
+    // BOS-1900: turned off the way the owner does it, with the Settings → Checks switch's route.
+    expect((await c.req("PUT", "/api/settings/merge-carry", { refresh: false })).json()).toMatchObject({ refresh: false });
     const res = approveAndWait(c.req, c.ticket.id);
     const job = await c.jobOf();
     c.state.mainMoved = true;
@@ -145,6 +147,26 @@ describe("a waiting merge takes the new main (BOS-1344)", () => {
     expect(job.priority).toBe(0);
     await c.db.update(checkJobs).set({ state: "cancelled", reason: "test over", endedAt: new Date() }).where(eq(checkJobs.id, job.id));
     await res;
+  });
+
+  // BOS-1805 (18 Nov): merges already in flight when BOS-1762 (a merge-check fix) merged kept rebuilding on each main
+  // move and queued new 30-50 min checks past the fix's hold; the hold was only read when an attempt began or failed.
+  it("a merge-check fix marked mid-attempt holds the merge before it rebuilds on a moved main: no second check is queued", async () => {
+    const c = await setup();
+    await c.db.insert(settings).values({ key: "merge_retarget", value: false });
+    const res = approveAndWait(c.req, c.ticket.id);
+    const job = await c.jobOf();
+    const [mine] = await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id));
+    // While its check runs, another ticket in the project is marked as fixing the merge check (open, so not in force).
+    await c.db.insert(tickets).values({ companyId: mine!.companyId, projectId: mine!.projectId, title: "Fix the merge check", systemState: "in_progress", fixesMergeCheck: true });
+    c.state.mainMoved = true;
+    await c.db.update(checkJobs).set({ state: "passed", exitCode: 0, startedAt: new Date(), endedAt: new Date() }).where(eq(checkJobs.id, job.id));
+    // finish refuses the old tree (main moved); before, the landing prepared again and queued a new job for the new tree.
+    expect((await res).json()).toMatchObject({ outcome: "held" });
+    expect(c.state.finishTree).toBe(OLD.tree);
+    expect(c.state.prepares).toBe(1);
+    expect(await c.db.select({ id: checkJobs.id }).from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).toHaveLength(1);
+    expect((await holdView(c.db, c.ticket.id))?.system).toBe(true);
   });
 
   it("does not touch a job a runner has already started", async () => {

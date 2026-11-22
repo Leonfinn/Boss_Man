@@ -88,7 +88,11 @@ async function setup() {
   // A stalled-run card climbs the alert ladder now (DR-017): it belongs to the Scrum Master/CEO, never the
   // owner's queue unless it is an owner kind. These tests read the card itself, whatever rung holds it, in
   // the CEO's own view (which carries the same evidence and reasons the owner's queue shows).
-  const alerts = async () => (await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[];
+  // The idle-slots alert (BOS-1881) is not about runs and fires on these tests' big clock jumps, so it is left out.
+  const alerts = async () =>
+    ((await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[]).filter(
+      (d) => !JSON.stringify(d).includes('"kind":"idle_slots"'),
+    );
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; neverStartedRuns: number; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
   return { ...built, db, reads, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
@@ -209,11 +213,49 @@ describe("ranked decision queue (R20)", () => {
 
       const row = (await ordered()).find((r) => r.id === asked.id)!;
       expect(row.waiting).toBeUndefined();
-      expect((await ctx.req("GET", "/api/decisions/tally")).json()).toEqual({ open: 1, waiting: 0 });
+      expect((await ctx.req("GET", "/api/decisions/tally")).json()).toMatchObject({ open: 1, waiting: 0 });
 
       // The Board's button names the card, not just the page.
       const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ id: string; ownerQuestionId: string | null }>;
       expect(board.find((x) => x.id === ticket.id)!.ownerQuestionId).toBe(asked.id);
+    });
+
+    it("tells the oldest open card's time and the 14-day median wait, null under 3 answers (BOS-2174)", async () => {
+      ctx = await setup();
+      const tally = async () => (await ctx.req("GET", "/api/decisions/tally")).json() as { open: number; oldestOpenAt: string | null; medianAnswerMs: number | null };
+      // The setup leaves one open card; nothing answered yet, so no median.
+      const first = await tally();
+      expect(first.oldestOpenAt).not.toBeNull();
+      expect(first.medianAnswerMs).toBeNull();
+      const hour = 3_600_000;
+      const t0 = ctx.clock().getTime();
+      const answered = async (waitH: number, ageDays: number) => {
+        const answeredAt = new Date(t0 - ageDays * 24 * hour);
+        await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "owner", status: "answered", answer: "Yes", question: `Done in ${waitH}h`, options: ["Yes", "No"], recommendedOption: "Yes", createdAt: new Date(answeredAt.getTime() - waitH * hour), answeredAt });
+      };
+      await answered(2, 1);
+      await answered(4, 2);
+      ctx.advance(6_000);
+      expect((await tally()).medianAnswerMs).toBeNull(); // only 2 answered
+      await answered(10, 3);
+      await answered(100, 20); // older than 14 days: left out
+      ctx.advance(6_000);
+      expect((await tally()).medianAnswerMs).toBe(4 * hour);
+      // Two more open cards, 3 days and 2 hours old: the 3-day-old one is the oldest.
+      const open = async (ageMs: number, question: string) => {
+        await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "owner", status: "open", question, options: ["Yes", "No"], recommendedOption: "Yes", createdAt: new Date(ctx.clock().getTime() - ageMs) });
+      };
+      await open(2 * hour, "Two hours old");
+      await open(72 * hour, "Three days old");
+      ctx.advance(6_000);
+      // The clock reads a few ms apart between calls, so allow a minute around the 3-day mark.
+      const age = ctx.clock().getTime() - new Date((await tally()).oldestOpenAt!).getTime();
+      expect(age).toBeGreaterThanOrEqual(72 * hour);
+      expect(age).toBeLessThan(72 * hour + 60_000);
+      // With nothing open the oldest is null.
+      await ctx.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.status, "open"));
+      ctx.advance(6_000);
+      expect((await tally()).oldestOpenAt).toBeNull();
     });
 
     it("puts a card whose ticket is back with an agent into the waiting group, with the reason", async () => {
@@ -343,7 +385,10 @@ describe("ranked decision queue (R20)", () => {
       expect(rows).not.toContain(ceoTier!.id);
       expect(rows).not.toContain(lesson!.id);
       // The one shared count: the menu badge and the page heading come from it.
-      const tally = async (query = "") => (await ctx.req("GET", `/api/decisions/tally${query}`)).json() as { open: number; waiting: number };
+      const tally = async (query = "") => {
+        const t = (await ctx.req("GET", `/api/decisions/tally${query}`)).json() as { open: number; waiting: number };
+        return { open: t.open, waiting: t.waiting };
+      };
       expect(await tally()).toEqual({ open: 2, waiting: 2 });
       expect(await tally(`?companyId=${ctx.company.id}`)).toEqual({ open: 2, waiting: 2 });
       // A company with no cards of its own reads zero, whatever this one holds.
@@ -384,7 +429,7 @@ describe("ranked decision queue (R20)", () => {
         return { body: r.json() as { open: number; waiting: number; stats?: { decisionsWaiting: number } }, queueRows: ctx.reads.byTable.decisions ?? 0 };
       };
       const first = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
-      expect(first.body).toEqual({ open: 1, waiting: 0 });
+      expect(first.body).toMatchObject({ open: 1, waiting: 0 });
       expect(first.queueRows).toBeGreaterThan(0);
       // The page heading, the menu badge and the dashboard all read one company's view, polling
       // together a moment later: they share the kept tally, so the queue is not walked again.
@@ -397,7 +442,7 @@ describe("ranked decision queue (R20)", () => {
       ctx.advance(6_000);
       await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
       const later = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
-      expect(later.body).toEqual({ open: 0, waiting: 1 });
+      expect(later.body).toMatchObject({ open: 0, waiting: 1 });
       expect(later.queueRows).toBeGreaterThan(0);
     });
   });
@@ -490,7 +535,8 @@ describe("stale blockers (R21)", () => {
     expect(row!.recommendedOption).toBe("Chase");
 
     await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Chase" });
-    const woken = await ctx.db.select().from(wakes);
+    // Only the chase matters here: 25 idle hours also bring R29's "nothing startable" wake and its stall alert.
+    const woken = await ctx.db.select().from(wakes).where(eq(wakes.reason, "chased"));
     expect(woken).toEqual([expect.objectContaining({ agentId: ctx.ceo.id, ticketId: domain.id, reason: "chased", priority: 3 })]);
     expect((await ctx.sweep()).staleBlockers.open).toBe(0);
 
@@ -999,11 +1045,14 @@ describe("stalled runs (R32)", () => {
       await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
       expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
     }
-    expect(await ctx.alerts()).toEqual([]);
+    // The idle-slots alert (BOS-1881) wakes the CEO, and a wake left unrun for an hour lets the no-progress card
+    // appear in this test's long clock jumps; this test is about stalled-run cards only.
+    const stalledCards = async () => (await ctx.alerts()).filter((d) => !/no_progress/.test(JSON.stringify(d)));
+    expect(await stalledCards()).toEqual([]);
     ctx.advance(29 * 60_000);
     await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
-    expect(await ctx.alerts()).toEqual([]);
+    expect(await stalledCards()).toEqual([]);
     ctx.advance(2 * 60_000);
     expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
   });
@@ -1338,7 +1387,7 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
     // Same chain as the old whole-table walk.
     const legacyRaw = await legacyQueue(ctx.db, () => new Date());
-    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, projects: row.projects, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
     expect(mine).toEqual(old);
   });
 
@@ -1373,6 +1422,8 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
       rechecking: null,
       notRechecked: null,
       about: r.id === heldCards[0]!.id ? about(root[0]!.id) : r.id === heldCards[1]!.id ? about(branch[0]!.id) : [],
+      // The project of each ticket a card is about; the unrelated card names none, so it is company-wide.
+      projects: r.id === heldCards[0]!.id || r.id === heldCards[1]!.id ? [{ id: ctx.project.id, name: "Customer app" }] : [],
       // A Date in the old body, an ISO string over HTTP.
       createdAt: r.createdAt.toISOString(),
     }));

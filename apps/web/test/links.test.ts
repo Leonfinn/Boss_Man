@@ -1,7 +1,7 @@
 // The one link builder and its surfaces (BOS-358). One row per link kind, one column per screen,
 // so a pattern that drifts on one screen fails here. Includes the owner's exact link from BOS-356.
 import { describe, expect, it } from "vitest";
-import { linkMarkdown, linkPieces, ticketHref, wikiHref, type LinkContext } from "../src/links";
+import { linkMarkdown, linkPieces, routeHref, ticketHref, wikiHref, type LinkContext } from "../src/links";
 
 const COMPANY = "8c7f803d-8266-4cae-b17b-79e289142018";
 const OWNER_PAGE = "runbooks/move-boss-man-to-a-new-host";
@@ -90,5 +90,56 @@ describe("every link kind on every surface (BOS-358)", () => {
       expect(links.length, surface).toBe(2);
       for (const l of links) expect(l.kind === "link" && l.href, surface).toBe(OWNER_HREF);
     }
+  });
+});
+
+// routeHref is the single check for "is this an in-app route?": a route starts "#/" and is passed
+// through unchanged, so an id or page name already encoded stays encoded. Anything else is not
+// a route the screen can open, and the caller shows it as plain text.
+describe("routeHref: the in-app routes it builds (BOS-358)", () => {
+  it("returns every kind of in-app route exactly as written", () => {
+    const routes = [
+      "#/decisions",
+      "#/tickets/t356",
+      "#/tickets/8c7f803d-8266-4cae-b17b-79e289142018",
+      "#/wiki/c1/research/landscape",
+      "#/wiki/c1/deploy#Rollback",
+      "#/wiki/c1/runbooks/move-boss-man-to-a-new-host#Step2",
+    ];
+    for (const route of routes) expect(routeHref(route)).toBe(route);
+  });
+
+  it("leaves an id that needs encoding alone instead of encoding it twice", () => {
+    // A wiki page can hold a space, a plus or a slash; the address is built already encoded.
+    for (const route of ["#/wiki/c1/a%20page", "#/wiki/c1/c%2B%2B", "#/tickets/abc%2Fdef", "#/wiki/c1/caf%C3%A9"]) {
+      expect(routeHref(route)).toBe(route);
+    }
+  });
+
+  it("keeps a route's section and query string whole", () => {
+    expect(routeHref("#/wiki/c1/deploy#Rollback?from=chat")).toBe("#/wiki/c1/deploy#Rollback?from=chat");
+    expect(routeHref("#/tickets/t356?tab=activity")).toBe("#/tickets/t356?tab=activity");
+  });
+
+  it("treats the empty route as a route, so the caller can drop it", () => {
+    // linkPieces also refuses "#/" on its own; routeHref reports what was written, not what renders.
+    expect(routeHref("#/")).toBe("#/");
+  });
+
+  it("returns null for anything that is not an in-app route", () => {
+    const notRoutes = [
+      "",
+      "decisions",
+      "/decisions",
+      "tickets/t356",
+      "BOS-356",
+      "https://example.com/#/wiki/c1/deploy",
+      "http://example.com",
+      " #/decisions",
+      "#decisions",
+      "##/decisions",
+      "/wiki/c1/deploy",
+    ];
+    for (const value of notRoutes) expect(routeHref(value), value).toBeNull();
   });
 });

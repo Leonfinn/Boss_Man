@@ -19,15 +19,36 @@ A zip, `<company-slug>.bossman.zip`, with a `manifest.json` (`format: "bossman-c
 
 | Part | Files | Always? |
 |---|---|---|
-| Company | `company.json`: name, review policy, notification and quiet-hours settings, rules | yes |
+| Company | `company.json`: name, mission, review policy, goal-check interval, whether the owner approves engagements, ticket prefix, standing rules, and whether the watchdog is on | yes |
 | Agents | `agents/<slug>/agent.json` (name, role, title, template, duty, reports-to, agent kind, model) and `agents/<slug>/INSTRUCTIONS.md`, plus `avatar.*` if uploaded | yes |
 | Skills | `skills/<name>/…`, the full folder as stored, plus `skills.json` (source, pin, pack, and which agents have each skill) | yes |
 | Projects | `projects/<slug>/project.json`: repo URL, default branch, checks, landing, caps, columns, review-policy override | yes |
 | Plan | `plan.json`: objectives, key results, milestones, features | yes |
 | Tool servers | `tool-servers.json`: URL, transport, and the **name** of the secret holding the token | yes |
 | Secrets | `secrets.json`: **names and grants only, never values** | yes |
+| Deploy targets | `deploy-targets.json`: name, kind, endpoint, production flag, "needs approval", and the **names** of the secrets granted to each target (BOS-2169). Never the deploy history. The host's own staging target is left out (the host makes it) | yes |
+| Permission rules | `permission-rules.json`: the company's **own** rules only (never the ones for every company), in order, with agents named by name (BOS-2169) | yes |
 | Wiki | `wiki/<folder>/<page>.md`: frontmatter carries the slug, title and source ticket | optional |
 | Tickets | `tickets.jsonl`: one per line, with parent, dependencies, state, assignee (by agent slug) and conversation | optional: none, open only, or all |
+
+On import (BOS-2169), deploy targets and rules are created in the new company, and the checklist lists what changed:
+
+- A rule that was **Allow** or **Ask the CEO** comes in as **Ask me**: "Rule X was Allow in the export; it asks you now. If you trust it, change it back in Settings → Permissions." A package can't hand out permissions, and an imported CEO rule would take destructive requests and pushes away from you. Deny and Ask me rules keep their outcome, and the order is kept. A rule's condition must be one the rule form can set (tool kinds, command or title pattern, safe-only, scratch-only, agents); a rule with other conditions or wrong values is skipped and listed.
+- A rule that names agents is pointed at the new company's agents by name. A name that isn't there is dropped from the rule and listed; a rule left with no agent is not imported (it is never widened to every agent).
+- A deploy target's endpoint goes through the same check as the deploy target form (`endpointProblem`); one that fails is skipped and listed. A target's live tag is not carried (saving one needs a runner); the checklist says to set it again.
+- Secrets granted to a target are listed like company-wide ones ("Add the secret X and grant it as ENV to deploy target T"): no secret is created, and values are entered again.
+- A package made before this change has neither file and imports as before.
+
+The company's own settings (BOS-2242) travel in `settings.json` (always written; it holds only what the owner set, so an empty `{}` means "defaults"). The list of per-company settings keys lives in `apps/server/src/services/company-settings-package.ts`, each one either carried or left out with its reason. A test fails when the server gains a per-company key that is on neither list.
+
+| Setting | In the package | On import |
+|---|---|---|
+| Who approves agent changes | `agentApprovals` | The stricter of the package's value and the default ("hires"): a package can ask for more approvals, never fewer. The checklist says when it was raised |
+| Commit and PR message templates | `gitTemplates` (`commit`, `pr`) | As in the package, with the same length limits as the form. The preview and checklist print each template in full, because agents get it as an instruction on every commit and PR |
+| Who runs workflow retros | `retroAgent`: the agent's folder name, like `reportsTo` | Pointed at the new agent; if that agent isn't in the package the default runs them, and the checklist says so |
+| Second opinion on permission cards | `secondOpinion`: address, model and the key's secret **name** (never its value or id) | Always **switched off**, with the address and model filled in, since it can allow cards; the checklist says to check it and switch it on in Settings → Permissions → Second opinion. Secrets are server-wide and the package names both the address and the secret, so an existing secret with that name is picked only when this server already sends it to the same host (another company's second opinion or wiki search); the preview then says which secret goes to which host. A name that matches but a host that doesn't leaves the key unpicked, and the checklist names the secret and the host so the owner can pick it on purpose. No secret by that name: the checklist says to add it |
+
+The preview lists one line per setting. A setting the package holds in a shape Boss Man can't use is left out with a warning, and the default is used. Left out on purpose: the weekly summary's email address (personal data; the mail server is set up per server), the model lists the runner observed, and alert and once-only marker keys.
 
 Never exported: secret values, owner login and sessions, runs and transcripts, costs and quota samples, funding-source credentials, run tokens, and the activity log.
 
@@ -63,9 +84,10 @@ The spec at agentcompanies.io is **not yet read**. This mapping comes from a rea
 |---|---|
 | `COMPANY.md` name | company name |
 | `AGENTS.md` frontmatter: name, title, `reportsTo`, `skills:` list; body | agent and instructions; skills given by leaf name |
-| `.paperclip.yaml` `adapter.type`: `claude_local`, `opencode_local` | agent kind: `claude`, `opencode` |
+| `.paperclip.yaml` `adapter.type`: `claude_local`, `opencode_local`, `codex_local` | agent kind: `claude`, `opencode`, `codex` (any other type becomes `claude`, noted in the preview) |
 | `adapter.config.model` | model (checked against the runner) |
-| `role`: CEO, engineer, qa, pm, researcher | role, plus the closest template |
+| `role`: ceo, engineer, qa, pm, researcher, designer, writer | role, plus the closest template |
+| `role`: knowledge-maintainer | a worker with the wiki duty |
 | `inputs.env` with `kind: secret` | secret placeholder, granted to that agent |
 | `projects.*.workspaces.repo.repoUrl` and `defaultRef` | project repo and branch |
 | `heartbeat`, `permissions`, `appearance` | dropped: Boss Man wakes on events, and only the CEO hires |

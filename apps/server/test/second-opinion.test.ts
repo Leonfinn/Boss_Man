@@ -3,14 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners } from "../src/db/schema.js";
+import { activity, decisions, runners } from "../src/db/schema.js";
 
 // BOS-338: the optional model second opinion. Off by default; it can only make a card stricter; any failure
 // means the rules judge decides alone, within the deadline; what is sent is redacted, and the key only goes
 // in the Authorization header.
 
 // The rules judge allows this (it stays in its own folder); the older text rule says Deny.
-const JUDGE_ALLOWS = 'rm -rf shots && git status --porcelain && echo "done" # token sk-or-v1-0123456789abcdef0123456789';
+// Made-up keys are joined at run time so this file holds no key-shaped line for the secret scans (BOS-1932).
+const JUDGE_ALLOWS = 'rm -rf shots && git status --porcelain && echo "done" # token ' + ["sk-or-v1", "0123456789abcdef0123456789"].join("-");
 // The rules judge denies this (prints environment values).
 const JUDGE_DENIES = "rm -rf dist && env";
 
@@ -88,7 +89,7 @@ describe("model second opinion (BOS-338)", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     ctx = await setup(async () => (await gate, answer('{"verdict":"allow","reason":"ok"}')()));
-    const key = "sk-or-v1-SECRETKEY0123456789abcdefABCDEF";
+    const key = ["sk-or-v1", "SECRETKEY0123456789abcdefABCDEF"].join("-");
     const secret = (await ctx.req("POST", "/api/secrets", { name: "router key", kind: "generic", value: key })).json() as { secret: { id: string } };
     await ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { permissionJudge: "advise" });
     await ctx.turnOn({ secretId: secret.secret.id });
@@ -249,7 +250,7 @@ describe("model second opinion (BOS-338)", () => {
   });
 
   it("the key never shows in the message, even if the provider echoes it; a 200 with only an error is read too", async () => {
-    const key = "sk-or-v1-ECHOEDKEY0123456789abcdefABCDEF";
+    const key = ["sk-or-v1", "ECHOEDKEY0123456789abcdefABCDEF"].join("-");
     let n = 0;
     ctx = await setup(async () =>
       ++n === 1
@@ -291,5 +292,30 @@ describe("model second opinion (BOS-338)", () => {
     expect((await ctx.req("PUT", `/api/companies/${ctx.companyId}/second-opinion`, { enabled: false, baseUrl: "ftp://x", model: "m", secretId: null })).statusCode).toBe(400);
     const t = (await ctx.req("POST", `/api/companies/${ctx.companyId}/second-opinion/test`, { enabled: false, baseUrl: "http://localhost:11434/v1", model: "gpt-oss-safeguard:20b", secretId: null })).json() as { ok: boolean; message: string };
     expect(t).toMatchObject({ ok: true, message: expect.stringContaining("valid verdict") });
+    // The refused saves and the Test button wrote no activity line.
+    expect(await ctx.db.select().from(activity).where(eq(activity.kind, "settings"))).toHaveLength(0);
+  });
+
+  it("settings changes leave one activity line, with no key and no address path", async () => {
+    ctx = await setup();
+    const put = (b: Record<string, unknown>) => ctx!.req("PUT", `/api/companies/${ctx!.companyId}/second-opinion`, { enabled: true, baseUrl: "https://models.example/v1/", model: "some/model", secretId: null, ...b });
+    const lines = async () => (await ctx!.db.select().from(activity).where(eq(activity.kind, "settings"))).map((a) => a.summary);
+    const secretId = randomUUID();
+    expect((await put({ baseUrl: "https://models.example/v1/?token=abc", secretId })).statusCode).toBe(200);
+    expect(await lines()).toEqual(["Owner turned the second opinion on (model some/model)"]);
+    // Saving the same thing again, or only swapping the key, adds nothing.
+    await put({ baseUrl: "https://models.example/v1/?token=abc", secretId });
+    await put({ baseUrl: "https://models.example/v1/?token=abc", secretId: randomUUID() });
+    expect(await lines()).toHaveLength(1);
+    await put({ model: "other/model" });
+    await put({ enabled: false });
+    expect(await lines()).toEqual([
+      "Owner turned the second opinion on (model some/model)",
+      "Owner changed the second opinion model to other/model",
+      "Owner turned the second opinion off",
+    ]);
+    const all = JSON.stringify(await ctx.db.select().from(activity).where(eq(activity.kind, "settings")));
+    expect(all).not.toContain("token=abc");
+    expect(all).not.toContain(secretId);
   });
 });

@@ -135,29 +135,47 @@ async function seed() {
 const median = (a: number[]) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)]!;
 
 /**
- * Median of the longest loop stall, and of the wall time, over ITERATIONS runs after one warm-up. `spins` holds a
- * spinCost() reading before every run and one after the last, so run i sits between spins[i] and spins[i + 1].
+ * Median of the longest loop stall, and of the wall time, over ITERATIONS runs after one warm-up. `refs` holds the
+ * reference scan's block before every run and one after the last, so run i sits between refs[i] and refs[i + 1].
  */
+// BOS-1940: SETTLE_MS was 20. blockOf runs about 16 times per item (warm-up, samples, reference readings), so the two
+// waits cost ~19 s of this file's ~35 s of tests while measuring nothing. 5 ms is still 5 ticks of the 1 ms histogram
+// timer, and both waits only need one: Node starts counting at the histogram's first tick, and a stall is recorded by
+// the first tick after it. That tick is due before our 5 ms timer, and timers fire in due order, so this holds on a
+// busy machine too.
+const SETTLE_MS = 5;
+
+async function blockOf(fn: () => Promise<unknown>): Promise<{ block: number; wall: number }> {
+  const h = monitorEventLoopDelay({ resolution: 1 });
+  h.enable();
+  // Let the histogram's own timer run a few times first: a stall that starts before its first tick is not recorded.
+  await new Promise((r) => setTimeout(r, SETTLE_MS));
+  const t0 = performance.now();
+  await fn();
+  const wall = performance.now() - t0;
+  // The histogram records a stall only when its timer fires after it, so give the loop a few ticks before stopping.
+  await new Promise((r) => setTimeout(r, SETTLE_MS));
+  h.disable();
+  return { block: h.max / 1e6, wall };
+}
+
+/** A fixed piece of database work: one scan and sum over the 50k cost events. Its block is this machine's speed at database work, right now. */
+const reference = () => ctx.db.execute(sql`select count(*)::int n, sum(cost_micros)::bigint s from cost_events`);
+
 async function measure(fn: () => Promise<unknown>) {
   await fn();
+  await reference();
   const blocks: number[] = [];
   const walls: number[] = [];
-  const spins: number[] = [spinCost()];
+  // One reference reading before every run and one after the last, so run i sits between refs[i] and refs[i + 1].
+  const refs: number[] = [(await blockOf(reference)).block];
   for (let i = 0; i < ITERATIONS; i++) {
-    const h = monitorEventLoopDelay({ resolution: 1 });
-    h.enable();
-    // Let the histogram's own timer run a few times first: a stall that starts before its first tick is not recorded.
-    await new Promise((r) => setTimeout(r, 20));
-    const t0 = performance.now();
-    await fn();
-    walls.push(performance.now() - t0);
-    // The histogram records a stall only when its timer fires after it, so give the loop a few ticks before stopping.
-    await new Promise((r) => setTimeout(r, 20));
-    h.disable();
-    blocks.push(h.max / 1e6);
-    spins.push(spinCost());
+    const m = await blockOf(fn);
+    walls.push(m.wall);
+    blocks.push(m.block);
+    refs.push((await blockOf(reference)).block);
   }
-  return { block: median(blocks), wall: median(walls), blocks, spins };
+  return { block: median(blocks), wall: median(walls), blocks, refs };
 }
 
 // BOS-1217: the merge gate runs up to 3 checks at once, so a fixed limit read "board 106 ms, limit 100" on a loaded box
@@ -171,30 +189,60 @@ async function measure(fn: () => Promise<unknown>) {
 // passes when the median of block / scaled limit is at most 1.
 // What it still catches: one query that scans or joins far too much (shown on the board route: a self-join of runs
 // blocked 3.6 s against a limit of 244 ms), and the BOS-643 freeze (3-4 s). The scale is capped at 2.5, so the limit never
-// exceeds 250 ms, and a route that blocks 100 ms+ on a quiet machine fails as before. Many small queries in a row (an
+// exceeds 250 ms. (BOS-1724: a machine whose reference scan blocks under 8.4 ms, i.e. a fast one, keeps the plain 100 ms.) Many small queries in a row (an
 // N+1 loop) are NOT caught: the query yield in setup() splits them.
+//
+// BOS-1724: that scale still failed by 1 to 3 ms, mostly on the slower second check worker, because "slower than the
+// quietest spin of this run" is blind to a machine that is slow the whole run (its quietest spin is slow too, so the scale
+// stays 1 and the limit stays at the dev-machine figure). And a CPU spin is not the work under test: PGlite runs wasm. So
+// the baseline is now database work of a known size (reference(): one scan of the 50k cost events), timed the same way,
+// in turn next to every sample. The limit scales with that machine's own speed at that moment: REF_TO_LIMIT = 12 means
+// "an item may block up to 12 times what the reference scan blocks" (the items read 0.2 to 5.3 times it here, so there is
+// more than twice the room, and the room moves with the machine). The scale stays between 1 and MAX_LOAD_SCALE: never
+// tighter than LIMIT_MS, never looser than 2.5x.
 const MAX_LOAD_SCALE = 2.5;
-let quietestSpinMs = Infinity;
-/** Wall time of one fixed CPU workload (~20 ms warm): a single run, so time spent preempted by other jobs reads as load. */
-function spinCost(): number {
-  const t0 = performance.now();
-  let x = 0;
-  for (let i = 0; i < 4_000_000; i++) x = (x + i * 31) % 1_000_003;
-  if (x < 0) throw new Error("unreachable");
-  const ms = performance.now() - t0;
-  quietestSpinMs = Math.min(quietestSpinMs, ms);
-  return ms;
-}
-/** How many times slower than the quietest spin of the run, between 1 and MAX_LOAD_SCALE. */
-const loadScale = (spinMs: number) => Math.min(MAX_LOAD_SCALE, Math.max(1, spinMs / quietestSpinMs));
+const REF_TO_LIMIT = 12;
+/** Limit scale for one reference reading: how many times `limitMs` the machine's database speed allows right now. */
+const loadScale = (refBlockMs: number, limitMs: number) => Math.min(MAX_LOAD_SCALE, Math.max(1, (REF_TO_LIMIT * refBlockMs) / limitMs));
 /**
- * Per-sample scale: the lower of the spins either side (the item's own garbage must not raise its own limit). Returns
- * the median of block / (limit x scale), which passes at <= 1, and the median scale for the report.
+ * Per-sample scale: the lower of the reference readings either side (the item's own garbage must not raise its own
+ * limit). Returns the median of block / (limit x scale), which passes at <= 1, and the median scale for the report.
  */
-function judge(m: { blocks: number[]; spins: number[] }, limitMs: number) {
-  const scales = m.blocks.map((_, i) => loadScale(Math.min(m.spins[i]!, m.spins[i + 1]!)));
+function judge(m: { blocks: number[]; refs: number[] }, limitMs: number) {
+  const scales = m.blocks.map((_, i) => loadScale(Math.min(m.refs[i]!, m.refs[i + 1]!), limitMs));
   return { ratio: median(m.blocks.map((b, i) => b / (limitMs * scales[i]!))), scale: median(scales) };
 }
+
+// BOS-1801: the reference scale above still bounced merges at the gate (BOS-1711: board 229 ms vs 199; BOS-1762: board
+// 162 ms vs 162, after 30 min of check-all next to other checks). The gate log shows why no same-run baseline fixes it:
+// idle, board blocks 6x the reference scan (60 ms vs 10 ms); under that load it read 12x (162 ms vs 13.5 ms). The
+// reference is one short stall and the board route a longer one, and CPU sharing stretches a longer stall by more, so
+// the scale lags exactly when it matters. Tuning REF_TO_LIMIT again would only move the edge.
+// So a miss is re-measured instead. Every item is measured once; any item over its scaled limit is measured again
+// after the rest (later, so not inside the same burst of load), up to ATTEMPTS times in all, and fails only when
+// every attempt is over. What a real regression looks like: an item that is over on every attempt. The cases this
+// test exists for are far past that (the board self-join blocked 3.6 s against 244 ms; the BOS-643 freeze 3-4 s), and
+// a route that has slowly grown past its limit misses on every attempt on a quiet machine too. What it no longer
+// fails on: one item brushing its limit once while the machine is shared.
+const ATTEMPTS = 3;
+
+type Attempt = { m: Awaited<ReturnType<typeof measure>>; ratio: number; scale: number };
+
+/** Measures every item, re-measures those over their limit (up to `attempts` in all), and returns each item's attempts in order. An item passes when its last attempt is at most 1. */
+async function budgetCheck(entries: Array<[string, () => Promise<unknown>]>, limitOf: (name: string) => number, attempts = ATTEMPTS) {
+  const results = new Map<string, Attempt[]>();
+  let pending = entries;
+  for (let a = 0; a < attempts && pending.length > 0; a++) {
+    for (const [name, fn] of pending) {
+      const m = await measure(fn);
+      results.set(name, [...(results.get(name) ?? []), { m, ...judge(m, limitOf(name)) }]);
+    }
+    pending = pending.filter(([name]) => results.get(name)!.at(-1)!.ratio > 1);
+  }
+  return results;
+}
+
+const overEveryAttempt = (results: Map<string, Attempt[]>) => [...results].filter(([, tries]) => tries.at(-1)!.ratio > 1).map(([name]) => name);
 
 let seqNo = 0;
 const ingest = (event: RunnerEvent) => ctx.runners.ingest(ctx.runner, { seq: ++seqNo + 1_000_000, at: new Date().toISOString(), event });
@@ -281,19 +329,46 @@ describe("hot-path budget (BOS-653)", () => {
     expect(yielding.block).toBeLessThan(LIMIT_MS);
   });
 
+  // BOS-1801: proves the re-measure on fake items. The limit here is a fifth of LIMIT_MS so the spins stay short; the
+  // over item spins 3x its limit at the 2.5x load cap, so it is over on any machine.
+  it("re-measures a miss: one that clears later passes, one over on every attempt fails", async () => {
+    const limit = LIMIT_MS / 5;
+    const spin = (ms: number) => {
+      const end = performance.now() + ms;
+      while (performance.now() < end);
+    };
+    let calls = 0;
+    const perAttempt = ITERATIONS + 1; // measure() runs one warm-up, then ITERATIONS samples
+    const results = await budgetCheck(
+      [
+        ["over once, then fine", async () => spin(++calls <= perAttempt ? limit * MAX_LOAD_SCALE * 3 : 1)],
+        ["over every time", async () => spin(limit * MAX_LOAD_SCALE * 3)],
+        ["always fine", async () => spin(1)],
+      ],
+      () => limit,
+    );
+    expect(results.get("over once, then fine")!.map((a) => a.ratio > 1)).toEqual([true, false]);
+    expect(results.get("over every time")!.map((a) => a.ratio > 1)).toEqual([true, true, true]);
+    expect(results.get("always fine")!.length).toBe(1);
+    expect(overEveryAttempt(results)).toEqual(["over every time"]);
+  }, 60_000);
+
   it(`keeps every item under ${LIMIT_MS} ms of event-loop block`, async () => {
-    const over: string[] = [];
-    for (let i = 0; i < 3; i++) spinCost(); // warm the spin's JIT so its first reading isn't taken as load
-    const measured: Array<[string, Awaited<ReturnType<typeof measure>>]> = [];
-    for (const [name, fn] of Object.entries(list)) measured.push([name, await measure(fn)]);
-    // Judged after every item ran, so every sample is compared to the quietest spin of the whole run.
-    for (const [name, m] of measured) {
+    const limitOf = (name: string) => (KNOWN_SLOW[name] ? KNOWN_SLOW_CEILING_MS : LIMIT_MS);
+    // Each sample is judged against the reference readings taken right next to it; a miss is re-measured (BOS-1801).
+    const results = await budgetCheck(Object.entries(list), limitOf);
+    const pct = (a: Attempt) => `${(a.ratio * 100).toFixed(0)}%`;
+    for (const [name, tries] of results) {
       const slow = KNOWN_SLOW[name];
-      const base = slow ? KNOWN_SLOW_CEILING_MS : LIMIT_MS;
-      const { ratio, scale } = judge(m, base);
-      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms   load x${scale.toFixed(2)}   ${(ratio * 100).toFixed(0)}% of limit${slow ? `   (known slow, ${slow}; ceiling ${base} ms)` : ""}`);
-      if (ratio > 1) over.push(`${name}: ${m.block.toFixed(0)} ms (limit ${(base * scale).toFixed(0)} at median load x${scale.toFixed(2)}, ${(ratio * 100).toFixed(0)}% of its scaled limit)`);
+      const { m, ratio, scale } = tries.at(-1)!;
+      const retried = tries.length > 1 ? `   (re-measured: ${tries.map(pct).join(", ")})` : "";
+      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms   load x${scale.toFixed(2)}   ref ${median(m.refs).toFixed(0)} ms (x${(m.block / median(m.refs)).toFixed(1)})   ${(ratio * 100).toFixed(0)}% of limit${slow ? `   (known slow, ${slow}; ceiling ${limitOf(name)} ms)` : ""}${retried}`);
     }
+    const over = overEveryAttempt(results).map((name) => {
+      const tries = results.get(name)!;
+      const { m, scale } = tries.at(-1)!;
+      return `${name}: over on all ${tries.length} attempts (${tries.map((a) => `${a.m.block.toFixed(0)} ms, ${pct(a)}`).join("; ")}); last ${m.block.toFixed(0)} ms vs limit ${(limitOf(name) * scale).toFixed(0)} at median load x${scale.toFixed(2)}`;
+    });
     expect(over).toEqual([]);
-  }, 90_000);
+  }, 120_000);
 });

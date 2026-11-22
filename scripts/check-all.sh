@@ -2,6 +2,8 @@
 # Everything in CI's "check" job that runs without Docker or a real Postgres, for Boss Man's
 # "Before merging" command. CI still runs leader.test.ts (real Postgres) and the image job
 # on pushes that touch those areas, every night, and on every pull request.
+# The last two steps (ShellCheck, shell tests) are skipped in a merge check when no file they read changed (BOS-1939,
+# scripts/shell-tests-needed.sh); every other kind of run does them.
 set -euo pipefail
 self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "$self")/.."
@@ -39,6 +41,9 @@ STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
 # that can't write a log still checks. scripts/sweep-tmp.sh never touches it, unlike /tmp.
 SCRATCH=${BOSSMAN_SCRATCH:-}
 SCRATCH_LOG="$SCRATCH/check-all.log"
+# Where a fenced run's log waits for the runner to move it in. Always /tmp in real use (the runner only looks there);
+# check-all.test.sh points it at a folder of its own, so its "taken name" case runs on every machine (BOS-1690).
+SCRATCH_TMP_DIR=${BOSSMAN_SCRATCH_TMP_DIR:-/tmp}
 # scratch_log <file> <exit code>: put this run's completed log in the ticket's kept scratch, so it can be read after a
 # restart wiped /tmp. Written as .next then moved into place, so a half-written log is never read, and the previous
 # run is kept as .previous. Best effort: a check that can't keep a log still checks. A fenced agent may not write the
@@ -53,12 +58,16 @@ scratch_log() {
     { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$out" 2>/dev/null || out=""
   fi
   if [ -z "$out" ]; then
-    [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ] || return 0
-    tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
-    if ! { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp"; then
+    [ -n "${BOSSMAN_TICKET:-}" ] && [ -d "$SCRATCH_TMP_DIR" ] && [ -w "$SCRATCH_TMP_DIR" ] || return 0
+    tmp="$SCRATCH_TMP_DIR/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
+    # `then :; else` and not `if ! { …; } >file`: bash does not apply the `!` when the group's own redirect fails to
+    # open the file, so the fallback below never ran (BOS-1689). scripts/negated-redirect.test.sh guards the pattern.
+    if { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp"; then
+      :
+    else
       # The kept name is taken by a file this run may not write (another user's, in sticky /tmp): keep the log under a
       # name of its own so it is not lost. The runner only moves the exact name in; this one is for a person to read.
-      tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.$$.log"
+      tmp="$SCRATCH_TMP_DIR/bossman-scratch-$BOSSMAN_TICKET.$$.log"
       { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp" || return 0
       echo "check-all: $SCRATCH_LOG not writable and the kept /tmp name is taken; log kept at $tmp" >&2
     fi
@@ -118,8 +127,11 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # Per-step times ("check-all: step <name> took <s>s"), as {"name":seconds,...} in order, so the result shows where the time went.
     local steps
     steps=$(sed -n 's/^check-all: step \([A-Za-z0-9:._-]*\) took \([0-9]*\)s.*/"\1":\2/p' "$log" | paste -sd, -)
-    printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s,"steps":{%s}}\n' \
-      "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" >"$STORE/$key.json" || return 0
+    # Steps that were skipped ("check-all: step <name> skipped", BOS-1939) are listed apart, so a skip never reads as a pass.
+    local skipped
+    skipped=$(sed -n 's/^check-all: step \([A-Za-z0-9:._-]*\) skipped.*/"\1"/p' "$log" | paste -sd, -)
+    printf '{"status":"%s","exit":%s,"tree":"%s","commit":"%s","finished":"%s","duration_seconds":%s,"merge_check":%s,"steps":{%s},"skipped":[%s]}\n' \
+      "$1" "$2" "$key" "$(git rev-parse HEAD)" "$(date -u +%FT%TZ)" "$dur" "$([ -n "${BOSSMAN_MERGE_CHECK:-}" ] && echo true || echo false)" "$steps" "$skipped" >"$STORE/$key.json" || return 0
     # Per-file test times of this run (best effort): the slowest server test files and shell tests, in seconds, for the next speed-up.
     if [ -n "$(ls -A "$times_dir" 2>/dev/null)" ]; then
       if node "$(dirname "$self")/test-times.mjs" "$times_dir" >"$STORE/$key.test-times.tmp" 2>/dev/null; then
@@ -157,7 +169,11 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
     took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
     if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
-    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
+    # One clock read: two `date` calls (now, and now as the default slot time) straddling a second boundary made the
+    # elapsed time -1 and let a retry through that the budget forbids (BOS-1702).
+    now=$(date +%s)
+    if [ "$n" -lt "$attempts" ] && [ $(( now - ${slot_at:-$now} + took + pause )) -le "$budget" ] && ! grep -q 'install stopped on a machine fault' "$log" && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
+
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
       sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
@@ -187,9 +203,35 @@ if [ -z "$pre_done" ]; then
   # CHECK_ALL_SLOT_COMMAND (used by check-quick.sh, with BOSSMAN_CHECK_CHILD=1): wait for a slot exactly like a hand-run check,
   # run that one command while holding it, and exit with its status. None of the full checks run.
   if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
-    pnpm install --frozen-lockfile --prefer-offline >/dev/null
-    node --test scripts/*.test.mjs
+    # BOS-1628: retried on a machine fault; exit 75 plus the marker line lets the server requeue a merge check run on a worker.
+    # shellcheck source=scripts/install-packages.sh
+    . "$(dirname "$self")/install-packages.sh"
+    install_packages
+    # Print the failing subtests' "not ok" lines and their errors first: a log that is cut to its last lines shows only passes.
+    script_test_log=$(mktemp)
+    if ! node --test scripts/*.test.mjs >"$script_test_log" 2>&1; then
+      echo "script tests failed; failing subtests:"
+      grep -nE '^\s*not ok' "$script_test_log" || true
+      grep -nE -B2 -A12 '^\s*not ok' "$script_test_log" | head -150 || true
+      echo "script tests failed; full output:"
+      cat "$script_test_log"
+      rm -f "$script_test_log"
+      exit 1
+    fi
+    cat "$script_test_log"
+    rm -f "$script_test_log"
+    # One run per file, so a skip is tied to its file and checked against scripts/skipped-tests.txt (BOS-1729).
+    skipdir="$(mktemp -d)"
+    for f in scripts/*.test.mjs; do
+      # A failing test file was already reported by the full run above; here only the skip count matters. stderr stays visible.
+      node --test --test-reporter=junit "$f" >"$skipdir/r.xml" || true
+      # An empty or missing report fails inside check-no-skips.mjs (not here, so a stubbed node in check-all.test.sh still passes).
+      node scripts/check-no-skips.mjs --junit "$skipdir/r.xml" --file "${f#scripts/}" --root scripts --allow scripts/skipped-tests.txt
+    done
+    rm -rf "$skipdir"
     node scripts/lint-migrations.mjs
+    node scripts/check-doc-numbers.mjs
+    node scripts/check-compose-secrets-docs.mjs
   fi
 fi
 
@@ -229,16 +271,49 @@ if [ -n "$mem_peak" ]; then
   mem_mb="${BOSSMAN_CHECK_MEMORY_MB:-6912}"; [[ "$mem_mb" =~ ^[0-9]{1,6}$ ]] || mem_mb=6912
   node "$(dirname "$self")/check-mem-guard.mjs" "$$" "$mem_mb" "$mem_peak" &
   mem_guard=$!
-  trap 'kill "$mem_guard" 2>/dev/null || true; [ ! -s "$mem_peak" ] || echo "check-all: peak memory of this check about $(( $(cat "$mem_peak") * 10 / 1024 / 10 )).$(( $(cat "$mem_peak") * 10 / 1024 % 10 )) GB (ceiling ${mem_mb} MB, BOSSMAN_CHECK_MEMORY_MB)"; rm -f "$mem_peak"' EXIT
+  # BOS-2218: the machine's memory limit and how many processes it killed for lack of memory during this check, in the log either way.
+  oom_start="$(node "$(dirname "$self")/check-oom-report.mjs" start 2>/dev/null || echo unknown)"
+  trap 'kill "$mem_guard" 2>/dev/null || true; node "$(dirname "$self")/check-oom-report.mjs" report "$oom_start" 2>/dev/null || true; [ ! -s "$mem_peak" ] || echo "check-all: peak memory of this check about $(( $(cat "$mem_peak") * 10 / 1024 / 10 )).$(( $(cat "$mem_peak") * 10 / 1024 % 10 )) GB (ceiling ${mem_mb} MB, BOSSMAN_CHECK_MEMORY_MB)"; rm -f "$mem_peak"' EXIT
 fi
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
-step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
+# Time budgets (BOS-1926), in seconds: what a step should take on the merge runner. A step over its budget is reported in the log
+# ("check-all: budget ... over by Ns") but never fails the check; the line is there so a slow stage is seen while it is still small.
+# The server tests grew from about 7 minutes (199 files) to 16 to 17.5 (411 files); the budget is the level they are trimmed to, and
+# a new file that pushes past it should be sped up or cut, not hidden by raising this number without a ticket.
+# BOSSMAN_BUDGET_TEST_SERVER_SECONDS overrides it (0 = no budget line).
+step_budget() {
+  case "$1" in
+    test:server) echo "${BOSSMAN_BUDGET_TEST_SERVER_SECONDS:-840}" ;;
+    *) echo 0 ;;
+  esac
+}
+step() {
+  local name=$1 began=$SECONDS rc=0 took budget; shift; "$@" || rc=$?
+  took=$((SECONDS - began))
+  echo "check-all: step $name took ${took}s (exit $rc, at $(date -u +%H:%M:%S) UTC)"
+  budget=$(step_budget "$name")
+  if [ "$budget" -gt 0 ] 2>/dev/null; then
+    if [ "$took" -gt "$budget" ]; then echo "check-all: budget $name ${budget}s: over by $((took - budget))s (a note, not a failure)"
+    else echo "check-all: budget $name ${budget}s: within, $((budget - took))s to spare"; fi
+  fi
+  return "$rc"
+}
 step in-memory-state node scripts/check-in-memory-state.mjs
-# Memory-safe on a shared runner (a 12 GB cgroup shared with other agents, two checks at once): one package at a time,
-# at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
-# and a capped heap for tsc only. Callers can override any of these.
-export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-2}"
+step test-lines node scripts/check-test-lines.mjs
+# The list guards (BOS-1727) run before the long typecheck and build, so a missing line in a hand-kept list fails in the
+# first minutes with the line to add, not after 30 to 50. The full test run repeats them (cheap); nothing is loosened.
+step guard:wake-classes scripts/check-guards.sh wake-classes
+step guard:owner-controls scripts/check-guards.sh owner-controls
+step guard:screen-inventory scripts/check-guards.sh screen-inventory
+step guard:update-waits scripts/check-guards.sh update-waits
+# Memory-safe on a shared runner: one package at a time, at most 4 PGlite workers, and a capped heap for tsc only.
+# Callers can override any of these. The 4 is only a ceiling: apps/server/vitest.config.ts also takes the smaller of
+# this slot's CPU and free-memory share (scripts/check-threads.mjs, split across the check slots) and backs off by the
+# cgroup's free memory (~0.9 GB per worker), so a busy or small host still gets fewer (BOS-117, BOS-674).
+# Was 2 until BOS-1924: measured on 19 Nov with all 3 slots busy, the server tests took 1049-1072 s at 2 workers and
+# 520-707 s at 4, and the check peaked at 4.1 GB (2.5-2.8 GB at 2) of its 6.9 GB ceiling.
+export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-4}"
 # /tmp fills with the tests' own scratch (BOS-568), and a check that starts on a full one fails oddly. Say so up front,
 # in the kept log, instead: 64 MB written and read back once per check. A probe that can't finish in 20 s is left as is.
 if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ] && [ -z "${BOSSMAN_SKIP_TMP_PROBE:-}" ]; then
@@ -270,7 +345,8 @@ step build pnpm build
 # The web suite must not skip anything at the gate (CI's web-browser job applies the same rule): a missing build, browser or Vite
 # fails here instead of passing quietly. BOSSMAN_SCRATCH points at a throwaway folder so the opt-in screenshot tests run too.
 web_tests() {
-  local d=$1 report shots rc=0 out
+  local d=$1 report shots rc=0 out skip_list=""
+  [ ! -f "$d/skipped-tests.txt" ] || skip_list="$d/skipped-tests.txt"  # the package's list of files allowed to skip (BOS-1729); none = no skip allowed
   report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-web.json}"
   [ -n "$report" ] || report="$(mktemp)"
   shots="$(mktemp -d)"
@@ -289,7 +365,7 @@ web_tests() {
   set -e
   rm -rf "$shots"
   if [ "$rc" -eq 0 ]; then
-    node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?
+    node "$(dirname "$self")/check-no-skips.mjs" "$report" --root "$d" ${skip_list:+--allow "$skip_list"} || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     echo "check-all: web test reasons (real-page lines, env):"
@@ -299,12 +375,34 @@ web_tests() {
   rm -f "$out"
   return "$rc"
 }
+# Every other package: vitest also writes a JSON report (the parent folds it into the result store, BOS-654), and a test that skipped
+# in a file missing from the package's skipped-tests.txt fails the step (BOS-1729). A skip on a GitHub runner and not here, or here
+# and not there, is how tests quietly stopped running; a new skip now needs a listed reason.
+pkg_tests() {
+  local d=$1 report rc=0 skip_list=""
+  [ ! -f "$d/skipped-tests.txt" ] || skip_list="$d/skipped-tests.txt"
+  report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json}"
+  [ -n "$report" ] || report="$(mktemp)"
+  pnpm --dir "$d" run test --reporter=default --reporter=json --outputFile.json="$report" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    node "$(dirname "$self")/check-no-skips.mjs" "$report" --root "$d" ${skip_list:+--allow "$skip_list"} || rc=$?
+  fi
+  return "$rc"
+}
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
   if [ "${d##*/}" = web ]; then step "test:web" web_tests "$d"; continue; fi
-  # BOSSMAN_TEST_TIMES_FILE makes vitest also write a JSON report, which the parent folds into the result store (BOS-654).
-  step "test:${d##*/}" env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_TEST_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json"} pnpm --dir "$d" run test
+  step "test:${d##*/}" pkg_tests "$d"
 done
-step shellcheck scripts/check-shell.sh
-step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
+# ShellCheck and the shell tests (about 6 of 29 minutes) are skipped in a merge check on a branch that changed nothing they read
+# (BOS-1939; the list and the rules are in scripts/shell-tests-needed.sh). GitHub CI still runs them on every branch and on main.
+# A skip is recorded as skipped, never as a pass: "check-all: step <name> skipped" fills the result's "skipped" list, not "steps".
+if scripts/shell-tests-needed.sh >/dev/null; then
+  step shellcheck scripts/check-shell.sh
+  step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
+else
+  echo "check-all: shell tests: skipped, no file they test changed (GitHub CI still runs them)"
+  echo "check-all: step shellcheck skipped"
+  echo "check-all: step shell-tests skipped"
+fi
 echo "check-all: everything passed"

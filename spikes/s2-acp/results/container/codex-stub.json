@@ -40,7 +40,7 @@
   "sessions": [
     {
       "index": 0,
-      "token": "bm_sess_3c18a0b6-894b-4f3b-9f19-2595ded21fa4",
+      "token": "bm_sess_(session-0)",
       "cwd": "/tmp/bm-s2-codex-Drn9or/ws-0",
       "configOptions": [
         {
@@ -156,7 +156,7 @@
     },
     {
       "index": 1,
-      "token": "bm_sess_011b4e2c-a2e0-4425-b630-076beaabce76",
+      "token": "bm_sess_(session-1)",
       "cwd": "/tmp/bm-s2-codex-Drn9or/ws-1",
       "configOptions": [
         {
@@ -267,7 +267,7 @@
     },
     {
       "index": 2,
-      "token": "bm_sess_6c7218bb-2a61-448b-9baa-74a31a0449c3",
+      "token": "bm_sess_(session-2)",
       "cwd": "/tmp/bm-s2-codex-Drn9or/ws-2",
       "configOptions": [
         {
@@ -466,7 +466,7 @@
   "mcpCalls": [
     {
       "tool": "create_ticket",
-      "token": "bm_sess_6c7218bb-2a61-448b-9baa-74a31a0449c3",
+      "token": "bm_sess_(session-2)",
       "args": {
         "title": "Spike S2 ticket",
         "body": "via codex"
@@ -474,7 +474,7 @@
     },
     {
       "tool": "create_ticket",
-      "token": "bm_sess_011b4e2c-a2e0-4425-b630-076beaabce76",
+      "token": "bm_sess_(session-1)",
       "args": {
         "title": "Spike S2 ticket",
         "body": "via codex"
@@ -482,7 +482,7 @@
     },
     {
       "tool": "create_ticket",
-      "token": "bm_sess_3c18a0b6-894b-4f3b-9f19-2595ded21fa4",
+      "token": "bm_sess_(session-0)",
       "args": {
         "title": "Spike S2 ticket",
         "body": "via codex"

@@ -10,6 +10,12 @@ lead: Boss Man backs up its database before every update. This guide covers upda
 
 ## Update the server
 
+To get agents to save their work and stop before you update, see [Stopping work](/guides/stopping-work#example-before-a-server-update).
+
+To see what an update brings before you run it, read [What's new](/whats-new). Before you update, check **Breaking changes** in [`docs/23-updating.md`](@repo/blob/main/docs/23-updating.md#breaking-changes): some updates need a step by hand.
+
+On a blue/green install, `scripts/deploy.sh` refuses to run. Update from the web page instead (see below).
+
 From the install folder, run:
 
 ```sh Run on the Linux machine, as root
@@ -36,7 +42,7 @@ It builds a new runner image and checks it with networking off. If the check fai
 - **Without the host deployer**, the runners stay on the old image until you start the swap. Open **Settings > Server and runner**, find **Updates**, and choose **Update runners (finish runs first)**.
 - **If no launcher is running**, the script restarts the runners at once. This cuts off any runs in progress.
 
-Follow the swap in **Updates**, which also has **Cancel the update**. To undo, run `scripts/update-runner.sh --rollback`.
+Follow the swap in **Updates**, which also has **Cancel the update**. While the swap waits for agents, **Ask agents to wrap up** asks them to save their work and stop sooner (see [Stopping work](/guides/stopping-work#ask-agents-to-wrap-up)). To undo, run `scripts/update-runner.sh --rollback`.
 
 ## Update from the web page (optional)
 
@@ -45,19 +51,19 @@ With the optional host deployer, you can update from Boss Man. The host deployer
 Once it is set up:
 
 - when the main branch moves, a card on Decisions asks whether to deploy, with **Deploy** and **Not now**
-- **Settings > Server and runner > Updates** has **Deploy latest**, **Build and update runners** and **Restart the server**
+- **Settings > Server and runner > Updates** shows the same offer (**Review and deploy**, or **Check for updates now** when there is none), and has **Build and update runners** and **Restart the server**
 
-**Deploy** and **Deploy latest** update the server only, never the runners. When an update changes the runners' code, the Deploy card says so, and Boss Man raises a second card later to update the runners. You can also choose **Build and update runners** yourself.
+A server deploy updates the server only, never the runners. When an update changes the runners' code, the Deploy card says so, and Boss Man raises a second card later to update the runners. On that Deploy card you can also choose **Deploy, then update runners after the trial**. You can also choose **Build and update runners** yourself.
 
 The host deployer will not apply changes to these files:
 
 - Compose files (`docker-compose*.yml`)
-- anything in `deploy/`, apart from the Penpot and ntfy files (see Guide 11)
+- anything in `deploy/`, apart from the Penpot and ntfy files (see [Phone notifications](/guides/phone-notifications) and [Add-ons](/guides/add-ons))
 - Dockerfiles
 - `.env` files, `.npmrc` and `.dockerignore`
-- the scripts `deploy.sh`, `rebuild-live.sh`, `update-runner.sh` and `host-deployer.sh`
+- the scripts `deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh` and `install-deployer.sh`
 
-Apply those by hand with `scripts/deploy.sh`.
+Boss Man shows a card for these. The card lists the steps under **What you'll need to do**, so you can read them before you choose **Approve**. Then run them on the machine. If the card says "Don't press Approve yet", the machine has not reported where Boss Man is installed, so there are no steps to show. Ask on the ticket for the exact commands.
 
 ## Where backups are kept
 
@@ -65,7 +71,9 @@ Backups go in the install folder, next to `src`, unless you set `BOSSMAN_BACKUP_
 
 - `bossman-YYYY-MM-DD-HHMM.sql.gz`: made before each update, newest 14 kept
 - `rebuild-YYYY-MM-DD-HHMM.sql.gz`: made by `scripts/rebuild-live.sh`
+- `restore-test-YYYY-MM-DD-HHMMSS.sql.gz`: made by `scripts/restore-test.sh --fresh-backup`
 - `penpot-YYYY-MM-DD-HHMM.tar`: made by `scripts/backup-penpot.sh`
+- `daily-YYYY-MM-DD-HHMM.sql.gz`: made once a day by the `backup` service, newest 14 kept, in a `daily` folder inside the backup folder. You set nothing up; Settings → Server shows when the last one was made, and you get one alert if it is over 36 hours old. It is not an off-site copy, so copy the folder somewhere else now and then.
 
 ## Check a backup restores
 
@@ -79,7 +87,7 @@ It makes a new backup and loads it into a throwaway database. The live database 
 
 Do this only when an update has damaged the data. A restore replaces the live data and loses everything written after the backup. If only the code is wrong, use `scripts/deploy.sh --rollback` instead, which never touches the data.
 
-Run every command as root from `$B/src`. These steps are for a single-server install. For blue/green, follow [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md).
+Run every command as root from `$B/src`. These steps are for a single-server install. For blue/green, follow [`docs/23-updating.md`](@repo/blob/main/docs/23-updating.md).
 
 1. Test the backup you chose on the throwaway database with `scripts/restore-test.sh ../bossman-YYYY-MM-DD-HHMM.sql.gz`. The output must end with a line starting `OK:`. If it does not, choose another file.
 2. Stop the server so nothing writes: `docker compose stop server`.

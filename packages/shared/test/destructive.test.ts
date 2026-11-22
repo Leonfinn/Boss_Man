@@ -1162,3 +1162,64 @@ describe("delete forms left out of BOS-571 (BOS-856)", () => {
     expect(evaluatePermission(exec(c), []).outcome).toBe("allow");
   });
 });
+
+describe("$BOSSMAN_SCRATCH / $TMPDIR at the start of a script path (BOS-1454)", () => {
+  // The runner sets both to absolute paths, so these can't turn into -e. Each went to the owner before BOS-1454.
+  it.each([
+    "node $BOSSMAN_SCRATCH/x.mjs",
+    "node ${BOSSMAN_SCRATCH}/x.mjs arg",
+    'node "$TMPDIR/x.mjs"',
+    "node ${TMPDIR}/x.mjs",
+    "python3 $TMPDIR/x.py",
+    "bash $BOSSMAN_SCRATCH/x.sh",
+    "node -r $TMPDIR/a.js $BOSSMAN_SCRATCH/b.mjs",
+    "node ${BOSSMAN_SCRATCH:-/tmp}/x.mjs",
+    "TMPDIR=${BOSSMAN_SCRATCH:-/tmp}/t node $TMPDIR/x.mjs",
+    "TMPDIR=$BOSSMAN_SCRATCH/t; node $TMPDIR/x.mjs",
+    "bash -c 'node $BOSSMAN_SCRATCH/x.mjs'",
+  ])("lets %j through", (c) => {
+    expect(commandRisks(c)).toEqual([]);
+    expect(evaluatePermission(exec(c), []).outcome).toBe("allow");
+  });
+
+  // Variant matrix: every way round the variables still goes to the owner.
+  it.each([
+    "node $S/x.mjs",
+    "node $BOSSMAN_SCRATCH $x",
+    "node $TMPDIR",
+    "node ${TMPDIR}x/y",
+    "node $TMPDIR2/x.mjs",
+    "node $tmpdir/x.mjs",
+    "node ${BOSSMAN_SCRATCH:-$HOME}/x.mjs",
+    "node ${BOSSMAN_SCRATCH:-rel}/x.mjs",
+    "node ${BOSSMAN_SCRATCH:=/tmp}/x.mjs",
+    "node $TMPDIR/x$(rm -rf /)",
+    "node $TMPDIR/*",
+    "node $TMPDIR/{a,b}",
+    "node $TMPDIR$S/x",
+    "node $TMPDIR/x.mjs; node $S/y.mjs",
+    "BOSSMAN_SCRATCH=-e node $BOSSMAN_SCRATCH/x",
+    "TMPDIR=$HOME/t node $TMPDIR/x.mjs",
+    "TMPDIR=rel node $TMPDIR/x.mjs",
+    "TMPDIR=${BOSSMAN_SCRATCH:-/tmp}$x node $TMPDIR/x.mjs",
+    "export TMPDIR=-e; node $TMPDIR/x.mjs",
+    "export TMPDIR=/tmp/t; node $TMPDIR/x.mjs",
+    "declare -n TMPDIR=x; node $TMPDIR/y",
+    "read TMPDIR <<< -e; node $TMPDIR/x.mjs",
+    "printf -v TMPDIR -- -e; node $TMPDIR/x.mjs",
+    "unset TMPDIR; node $TMPDIR/x.mjs",
+    "env TMPDIR=-e node $TMPDIR/x.mjs",
+    'export "${T}DIR=-e"; node $TMPDIR/x.mjs',
+    'T=TMP; export "${T}DIR=-e"; node $TMPDIR/x.mjs',
+    'TMP"DIR"=-e; node $TMPDIR/x.mjs',
+    "TMP$x=-e; node $TMPDIR/x.mjs",
+    "for TMPDIR in -e; do node $TMPDIR/x.mjs; done",
+    "bash -c 'export TMPDIR=-e; node $TMPDIR/x.mjs'",
+    "echo $(node $S/x.mjs)",
+    "echo $(export TMPDIR=-e; node $TMPDIR/x.mjs)",
+    "node $'\\x24TMPDIR'/x",
+    "node -e 'require(\"fs\").rmSync(\"/x\")' $TMPDIR/x.mjs",
+  ])("still sends %j to the owner", (c) => {
+    expect(destroys(c)).toBe(true);
+  });
+});

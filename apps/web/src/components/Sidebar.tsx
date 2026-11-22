@@ -1,10 +1,20 @@
 // The sidebar (R72, R75): the company switcher at the top, then the screens in groups. Every
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { figureText } from "@boss-man/shared";
 import type { Company, Decision } from "../api";
 import { useMediaQuery } from "../hooks";
 import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
+import { SearchButton } from "./SearchPalette";
+
+/**
+ * R43: a per-company server figure (feedback.toProcess) for the chosen company, the one its own page shows. The
+ * Feedback badge used to add up every company's, so it read higher than the Unprocessed tab beside it.
+ */
+export function companyFigure(byCompany: Record<string, number> | null | undefined, companyId: string | undefined): number {
+  return companyId ? (byCompany?.[companyId] ?? 0) : 0;
+}
 
 type Item = { id: string; label: string; icon: LucideIcon };
 type Group = { group: string; label: string; icon: LucideIcon; items: Item[] };
@@ -80,17 +90,19 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const status = (c: Company) => {
     const n = waiting(c.id);
-    return c.paused ? (["#5e6878", "Paused"] as const) : n ? (["#f0b75c", `${n} ${n === 1 ? "needs" : "need"} you`] as const) : (["#7fd3a5", `${c.agents.length} agent${c.agents.length === 1 ? "" : "s"}`] as const);
+    return c.paused ? (["#5e6878", "Paused"] as const) : n ? (["#f0b75c", figureText("decisions.needYou", n)] as const) : (["#7fd3a5", `${c.agents.length} agent${c.agents.length === 1 ? "" : "s"}`] as const);
   };
   const create = (e: FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || creating) return;
+    setCreating(true);
     onCreate(name.trim()).then(
       () => (setName(""), setAdding(false), setOpen(false), setError(null)),
       (err: Error) => setError(err.message),
-    );
+    ).finally(() => setCreating(false));
   };
   if (!current) return null;
   const [colour, note] = status(current);
@@ -129,8 +141,8 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
                 New company name
               </label>
               <input id="new-company" autoFocus maxLength={80} placeholder="Company name" value={name} onChange={(e) => setName(e.target.value)} />
-              <button type="submit" disabled={!name.trim()}>
-                Create
+              <button type="submit" disabled={!name.trim() || creating}>
+                {creating ? "Creating…" : "Create"}
               </button>
               {error && <small role="alert">{error}</small>}
             </form>
@@ -253,8 +265,10 @@ export function Sidebar(props: {
   const badgeCount = props.decisionsTally ? props.decisionsTally.open : needsOwner;
   const isCurrent = (id: string) => props.active === id || ((props.active === "tickets" || props.active === "board") && id === "projects");
   const label = ALL_ITEMS.find((i) => isCurrent(i.id))?.label ?? "Menu";
+  // R43 (BOS-1716): every badge's words come from the one label list (@boss-man/shared owner-figures), so the
+  // badge reads exactly as the page, banner and dashboard write the same figure.
   const badge = (n: Item) =>
-    n.id === "decisions" && badgeCount > 0 ? { value: badgeCount, label: `${badgeCount} ${badgeCount === 1 ? "needs" : "need"} you${props.decisionsTally && props.decisionsTally.waiting > 0 ? `, ${props.decisionsTally.waiting} with the team` : ""}` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: `${props.feedback} to process` } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: `${props.mergeStuck} stuck`, warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: `${props.mergeWaiting} waiting to merge` } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: `${props.unread} unread` } : null;
+    n.id === "decisions" && badgeCount > 0 ? { value: badgeCount, label: `${figureText("decisions.needYou", badgeCount)}${props.decisionsTally && props.decisionsTally.waiting > 0 ? `, ${figureText("decisions.withTeam", props.decisionsTally.waiting)}` : ""}` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: figureText("feedback.toProcess", props.feedback) } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: figureText("mergeQueue.lineStuck", props.mergeStuck), warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: figureText("mergeQueue.inLine", props.mergeWaiting) } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: figureText("notifications.unread", props.unread) } : null;
   const itemLink = (n: Item) => {
     const b = badge(n);
     return (
@@ -282,6 +296,8 @@ export function Sidebar(props: {
           <MenuIcon size={20} strokeWidth={1.75} aria-hidden="true" />
           <span className="sr-only">{menu ? "Close menu" : `Menu, ${label}`}</span>
         </button>
+        {/* BOS-2192: opens the search box, for touch screens with no Ctrl+K. */}
+        <SearchButton />
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         <div className="nav-scroll">

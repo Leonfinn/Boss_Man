@@ -41,6 +41,7 @@ describe("portal logo", () => {
     expect(calls.some((c) => c.startsWith("PUT") && c.includes("portal-logo"))).toBe(true);
     expect(screen.getByText("Replace")).toBeTruthy();
 
+    vi.stubGlobal("confirm", vi.fn(() => true));
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     await waitFor(() => expect(screen.queryByAltText("Current portal logo")).toBeNull());
     expect(screen.getByText("Add logo")).toBeTruthy();

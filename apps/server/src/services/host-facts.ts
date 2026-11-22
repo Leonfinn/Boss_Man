@@ -247,8 +247,9 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
 
   /** Every recorded fact's value, for filling `{{host.…}}` tokens. Undefined when the steps use no host token, so
    * a card without one never waits on the settings record. */
-  async function valuesFor(steps: readonly string[] | undefined): Promise<Record<string, string> | undefined> {
-    if (!steps?.some((s) => s.includes("{{"))) return undefined;
+  async function valuesFor(...fields: Array<readonly string[] | string | undefined>): Promise<Record<string, string> | undefined> {
+    // BOS-1660: every owner-visible field counts (the question, the options, triedFirst, the steps), not only the steps.
+    if (!fields.some((f) => (typeof f === "string" ? [f] : f ?? []).some((s) => s.includes("{{")))) return undefined;
     const rec = await sync();
     return Object.fromEntries(Object.entries(rec.facts).map(([k, f]) => [k, f.value]));
   }

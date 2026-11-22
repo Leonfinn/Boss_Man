@@ -1,10 +1,13 @@
 // Agents (R62): who works for the company, what each is doing and has used this month, and
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
+import { NoCompany } from "../components/NoCompany";
 import { Star } from "lucide-react";
-import { describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
+import { DAY_NAMES, describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
 import { Avatar } from "../components/Avatar";
+import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { RowMenu } from "../components/RowMenu";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
@@ -29,6 +32,9 @@ type AgentRow = {
   fundingKind: string | null;
   paused: boolean;
   starred: boolean;
+  /** BOS-2200: working hours (null: always available), and while outside them, when they open. */
+  workingHours?: { days: number[]; start: string; end: string; timeZone: string } | null;
+  offUntil?: { at: string; label: string } | null;
   duty: string | null;
   avatarAt?: string | null;
   retiredAt: string | null;
@@ -38,6 +44,9 @@ type AgentRow = {
   /** Tickets in progress, and the owner's limit per agent (null: no limit), for "3 of 2 tickets in progress" (BOS-1029). */
   wipCount?: number;
   wipLimit?: number | null;
+  /** BOS-1909: tickets of this agent's that count toward no limit: being checked, and next up in Ready. Missing from an older server. */
+  beingChecked?: number;
+  nextUp?: number;
   pa: { posted: number; escalated: number; wrong: number } | null;
   month: { costMicros: number; runs: number; tokens: number };
 };
@@ -183,23 +192,26 @@ function ThinkingField({ id, value, onChange }: { id: string; value: string; onC
   );
 }
 
-export function StarButton({ agent, onToggle, where = "Chat" }: { agent: { name: string; starred: boolean }; onToggle: () => void; where?: string }) {
+export function StarButton({ agent, onToggle, where = "Chat", disabled }: { agent: { name: string; starred: boolean }; onToggle: () => void; where?: string; disabled?: boolean }) {
   return (
-    <button type="button" className="btn star" aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? `Starred: shown under ${where}` : `Star to show under ${where}`} onClick={onToggle}>
+    <button type="button" className="btn star" disabled={disabled} aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? `Starred: shown under ${where}` : `Star to show under ${where}`} onClick={onToggle}>
       <Star size={16} aria-hidden="true" fill={agent.starred ? "currentColor" : "none"} />
     </button>
   );
 }
 
 const STATUS: Record<AgentRow["status"], [string, string]> = { working: ["Working", "green"], idle: ["Idle", ""], paused: ["Paused", "amber"], retired: ["Retired", ""] };
-const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", thinking: "Thinking", funding: "Paid from", kind: "Agent kind", paused: "Paused" };
+const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", thinking: "Thinking", funding: "Paid from", kind: "Agent kind", paused: "Paused", working_hours: "Working hours" };
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 const jobOf = (a: Pick<AgentRow, "role" | "title" | "duty">) => (a.role === "ceo" ? "CEO" : (a.title ?? (a.duty === "wiki" ? "Wiki Maintainer" : a.role === "manager" ? "Manager" : "Agent")));
 /** Boolean fields read as plain words, e.g. paused true -> "Paused", false -> "Unpaused", not "yes -> no". */
 const FLIP: Record<string, [string, string]> = { paused: ["Paused", "Unpaused"], starred: ["Starred", "Unstarred"] };
 export const flipWord = (field: string, after: unknown) => (typeof after === "boolean" && FLIP[field] ? FLIP[field]![after ? 0 : 1] : null);
+export type Hours = { days: number[]; start: string; end: string; timeZone: string };
+const isHours = (v: unknown): v is Hours => !!v && typeof v === "object" && Array.isArray((v as Hours).days) && typeof (v as Hours).start === "string";
+export const hoursText = (h: Hours) => `${h.days.map((d) => DAY_NAMES[d]).join(", ")}, ${h.start} to ${h.end} (${h.timeZone})`;
 const show = (v: unknown, sources: FundingSource[]) =>
-  v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
+  isHours(v) ? hoursText(v) : v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
 
 function Hire({ companyId, templates, sources, lists, refresh, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onDone: (name: string) => void }) {
   const [tpl, setTpl] = useState<Template | null>(null);
@@ -335,7 +347,7 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
         <input type="file" accept="image/png,image/jpeg,image/webp" className="sr-only" aria-label={`Picture for ${a.name}`} onChange={(e) => pick(e.target.files?.[0])} />
       </label>
       {a.avatarAt && (
-        <button type="button" className="btn small" onClick={() => void run(() => api(url, { method: "DELETE" }), "Back to the default picture.")}>
+        <button type="button" className="btn small" onClick={() => window.confirm(`Remove ${a.name}'s picture? You would have to upload it again to get it back.`) && void run(() => api(url, { method: "DELETE" }), "Back to the default picture.")}>
           Use the default
         </button>
       )}
@@ -344,14 +356,66 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
   );
 }
 
+type HoursForm = { on: boolean; days: number[]; start: string; end: string; timeZone: string };
+const browserZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+};
+const hoursForm = (h: Hours | null | undefined): HoursForm => (h ? { on: true, ...h } : { on: false, days: [1, 2, 3, 4, 5], start: "08:00", end: "18:00", timeZone: browserZone() });
+
+/** BOS-2200: off by default (always available); when on, days, a from-to time (it may cross midnight) and a time zone. */
+export function WorkingHoursField({ id, name, value, onChange }: { id: string; name: string; value: HoursForm; onChange: (v: HoursForm) => void }) {
+  return (
+    <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+      <legend className="label">Working hours</legend>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="checkbox" checked={value.on} onChange={(e) => onChange({ ...value, on: e.target.checked })} />
+        Only start {name} on new work during set hours
+      </label>
+      {value.on && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+          <div role="group" aria-label="Days" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {DAY_NAMES.map((d, i) => (
+              <label key={d} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <input type="checkbox" checked={value.days.includes(i)} onChange={(e) => onChange({ ...value, days: e.target.checked ? [...value.days, i] : value.days.filter((x) => x !== i) })} />
+                {d}
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end" }}>
+            <label htmlFor={`${id}-from`}>
+              From <input id={`${id}-from`} type="time" required value={value.start} onChange={(e) => onChange({ ...value, start: e.target.value })} />
+            </label>
+            <label htmlFor={`${id}-to`}>
+              To <input id={`${id}-to`} type="time" required value={value.end} onChange={(e) => onChange({ ...value, end: e.target.value })} />
+            </label>
+            <label htmlFor={`${id}-zone`}>
+              Time zone <input id={`${id}-zone`} required maxLength={80} value={value.timeZone} onChange={(e) => onChange({ ...value, timeZone: e.target.value })} />
+            </label>
+          </div>
+        </div>
+      )}
+      <small className="muted">
+        {value.on
+          ? `Outside these hours ${name} isn't started on new work; it starts by itself when they open. A run already going finishes, and urgent tickets and your replies still start it. Use a "to" earlier than "from" for a window past midnight (22:00 to 07:00); it belongs to the day it starts on.`
+          : `Off: ${name} is available at any time.`}
+      </small>
+    </fieldset>
+  );
+}
+
 function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string }; policy?: { rules: ReviewPolicy; companyId: string } | null }) {
-  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
+  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind, hours: hoursForm(a.workingHours) });
   // The instructions box is kept in this browser as it is typed (DR-045); it goes once saved.
   const instructionsKey = `agent-instructions/${a.id}`;
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
+  const [undoing, setUndoing] = useState(false);
   const run = async (fn: () => Promise<unknown>, done: string) => {
     try {
       await fn();
@@ -366,7 +430,11 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, thinking: form.thinking || null, fundingSourceId: form.fundingSourceId || null, agentKind: form.agentKind };
+    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, thinking: form.thinking || null, fundingSourceId: form.fundingSourceId || null, agentKind: form.agentKind, workingHours: form.hours.on ? { days: [...form.hours.days].sort(), start: form.hours.start, end: form.hours.end, timeZone: form.hours.timeZone.trim() } : null };
+    if (form.hours.on && !form.hours.days.length) {
+      setNote({ ok: false, text: "Choose at least one day for the working hours." });
+      return;
+    }
     setBusy(true);
     const ok = await run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
     setBusy(false);
@@ -421,6 +489,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
               </select>
             </div>
           </div>
+          <WorkingHoursField id={`hours-${a.id}`} name={a.name} value={form.hours} onChange={(hours) => setForm({ ...form, hours })} />
           <div className="field">
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
             <DraftTextarea draftKey={instructionsKey} id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
@@ -455,7 +524,16 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
                   {c.undoneAt && <span className="tag" style={{ marginLeft: 6 }}>Undone</span>}
                 </span>
                 {!c.undoneAt && c.field !== "hired" && c.field !== "rehired" && (
-                  <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} onClick={() => void run(() => api(`/api/agent-changes/${c.id}/undo`, { method: "POST" }), c.field === "retired" ? "Rehired, with their tasks back." : "Undone.")}>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ minHeight: 32, padding: "4px 10px" }}
+                    disabled={undoing}
+                    onClick={() => {
+                      setUndoing(true);
+                      void run(() => api(`/api/agent-changes/${c.id}/undo`, { method: "POST" }), c.field === "retired" ? "Rehired, with their tasks back." : "Undone.").finally(() => setUndoing(false));
+                    }}
+                  >
                     {c.field === "retired" ? "Rehire" : "Undo"}
                   </button>
                 )}
@@ -705,7 +783,8 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
   const [hiring, setHiring] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  if (!company) return <p>Create a company on the Kanban first.</p>;
+  const [refreshing, setRefreshing] = useState(false);
+  if (!company) return <NoCompany />;
   const refreshModels = async () => {
     const r = await api<{ probed: Record<string, { ok: boolean; error?: string }> }>(`/api/companies/${company!.id}/models/refresh`, { method: "POST" });
     models.reload();
@@ -811,12 +890,14 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
                   <span title="Tickets in progress, against the limit per agent set in Settings" className={a.wipCount > a.wipLimit ? "over-limit" : undefined}>
                     {a.wipCount} of {a.wipLimit} tickets in progress{a.wipCount > a.wipLimit ? ", over the limit" : ""}
                   </span>
+                  {!!a.beingChecked && <span title="Handed in, waiting for the quick check. Counts toward no limit."> · {a.beingChecked} being checked</span>}
+                  {!!a.nextUp && <span title="Waiting in Ready; starts by itself when the agent finishes. Counts toward no limit."> · {a.nextUp} next up</span>}
                 </>
               )}
               {isInfiniteModel(a.model) && (
                 <>
                   {" "}
-                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › Server and runner › Agents at once.">
+                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › Server and runner › Limits and checks › Agents at once.">
                     Infinite mode · free, slow
                   </span>
                 </>
@@ -825,6 +906,11 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             <div className="muted agent-stats">
               <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "No account to run on yet"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
             </div>
+            {a.offUntil && !a.retiredAt && (
+              <div className="muted agent-stats" data-testid={`off-until-${a.id}`}>
+                Off until {a.offUntil.label} (working hours)
+              </div>
+            )}
             {a.pa && (
               <div className="muted agent-stats">
                 Answers: {a.pa.posted} posted, {a.pa.escalated} passed to the CEO
@@ -858,8 +944,20 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
         <CeoApprovals companyId={company.id} />
         <p className="muted" style={{ fontSize: 13, margin: 0 }}>
           Model lists come from the runner when agents run{models.data?.api.length ? ", and from your API keys" : ""}.{" "}
-          <button type="button" className="linkish" onClick={() => void api<ModelLists>(`/api/companies/${company.id}/models?refresh=1`).then(() => models.reload())}>
-            Refresh
+          <button
+            type="button"
+            className="linkish"
+            disabled={refreshing}
+            onClick={() => {
+              setRefreshing(true);
+              setNote(null);
+              api<ModelLists>(`/api/companies/${company.id}/models?refresh=1`)
+                .then(() => models.reload())
+                .catch((err) => setNote({ ok: false, text: `Couldn't refresh the model lists: ${(err as Error).message}` }))
+                .finally(() => setRefreshing(false));
+            }}
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
           </button>
         </p>
       </div>
@@ -881,7 +979,9 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           {note.text}
         </p>
       )}
-      <ul className="agent-list">{active.map(row)}</ul>
+      {!list.data && list.error && <LoadError what="agents" message={list.error.message} onRetry={list.reload} />}
+      {!list.data && !list.error && <Loader label="Loading agents" />}
+      {list.data && <ul className="agent-list">{active.map(row)}</ul>}
       {retired.length > 0 && (
         <details>
           <summary className="section-label">Retired ({retired.length})</summary>

@@ -106,4 +106,30 @@ describe("company import and export (docs/11, step 3)", () => {
     // The tick is offered because one of the git hosts reaches the stack.
     expect(screen.getByLabelText(/I understand this gives the runner/)).toBeTruthy();
   });
+
+  it("lists the company's own settings in the preview, and renders without them from an older server (BOS-2242)", async () => {
+    const lines = ["Who approves agent changes: hires and edits", "Second opinion: arrives switched off; switch it on in Settings"];
+    let withSettings = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/funding-sources") return json([]);
+        if (url === "/api/companies/import/preview") return json(withSettings ? { ...preview("Set Co", false), settings: lines } : preview("Old Co", false));
+        return json({});
+      }),
+    );
+    const pick = () =>
+      fireEvent.change(screen.getByLabelText("Package"), { target: { files: [new File([new Uint8Array([80, 75, 5, 6])], "s.bossman.zip")] } });
+    render(<ImportCompany go={() => {}} onChanged={() => {}} />);
+    pick();
+    expect(await screen.findByText(/The company's own settings/)).toBeTruthy();
+    for (const l of lines) expect(screen.getByText(l)).toBeTruthy();
+
+    cleanup();
+    withSettings = false;
+    render(<ImportCompany go={() => {}} onChanged={() => {}} />);
+    pick();
+    expect(await screen.findByText(/3 agents, 1 skills/)).toBeTruthy();
+    expect(screen.queryByText(/The company's own settings/)).toBeNull();
+  });
 });

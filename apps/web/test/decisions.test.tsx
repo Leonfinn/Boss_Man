@@ -147,6 +147,46 @@ describe("decision queue", () => {
     expect(screen.getByText("Runner update afterwards: not needed.")).toBeTruthy();
   });
 
+  // BOS-1826: the card showed "+17 more" for the rest of the first 20 and "and 4 more" for those past 20: two counts for one list.
+  it("a deploy card has one 'and N more' line counting every ticket not on screen (BOS-1826)", () => {
+    const changes = Array.from({ length: 20 }, (_, i) => ({ ticketId: `t${i + 1}`, ref: `APP-${i + 1}`, title: `Change ${i + 1}` }));
+    const d = decision({
+      kind: "approval",
+      question: "Deploy Boss Man?",
+      options: ["Deploy", "Not now"],
+      recommendedOption: "Deploy",
+      blocks: [],
+      context: { type: "self_deploy", update: { from: "a".repeat(40), to: "b".repeat(40), total: 120, files: 157, changes, more: 4, otherCommits: ["Bump one", "Bump two"], otherMore: 94, risks: [] } },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const list = screen.getByRole("list", { name: "Tickets in this update" });
+    // 3 shown, 17 kept but folded, 4 only counted: one line, 21.
+    expect(list.textContent).toContain("and 21 more — See all the tickets");
+    expect(list.textContent).not.toMatch(/\+\d+ more|and 4 more/);
+    fireEvent.click(screen.getByRole("button", { name: "and 21 more" }));
+    expect(screen.getByText("APP-20", { exact: false })).toBeTruthy();
+    expect(list.textContent).toContain("and 4 more — See all the tickets · Show fewer");
+    // Other commits count those the card keeps by name and those it only counts.
+    expect(screen.getByText("Other commits: 96")).toBeTruthy();
+  });
+
+  it("shows the hand-apply steps open on the card, with the why line, and says so when the host reported no steps (BOS-1834)", () => {
+    setSecure(true);
+    const base = { kind: "approval" as const, question: "Main has moved.", options: ["Approve", "Not now"], recommendedOption: "Approve", blocks: [] };
+    const update = { from: "a".repeat(40), to: "b".repeat(40), total: 1, files: 1, changes: [], more: 0, otherCommits: [], handBecause: "x", handFiles: ["scripts/host-deployer.sh", "deploy/staging.yml"], handEffect: "both" as const, needsDeployerCopy: true, needsRunnerUpdate: false, risks: [] };
+    const { unmount } = render(<Decisions decisions={[decision({ ...base, context: { type: "self_deploy", infra: true, update, handSteps: ["Step one."], check: "Check it.", rollback: "Roll back." } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const why = document.querySelector("[data-hand-why]")!;
+    expect(why.textContent).toBe("This update changes how Boss Man deploys itself (scripts/host-deployer.sh, deploy/staging.yml), so it is applied on the machine that runs Boss Man, not by the button.");
+    expect(document.querySelector("[data-hand-steps] details")).toBeNull();
+    expect(screen.getByText("Step one.")).toBeTruthy();
+    expect(screen.getByText("Check it.")).toBeTruthy();
+    expect(screen.getByText("Roll back.")).toBeTruthy();
+    unmount();
+    render(<Decisions decisions={[decision({ ...base, context: { type: "self_deploy", infra: true, update, handSteps: [] } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(document.querySelector("[data-hand-nosteps]")?.textContent).toContain("hasn't reported where Boss Man is installed");
+    expect(document.querySelector("[data-hand-steps] ol")).toBeNull();
+  });
+
   it("shows each hand-apply command in its own block with a Copy button that copies only the command (BOS-269)", async () => {
     setSecure(true);
     const writeText = vi.fn(() => Promise.resolve());
@@ -307,7 +347,7 @@ describe("decision queue", () => {
     // Another company's decisions are named, one click from switching to it.
     const onPick = vi.fn();
     const other = render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} elsewhere={[{ id: "c2", name: "HolidayHours", count: 9 }]} onPickCompany={onPick} />);
-    fireEvent.click(screen.getByRole("button", { name: "9 in HolidayHours" }));
+    fireEvent.click(screen.getByRole("button", { name: "9 need you in HolidayHours" }));
     expect(onPick).toHaveBeenCalledWith("c2");
     other.unmount();
     const { rerender } = render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
@@ -447,6 +487,26 @@ describe("Allow always", () => {
     await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Permissions\./)).toBeTruthy());
     const answerCall = fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }];
     expect(JSON.parse(answerCall[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
+  });
+  // BOS-2188: how long the rule lasts; "always" stays the default, so an owner who doesn't look gets what they got before.
+  it("sends 'always' by default and the duration picked otherwise", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const always = [{ label: "Always allow crawl4ai's md tool", what: "use crawl4ai's md tool" }];
+    const d = decision({ kind: "permission", options: ["Allow once", always[0]!.label, "Deny"], context: { type: "permission", explain, always, alwaysAgent: { id: "a1", name: "Researcher" } } });
+    const sent = () => JSON.parse((fetchMock.mock.calls.find((c) => (c[0] as string) === "/api/decisions/d1/answer")![1] as { body: string }).body);
+    const { unmount } = render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect((screen.getByLabelText("Always (until you remove it)") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
+    await waitFor(() => expect(screen.getByText(/Saved as a rule for Researcher\./)).toBeTruthy());
+    expect(sent()).toMatchObject({ alwaysScope: "agent", alwaysTtl: "always" });
+    unmount();
+    fetchMock.mockClear();
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByLabelText("For 1 hour"));
+    fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
+    await waitFor(() => expect(screen.getByText(/Saved as a rule for Researcher, for 1 hour\./)).toBeTruthy());
+    expect(sent()).toMatchObject({ alwaysTtl: "hour" });
   });
   it("no longer explains a button that isn't there (BOS-1236)", () => {
     render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission", explain: { ...explain, alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);

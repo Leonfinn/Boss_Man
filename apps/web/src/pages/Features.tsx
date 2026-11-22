@@ -1,4 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { NoCompany } from "../components/NoCompany";
+import { short } from "../short-date";
 import { featureHorizon, HORIZONS, portalTitle, type Horizon } from "@boss-man/shared";
 import {
   api,
@@ -22,6 +24,9 @@ import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
+import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
+import { buildCsv, download } from "../csv";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
@@ -179,8 +184,14 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
   const [area, setArea] = useState("");
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => void p.then(() => (setError(null), s.reload(), onChanged()), (err: Error) => setError(err.message));
-  if (!s.data) return null;
+  const [adding, setAdding] = useState<"driver" | "area" | null>(null);
+  if (!s.data) return s.error ? <p className="error">{s.error.message}</p> : <Loader label="Loading settings" />;
   const d = s.data;
+  const add = (kind: "driver" | "area", start: () => Promise<unknown>) => {
+    if (adding) return;
+    setAdding(kind);
+    run(start().finally(() => setAdding(null)));
+  };
   return (
     <section className="card" aria-labelledby="prio-h" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <h2 id="prio-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -231,7 +242,7 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            run(api(`/api/companies/${companyId}/feature-drivers`, { method: "POST", body: { name: driver.name.trim(), weight: driver.weight } }).then(() => setDriver({ name: "", weight: 1 })));
+            add("driver", () => api(`/api/companies/${companyId}/feature-drivers`, { method: "POST", body: { name: driver.name.trim(), weight: driver.weight } }).then(() => setDriver({ name: "", weight: 1 })));
           }}
           style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 8 }}
         >
@@ -249,8 +260,8 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
               ))}
             </select>
           </div>
-          <button className="btn" type="submit">
-            Add
+          <button className="btn" type="submit" disabled={adding !== null}>
+            {adding === "driver" ? "Adding…" : "Add"}
           </button>
         </form>
       </div>
@@ -272,7 +283,7 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            run(api(`/api/companies/${companyId}/feature-areas`, { method: "POST", body: { name: area.trim() } }).then(() => setArea("")));
+            add("area", () => api(`/api/companies/${companyId}/feature-areas`, { method: "POST", body: { name: area.trim() } }).then(() => setArea("")));
           }}
           style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 8 }}
         >
@@ -280,8 +291,8 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
             <label htmlFor="new-area">New area</label>
             <input id="new-area" required maxLength={80} placeholder="e.g. Billing, Reporting" value={area} onChange={(e) => setArea(e.target.value)} />
           </div>
-          <button className="btn" type="submit">
-            Add
+          <button className="btn" type="submit" disabled={adding !== null}>
+            {adding === "area" ? "Adding…" : "Add"}
           </button>
         </form>
       </div>
@@ -557,6 +568,28 @@ function FeatureCard({ f, drivers, sub, hasSubfeatures, open, onToggle, onPatch 
   );
 }
 
+/** The features shown as a spreadsheet (BOS-2248): one row each in the list's order, sub-features under their parent with the
+ * parent's title in a column, one column per criterion, numbers as numbers (blank where unscored). */
+export function featuresToCsv(rows: Array<{ f: Feature; area: string }>, drivers: Driver[], all: Feature[]): string {
+  return buildCsv(
+    ["area", "feature", "parent", "portal", "status", "demand", ...drivers.map((x) => x.name), "effort", "value", "priority", "tasks_done", "tasks"],
+    rows.map(({ f, area }) => [
+      area,
+      f.title,
+      all.find((p) => p.id === f.parentId)?.title ?? "",
+      f.portalVisible ? "yes" : "no",
+      FEATURE_STATUS_LABEL[f.status],
+      f.demand,
+      ...drivers.map((x) => f.driverScores[x.id] ?? ""),
+      f.effort ?? "",
+      f.value.toFixed(1),
+      f.priority.toFixed(1),
+      f.tickets.done,
+      f.tickets.total,
+    ]),
+  );
+}
+
 export function Features({ companies, companyId, featureId, go }: { companies: Company[]; companyId: string | undefined; featureId: string | undefined; go: (to: string) => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   if (company && featureId) return <FeaturePage key={featureId} id={featureId} companyId={company.id} go={go} />;
@@ -623,7 +656,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
         </div>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <>
           <section className="card features-toolbar">
@@ -650,6 +683,20 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
               <a href={`#/feedback/${company.id}`} style={{ marginLeft: "auto" }}>
                 Feedback inbox
               </a>
+              <button
+                type="button"
+                className="btn small"
+                disabled={!d || !shown.length}
+                onClick={() => {
+                  if (!d) return;
+                  const rows = groups.flatMap((g) =>
+                    g.features.flatMap((f) => [f, ...shown.filter((s) => s.parentId === f.id).sort(order)]).map((f) => ({ f, area: g.name })),
+                  );
+                  download(`features-${company.name.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "company"}-${new Date().toISOString().slice(0, 10)}.csv`, featuresToCsv(rows, d.drivers, d.features));
+                }}
+              >
+                Download CSV
+              </button>
               <button type="button" className="btn small" aria-expanded={showSettings} onClick={() => setShowSettings(!showSettings)}>
                 Criteria and areas
               </button>
@@ -657,6 +704,8 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           </section>
           {showSettings && <PrioritySettings companyId={company.id} onChanged={() => (data.reload(), settings.reload())} />}
           {error && <p className="error">{error}</p>}
+          {!d && data.error && <LoadError what="your features" message={data.error.message} onRetry={data.reload} />}
+          {!d && !data.error && <Loader label="Loading features" />}
           {d && !shown.length ? (
             <p className="muted">No features yet. Add one above, or create one while linking feedback in the inbox.</p>
           ) : d && phone ? (
@@ -799,7 +848,7 @@ export function GoalSelect({ id, tree, value, onChange }: { id: string; tree: Tr
           {o.milestones.map((m) => (
             <option key={m.id} value={`m:${m.id}`}>
               {m.title}
-              {m.targetDate ? ` (${m.targetDate})` : ""}
+              {m.targetDate ? ` (${short(m.targetDate)})` : ""}
             </option>
           ))}
         </optgroup>
@@ -834,6 +883,26 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   const keepOffReasonDraftKey = `feature-keep-off-reason/${id}`;
   const [keepOffReasonDraft, setKeepOffReasonDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Priority 1 (BOS-2091): off while the request runs, and the reply's count is shown after it.
+  const [p1Busy, setP1Busy] = useState(false);
+  const [p1Note, setP1Note] = useState<string | null>(null);
+  const setPriorityOne = (on: boolean, title: string, openTasks: number) => {
+    if (p1Busy) return;
+    if (on && !window.confirm(`Put all ${openTasks} open task${openTasks === 1 ? "" : "s"} of "${title}" first? They go ahead of other work and past the usage-limit hold.`)) return;
+    setP1Busy(true);
+    void api<{ tickets?: number }>(`/api/features/${id}/priority-one`, { method: "PUT", body: { on } })
+      .then(
+        (r) => {
+          const n = r?.tickets ?? 0;
+          const s = n === 1 ? "" : "s";
+          setError(null);
+          setP1Note(on ? `Priority 1 on: ${n} task${s} marked to go first.` : `Priority 1 off: ${n} task${s} back to normal order.`);
+          data.reload();
+        },
+        (err: Error) => (setP1Note(null), setError(err.message)),
+      )
+      .finally(() => setP1Busy(false));
+  };
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
   const saveKeepOffReason = (reason: string) =>
     void api(`/api/features/${id}`, { method: "PATCH", body: { keepOffPortal: true, keepOffReason: reason.trim() || null } }).then(
@@ -847,7 +916,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
     );
   if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Feature not found" backHref="#/features" backLabel="Back to Features">This feature doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
   const d = data.data;
-  if (!d) return null;
+  if (!d) return <Loader label="Loading feature" />;
   const f = d.feature;
   const parents = (list.data?.features ?? []).filter((x) => !x.parentId && x.id !== id);
   const hasChildren = d.subfeatures.length > 0;
@@ -1038,6 +1107,18 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           </div>
         </div>
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input
+            type="checkbox"
+            checked={!!f.priorityOne}
+            disabled={p1Busy}
+            onChange={(e) => setPriorityOne(e.target.checked, f.title, d.tickets.filter((t) => t.state !== "done").length)}
+          />
+          Priority 1: every open task of it goes first, and you get one page when all of it has merged
+        </label>
+        <p role="status" className="muted" style={{ fontSize: 13, margin: 0 }}>
+          {p1Note}
+        </p>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
           Show on the feedback portal, where visitors can vote on it
         </label>
@@ -1113,13 +1194,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           >
             Save summary
           </button>
-          <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
-            <input type="checkbox" checked={f.showPublicly} disabled={!(f.publicSummary ?? "").trim()} onChange={(e) => patch({ showPublicly: e.target.checked })} />
-            Show publicly
-          </label>
-          {f.showPublicly && <span className="tag green">On</span>}
         </div>
-        {!(f.publicSummary ?? "").trim() && <p className="muted" style={{ fontSize: 13 }}>Write and save a public summary before showing it publicly.</p>}
       </section>
 
       <section className="card" aria-labelledby="f-insights-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { policyRulesService } from "./policy-rules.js";
 
 /**
  * Deletes runner events older than `days`, a few thousand rows per statement so no transaction
@@ -63,6 +64,37 @@ export async function pruneFailureSignatures(db: Db, opts: { days: number; batch
 export function failureSignaturesDays(raw: string | undefined): number {
   const n = Number(raw);
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 30;
+}
+
+/** Deletes stored permission decisions older than `days` (BOS-2185), in batches like the runner events. */
+export async function prunePermissionDecisions(db: Db, opts: { days: number; batch?: number; now?: Date; stop?: () => boolean; maxBatches?: number }): Promise<number> {
+  const batch = opts.batch ?? 2000;
+  const cutoff = new Date((opts.now ?? new Date()).getTime() - opts.days * 86_400_000);
+  let total = 0;
+  for (let i = 0; i < (opts.maxBatches ?? 500); i++) {
+    if (opts.stop?.()) break;
+    const res = await db.execute(sql`
+      delete from permission_decisions where id in (
+        select id from permission_decisions where at < ${cutoff.toISOString()}::timestamptz limit ${batch}
+      ) returning id`);
+    const n = (res as { rows?: unknown[] }).rows?.length ?? (Array.isArray(res) ? res.length : 0);
+    total += n;
+    if (n < batch) break;
+  }
+  return total;
+}
+
+/** Deletes timed permission rules that ended more than `days` (default 7) ago (BOS-2188). Never touches a rule with no expiry. */
+export async function pruneExpiredPolicyRules(db: Db, opts: { days?: number; now?: Date; stop?: () => boolean } = {}): Promise<number> {
+  if (opts.stop?.()) return 0;
+  const at = opts.now;
+  return policyRulesService(db, at ? () => at : undefined).pruneExpired(opts.days ?? 7);
+}
+
+/** BOSSMAN_PERMISSION_LOG_DAYS: days to keep stored permission decisions (default 60). */
+export function permissionLogDays(raw: string | undefined): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 60;
 }
 
 /** BOSSMAN_RUNNER_EVENTS_DAYS: days to keep (default 60); 0 or junk falls back to the default. */

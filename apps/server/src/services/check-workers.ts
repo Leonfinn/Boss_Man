@@ -11,11 +11,19 @@
 //    company it serves.
 import { randomBytes } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import type { CheckLimits, WorkerCommand } from "@boss-man/shared";
+import { PROTOCOL_VERSION, checkMemoryWarning, toolchainDifferences, toolchainMissing, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { checkWorkers, companies, runners } from "../db/schema.js";
-import { MAX_CHECK_SLOTS } from "./check-queue.js";
+import { MACHINE_TAKES, MAX_CHECK_SLOTS, readPolicy, type MachineTakes, type SlotPolicy } from "./check-queue.js";
+
+type Tc = { fingerprint: string; tools: Record<string, string> };
+
+/** Ids of workers with an open socket on this process, for the owner's-setup record (BOS-1596); mirrors each service's `connected` map. */
+// shortcut: this process only (the leader holds the sockets); lost on restart, harmless because a worker redials.
+const liveWorkerIds = new Set<string>();
+export const onlineWorkerCount = () => liveWorkerIds.size;
+export const isWorkerOnline = (id: string) => liveWorkerIds.has(id);
 
 export type CheckWorker = typeof checkWorkers.$inferSelect;
 export type WorkerSender = (command: WorkerCommand) => boolean;
@@ -28,14 +36,22 @@ export const THREADS_MAX = 256;
 export const MEMORY_MB_MIN = 256;
 export const MEMORY_MB_MAX = 1_048_576;
 
-export type WorkerSettings = { name: string; companyIds: string[]; slots: number; checkThreads: number | null; checkMemoryMb: number | null; enabled: boolean };
-export type Eligible = { id: string; name: string; limit: number; limits?: CheckLimits };
+/** `takes` and `mergeKept` (BOS-1602) are optional: left out, a new worker takes both kinds with no slot kept, as before. */
+export type WorkerSettings = { name: string; companyIds: string[]; slots: number; checkThreads: number | null; checkMemoryMb: number | null; enabled: boolean; takes?: MachineTakes; mergeKept?: number };
+export type Eligible = { id: string; name: string; limit: number; limits?: CheckLimits; policy?: SlotPolicy };
+
+/** BOS-1602: the worker's split as the queue reads it. */
+export const workerPolicy = (w: Pick<CheckWorker, "takes" | "mergeKept">): SlotPolicy => readPolicy({ takes: w.takes, mergeKept: w.mergeKept });
 export type Readiness = { ok: true; limit: number } | { ok: false; reason: string };
 
 /** How many checks a worker may run at once: the owner's number, never more than the worker says it can run. */
 export const workerLimit = (w: Pick<CheckWorker, "slots" | "reportedSlots">) => Math.max(1, Math.min(w.slots, w.reportedSlots ?? w.slots, MAX_CHECK_SLOTS));
 
-const limitsOf = (w: Pick<CheckWorker, "checkThreads" | "checkMemoryMb">): CheckLimits | undefined =>
+/** BOS-2217: a warning when the checks at once × memory per check are more than the machine says it has; null when they fit or it has not said. */
+export const workerMemoryWarning = (w: Pick<CheckWorker, "slots" | "reportedSlots" | "checkMemoryMb" | "reportedMemoryMb">) =>
+  checkMemoryWarning({ slots: workerLimit(w), perCheckMb: w.checkMemoryMb, machineMb: w.reportedMemoryMb });
+
+const limitsOf =(w: Pick<CheckWorker, "checkThreads" | "checkMemoryMb">): CheckLimits | undefined =>
   w.checkThreads || w.checkMemoryMb ? { ...(w.checkThreads ? { threads: w.checkThreads } : {}), ...(w.checkMemoryMb ? { memoryMb: w.checkMemoryMb } : {}) } : undefined;
 
 function validate(s: Partial<WorkerSettings>) {
@@ -43,11 +59,20 @@ function validate(s: Partial<WorkerSettings>) {
   if (s.slots !== undefined && (!Number.isInteger(s.slots) || s.slots < 1 || s.slots > MAX_CHECK_SLOTS)) throw new Error(`Slots must be a whole number from 1 to ${MAX_CHECK_SLOTS}.`);
   if (s.checkThreads != null && (!Number.isInteger(s.checkThreads) || s.checkThreads < 1 || s.checkThreads > THREADS_MAX)) throw new Error(`Test threads must be a whole number from 1 to ${THREADS_MAX}.`);
   if (s.checkMemoryMb != null && (!Number.isInteger(s.checkMemoryMb) || s.checkMemoryMb < MEMORY_MB_MIN || s.checkMemoryMb > MEMORY_MB_MAX)) throw new Error(`Memory per check must be from ${MEMORY_MB_MIN} to ${MEMORY_MB_MAX} MB.`);
+  if (s.takes !== undefined && !MACHINE_TAKES.includes(s.takes)) throw new Error("Takes must be merges and quick checks, merges only, or quick checks only.");
+  if (s.mergeKept !== undefined && (!Number.isInteger(s.mergeKept) || s.mergeKept < 0 || s.mergeKept > MAX_CHECK_SLOTS)) throw new Error(`Kept for merges must be a whole number from 0 to ${MAX_CHECK_SLOTS}.`);
 }
+
+/** Kept slots only mean something when the machine takes both kinds; stored as 0 otherwise, so the panel never shows a stale number. */
+const keptFor = (takes: MachineTakes | undefined, kept: number | undefined) => (takes !== undefined && takes !== "both" ? 0 : kept);
 
 export function checkWorkersService(db: Db) {
   // shortcut: live sockets on this process (only the leader holds any); lost on restart, harmless because a worker redials, like a runner.
   const connected = new Map<string, { send: WorkerSender; close: (code: number, why: string) => void }>();
+  // BOS-1570: a worker whose code speaks another protocol is refused at hello and never "connects"; remember what it said so
+  // the panel can show "worker code too old" instead of a bare "Offline".
+  // shortcut: one entry per worker id, this process only; lost on restart, harmless because the worker redials within seconds and is refused again.
+  const refused = new Map<string, { protocol: number; at: Date }>();
   // shortcut: per live socket; lost on restart, harmless because a worker sends its features again in hello.
   const features = new Map<string, string[]>();
 
@@ -63,26 +88,44 @@ export function checkWorkersService(db: Db) {
   /** Why this worker can take no company's checks at all (off, offline, an image that can't), or null. */
   function machineReason(w: CheckWorker): string | null {
     if (!w.enabled) return "Turned off.";
-    if (!connected.has(w.id)) return w.lastSeenAt ? `Offline since ${w.lastSeenAt.toISOString()}.` : "Has not connected yet.";
+    const bad = refused.get(w.id);
+    if (!connected.has(w.id) && bad && Date.now() - bad.at.getTime() < 10 * 60_000) {
+      return `Out of date: worker code too old (it speaks protocol ${bad.protocol}, your server needs ${PROTOCOL_VERSION}). Redeploy this worker so it rebuilds from the current source; no file edit is needed.`;
+    }
+    if (!connected.has(w.id)) return w.lastSeenAt ? `Offline since ${w.lastSeenAt.toISOString()}.` : "Has not connected yet. If its log says \"Can't find the address\" (ENOTFOUND), that machine can't look up the address in its file: if it is a Tailscale name, the machine isn't on your tailnet, so put Boss Man's local network address in BOSSMAN_URL and redeploy it.";
     const feats = features.get(w.id) ?? [];
     if (!feats.includes("check-jobs")) return "Its image can't run queued checks: update this machine.";
     if (!feats.includes(BUNDLE_FEATURE)) return "Its image can't fetch the code to check yet (needs a newer image), so it gets no checks.";
-    if (!w.imageCommit) return "It hasn't said which commit its image was built from: update this machine.";
+    if (!w.imageCommit && !w.toolchain) return "It hasn't said which tools or commit its image was built with: update this machine.";
     return null;
   }
 
-  function readiness(w: CheckWorker, companyId: string, runnerCommit: string | null): Readiness {
+  /**
+   * BOS-1570: a worker matches on the tools checks run with (Node, pnpm, git, ...), not on the commit its image was built
+   * from, so a runner update that leaves the tools alone leaves the worker working. The commit stays the test only
+   * when one side's image is too old to report its tools.
+   */
+  function readiness(w: CheckWorker, companyId: string, runnerCommit: string | null, runnerToolchain: Tc | null = null): Readiness {
     const why = machineReason(w);
     if (why) return { ok: false, reason: why };
     if (!w.companyIds.includes(companyId)) return { ok: false, reason: "Not set up for this company." };
-    if (!runnerCommit) return { ok: false, reason: "The company's runner hasn't said which commit its image was built from, so results can't be compared." };
-    if (w.imageCommit!.toLowerCase() !== runnerCommit.toLowerCase()) return { ok: false, reason: "Built from a different commit than the company's runner, so its results could differ: update this machine." };
+    if (w.toolchain && runnerToolchain) {
+      const diff = [...toolchainDifferences(w.toolchain.tools, runnerToolchain.tools), ...toolchainMissing(w.toolchain.tools, runnerToolchain.tools)];
+      if (w.toolchain.fingerprint === runnerToolchain.fingerprint && !diff.length) return { ok: true, limit: workerLimit(w) };
+      return { ok: false, reason: `Out of date: its tools differ from your runner's (${diff.length ? diff.join("; ") : "see the tool list"}). Redeploy this worker so it rebuilds; no file edit is needed.` };
+    }
+    // One side can't report its tools: fall back to the commit.
+    if (!runnerCommit) return { ok: false, reason: "The company's runner hasn't said which tools or commit its image was built with, so results can't be compared." };
+    if (!w.imageCommit) return { ok: false, reason: "Its image is too old to report its tools and has no commit: update this machine." };
+    if (w.imageCommit.toLowerCase() !== runnerCommit.toLowerCase()) {
+      return { ok: false, reason: w.toolchain ? "Your runner's image is older and can't report its tools, and the commits differ: rebuild the runner (Build and update runners)." : "Its image is older than this check and can't report its tools, and its commit differs from your runner's: redeploy this worker from the current compose.yaml (one time only)." };
+    }
     return { ok: true, limit: workerLimit(w) };
   }
 
-  async function runnerCommit(companyId: string): Promise<string | null> {
-    const [r] = await db.select({ c: runners.imageCommit }).from(runners).where(eq(runners.companyId, companyId));
-    return r?.c ?? null;
+  async function runnerImage(companyId: string): Promise<{ commit: string | null; toolchain: Tc | null }> {
+    const [r] = await db.select({ c: runners.imageCommit, t: runners.toolchain }).from(runners).where(eq(runners.companyId, companyId));
+    return { commit: r?.c ?? null, toolchain: r?.t ?? null };
   }
 
   return {
@@ -92,7 +135,7 @@ export function checkWorkersService(db: Db) {
       const token = `bmw_${randomBytes(32).toString("base64url")}`;
       const [worker] = await db
         .insert(checkWorkers)
-        .values({ name: s.name.trim(), companyIds: [...new Set(s.companyIds)], slots: s.slots, checkThreads: s.checkThreads, checkMemoryMb: s.checkMemoryMb, enabled: s.enabled, tokenHash: hashToken(token) })
+        .values({ name: s.name.trim(), companyIds: [...new Set(s.companyIds)], slots: s.slots, checkThreads: s.checkThreads, checkMemoryMb: s.checkMemoryMb, enabled: s.enabled, takes: s.takes ?? "both", mergeKept: keptFor(s.takes, s.mergeKept) ?? 0, tokenHash: hashToken(token) })
         .returning();
       return { worker: worker!, token };
     },
@@ -106,9 +149,15 @@ export function checkWorkersService(db: Db) {
 
     get,
 
+    /** A hello with a protocol this server doesn't speak was refused: keep it so the owner is told why (BOS-1570). */
+    refuse(id: string, protocol: number, now = new Date()) {
+      refused.set(id, { protocol, at: now });
+    },
+
     async update(id: string, s: Partial<WorkerSettings>): Promise<CheckWorker | null> {
       validate(s);
-      const set = { ...s, ...(s.name !== undefined ? { name: s.name.trim() } : {}), ...(s.companyIds ? { companyIds: [...new Set(s.companyIds)] } : {}) };
+      const kept = keptFor(s.takes, s.mergeKept);
+      const set = { ...s, ...(s.name !== undefined ? { name: s.name.trim() } : {}), ...(s.companyIds ? { companyIds: [...new Set(s.companyIds)] } : {}), ...(kept !== undefined ? { mergeKept: kept } : {}) };
       const [row] = await db.update(checkWorkers).set(set).where(eq(checkWorkers.id, id)).returning();
       return row ?? null;
     },
@@ -120,10 +169,10 @@ export function checkWorkersService(db: Db) {
     },
 
     /** Records a hello: last seen, image commit and version, the slots and features it reports. */
-    async touch(id: string, hello: { imageCommit?: string; imageVersion: string | null; checkSlots?: number; features?: string[] }, now = new Date()): Promise<CheckWorker | null> {
+    async touch(id: string, hello: { imageCommit?: string; toolchain?: { fingerprint: string; tools: Record<string, string> }; imageVersion: string | null; checkSlots?: number; memoryMb?: number; features?: string[] }, now = new Date()): Promise<CheckWorker | null> {
       const [row] = await db
         .update(checkWorkers)
-        .set({ lastSeenAt: now, imageCommit: hello.imageCommit ?? null, imageVersion: hello.imageVersion, reportedSlots: hello.checkSlots ?? null, features: hello.features ?? [] })
+        .set({ lastSeenAt: now, imageCommit: hello.imageCommit ?? null, toolchain: hello.toolchain ?? null, imageVersion: hello.imageVersion, reportedSlots: hello.checkSlots ?? null, reportedMemoryMb: hello.memoryMb ?? null, features: hello.features ?? [] })
         .where(eq(checkWorkers.id, id))
         .returning();
       return row ?? null;
@@ -139,11 +188,13 @@ export function checkWorkersService(db: Db) {
       // Its jobs are re-synced by the newer machine's hello; if it redials, each hello cancels the other's leftovers.
       const prev = connected.get(id);
       connected.set(id, entry);
+      liveWorkerIds.add(id);
       if (prev) prev.close(WORKER_REPLACED_CLOSE, "replaced by a newer connection");
       features.set(id, feats);
       return () => {
         if (connected.get(id) === entry) {
           connected.delete(id);
+          liveWorkerIds.delete(id);
           features.delete(id);
         }
       };
@@ -164,11 +215,11 @@ export function checkWorkersService(db: Db) {
       // Cheap when there are no workers (the common case): one indexed read, nothing else.
       const all = await db.select().from(checkWorkers).where(eq(checkWorkers.enabled, true)).orderBy(asc(checkWorkers.createdAt));
       if (!all.length) return [];
-      const commit = await runnerCommit(companyId);
+      const image = await runnerImage(companyId);
       const out: Eligible[] = [];
       for (const w of all) {
-        const r = readiness(w, companyId, commit);
-        if (r.ok) out.push({ id: w.id, name: w.name, limit: r.limit, limits: limitsOf(w) });
+        const r = readiness(w, companyId, image.commit, image.toolchain);
+        if (r.ok) out.push({ id: w.id, name: w.name, limit: r.limit, limits: limitsOf(w), policy: workerPolicy(w) });
       }
       return out;
     },
@@ -177,7 +228,7 @@ export function checkWorkersService(db: Db) {
     async list() {
       const all = await db.select().from(checkWorkers).orderBy(asc(checkWorkers.createdAt));
       const names = new Map((await db.select({ id: companies.id, name: companies.name }).from(companies)).map((c) => [c.id, c.name]));
-      const commits = new Map((await db.select({ c: runners.companyId, commit: runners.imageCommit }).from(runners)).map((r) => [r.c, r.commit]));
+      const images = new Map((await db.select({ c: runners.companyId, commit: runners.imageCommit, tc: runners.toolchain }).from(runners)).map((r) => [r.c, r]));
       return all.map((w) => ({
         id: w.id,
         name: w.name,
@@ -185,15 +236,21 @@ export function checkWorkersService(db: Db) {
         connected: connected.has(w.id),
         slots: w.slots,
         reportedSlots: w.reportedSlots,
+        reportedMemoryMb: w.reportedMemoryMb,
+        // BOS-2217: shown in the Checks panel; a warning, not a refusal, because the machine's figure can be a container limit the owner is about to raise.
+        memoryWarning: workerMemoryWarning(w),
         limit: workerLimit(w),
+        takes: workerPolicy(w).takes,
+        mergeKept: workerPolicy(w).mergeKept,
         checkThreads: w.checkThreads,
         checkMemoryMb: w.checkMemoryMb,
         imageCommit: w.imageCommit,
+        toolchain: w.toolchain?.tools ?? null,
         imageVersion: w.imageVersion,
         lastSeenAt: w.lastSeenAt,
         createdAt: w.createdAt,
         companies: w.companyIds.map((id) => {
-          const r = readiness(w, id, commits.get(id) ?? null);
+          const r = readiness(w, id, images.get(id)?.commit ?? null, images.get(id)?.tc ?? null);
           return { id, name: names.get(id) ?? "(deleted company)", ready: r.ok, reason: r.ok ? null : r.reason };
         }),
         // One line when nothing works for any company (turned off, offline, old image); null otherwise.

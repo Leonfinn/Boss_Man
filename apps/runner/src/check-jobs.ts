@@ -4,6 +4,7 @@
 // hand-run checks and the vitest guard share the machine's real limit. The runner's count caps the server's check_slots.
 import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, CheckLimits, VERIFY_TIMEOUT_MS, redactForModel, withCheckFacts, type CheckBundleInfo, type RunnerMessage } from "@boss-man/shared";
 import type { Workspaces } from "./workspace.js";
+import type { DiskGuard } from "./disk-guard.js";
 
 /** What a job needs from check.run (tests pass only some of it). */
 export type CheckRunCommand = { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number; scanList?: string; limits?: CheckLimits; bundle?: CheckBundleInfo };
@@ -37,6 +38,8 @@ export class CheckJobs {
      * no result is sent. The company runner has none: its shared repo already holds every commit it is sent.
      */
     private readonly prepare?: (cmd: CheckRunCommand) => Promise<boolean>,
+    /** BOS-2182: while the disk is almost full a job waits (progress says why) and starts by itself when space is back. */
+    private readonly diskGuard?: DiskGuard,
   ) {}
 
   /** Job ids this runner is running now, for the hello message: the server puts back in line any it thinks run here but don't. */
@@ -61,6 +64,27 @@ export class CheckJobs {
     this.cancels.set(cmd.jobId, () => {
       job.cancelled = true;
     });
+    if (this.diskGuard && this.diskGuard.hold() !== null) {
+      const guard = this.diskGuard;
+      void guard
+        .waitForRoom({
+          cancelled: () => job.cancelled,
+          logEveryMs: PROGRESS_EVERY_MS,
+          onHold: (reason) => {
+            this.send({ type: "check.progress", jobId: cmd.jobId, tail: reason });
+            this.log(`check job ${cmd.jobId} is held: ${reason}`);
+          },
+        })
+        .then((room) => {
+          if (room && !job.cancelled) return this.begin(cmd, job);
+          this.cancels.delete(cmd.jobId);
+        });
+      return;
+    }
+    this.begin(cmd, job);
+  }
+
+  private begin(cmd: CheckRunCommand, job: { cancelled: boolean }) {
     if (!this.prepare) return this.check(cmd, job);
     void this.prepare(cmd)
       .catch((err: Error) => {
@@ -101,12 +125,12 @@ export class CheckJobs {
         },
       })
       .then(
-        (r) => ({ exitCode: cancelled ? null : r.exitCode, timedOut: r.timedOut && !cancelled, tail: cancelled ? `${r.output}\nStopped by the server.` : r.output, fullLog: r.fullLog === undefined ? undefined : cancelled ? `${r.fullLog}\nStopped by the server.` : r.fullLog }),
-        (err: Error) => ({ exitCode: null as number | null, timedOut: false, tail: `The runner could not start the check: ${String(err.message).slice(0, 1000)}`, fullLog: undefined as string | undefined }),
+        (r) => ({ stages: r.stages, ranFull: r.ranFull, exitCode: cancelled ? null : r.exitCode, timedOut: r.timedOut && !cancelled, tail: cancelled ? `${r.output}\nStopped by the server.` : r.output, fullLog: r.fullLog === undefined ? undefined : cancelled ? `${r.fullLog}\nStopped by the server.` : r.fullLog }),
+        (err: Error) => ({ stages: undefined, ranFull: undefined, exitCode: null as number | null, timedOut: false, tail: `The runner could not start the check: ${String(err.message).slice(0, 1000)}`, fullLog: undefined as string | undefined }),
       )
       .then((r) => {
         this.cancels.delete(cmd.jobId);
-        const done: Done = { type: "check.done", jobId: cmd.jobId, commit: cmd.commit, exitCode: r.exitCode, timedOut: r.timedOut, tail: redactForModel(withCheckFacts(r.tail)), ...(r.fullLog !== undefined ? { fullLog: r.fullLog } : {}) };
+        const done: Done = { type: "check.done", jobId: cmd.jobId, commit: cmd.commit, exitCode: r.exitCode, timedOut: r.timedOut, tail: redactForModel(withCheckFacts(r.tail)), ...(r.fullLog !== undefined ? { fullLog: r.fullLog } : {}), ...(r.stages ? { stages: r.stages, ranFull: r.ranFull } : {}) };
         this.unsent.set(cmd.jobId, done);
         this.send(done);
         this.log(`check job ${cmd.jobId} ended (exit ${r.exitCode}${r.timedOut ? ", timed out" : ""})`);

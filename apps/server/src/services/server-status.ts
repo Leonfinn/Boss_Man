@@ -17,6 +17,7 @@ import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
 import type { NetguardAllowReport } from "./netguard-allow.js";
 import { lastRestart } from "./runner-restarts.js";
+import { ownerSetupFacts } from "./owner-record.js";
 import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
@@ -34,6 +35,8 @@ export type ServerStatusDeps = {
   colours?: () => Promise<BlueGreen>;
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
+  /** BOS-2058: every update wait that is on (update-waits.ts activeWaits). Absent in tests that don't need it. */
+  updateWaits?: () => Promise<unknown[]>;
   /** Whether this company's own runner swap is under way (runner-report swappingFor); absent: any hold counts. */
   swapping?: (companyId: string) => Promise<boolean>;
   errors: ErrorBuffer;
@@ -57,6 +60,12 @@ export type ServerStatusDeps = {
   runLimits?: (companyId: string) => Promise<unknown>;
   /** Failed merge attempts in the last hour, grouped by reason (merge-failures.ts, BOS-1461). Absent: null. */
   mergeFailures?: (companyId: string) => Promise<unknown>;
+  /** The merge train per project on this server: seats, who is seated and waits, tickets held to land alone, stall clocks (merge-stall.ts, BOS-1515). Absent: null. */
+  mergeTrain?: (companyId: string) => Promise<unknown>;
+  /** BOS-2119: each project's landing turn on this server: holder, cap, the line in order, and what each waiter shows (merge-status.ts). Absent: null. */
+  landingTurns?: (companyId: string) => Promise<unknown>;
+  /** R46: free check slots not taking a queued job, each with its reason ("free, not taking X because …"). */
+  idleCheckSlots?: (companyId: string) => unknown[] | Promise<unknown[]>;
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -222,6 +231,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         cpuReserve: (await deps.cpuReserve?.()) ?? null,
         // The owner's BOSSMAN_NETGUARD_ALLOW entries (BOS-770): what the launcher uses, what .env holds, which ones Boss Man covers anyway.
         netguardAllow: deps.netguardAllow ? await deps.netguardAllow().catch(() => null) : null,
+        // BOS-1472: what staging runs and how its last smoke checks went (the host's staging lane); null when the host doesn't report one.
+        staging: (deploy as { staging?: unknown } | null)?.staging ?? null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),
@@ -236,9 +247,13 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // A wake held "at a concurrency limit: all companies" waits for the first; "this company" for the second.
         runLimits: deps.runLimits ? await deps.runLimits(companyId).catch(() => null) : null,
         mergeFailures: deps.mergeFailures ? await deps.mergeFailures(companyId).catch(() => null) : null,
+        mergeTrain: deps.mergeTrain ? await deps.mergeTrain(companyId).catch(() => null) : null,
+        landingTurns: deps.landingTurns ? await deps.landingTurns(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
+        // BOS-2058: every update wait that is on (what it waits on, since when, when it ends): the owner's screens read the same list.
+        updateWaits: deps.updateWaits ? await deps.updateWaits().catch(() => null) : null,
         // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
-        checks: await checkQueue(db).status(companyId, at),
+        checks: { ...(await checkQueue(db).status(companyId, at)), idleSlots: (await deps.idleCheckSlots?.(companyId)) ?? [] },
         migration: await latestMigration(db),
         runner: runner
           ? {
@@ -273,6 +288,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // Only "running" means the add-on is up; never tell the owner otherwise.
         addons: deps.addons ? await deps.addons() : null,
         hostFacts: deps.hostFacts ? await deps.hostFacts().catch(() => null) : null,
+        // What the owner has set up, from the record (BOS-1596): check workers added / ever connected / online. A worker is installed only once it has connected; never say otherwise.
+        ownerSetup: await ownerSetupFacts(db, companyId).catch(() => null),
       };
     },
   };

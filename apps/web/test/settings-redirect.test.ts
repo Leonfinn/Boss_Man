@@ -6,9 +6,12 @@ import { SETTINGS_GROUPS, SETTINGS_PAGES, settingsPath, settingsRedirect } from 
 const route = (hash: string) => hash.replace(/^#\/?/, "").split("/");
 
 describe("Settings pages", () => {
-  it("has the 9 approved pages in 3 groups, in order", () => {
-    expect(SETTINGS_GROUPS.map((g) => g.label)).toEqual(["Money and access", "How the team works", "Boss Man"]);
-    expect(SETTINGS_PAGES.map((p) => p.label)).toEqual(["Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions", "Server and runner", "Import and export"]);
+  it("has the 15 approved pages in 3 groups, in order (BOS-1492, Account added in BOS-2159)", () => {
+    expect(SETTINGS_GROUPS.map((g) => g.label)).toEqual(["Money and access", "How the team works", "Server and runner"]);
+    expect(SETTINGS_PAGES.map((p) => p.label)).toEqual([
+      "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+      "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
+    ]);
   });
 
   it("gives each page its own URL under the company", () => {
@@ -20,6 +23,10 @@ describe("Settings pages", () => {
 describe("old Settings links land on the new page (BOS-1018 §5)", () => {
   it("sends #/settings/<co>/access to Tools and deploys", () => {
     expect(settingsRedirect(route("settings/c1/access"), "c1")).toBe("settings/c1/tools");
+  });
+
+  it("sends the one-page #/settings/<co>/system to Updates, the first of its six pages, keeping the company (BOS-1492)", () => {
+    expect(settingsRedirect(route("settings/c1/system"), "c1")).toBe("settings/c1/updates");
   });
 
   it("sends #/settings/<co>/workflow to Reviews", () => {

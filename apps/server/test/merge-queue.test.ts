@@ -40,6 +40,85 @@ describe("merge queue screen (BOS-587)", () => {
     expect(failingStep("error: something broke")).toBe("error: something broke");
   });
 
+  // R28: approved tickets held by mergeWaits on a fix marked fixesMergeCheck: one line from the function that holds, not "healthy".
+  it("reads held_behind_fix for approved tickets waiting on a marked fix, and stuck fix_stalled when the fix is parked", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+    const fix = await mk("Fix main CI");
+    await c.db.update(tickets).set({ systemState: "in_progress", fixesMergeCheck: true }).where(eq(tickets.id, fix.id));
+    for (const title of ["Held one", "Held two"]) {
+      const t = await mk(title);
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+    }
+    const data = await queue(c);
+    expect(data.line).toMatchObject({ state: "held_behind_fix", held: 2, fixes: [{ ticketId: fix.id, stateText: "being fixed", ownerUpdate: false }] });
+    await c.db.update(tickets).set({ systemState: "ready" }).where(eq(tickets.id, fix.id));
+    expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", others: 2 });
+  });
+
+  describe("held behind a fix: the fix's own state (R28)", () => {
+    async function heldTwoBehind(c: Awaited<ReturnType<typeof setup>>, fixSet: Partial<typeof tickets.$inferInsert>) {
+      const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+      const fix = await mk("Fix main CI");
+      await c.db.update(tickets).set({ fixesMergeCheck: true, ...fixSet }).where(eq(tickets.id, fix.id));
+      for (const title of ["Held one", "Held two"]) {
+        const t = await mk(title);
+        await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+        await approve(c, t.id);
+      }
+      return fix;
+    }
+
+    it("a fix that was sent back is stalled, not 'being fixed'", async () => {
+      const c = (ctx = await setup());
+      const fix = await heldTwoBehind(c, { systemState: "in_progress" });
+      await c.db.insert(reviewRequests).values({ ticketId: fix.id, kind: "code", round: 1, status: "changes_requested" });
+      expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", others: 2, reason: expect.stringMatching(/sent back/) });
+      // A later round that is still pending (back with its reviewers) is not a sent-back fix.
+      await c.db.insert(reviewRequests).values({ ticketId: fix.id, kind: "code", round: 2, status: "pending" });
+      expect((await queue(c)).line).toMatchObject({ state: "held_behind_fix", fixes: [{ stateText: "being fixed" }] });
+    });
+
+    it("an approved fix that has waited over an hour to land is stalled, whoever owns the wait", async () => {
+      const c = (ctx = await setup());
+      const fix = await heldTwoBehind(c, { systemState: "review", lastActivityAt: new Date(Date.now() - 90 * 60_000) });
+      await approve(c, fix.id);
+      // The wait is the owner's (an open sign-off), not Boss Man's: the old "system waits only" rule never flagged this.
+      const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Sign off the fix?", recommendedOption: "Yes", context: { type: "risk_review" } }).returning({ id: decisions.id });
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: fix.id, blockerDecisionId: card!.id });
+      expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", reason: expect.stringMatching(/approved for 9\d minutes and has not landed/) });
+    });
+
+    it("merged in a company that puts work live itself: it waits for the CEO to mark it live, with no update card", async () => {
+      const c = (ctx = await setup());
+      // The first company is the home company (Boss Man's own deploy); this second one puts its own work live.
+      const { company } = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+      const project = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Shop" })).json() as { id: string };
+      const mk = async (title: string) => (await c.req("POST", `/api/projects/${project.id}/tickets`, { title })).json() as { id: string };
+      const fix = await mk("Fix main CI");
+      await c.db.update(tickets).set({ fixesMergeCheck: true, systemState: "review", mergeCommit: "a".repeat(40), mergedAt: new Date() }).where(eq(tickets.id, fix.id));
+      await c.db.insert(settings).values({ key: `live_release:${company.id}`, value: { new: "b".repeat(40) } });
+      const t = await mk("Held one");
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+      const line = (await c.req("GET", `/api/companies/${company.id}/merge-queue`).then((r) => r.json())).line;
+      expect(line).toMatchObject({ state: "held_behind_fix", fixes: [{ stateText: "merged, waiting for the CEO to mark it live", ownerUpdate: false, updateCardId: null }] });
+    });
+
+    it("merged, only the server update left: the line links the open update card and raises none", async () => {
+      const c = (ctx = await setup());
+      await heldTwoBehind(c, { systemState: "review", mergeCommit: "a".repeat(40), mergedAt: new Date() });
+      // The server runs an older commit than the merge, so the merge is not live yet.
+      await c.db.insert(settings).values({ key: `live_release:${c.company.id}`, value: { new: "b".repeat(40) } });
+      const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Put the update live?", recommendedOption: "Yes", context: { type: "deploy", deployId: "d1" } }).returning({ id: decisions.id });
+      const before = (await c.db.select().from(decisions)).length;
+      const line = (await queue(c)).line;
+      expect(line).toMatchObject({ state: "held_behind_fix", fixes: [{ ownerUpdate: true, updateCardId: card!.id }] });
+      expect((await c.db.select().from(decisions)).length).toBe(before);
+    });
+  });
+
   it("lists a ticket in review with a failed check, and flags it as stuck", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the login" })).json() as { id: string; number: number };
@@ -51,8 +130,9 @@ describe("merge queue screen (BOS-587)", () => {
     expect(row).toMatchObject({ title: "Fix the login", stuck: true, state: "check_failed_retrying", failedCheck: true });
     expect(row.label).toMatch(/check failed: retrying \(error TS1: bad\)/);
     expect(data.waitingCount).toBe(1);
-    // The side menu's warning badge counts stuck items (BOS-767).
-    expect(data.stuckCount).toBe(1);
+    // The side menu's warning badge follows the line's verdict (BOS-1594): one ticket's own failed check is flagged on its row, not a stuck line.
+    expect(data.stuckCount).toBe(0);
+    expect(data.line.state).not.toBe("stuck");
   });
 
   it("shows a stuck-check card as needs you, linking to the decision", async () => {
@@ -319,6 +399,40 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       mergeQueueService(c.db, { runningMerges: () => [], limit: async () => 2, queueStatus: async () => ({ mode: "server", slots: 2, running: 0, waiting: 0 }), runnerConnected: async () => true, ...over });
     const labelOf = async (c: Awaited<ReturnType<typeof setup>>, id: string, over: Partial<Parameters<typeof mergeQueueService>[1]>) => (await svc(c, over).get(c.company.id)).waiting.find((w) => w.ticketId === id)!;
 
+    // BOS-1757: a running merge check holds a slot even when no landing owns it, so the screen counts the same rows as the Checks panel.
+    it("lists a running merge job that no landing owns, so it counts the same as the Checks panel", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const started = new Date(Date.now() - 15 * 60_000);
+      const view = await svc(c, { runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: started }], queueStatus: async () => ({ mode: "server", slots: 3, running: 1, waiting: 0 }) }).get(c.company.id);
+      expect(view.running.map((r) => r.ticketId)).toEqual([id]);
+      expect(view.running[0]!.minutes).toBeGreaterThanOrEqual(15);
+    });
+
+    // BOS-1942: where a running merge check runs comes from its check job, and the server's host name rides with the view.
+    it("carries where each running merge check runs, and the server's host name", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const view = await svc(c, { runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: new Date(), ranOn: "Worker One" }], serverHost: async () => "host-a", queueStatus: async () => ({ mode: "server", slots: 3, running: 1, waiting: 0 }) }).get(c.company.id);
+      expect(view.running[0]!.ranOn).toBe("Worker One");
+      expect(view.serverHost).toBe("host-a");
+      // No job on record names no place (and a failing host lookup is not an error).
+      const none = await svc(c, { runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: new Date() }], serverHost: async () => { throw new Error("no report"); }, queueStatus: async () => ({ mode: "server", slots: 3, running: 1, waiting: 0 }) }).get(c.company.id);
+      expect(none.running[0]!.ranOn).toBeUndefined();
+      expect(none.serverHost).toBeNull();
+    });
+
+    // BOS-1942: the slot total says what it is made of (server plus worker), only when more than one machine holds slots.
+    it("carries the slot split only when several machines hold slots", async () => {
+      const c = (ctx = await setup());
+      await waitingMerge(c);
+      const q = { queueStatus: async () => ({ mode: "server" as const, slots: 5, running: 0, waiting: 0 }) };
+      const two = await svc(c, { ...q, slotSplit: async () => [{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }] }).get(c.company.id);
+      expect(two.slotSplit).toEqual([{ ranOn: "company runner", slots: 3 }, { ranOn: "Truenas", slots: 2 }]);
+      const one = await svc(c, { ...q, slotSplit: async () => [{ ranOn: "company runner", slots: 5 }] }).get(c.company.id);
+      expect(one.slotSplit).toBeUndefined();
+    });
+
     it("says no runner is connected before anything else, even with every slot busy", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);
@@ -360,6 +474,36 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(other.statusLine!.blocker).toMatch(/Every slot is busy: slot 1: APP-1/);
     });
 
+    // BOS-1803: a seat waiter says how many wait ahead for a seat, and a lane merge says so, on the row and the ticket's status line.
+    it("says the seat place and the background lane in the label and status line", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const seat = async () => ({ slots: 2, busy: [], mainRed: false, fixRef: null, seatWait: [id] });
+      const lane = "background lane: newer ordinary work goes first for up to 40 min more";
+      const row = await labelOf(c, id, { queueDetail: seat, places: async () => new Map([[id, { place: null, why: null, seatPlace: 3, lane }]]) });
+      expect(row).toMatchObject({ state: "waiting_for_seat", label: `waiting for a train seat (2 ahead); ${lane}` });
+      expect(row.place ?? null).toBeNull(); // a seat waiter has no check-queue place yet
+      expect(row.statusLine!.step).toBe(`waiting for a train seat (2 ahead); ${lane}`);
+      const next = await labelOf(c, id, { queueDetail: seat, places: async () => new Map([[id, { place: null, why: null, seatPlace: 1, lane: null }]]) });
+      expect(next.label).toBe("waiting for a train seat (next up)");
+      // Waiting for a check slot: its place counts as before and the lane is added after it.
+      const busy = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 5 }), queueDetail: detail(2), places: async () => new Map([[id, { place: 4, why: null, lane }]]) });
+      expect(busy.statusLine!.step).toBe(`waiting for a check slot (3 ahead); ${lane}`);
+      expect(busy.place).toBe(4);
+    });
+
+    // BOS-1515 (B1): a merge the train holds to land on main alone says who it clashed with, the files, and what happens next.
+    it("says waiting to land on main alone, with the clash, for a merge the train holds alone", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const detail = async () => ({ slots: 2, busy: [], mainRed: false, fixRef: null, seatWait: [id], heldAlone: [{ ticketId: id, clashWith: ["APP-1471"], files: ["a.ts", "b.ts", "c.ts", "d.ts"], since: "2026-11-14T20:14:35.000Z", holdsLine: true }] });
+      const row = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 1, waiting: 3 }), queueDetail: detail });
+      expect(row).toMatchObject({ state: "waiting_for_seat", label: "waiting to land on main alone: it clashed with APP-1471 in 4 files (a.ts, b.ts, c.ts, …)" });
+      expect(row.heldAlone).toEqual({ clashWith: ["APP-1471"], files: ["a.ts", "b.ts", "c.ts", "d.ts"], since: "2026-11-14T20:14:35.000Z", holdsLine: true });
+      expect(row.statusLine).toMatchObject({ step: row.label, blocker: "The tickets ahead in the merge train haven't landed yet." });
+      expect(row.statusLine!.next).toMatch(/others wait behind it until then\. It is sent back at once if the clash reaches main\./);
+    });
+
     it("gives a running merge the check's own start time, not the landing's", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);
@@ -381,6 +525,61 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       const row = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 1, waiting: 1 }), queueDetail: detail(1) });
       expect(row.label).toMatch(/^next in line for a check/);
       expect(row.label).not.toMatch(/waiting for a check slot/);
+    });
+
+    // BOS-1871: BOS-1854's check passed at 12:44, then its landing waited for GitHub CI on the merge copy. Its check held no
+    // slot any more, so it dropped out of Running now and fell through to "next in line for a check. A slot is free".
+    it("says waiting for GitHub CI, never next in line, for a landing whose check ended but whose CI wait is open", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const landing = new Date(Date.now() - 40 * 60_000);
+      const ciSince = new Date(Date.now() - 12 * 60_000);
+      const service = svc(c, {
+        runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const, ci: { since: ciSince.toISOString(), waiting: ["check", "images (arm64)"] } }],
+        runningChecks: async () => [],
+        queueStatus: async () => ({ mode: "server", slots: 2, running: 0, waiting: 0 }),
+        queueDetail: detail(0),
+      });
+      const view = await service.get(c.company.id);
+      expect(view.running).toEqual([]);
+      const row = view.waiting.find((w) => w.ticketId === id)!;
+      expect(row).toMatchObject({ state: "waiting_for_ci", minutes: 12, stuck: false, actor: "system", label: "waiting for GitHub CI on its merge copy (check, images (arm64)), 12 min so far" });
+      expect(`${row.label} ${row.next}`).not.toMatch(/next in line|slot is free|check slot/);
+      expect(row.statusLine).toMatchObject({ step: row.label, since: ciSince.toISOString(), blocker: null });
+      expect(await service.statusLineFor(c.company.id, id)).toEqual(row.statusLine);
+      // Still one item in the line (R43), and a CI wait is not the line's own fault: no stuck badge.
+      expect(view.lineCount).toBe(1);
+      expect(view.stuckCount).toBe(0);
+      // With its check still holding a slot it stays in Running now, with the CI wait beside it (BOS-1070), as before.
+      const both = await svc(c, {
+        runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const, ci: { since: ciSince.toISOString(), waiting: [] } }],
+        runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: ciSince }],
+      }).get(c.company.id);
+      expect(both.running).toMatchObject([{ ticketId: id, ci: { minutes: 12, waiting: [] } }]);
+      expect(both.waiting.find((w) => w.ticketId === id)).toBeUndefined();
+      // A landing with no CI wait and no slot is still left out of Running now (BOS-1287), so it reads as before.
+      const none = await labelOf(c, id, { runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const }], runningChecks: async () => [], queueDetail: detail(1) });
+      expect(none.state).toBe("waiting_for_check_capacity");
+    });
+
+    // BOS-1871: the held-fix stall alarm read the CI wait only on running rows, so a fix waiting on GitHub CI was timed as
+    // "approved, waiting to land" from its approval.
+    it("times a held fix that waits for GitHub CI by that wait, not by its approval", async () => {
+      const c = (ctx = await setup());
+      const fix = await waitingMerge(c);
+      await c.db.update(tickets).set({ fixesMergeCheck: true, lastActivityAt: new Date(Date.now() - 5 * 60 * 60_000) }).where(eq(tickets.id, fix));
+      const held = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Held" })).json() as { id: string };
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, held.id));
+      await approve(c, held.id);
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: held.id, blockerTicketId: fix });
+      const lineWith = (ciMin: number) =>
+        svc(c, {
+          runningMerges: () => [{ ticketId: fix, startedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(), startedBy: "the merge gate", ci: { since: new Date(Date.now() - ciMin * 60_000).toISOString(), waiting: ["check"] } }],
+          runningChecks: async () => [],
+          queueDetail: detail(0),
+        }).get(c.company.id).then((v) => v.line);
+      expect(await lineWith(20)).toMatchObject({ state: "held_behind_fix", fixes: [{ ticketId: fix, stateText: "waiting for GitHub CI, 20 min" }] });
+      expect(await lineWith(75)).toMatchObject({ state: "stuck", cause: "fix_stalled", reason: expect.stringMatching(/waiting for GitHub CI for 75 minutes with no result/) });
     });
 
     it("does not claim a slot is free when slot use is unknown (legacy mode, or the lookup fails)", async () => {
@@ -429,6 +628,35 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     const d2 = await first.get(c.company.id);
     expect(d2.waiting.find((w) => w.ticketId === ids[0])!.label).toMatch(/^waiting for a check slot \(next up\)/);
     expect(d2.waiting.find((w) => w.ticketId === ids[1])!.label).toMatch(/^waiting for a check slot \(1 ahead\)/);
+  });
+
+  it("BOS-1594: tickets queued over an hour for a busy check slot are over capacity, so the side-menu stuck badge stays 0", async () => {
+    const c = (ctx = await setup());
+    await serverMode(c);
+    const old = new Date(Date.now() - 90 * 60_000);
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Long wait" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review", lastActivityAt: old, stateChangedAt: old }).where(eq(tickets.id, t.id));
+    await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "code", round: 1, status: "approved" });
+    await job(c, t.id, "queued", "c".repeat(40));
+    // The line is landing: two merges 20 and 40 minutes ago.
+    for (const [i, ago] of [20, 40].entries()) {
+      const m = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: `Landed ${i}` })).json() as { id: string };
+      const at = new Date(Date.now() - ago * 60_000);
+      await c.db.update(tickets).set({ systemState: "done", mergeCommit: `abcdef${i}234567890`, stateChangedAt: at }).where(eq(tickets.id, m.id));
+    }
+    const service = mergeQueueService(c.db, {
+      runningMerges: () => [],
+      limit: async () => 2,
+      queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 3 }),
+      runnerConnected: async () => true,
+      queueDetail: async () => ({ slots: 2, busy: [{ ref: "APP-1", title: "A", kind: "merge check" }, { ref: "APP-2", title: "B", kind: "merge check" }], mainRed: false, fixRef: null }),
+    });
+    const data = await service.get(c.company.id);
+    const row = data.waiting.find((w) => w.ticketId === t.id)!;
+    // The row itself still reads as an hour-old wait, but it is the line's own capacity at work, not a fault.
+    expect(row).toMatchObject({ state: "waiting_for_check_capacity", stuck: true });
+    expect(data.line.state).toBe("over_capacity");
+    expect(data.stuckCount).toBe(0);
   });
 
   it("keeps a plain wait with an empty queue, and counts only this company's jobs", async () => {
@@ -484,5 +712,8 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     expect(waitingMerges).toHaveLength(4);
     for (const w of waitingMerges) expect(w.label).toMatch(/server restarted/);
     expect(new Set(data.running.map((r) => r.slot)).size).toBe(data.running.length);
+    // R43: the badge and Merges tab figure is everything on the tab, waiting and running; the start hold's stays waiting only.
+    expect(data.lineCount).toBe(data.waiting.length + data.running.length);
+    expect(data.waitingCount).toBe(data.waiting.length);
   });
 });

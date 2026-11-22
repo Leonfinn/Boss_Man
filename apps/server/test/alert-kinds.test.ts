@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ALERT_KIND_NAMES, ALERT_KINDS, isAlertKind, kindCeiling, kindRow } from "../src/services/alert-kinds.js";
+import { ALERT_KIND_NAMES, ALERT_KINDS, isAlertKind, kindCeiling, kindRow, kindStart } from "../src/services/alert-kinds.js";
+import type { AlertRung } from "../src/services/alert-kinds.js";
 
 const SRC = join(import.meta.dirname, "..", "src");
 
@@ -41,8 +42,10 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/no-progress.ts", kind: "no_progress", why: "a company with work waiting and nothing finishing (BOS-593)" },
   { file: "services/opencode-vacuum.ts", kind: "opencode_vacuum_cut", why: "the OpenCode prune's VACUUM killed at its cap" },
   { file: "services/merge-failures.ts", kind: "merge_failures", why: "the same merge failure, repeatedly (BOS-1461)" },
+  { file: "services/cost-check.ts", kind: "cost_out_of_band", why: "a run's cost far from its tokens at list price (BOS-1866)" },
   { file: "services/server-health.ts", kind: "server_memory", why: "the server's memory running high or climbing" },
   { file: "services/server-health.ts", kind: "server_freezes", why: "the server freezing again and again" },
+  { file: "services/github-watch.ts", kind: "github_watch", why: "the GitHub watcher unable to read the repo (BOS-1393)" },
 ];
 
 /**
@@ -57,7 +60,7 @@ const UNTIERED_INSERTS: Record<string, number> = {
   // now names its tier: owner-only kinds stay with the owner, the rest go to the CEO first, BOS-1318.)
   "services/decisions.ts": 2,
   // Disk, runner update, self-deploy, budget and cost-cap cards are the owner's own to answer.
-  "services/disk.ts": 1,
+  "services/disk.ts": 2,
   // An engagement's "approve the work?" card: the owner's to answer (it was hidden by the old scan's loose spread test).
   "services/engagements.ts": 1,
   "services/maintenance.ts": 1,
@@ -129,7 +132,7 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
       expect(["scrum_master", "ceo", "owner"]).toContain(row.topRung);
     }
     // The alert kinds that must stop at the CEO (DR-017 A).
-    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "looks_stuck", "watchdog_trip", "runner_boot", "quota_held", "opencode_vacuum_cut"] as const) {
+    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "looks_stuck", "watchdog_trip", "runner_boot", "quota_held", "opencode_vacuum_cut", "idle_slots"] as const) {
       expect(kindCeiling(kind, undefined), kind).toBe("ceo");
       expect(kindRow(kind, undefined).topRung, kind).toBe("ceo");
     }
@@ -137,6 +140,13 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
     expect(kindCeiling("owner", undefined)).toBe("owner");
     // A stopped company usually can't run its own CEO either, so this card may reach the owner (BOS-593).
     expect(kindCeiling("no_progress", "ceo")).toBe("owner");
+  });
+
+  it("kindStart starts at the Scrum Master unless the raise says higher, and passes any rung through (BOS-1945)", () => {
+    expect(kindStart(undefined)).toBe("scrum_master");
+    for (const rung of ["scrum_master", "ceo", "owner"] as const) expect(kindStart(rung)).toBe(rung);
+    // The function validates nothing: an unknown rung is passed through as given.
+    expect(kindStart("unknown" as AlertRung)).toBe("unknown");
   });
 
   it("an account limit card is per company and account, and clears when the account has room (BOS-498)", () => {

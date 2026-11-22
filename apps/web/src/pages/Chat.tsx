@@ -1,13 +1,18 @@
 // The owner chat (v1.1, R70), laid out like a messenger: the team on the left, the
 // conversation on the right. Most messages go to the CEO, but any agent can be messaged
 // directly. On a phone the list and the conversation take turns.
-import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
+import { NoCompany } from "../components/NoCompany";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
 import { when } from "./Runs";
+import { atTime } from "./settings/updates";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
+import { DraftTextarea } from "../components/DraftTextarea";
+import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { ThinkingTrace } from "../components/ThinkingTrace";
@@ -15,9 +20,9 @@ import { linkPieces, type LinkContext } from "../links";
 import type { TraceBody } from "@boss-man/shared";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
-type Chat = { agentId: string; items: Message[]; state: string; live?: TraceBody | null };
+type Chat = { agentId: string; items: Message[]; hasMore?: boolean; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; runs: number; chatOpen: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -72,6 +77,12 @@ function busyText(state: string, name: string) {
 /** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
 export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (m.kind === "building")
+    return (
+      <p className="banner" role="status">
+        A runner update is being built. Chat stays open; new agent runs start once the update has gone in.
+      </p>
+    );
   if (m.kind === "settings")
     return (
       <p className="banner" role="status">
@@ -83,13 +94,77 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   return (
     <p className="banner" role="status">
       {m.chatOpen
-        ? `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
-        : "Updating, back in a moment. New messages are saved and answered when it is done."}
+        ? m.runs === 0 && m.unknownWait
+          ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner → Updates to stop waiting or cancel."
+          : m.runs === 0 && (m.merges ?? 0) > 0 && !(m.checks ?? 0)
+            ? `Update waiting for ${m.merges === 1 ? "a merge" : `${m.merges} merges`} being pushed to main${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
+          : m.runs === 0
+          ? `Update waiting for running checks to finish${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
+          : `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
+        : m.phase === "swapping"
+          ? "Swapping the runners now, back in a moment. New messages are saved and answered when it is done."
+          : `Update pending${m.expectedFinishAt ? `: expected to finish about ${atTime(m.expectedFinishAt)}` : m.overdue ? ": taking longer than expected" : ""}. New messages are saved and answered when it is done.`}
     </p>
   );
 }
 
-export function ChatPage({ companies, companyId, agentId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
+/** "Remember this" on the owner's own message (BOS-2184): adds the text as a new line of the standing rules, with Undo. */
+export function RememberThis({ companyId, text }: { companyId: string; text: string }) {
+  const [step, setStep] = useState<"idle" | "editing" | "added">("idle");
+  const [draft, setDraft] = useState(text);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const url = `/api/companies/${companyId}/standing-rules`;
+  const call = (path: string, body: unknown, done: () => void) => {
+    setBusy(true);
+    setError(null);
+    void api(`${url}/${path}`, { method: "POST", body }).then(
+      () => {
+        setBusy(false);
+        done();
+      },
+      (err: Error) => {
+        setBusy(false);
+        setError(err.message);
+      },
+    );
+  };
+  if (step === "added")
+    return (
+      <p className="remember-note muted" role="status">
+        Added to standing rules.{" "}
+        <button type="button" className="linkish" disabled={busy} onClick={() => call("undo", undefined, () => setStep("idle"))}>
+          Undo
+        </button>
+        {error && <span className="error"> {error}</span>}
+      </p>
+    );
+  if (step === "idle")
+    return (
+      <button type="button" className="linkish remember-btn" onClick={() => { setDraft(text); setError(null); setStep("editing"); }}>
+        Remember this
+      </button>
+    );
+  return (
+    <div className="remember-box">
+      <label>
+        <span className="muted">Add this to the standing rules every agent reads:</span>
+        <DraftTextarea draftKey={null} noDraft="a short edit of a message that is already in the chat, which stays there" value={draft} onChange={setDraft} rows={3} />
+      </label>
+      <div className="remember-actions">
+        <button type="button" className="btn primary" disabled={busy || !draft.trim()} onClick={() => call("append", { text: draft }, () => setStep("added"))}>
+          Add to standing rules
+        </button>
+        <button type="button" className="btn" disabled={busy} onClick={() => setStep("idle")}>
+          Cancel
+        </button>
+      </div>
+      {error && <p className="error" role="alert">{error}</p>}
+    </div>
+  );
+}
+
+export function ChatPage({ companies, companyId, agentId, messageId, maintenance = null, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; /** BOS-2192: a search result's message, scrolled to once loaded. */ messageId?: string; maintenance?: Maintenance | null; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
   const team = threads.data ?? [];
@@ -110,7 +185,40 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
   const [seen, setSeen] = useState(readSeen);
   const end = useRef<HTMLDivElement>(null);
   const state = chat.data?.state ?? "idle";
-  const items = chat.data?.items ?? [];
+  // Older pages the owner loaded (BOS-2167), kept apart from the polled newest 200 so a poll never drops them.
+  const [older, setOlder] = useState<{ key: string; items: Message[]; hasMore: boolean } | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const logRef = useRef<HTMLDivElement>(null);
+  const keep = useRef<{ height: number; top: number } | null>(null);
+  const convKey = `${company?.id ?? "none"}/${current?.id ?? "none"}`;
+  const olderHere = older?.key === convKey ? older : null;
+  const newest = chat.data?.items ?? [];
+  const seenIds = new Set(newest.map((m) => m.id));
+  const items = olderHere ? [...olderHere.items.filter((m) => !seenIds.has(m.id)), ...newest] : newest;
+  const hasMore = olderHere ? olderHere.hasMore : (chat.data?.hasMore ?? false);
+  const loadOlder = async () => {
+    const first = items[0];
+    if (!company || !current || !first || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await api<Chat>(`/api/companies/${company.id}/chat?agentId=${current.id}&before=${first.id}`);
+      const log = logRef.current;
+      keep.current = log ? { height: log.scrollHeight, top: log.scrollTop } : null;
+      setOlder({ key: convKey, items: [...page.items, ...(olderHere?.items ?? [])], hasMore: page.hasMore ?? false });
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+  // After older messages are added above, put the owner back on the message they were reading.
+  useLayoutEffect(() => {
+    const k = keep.current;
+    const log = logRef.current;
+    keep.current = null;
+    if (k && log) log.scrollTop = k.top + (log.scrollHeight - k.height);
+  }, [olderHere?.items.length]);
   const live = chat.data?.live ?? null;
   // Which traces and steps the owner has opened, kept by message (or the live run) so the 2 s poll
   // doesn't close them; not kept after a reload (BOS-1367). Keyed by message id, or `live:<agentId>`.
@@ -120,9 +228,36 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
   const latest = items.at(-1)?.createdAt;
   useEffect(() => setBusy(state !== "idle"), [state]);
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
+  // A search result names one message (BOS-2192): scroll to it once it has loaded. If the conversation
+  // loaded without it (older than the newest 200 shown), say so and open at the end as usual.
+  const target = useRef(messageId);
+  const [olderThanShown, setOlderThanShown] = useState(false);
+  // The palette stays mounted over this page and the page isn't keyed by route, so a result picked while a
+  // chat is open (same chat or another agent's) arrives as a new messageId on this same instance: re-arm.
+  // Declared before the scroll effect so it runs first in the same commit.
   useEffect(() => {
+    target.current = messageId;
+    setOlderThanShown(false);
+  }, [messageId, current?.id]);
+  // Only this conversation's data counts: right after a switch the previous agent's page is still in
+  // chat.data for one render, and the target missing from it must not read as "older than shown".
+  const loaded = !!current && chat.data?.agentId === current.id;
+  useEffect(() => {
+    const want = target.current;
+    if (want) {
+      const el = document.getElementById(`chat-msg-${want}`);
+      if (el) {
+        target.current = undefined;
+        el.scrollIntoView({ block: "center" });
+        return;
+      }
+      if (!loaded) return;
+      target.current = undefined;
+      setOlderThanShown(true);
+    }
+    // Keyed on the polled newest page (BOS-2167), so loading older messages doesn't jump to the end.
     end.current?.scrollIntoView({ block: "end" });
-  }, [items.length, current?.id]);
+  }, [newest.length, newest.at(-1)?.id, current?.id, loaded, messageId]);
   useEffect(() => {
     if (!current || !latest) return;
     markSeen(current.id, latest);
@@ -186,10 +321,12 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
         </div>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <section className="card messenger" data-picked={agentId ? "yes" : "no"} aria-label="Chat">
           <nav className="messenger-list" aria-label="Team">
+            {!threads.data && threads.error && <LoadError what="the team" message={threads.error.message} onRetry={threads.reload} />}
+            {!threads.data && !threads.error && <Loader label="Loading the team" size={16} />}
             <ul>
               {team.map((t) => (
                 <li key={t.id}>
@@ -222,7 +359,15 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                 </div>
                 {starred && <StarButton agent={starred} onToggle={() => void api(`/api/agents/${current.id}`, { method: "PATCH", body: { starred: !starred.starred } }).then(onChanged, (err: Error) => setError(err.message))} />}
               </header>
-              <div className="chat-log" role="log" aria-live="polite">
+              <div className="chat-log" role="log" aria-live="polite" ref={logRef}>
+                {hasMore && (
+                  <button type="button" className="btn" onClick={() => void loadOlder()} disabled={loadingOlder}>
+                    {loadingOlder ? "Loading…" : "Load older messages"}
+                  </button>
+                )}
+                {!chat.data && chat.error && <LoadError what="this conversation" message={chat.error.message} onRetry={chat.reload} />}
+                {!chat.data && !chat.error && <Loader label="Loading the conversation" size={16} />}
+                {olderThanShown && <p className="muted">The message you searched for is older than the messages shown here, so the chat opens at its newest. Use "Load older messages" at the top to go back to it.</p>}
                 {items.length === 0 && chat.data && (
                   <p className="muted">
                     {current.role === "ceo" || current.duty === "assistant" ? 'Try: "Add rate limiting to the login API before the beta, after the auth refactor."' : `Ask ${current.name} about their work, or for something to go on the board.`}
@@ -231,7 +376,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                 {items.map((m, i) => {
                   const trace = m.trace;
                   return (
-                    <div key={m.id} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}`}>
+                    <div key={m.id} id={`chat-msg-${m.id}`} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}${m.id === messageId ? " found" : ""}`}>
                       {trace && m.role === "assistant" && (
                         <ThinkingTrace
                           trace={trace}
@@ -256,6 +401,7 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                       <small>
                         {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
                       </small>
+                      {m.role === "owner" && <RememberThis companyId={company.id} text={m.text} />}
                     </div>
                   );
                 })}

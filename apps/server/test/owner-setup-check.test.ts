@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { composeCommand, flattenHostRecord, type HostRecord } from "../src/services/host-facts.js";
 import { checkOwnerSetup, fillOwnerSetup, ownerSetupWriteCheck } from "../src/services/owner-setup-check.js";
-import { lintOwnerSteps } from "../src/services/steps.js";
+import { lintOwnerSteps, placeMissingText } from "../src/services/steps.js";
+import { checkAsk } from "../src/services/card-check.js";
 
 const r17 = (step: string) => lintOwnerSteps([step]).refuse.filter((f) => f.rule === "R17");
 
@@ -37,7 +38,7 @@ describe("R17 vague host step: passing rows", () => {
     ["a command with the host token", "Remove the NTFY_IMAGE line from the stack's .env: `sed -i '/^NTFY_IMAGE=/d' {{host.env.file}}`. This prints nothing."],
     ["a restart with its command", "Restart the notifications add-on: `{{host.compose.cmd}} up -d ntfy`"],
     ["a restart by button path", "Restart the runner service from Settings → Server and runner"],
-    ["Boss Man's pointer when it doesn't know the folder", "Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This host shows it)"],
+    ["Boss Man's pointer when it doesn't know the folder", "Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This server shows it)"],
     ["no host thing at all", "Start using the new funding source"],
     ["a file that only looks like .env", "Leave .envrc and my.env alone"],
     ["a file named with nothing to do to it", "Your .env file needs nothing new."],
@@ -64,7 +65,7 @@ describe("host facts for setup steps (DR-052)", () => {
     // The card then says where to look it up instead of guessing.
     const filled = fillOwnerSetup(["Remove the NTFY_IMAGE line from {{host.env.file}}"], flat);
     expect(filled.generic).toBe(true);
-    expect(filled.steps[0]).toBe("Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This host shows it)");
+    expect(filled.steps[0]).toBe("Remove the NTFY_IMAGE line from the .env file the stack starts with (Settings → Server and runner → This server shows it)");
   });
 
   it("compose.cmd is built from the checkout and the reported compose files", () => {
@@ -93,7 +94,8 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
     for (const steps of [NTFY, SLOTS]) {
       for (const mode of ["write", "raise"] as const) {
         const c = checkOwnerSetup(steps, { values: VALUES, serverHost: "example-host" }, mode);
-        expect([...c.hard, ...c.soft]).toEqual([]);
+        // These steps keep their commands in sentences, so R21 (no place) is tested on its own below.
+        expect([...c.hard, ...c.soft].filter((f) => f.rule !== "R21")).toEqual([]);
         expect(c.generic).toBe(false);
       }
     }
@@ -112,12 +114,29 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
 
   it("with no host report, a token in the words becomes the label; one in a command is let through when written but stops the go-live card", () => {
     const write = checkOwnerSetup(NTFY, {}, "write");
-    expect([...write.hard, ...write.soft]).toEqual([]);
+    expect([...write.hard, ...write.soft].filter((f) => f.rule !== "R21")).toEqual([]);
     const raise = checkOwnerSetup(NTFY, {}, "raise");
     expect(raise.hard.map((f) => f.rule)).toContain("R4");
     const words = checkOwnerSetup(["Remove the NTFY_IMAGE line from {{host.env.file}}"], {}, "raise");
-    expect([...words.hard, ...words.soft]).toEqual([]);
+    expect([...words.hard, ...words.soft].filter((f) => f.rule !== "R21")).toEqual([]);
     expect(words.generic).toBe(true);
+  });
+
+  // BOS-1880: the Umami go-live card (BOS-1739) sent the owner to "the go-live card" for the place of two values.
+  it("a step that names no place is refused, when written and at go-live, and a step that does gets a Where line", () => {
+    const umami = ["Set the two Umami values where the go-live card names"];
+    for (const mode of ["write", "raise"] as const) {
+      const c = checkOwnerSetup(umami, {}, mode);
+      expect([...c.hard, ...c.soft].map((f) => f.rule)).toEqual(expect.arrayContaining(["R21", "R1"]));
+    }
+    expect(ownerSetupWriteCheck(umami, {}, { byCeo: true, lintOverride: "The owner knows where." }).error).toMatch(/Step 1: doesn't say where it happens/);
+    const ok = checkOwnerSetup(["Open Settings → Secrets and add the key.", "Open http://192.168.1.50/admin and save."], {}, "raise");
+    expect([...ok.hard, ...ok.soft]).toEqual([]);
+    expect(ok.where).toEqual(["Step 1: Boss Man, in Settings", "Step 2: Boss Man, in your browser"]);
+  });
+
+  it.each([["the go-live card names"], ["the value the card says"], ["see the setup card"], ["as the owner's go-live card lists"]])("R1 refuses a pointer to a card: %s", (text) => {
+    expect(lintOwnerSteps([`Open Settings → Secrets and use ${text}.`]).refuse.map((f) => f.rule)).toContain("R1");
   });
 
   it("an unknown host token is refused when written", () => {
@@ -126,14 +145,69 @@ describe("the setup-step check (fill, then the whole card lint)", () => {
   });
 
   it("lintOverride is the CEO's only, needs a reason, covers soft findings and is returned to store", () => {
-    const vague = ["Restart the notifications add-on"];
+    const vague = ["Restart the notifications add-on at http://192.168.1.50/admin"];
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: false, lintOverride: "the add-on restarts itself" }).error).toMatch(/Only the CEO/);
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: true, lintOverride: "short" }).error).toMatch(/at least 10/);
     expect(ownerSetupWriteCheck(vague, {}, { byCeo: true })).toMatchObject({ error: expect.stringContaining("pass lintOverride") });
-    expect(ownerSetupWriteCheck(vague, {}, { byCeo: true, lintOverride: "The add-on restarts by itself on the update." })).toEqual({ error: null, override: "The add-on restarts by itself on the update." });
+    // R35: a plain reason on one refused step is stored with the step it covers.
+    const stored = ownerSetupWriteCheck(vague, {}, { byCeo: true, lintOverride: "The add-on restarts by itself on the update." });
+    expect(stored).toEqual({ error: null, override: expect.any(String) });
+    expect(JSON.parse((stored as { override: string }).override)).toEqual([{ steps: [1], rules: [expect.any(String)], reason: "The add-on restarts by itself on the update." }]);
     // Nothing to let through: nothing is stored.
     expect(ownerSetupWriteCheck(["Settings → Funding → Add funding source"], {}, { byCeo: true, lintOverride: "not needed at all here" })).toEqual({ error: null, override: null });
     // A command that isn't copy-safe is never let through.
     expect(ownerSetupWriteCheck(["Run `mkdir <your-folder>`"], {}, { byCeo: true, lintOverride: "The owner knows which folder." }).error).toMatch(/placeholder/);
   });
+
+  it("R35: the override names the steps it covers; a refused step it leaves out stays refused (fails on the old code)", () => {
+    const two = ["Restart the notifications add-on at http://192.168.1.50/a", "Settings → Funding → Add funding source", "Restart the other add-on at http://192.168.1.50/b"];
+    const why = "Both add-ons restart by themselves.";
+    // One reason can't cover refusals on two steps.
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: why }).error).toMatch(/name the steps it covers/);
+    // Naming one leaves the other refused.
+    const one = ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1], reason: why }] });
+    expect(one.error).toMatch(/Step 3: /);
+    expect(one.error).toMatch(/isn't covered/);
+    // Naming a step with no refusal is itself refused.
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1, 2, 3], reason: why }] }).error).toMatch(/override for step 2 matches nothing/);
+    // Naming both is stored with its scope, and a re-check of the stored value (not strict) passes.
+    const both = ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1, 3], reason: why }] });
+    expect(both).toEqual({ error: null, override: expect.any(String) });
+    const stored = JSON.parse((both as { override: string }).override);
+    expect(stored).toEqual([{ steps: [1, 3], rules: [expect.any(String)], reason: why }]);
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: stored, strict: false })).toEqual({ error: null, override: expect.any(String) });
+    // Step 3 edited to something else: the stored override no longer covers a new refusal there, and an entry whose refusal went is only unused.
+    expect(ownerSetupWriteCheck(two, {}, { byCeo: true, lintOverride: [{ steps: [1], reason: why }], strict: false }).error).toMatch(/Step 3/);
+    expect(ownerSetupWriteCheck(["Restart the notifications add-on at http://192.168.1.50/a", "Settings → Funding → Add funding source", "Settings → Funding → Add funding source"], {}, { byCeo: true, lintOverride: stored, strict: false })).toMatchObject({ error: null });
+  });
+});
+
+// BOS-1880 criterion 3: an agent's card (checkAsk) and a ticket's setup steps (checkOwnerSetup) share one place check,
+// so the same steps get the same verdict and name the same steps. Table-driven: one list, both paths, compared.
+describe("one place check for cards and setup steps (BOS-1880)", () => {
+  const rows: { name: string; steps: string[]; missing: number[]; pointer?: true }[] = [
+    { name: "a Settings path", steps: ["Settings → Funding → Add funding source"], missing: [] },
+    { name: "a website", steps: ["Open https://analytics.example.com/settings and paste the website id into the Website ID box"], missing: [] },
+    { name: "a place, then a step with none", steps: ["Settings → Funding → Add funding source", "Paste the second value into the box and save it"], missing: [2] },
+    { name: "two steps with no place", steps: ["Paste the first value into the box and save it", "Paste the second value into the box and save it"], missing: [1, 2] },
+    { name: "the Umami wording (points at a card)", steps: ["Set the two values the go-live card names, then save"], missing: [1], pointer: true },
+  ];
+  for (const row of rows) {
+    it(`${row.name}: both paths give the same verdict`, () => {
+      const setup = checkOwnerSetup(row.steps, {}, "write");
+      const refused = [...setup.hard, ...setup.soft];
+      const setupMissing = refused.filter((f) => f.rule === "R21").map((f) => f.step).sort((a, b) => a - b);
+      const card = checkAsk({ triedFirst: "Checked the settings page myself; only the owner can sign in there.", why: "It turns the feature on.", minutes: 2, steps: row.steps });
+      expect(setupMissing).toEqual(row.missing);
+      // Same accept or refuse on both paths.
+      expect(card.error === null).toBe(refused.length === 0);
+      if (row.pointer) {
+        // The card-pointer rule (R1) refuses it on both paths.
+        expect(refused.map((f) => f.rule)).toContain("R1");
+        expect(card.error).toMatch(/sends the owner to another card/);
+      } else if (row.missing.length) {
+        expect(card.error).toBe(placeMissingText(row.missing));
+      }
+    });
+  }
 });

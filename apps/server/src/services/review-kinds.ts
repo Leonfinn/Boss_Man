@@ -225,7 +225,7 @@ export async function setReviewOrder(db: Db, t: Ticket, order: string[], byAgent
   return activeRows(rows).filter((r) => !before.has(r.id));
 }
 
-export const decide = (db: Db, id: string, patch: Partial<Pick<ReviewRow, "status" | "notes" | "comments" | "overruledByAgentId" | "overruleReason">>) =>
+export const decide = (db: Db, id: string, patch: Partial<Pick<ReviewRow, "status" | "notes" | "comments" | "overruledByAgentId" | "overruleReason" | "head" | "readHead">>) =>
   db.update(reviewRequests).set({ ...patch, decidedAt: new Date() }).where(eq(reviewRequests.id, id));
 
 /** Reviews that never ran because an earlier one failed. */

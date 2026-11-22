@@ -30,6 +30,22 @@ function stubApi(forecast: Record<string, unknown>, overageInUse = false, readin
   }));
 }
 
+describe("funding cards loading, error and empty states (BOS-2153)", () => {
+  it("shows a loader first, then the empty message for no sources", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200, headers: { "content-type": "application/json" } })));
+    render(<FundingCards />);
+    // The loader's words only appear after its first second; its status region is there at once.
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(await screen.findByText("No funding sources yet.")).toBeTruthy();
+  });
+
+  it("shows the error as an alert when the list fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "Funding is down" }), { status: 500, headers: { "content-type": "application/json" } })));
+    render(<FundingCards />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Funding is down");
+  });
+});
+
 describe("quota card wording", () => {
   it("labels the Fable limit and shows the raw key only in the hold switches", async () => {
     stubApi({ runsOutAt: soon, beforeReset: true });

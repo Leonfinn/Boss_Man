@@ -2,6 +2,8 @@ import { useState, type FormEvent } from "react";
 import { api, type Company } from "../api";
 import { Credentials } from "./settings/Credentials";
 import { usePoll } from "../hooks";
+import { LoadError } from "../components/LoadError";
+import { Loader } from "../components/Loader";
 import { when } from "./Runs";
 
 type Secret = { id: string; name: string; kind: string; hint: string | null; version: number; createdAt: string; updatedAt: string };
@@ -67,8 +69,12 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
               </li>
             ))}
           </ul>
-        ) : (
+        ) : grants.data ? (
           <p className="muted">Not granted to any company. Grant it above, under the company's variables.</p>
+        ) : grants.error ? (
+          <LoadError what="who gets this secret" message={grants.error.message} onRetry={grants.reload} />
+        ) : (
+          <Loader label="Loading who gets this secret" size={16} />
         )}
       </div>
       <form onSubmit={rotate} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
@@ -123,8 +129,12 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
               </tbody>
             </table>
           </div>
-        ) : (
+        ) : log.data ? (
           <p className="muted">No run has been given it yet.</p>
+        ) : log.error ? (
+          <LoadError what="the recent use" message={log.error.message} onRetry={log.reload} />
+        ) : (
+          <Loader label="Loading the recent use" size={16} />
         )}
       </div>
     </div>
@@ -146,7 +156,9 @@ export function Secrets({ companies, companyId, onChanged }: { companies: Compan
       </header>
       {company && <Credentials key={company.id} company={company} title={`${company.name}'s variables`} onChanged={() => (list.reload(), onChanged?.())} />}
       <h2 style={{ fontSize: 17, fontWeight: 600 }}>All stored secrets</h2>
-      {list.data && list.data.length === 0 ? (
+      {!list.data && list.error && <LoadError what="the stored secrets" message={list.error.message} onRetry={list.reload} />}
+      {!list.data && !list.error && <Loader label="Loading the stored secrets" size={16} />}
+      {!list.data ? null : list.data.length === 0 ? (
         <p className="muted">No secrets yet. Add one above.</p>
       ) : (
         <ul className="secret-list">

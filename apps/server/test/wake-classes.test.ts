@@ -9,7 +9,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { costEvents, decisions, runs, tickets, wakes } from "../src/db/schema.js";
-import { WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
+import { reasonsOfClass, WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
 import type { Limits } from "../src/services/scheduler.js";
 import { HELD_COMPANY } from "../src/services/fair-share.js";
 
@@ -45,8 +45,19 @@ describe("wake classes: the table", () => {
   // Strings that follow `reason:` in the source but are never a wake's reason.
   const NOT_WAKE_REASONS = new Set([
     "runner offline",
+    // Meaning search's "no result" reasons (ticket-meaning.ts), not a wake's reason.
+    "off",
+    "the provider sent no vector",
+    // The runner update's early hold (BOS-1955, maintenance.ts): a drain reason and hold note, not a wake's reason.
+    "building",
+    "building the new runner image",
     "not_found",
+    // The nightly secrets pass's ticket-move reasons (BOS-1932, secret-scan.ts), not a wake's reason.
+    "the nightly secrets pass still finds this match on main",
+    "the secrets pass no longer finds this match on main",
     "foreign_agent",
+    // The merge line's pause reason (R44, merge-queue.ts), not a wake's reason.
+    "a server update",
     "agent or company gone",
     "a ticket it waited on finished",
     "the owner wrote on this ticket",
@@ -81,6 +92,8 @@ describe("wake classes: the table", () => {
     "runner_cannot_fence",
     // The status reason written on a wake the WIP limit refused (BOS-1180), not a wake reason.
     "held by the WIP limit",
+    // The reason of a "can't tell" go-live answer (BOS-1644), not a wake.
+    "nothing is recorded yet about which version the server runs",
     // The status reason on a wake the maintenance hold stopped holding (BOS-1414), not a wake reason.
     "released: the runner update waited past its deadline and is waiting for the owner's answer; new runs are not held for it",
   ]);
@@ -95,10 +108,17 @@ describe("wake classes: the table", () => {
     }
     // "update pending" is the maintenance hold's label; no_wrapup and too_early are the refusal codes of the
     // stop-stragglers endpoint (BOS-1238). None is a wake.
-    for (const r of ["update pending", "no_wrapup", "too_early"]) found.delete(r); // the maintenance hold's label, not a wake
+    // no_update, agents_running and no_checks are the refusal codes of the update-now endpoint (BOS-1600).
+    for (const r of ["update pending", "no_wrapup", "too_early", "no_update", "agents_running", "no_checks"]) found.delete(r); // the maintenance hold's label, not a wake
     for (const r of NOT_WAKE_REASONS) found.delete(r);
-    const unclassified = [...found].filter(([r]) => !(r in WAKE_CLASS)).map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
-    expect(unclassified).toEqual([]);
+    const missing = [...found].filter(([r]) => !(r in WAKE_CLASS));
+    const unclassified = missing.map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
+    // The message is the exact fix (BOS-1727): a line per reason for the WAKE_CLASS table, or the NOT_WAKE_REASONS list if it is no wake.
+    const fix =
+      `For a wake reason, add to WAKE_CLASS in apps/server/src/services/wake-classes.ts (class waiting, scheduled or agent; see the table's header):\n` +
+      missing.map(([r]) => `  ${/^[a-z_]+$/.test(r) ? r : JSON.stringify(r)}: "<class>",`).join("\n") +
+      `\nIf it is not a wake's reason, add ${missing.map(([r]) => JSON.stringify(r)).join(", ")} to NOT_WAKE_REASONS in apps/server/test/wake-classes.test.ts.`;
+    expect(unclassified, fix).toEqual([]);
   });
 
   it("puts the reasons DR-002 names in their classes", () => {
@@ -163,7 +183,9 @@ describe("wake classes: scheduled wakes", () => {
     const b = await ctx!.agent("B");
     const ta = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Routine" })).json();
     const tb = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Urgent" })).json();
-    await ctx!.db.update(tickets).set({ urgent: true }).where(eq(tickets.id, tb.id));
+    await ctx!.db.update(tickets).set({ urgent: true, assigneeAgentId: b.id, systemState: "ready" }).where(eq(tickets.id, tb.id));
+    // Each ticket belongs to its agent: a wake on a parked or reassigned ticket is dropped (BOS-1791).
+    await ctx!.db.update(tickets).set({ assigneeAgentId: a.id, systemState: "ready" }).where(eq(tickets.id, ta.id));
     // Same stored priority and the routine one is older: without the urgent bonus it would start first.
     await ctx!.scheduler.wake({ agentId: a.id, ticketId: ta.id, reason: "assigned", priority: 2 });
     await ctx!.scheduler.wake({ agentId: b.id, ticketId: tb.id, reason: "assigned", priority: 2 });
@@ -194,6 +216,8 @@ describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-5
     const checker = await ctx!.agent("Checker");
     const watcher = await ctx!.agent("Watcher");
     const t1 = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Booked check" })).json();
+    // The check belongs to the checker's own ticket: a "check due" wake on a parked ticket is dropped (BOS-1791).
+    await ctx!.db.update(tickets).set({ assigneeAgentId: checker.id, systemState: "in_progress" }).where(eq(tickets.id, t1.id));
     // The one slot is taken, so everything below is held "at a concurrency limit".
     const [live] = await ctx!.db.insert(runs).values({ companyId: ctx!.company.id, agentId: busy.id, lastEventAt: new Date() }).returning();
     const engagement = await ctx!.scheduler.wake({ agentId: ctx!.ceo.id, reason: "engagement", note: "Engagement 443477d4: the server is back." });
@@ -282,6 +306,8 @@ describe("wake classes: watch wakes", () => {
     await ctx!.req("PATCH", `/api/projects/${ctx!.project.id}`, { ticketCostCapUsd: 1 });
     const t = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Watched" })).json();
     const worker = await ctx!.agent("Worker");
+    // The worker's own ticket: an "assigned" wake on an unassigned parked ticket is dropped (BOS-1791).
+    await ctx!.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "ready" }).where(eq(tickets.id, t.id));
     const fs = (await ctx!.req("POST" as never, "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json();
     const spend = async (origin: string | null, usd: number) => {
       const runId = randomUUID();
@@ -333,6 +359,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "mcp.ts": DROP_RECORDED + " (hooks.wake: note request, ...)",
     "services/alert-ladder.ts": CHECKS_OUTCOME + " (a dropped rung is not counted as sent)",
     "services/check-dispatcher.ts": NEVER_DROPPED + " (check_result is scheduled)",
+    "services/check-hold.ts": NEVER_DROPPED + " (check_result is scheduled)",
     "services/chat.ts": NEVER_DROPPED,
     "services/closed-notice.ts": NEVER_DROPPED + " (a flag note to an engaged owner, passed in as a dep)",
     "services/pa.ts": NEVER_DROPPED,
@@ -341,7 +368,9 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/engagements.ts": DROP_RECORDED,
     "services/progress.ts": NEVER_DROPPED + " (a status check steers into the live silent run)",
     "services/recovery.ts": NEVER_DROPPED,
+    "services/main-ci.ts": CHECKS_OUTCOME + " (a dropped wake is skipped: the ticket is already open and the assignee finds it in its list)",
     "services/retro.ts": NEVER_DROPPED,
+    "services/github-watch.ts": NEVER_DROPPED + " (github feedback and github security are scheduled)",
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",
     "services/release-log.ts": CHECKS_OUTCOME + " (a dropped release wake is logged and retried next pass)",
     "services/review-kinds.ts": NEVER_DROPPED,
@@ -350,9 +379,13 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/stale-requests.ts": CHECKS_OUTCOME + " (a dropped check is skipped)",
     "services/review-holds.ts": NEVER_DROPPED,
     "services/sweeps.ts": NEVER_DROPPED,
+    "services/line-holder.ts": NEVER_DROPPED + " (line holder sent back and line holder stuck are waiting reasons)",
     "services/owner-replies.ts": CHECKS_OUTCOME + " (a dropped re-wake still counts as the one try; the 10-minute ask does not need it to land)",
     "services/ticket-chat.ts": NEVER_DROPPED,
+    "services/merge-stall.ts": NEVER_DROPPED + " (merge line stalled is a waiting reason; deps.notify is the owner's notification, not a wake)",
+    "services/check-idle.ts": NEVER_DROPPED + " (idle check slot is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/watchdog.ts": CHECKS_OUTCOME + " (a dropped wake is reported, not counted as sent)",
+    "services/secret-scan.ts": NEVER_DROPPED + " (secret scan is scheduled; the match's ticket stays assigned, so a missed wake is picked up by the idle sweeps)",
   };
 
   it("lists every file that wakes an agent, so a new caller has to say how it handles a drop", () => {
@@ -363,5 +396,27 @@ describe("wake classes: callers of wake() and notify()", () => {
       .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts" && f !== "services/runner-watch.ts" && f !== "services/deploy-wait.ts" && f !== "services/merge-jam.ts");
     const unlisted = callers.filter((f) => !(f in CALLERS));
     expect(unlisted).toEqual([]);
+  });
+});
+
+describe("wake classes: reasonsOfClass", () => {
+  it("returns each class its own reasons", () => {
+    expect(reasonsOfClass("waiting")).toEqual(expect.arrayContaining(["decision", "alert", "review requested", "woken by owner", "priority watch", "merge line stalled"]));
+    expect(reasonsOfClass("scheduled")).toEqual(expect.arrayContaining(["ticket watch", "check due", "resume", "watchdog", "github feedback"]));
+    expect(reasonsOfClass("agent")).toEqual(expect.arrayContaining(["nudge", "assigned", "unblocked", "feedback"]));
+    // Only the table's own reasons, never another class's.
+    expect(reasonsOfClass("waiting")).not.toContain("nudge");
+    expect(reasonsOfClass("scheduled")).not.toContain("decision");
+    expect(reasonsOfClass("agent")).not.toContain("check due");
+  });
+
+  it("puts every reason in exactly one class, so none is lost or counted twice", () => {
+    const all = [reasonsOfClass("waiting"), reasonsOfClass("scheduled"), reasonsOfClass("agent")].flat();
+    expect(all.slice().sort()).toEqual(Object.keys(WAKE_CLASS).sort());
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("gives an unknown class no reasons", () => {
+    expect(reasonsOfClass("not-a-class" as never)).toEqual([]);
   });
 });

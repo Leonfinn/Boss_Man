@@ -3,11 +3,12 @@
 // that merges are moving again when it clears. The jam is read from the Merge queue screen's own view,
 // so the alert can never disagree with what the owner sees there. A jam a card already covers is not
 // this sweep's business: the card has its own notification.
+import { figureText } from "@boss-man/shared";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, notifications, settings } from "../db/schema.js";
 import type { MergeQueueView } from "./merge-queue.js";
-import { PHASE_LABEL, waitedText } from "./merge-queue.js";
+import { mergeLineHealth, slowText, startBrakeText, type MergeLineHealth, type StuckLine } from "./merge-line-health.js";
 
 /** The loud reminder comes this long after the first alert, never sooner. */
 export const JAM_REMINDER_MS = 60 * 60_000;
@@ -33,21 +34,20 @@ export function reachesOwner(n: { level: string } | null | undefined): boolean {
   return n?.level === "flag" || n?.level === "page" || n?.level === "ask";
 }
 
-const KEY = (companyId: string) => `merge_jam:${companyId}`;
+/** The CEO's wake when the start brake is off and the line has grown (R47); a waiting-class reason in wake-classes.ts. */
+export const BRAKE_OFF_REASON = "merge start brake off";
 
-/** The rows that count as this sweep's jam: a long merge check, or stuck work Boss Man is meant to move. */
-export function jammedRows(view: Pick<MergeQueueView, "running" | "waiting">): {
-  running: Array<{ ref: string | null; title: string; minutes: number; phase: string }>;
-  waiting: Array<{ ref: string | null; title: string; minutes: number; label: string; next: string | null }>;
-} {
-  // An agent's own check before review isn't part of the merge line, and a card row belongs to its card.
-  const running = view.running
-    .filter((r) => r.what === "merge_check" && r.overLimit)
-    .map((r) => ({ ref: r.ref, title: r.title, minutes: r.minutes, phase: r.phase }));
-  const waiting = view.waiting
-    .filter((w) => w.stuck && w.actor === "system" && !w.decisionId)
-    .map((w) => ({ ref: w.ref, title: w.title, minutes: w.minutes, label: w.label, next: w.next }));
-  return { running, waiting };
+const KEY =(companyId: string) => `merge_jam:${companyId}`;
+
+/** At most one "merging, but slowly" feed note per company in this long (BOS-1594). */
+export const SLOW_NOTE_EVERY_MS = 24 * 60 * 60_000;
+
+/**
+ * The line's verdict (BOS-1594): the one the Merge queue read carries, so the banner and this alert agree. A view that
+ * has none (an older caller) is classified here by the same function.
+ */
+export function lineOf(view: MergeQueueView, at: Date): MergeLineHealth {
+  return view.line ?? mergeLineHealth(view, { now: at });
 }
 
 /** The first alert's words: which piece of work, how long, and what Boss Man does next. */
@@ -63,7 +63,7 @@ export function mergeJamService(
     /** Returns the owner's notification as delivered (its `level` after quiet hours), or null when none was written. */
     notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string }) => Promise<{ id: string; level: string } | null>;
     /** Wakes the company's CEO on a ticket with a note (BOS-1078: a card holding a merge looks stale); without it nothing is sent. */
-    tellCeo?: (input: { companyId: string; ticketId: string; note: string }) => Promise<unknown>;
+    tellCeo?: (input: { companyId: string; ticketId: string; note: string; /** The wake's reason; the stale-card reason when absent. */ reason?: string }) => Promise<unknown>;
     now?: () => Date;
   },
 ) {
@@ -85,25 +85,29 @@ export function mergeJamService(
       .onConflictDoUpdate({ target: settings.key, set: { value: episode } });
   }
 
-  /** One line naming the worst jammed row, then how many others there are. */
-  function stuckLine(jam: ReturnType<typeof jammedRows>): { title: string; body: string } {
-    if (jam.running.length) {
-      const r = jam.running[0]!;
-      const others = jam.running.length + jam.waiting.length - 1;
-      const ref = r.ref ?? `"${r.title}"`;
-      const what = r.phase === "merging" ? "has been merging for" : "has been in its check for";
-      return {
-        title: `${ref} ${what} ${waitedText(r.minutes)}`,
-        body: `${ref} has been in its merge check for ${waitedText(r.minutes)}, past the one-hour limit${r.phase === "queued" ? ", without the check starting" : ""}. Boss Man is still ${PHASE_LABEL[r.phase as keyof typeof PHASE_LABEL] ?? "working on it"}.${others > 0 ? ` ${others === 1 ? "One other piece of work is" : `${others} other pieces of work are`} stuck too.` : ""}`,
-      };
-    }
-    const w = jam.waiting[0]!;
-    const others = jam.waiting.length - 1;
-    const ref = w.ref ?? `"${w.title}"`;
+  /** The stuck verdict in the alert's words: what is stuck, why, and the one step that fixes it, then how many wait behind it. */
+  function stuckLine(s: StuckLine): { title: string; body: string } {
+    const end = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`);
     return {
-      title: `${ref} has waited ${waitedText(w.minutes)} to merge`,
-      body: `${ref} is ${w.label} and has waited ${waitedText(w.minutes)}. ${w.next ?? "Boss Man keeps working on it by itself."}${others > 0 ? ` ${others === 1 ? "One other piece of work is" : `${others} other pieces of work are`} stuck too.` : ""}`,
+      title: s.title,
+      // R43: the banner's own words for this figure (mergeQueue.behindIt).
+      body: `${end(s.reason)} Fix: ${end(s.fix)}${s.others > 0 ? ` ${figureText("mergeQueue.behindIt", s.others)}.` : ""}`,
     };
+  }
+
+  /**
+   * Merging, but slowly (BOS-1594): a calm feed note, never a flag or page, at most one a day. Claimed before sending,
+   * so two passes can't both send it.
+   */
+  async function slowNote(companyId: string, line: Extract<MergeLineHealth, { state: "over_capacity" }>, t: Date): Promise<boolean> {
+    const key = `merge_slow_note:${companyId}`;
+    const [seen] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, key));
+    const lastAt = (seen?.value as { at?: string } | undefined)?.at;
+    if (lastAt && t.getTime() - new Date(lastAt).getTime() < SLOW_NOTE_EVERY_MS) return false;
+    await db.insert(settings).values({ key, value: { at: t.toISOString() } }).onConflictDoUpdate({ target: settings.key, set: { value: { at: t.toISOString() } } });
+    const clock = (iso: string) => `${new Date(iso).toISOString().slice(11, 16)} UTC`;
+    await deps.notify({ companyId, level: "note", title: "Merging, but slowly", body: slowText(line, clock), link: `#/merge-queue/${companyId}` });
+    return true;
   }
 
   /**
@@ -132,6 +136,32 @@ export function mergeJamService(
     }
   }
 
+  /**
+   * R47: the start brake has no limit and the line has grown for an hour: the CEO is woken once per episode, with the limit
+   * to set. The episode ends (and a later one may wake again) once the warning is gone: a limit was set or the line shrank.
+   */
+  async function brakeOffEpisode(companyId: string, view: MergeQueueView) {
+    const key = `merge_brake_off:${companyId}`;
+    const warn = view.startBrakeOff;
+    if (!warn) {
+      await db.delete(settings).where(eq(settings.key, key));
+      return;
+    }
+    const first = view.waiting[0];
+    if (!deps.tellCeo || !first) return;
+    // Claimed before telling, so two passes can't both send it.
+    const claimed = await db.insert(settings).values({ key, value: { at: now().toISOString() } }).onConflictDoNothing().returning({ key: settings.key });
+    if (!claimed.length) return;
+    await deps
+      .tellCeo({
+        companyId,
+        ticketId: first.ticketId,
+        reason: BRAKE_OFF_REASON,
+        note: `${startBrakeText(warn)}. The merge line has grown for an hour and new starts are not held. The owner sets the limit in Settings → "Hold new starts while this many merges are waiting"; ask them to, with the suggested number. This is the one wake for this stretch.`,
+      })
+      .catch(() => undefined);
+  }
+
   return {
     /** One pass for every company with a jam going, or unpaused: the first alert, the reminder, or the all-clear. Safe to call often. */
     async run(): Promise<{ alerted: number; reminded: number; cleared: number }> {
@@ -147,8 +177,14 @@ export function mergeJamService(
         const view = await deps.view(companyId).catch(() => null);
         if (!view) continue;
         await flagStaleHolds(companyId, view);
-        const jam = jammedRows(view);
-        const jammed = jam.running.length + jam.waiting.length;
+        await brakeOffEpisode(companyId, paused ? { ...view, startBrakeOff: null } : view).catch(() => undefined);
+        const health = lineOf(view, t);
+        // R44: a deliberate pause raises no alarm and ends none: leave any episode as it is until the normal verdicts return.
+        if (health.state === "paused") continue;
+        const jam = health.state === "stuck" ? health : null;
+        const jammed = jam !== null;
+        // Landing but slow is not a jam: no flag, no page, one feed note a day (BOS-1594).
+        if (health.state === "over_capacity" && !paused) await slowNote(companyId, health, t).catch(() => undefined);
         // Merges moving again, and the owner was told about the jam: one quiet note, and the jam alerts
         // are read. A jam whose first alert was held back (quiet hours made it a feed note) gets no
         // all-clear: an all-clear for a jam they never heard about is worse than silence (BOS-819). A failed
@@ -172,7 +208,7 @@ export function mergeJamService(
         if (paused) continue;
         const link = `#/merge-queue/${companyId}`;
         if (!episode) {
-          const line = stuckLine(jam);
+          const line = stuckLine(jam!);
           const alert = firstAlert(line);
           const sent = await deps.notify({ companyId, level: "flag", title: alert.title, body: alert.body, link });
           await writeEpisode(companyId, { firstAlertAt: t.toISOString(), reminded: false, notificationIds: sent ? [sent.id] : [], ownerTold: reachesOwner(sent) });
@@ -181,7 +217,7 @@ export function mergeJamService(
         }
         const due = t.getTime() - new Date(episode.firstAlertAt).getTime() >= JAM_REMINDER_MS;
         if (episode.reminded || !due) continue;
-        const line = stuckLine(jam);
+        const line = stuckLine(jam!);
         const sent = await deps.notify({
           companyId,
           level: "page",

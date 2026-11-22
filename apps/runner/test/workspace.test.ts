@@ -216,6 +216,45 @@ describe("git workspaces (R38)", () => {
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
   });
 
+  // BOS-1647: a push that landed but was never recorded shows in the diff as `mergedInto`, with the commit that brought the head in.
+  it("says which commit on main brought the ticket's head in, and nothing for a branch not on main (BOS-1647)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // A ticket with no commit of its own sits on the base, which is on main: that is not a merge.
+    expect((await ws.diff(spec, undefined, "main")).mergedInto).toBeUndefined();
+    writeFileSync(path.join(w.path, "feature.ts"), "export const f = 1;\n");
+    git(w.path, "add", "feature.ts");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add feature");
+    const head = git(w.path, "rev-parse", "HEAD");
+    expect((await ws.diff(spec, undefined, "main")).mergedInto).toBeUndefined();
+    // Main moves on, then the branch lands as a merge commit.
+    r.commit("main moved");
+    git(r.dir, "fetch", "-q", w.path, "HEAD");
+    git(r.dir, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "Merge the ticket", head);
+    const merge = git(r.dir, "rev-parse", "HEAD");
+    r.commit("main moved again");
+    const d = await ws.diff(spec, undefined, "main");
+    expect(d.mergedInto).toEqual({ commit: merge, files: ["feature.ts"] });
+    expect(d.commits).toEqual([]);
+  });
+
+  it("names the head itself when the branch landed by fast-forward (BOS-1647)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "feature.ts"), "export const f = 1;\n");
+    git(w.path, "add", "feature.ts");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add feature");
+    const head = git(w.path, "rev-parse", "HEAD");
+    git(r.dir, "fetch", "-q", w.path, "HEAD");
+    git(r.dir, "merge", "-q", "--ff-only", head);
+    r.commit("main moved");
+    expect((await ws.diff(spec, undefined, "main")).mergedInto).toEqual({ commit: head });
+  });
+
   // BOS-1100: git's rename detection would fold a move into one `old => new` line, and the owner-approval
   // check matches exact paths, so a moved gate script slipped past it. The file list must name both sides.
   it("names both sides of a rename in the diff, so a moved check-all.sh is still held (BOS-1100)", async () => {
@@ -401,7 +440,7 @@ describe("workspace clean-up (R54)", () => {
     const b = await ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" });
     writeFileSync(path.join(a.path, "big.bin"), Buffer.alloc(256 * 1024, 1));
     // b's folder vanishes behind git's back, then something unrelated appears in tickets/.
-    rmSync(b.path, { recursive: true, force: true });
+    rmSync(b.path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     const stray = path.join(root, "tickets", "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
     mkdirSync(stray, { recursive: true });
     writeFileSync(path.join(stray, "leftover.txt"), "x");

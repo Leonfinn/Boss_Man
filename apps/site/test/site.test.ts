@@ -2,8 +2,8 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync, rmSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { build, checkPortalUrl, fill, parsePage, portalBlocks, requireSiteUrlOnPages } from "../scripts/build.mjs";
-import { checkSite } from "../scripts/check.mjs";
+import { build, checkPortalUrl, checkUmami, fill, parsePage, portalBlocks, readChangelog, requireSiteUrlOnPages } from "../scripts/build.mjs";
+import { checkSite, xmlProblem } from "../scripts/check.mjs";
 
 let tmp: string;
 let dist: string;
@@ -120,6 +120,55 @@ describe("build", () => {
     expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toEqual([]);
   });
 
+  it("writes an Atom feed of the changelog, newest first, only when SITE_URL is set", () => {
+    expect(existsSync(path.join(dist, "whats-new.xml"))).toBe(false);
+    expect(read("index.html")).not.toContain("whats-new.xml");
+    expect(read("whats-new.html")).not.toContain("Follow by feed");
+    const withUrl = path.join(tmp, "dist-feed");
+    build({ outDir: withUrl, siteUrl: "https://example.test", portalUrl: "" });
+    const feed = readFileSync(path.join(withUrl, "whats-new.xml"), "utf8");
+    const source = readFileSync(path.join(__dirname, "..", "..", "..", "CHANGELOG.md"), "utf8");
+    const first = /^## (.+)$/m.exec(source)![1];
+    const id = first.toLowerCase().replace(/ /g, "-");
+    expect(xmlProblem(feed)).toBe("");
+    expect(feed).toContain(`<id>https://example.test/whats-new#${id}</id>`);
+    expect(feed).toContain(`<title>${first}</title>`);
+    const [day, month, year] = first.split(" ");
+    const iso = new Date(Date.UTC(+year, ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].indexOf(month), +day)).toISOString().replace(".000Z", "Z");
+    expect(feed).toMatch(new RegExp(`</title>\\s*<updated>${iso}</updated>\\s*<content type="html">&lt;`));
+    expect(feed.match(/<updated>/g)!.length).toBeLessThanOrEqual(21);
+    expect(feed.indexOf(`<updated>${iso}</updated>`)).toBeLessThan(feed.indexOf("<entry>"));
+    const head = '<link rel="alternate" type="application/atom+xml" title="Boss Man: What\'s new" href="/whats-new.xml">';
+    for (const f of ["index.html", "404.html", "whats-new.html", "guides/index.html"]) expect(readFileSync(path.join(withUrl, f), "utf8"), f).toContain(head);
+    expect(readFileSync(path.join(withUrl, "whats-new.html"), "utf8")).toContain('<a href="/whats-new.xml">Follow by feed</a>');
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toEqual([]);
+  });
+
+  it("caps the feed at 20 entries", () => {
+    const f = path.join(tmp, "long-changelog.md");
+    const days = Array.from({ length: 25 }, (_, i) => `## ${25 - i} October 2026\n\n- Change ${i}\n`).join("\n");
+    writeFileSync(f, `# Title\n\n${days}`);
+    const out = path.join(tmp, "dist-long");
+    build({ outDir: out, siteUrl: "https://example.test", portalUrl: "", changelogFile: f });
+    const feed = readFileSync(path.join(out, "whats-new.xml"), "utf8");
+    expect(feed.match(/<entry>/g)).toHaveLength(20);
+    expect(feed).toContain("<updated>2026-10-25T00:00:00Z</updated>\n  <entry>");
+    expect(feed).not.toContain("<title>5 October 2026</title>");
+  });
+
+  it("the site check fails when the feed is missing or not well-formed", () => {
+    const withUrl = path.join(tmp, "dist-feed-check");
+    build({ outDir: withUrl, siteUrl: "https://example.test", portalUrl: "" });
+    const file = path.join(withUrl, "whats-new.xml");
+    const good = readFileSync(file, "utf8");
+    writeFileSync(file, good.replace("</feed>", ""));
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" }).join("\n")).toMatch(/whats-new\.xml is not well-formed XML/);
+    writeFileSync(file, good.replace("<title>Boss Man", "<title>Boss & Man"));
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" }).join("\n")).toMatch(/bare &/);
+    rmSync(file);
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toContain("whats-new.xml is missing");
+  });
+
   it("fails a Cloudflare Pages build without SITE_URL", () => {
     expect(() => requireSiteUrlOnPages({ CF_PAGES: "1" })).toThrow(/SITE_URL/);
     expect(() => requireSiteUrlOnPages({ CF_PAGES: "1", SITE_URL: "https://example.com" })).not.toThrow();
@@ -179,6 +228,62 @@ describe("About page", () => {
   });
 });
 
+describe("What's new page", () => {
+  const changelog = (text: string) => {
+    const f = path.join(tmp, "CHANGELOG-test.md");
+    writeFileSync(f, text);
+    return () => readChangelog(f);
+  };
+
+  it("builds /whats-new from the repo's CHANGELOG.md, newest entry first, without the file's preamble or the release-step comment", () => {
+    const html = read("whats-new.html");
+    const source = readFileSync(path.join(__dirname, "..", "..", "..", "CHANGELOG.md"), "utf8");
+    const first = /^## (.+)$/m.exec(source)![1];
+    expect(html).toContain("<h1>What's new</h1>");
+    expect(html).toContain(`<h2 id="${first.toLowerCase().replace(/ /g, "-")}">${first}</h2>`);
+    expect(html).toContain(`Latest entry: ${first}.`);
+    expect(html).not.toContain("# What's new in Boss Man");
+    expect(html).not.toMatch(/release step|<!--/i);
+    expect(html).toContain('href="/guides/updates-and-backups"');
+  });
+
+  it("is linked from the main menu and the footer of every page, marked current on its own page, and from the updating guide", () => {
+    for (const f of htmlFiles()) {
+      const html = read(f);
+      const menu = html.slice(html.indexOf('<nav aria-label="Main"'), html.indexOf("</nav>"));
+      const footer = html.slice(html.indexOf('<nav aria-label="Footer">'));
+      expect(menu, f).toMatch(/<a href="\/whats-new"( aria-current="page")?>What's new<\/a>/);
+      expect(footer, f).toContain('<a href="/whats-new">What\'s new</a>');
+    }
+    expect(read("whats-new.html")).toContain('<a href="/whats-new" aria-current="page">What\'s new</a>');
+    expect(read("index.html")).not.toContain('href="/whats-new" aria-current');
+    expect(read("guides/updates-and-backups.html")).toContain('href="/whats-new"');
+  });
+
+  it("carries no ticket number, host address or home path on the built page", () => {
+    const html = read("whats-new.html");
+    expect(html).not.toMatch(/\bBOS-\d+/i);
+    expect(html).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\.ts\.net|\/mnt\/|\/home\//);
+  });
+
+  it("stops the build on an entry that is not a date, dates out of order or repeated, a ticket number, or no entries", () => {
+    const ok = "# What's new\n\nIntro.\n\n## 16 November 2026\n\n- A change.\n\n## 2 November 2026\n\n- Another.\n";
+    expect(changelog(ok)().dates).toEqual(["16 November 2026", "2 November 2026"]);
+    expect(changelog(ok.replace("16 November", "Week 46"))).toThrow(/is not a date/);
+    expect(changelog(ok.replace("16 November", "31 November"))).toThrow(/is not a date/);
+    expect(changelog(ok.replace("16 November", "16 Nov"))).toThrow(/is not a date/);
+    expect(changelog(ok.replace("16 November", "1 November"))).toThrow(/out of order/);
+    expect(changelog(ok.replace("16 November", "2 November"))).toThrow(/out of order/);
+    expect(changelog(ok.replace("A change.", "A change (BOS-1658)."))).toThrow(/ticket number/);
+    expect(changelog("# What's new\n\nNothing yet.\n")).toThrow(/no entries/);
+  });
+
+  it("keeps the release-step comment out of the page but in the file, so the next release knows what to add", () => {
+    const source = readFileSync(path.join(__dirname, "..", "..", "..", "CHANGELOG.md"), "utf8");
+    expect(source).toMatch(/<!--[\s\S]*release step[\s\S]*-->/i);
+  });
+});
+
 describe("roadmap portal link", () => {
   it("is left out of the menu, the footer and the home page while no portal address is set", () => {
     for (const f of ["index.html", "about.html", "guides/install-boss-man.html"]) {
@@ -229,6 +334,44 @@ describe("check", () => {
     expect(problems).toContain('404.html: image "/img/none.webp" does not exist');
   });
 
+  it("puts SoftwareApplication structured data on the home page only, and the check catches its loss", () => {
+    const m = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(read("index.html"));
+    expect(JSON.parse(m![1])).toMatchObject({ "@type": "SoftwareApplication", name: "Boss Man", isAccessibleForFree: true });
+    expect(read("about.html")).not.toContain("ld+json");
+    const undo = edit("index.html", (h) => h.replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, ""));
+    const problems: string[] = checkSite(dist);
+    undo();
+    expect(problems).toContain("index.html: missing SoftwareApplication structured data");
+  });
+
+  it("catches missing preview tags, a repeated title or description, and a noindex on a public page", () => {
+    const undo = edit("about.html", (h) => h.replace(/<meta name="twitter:title"[^>]*>/, "").replace(/<title>[^<]*<\/title>/, "<title>Same</title>").replace("</head>", '<meta name="robots" content="noindex"></head>'));
+    const undo2 = edit("whats-new.html", (h) => h.replace(/<title>[^<]*<\/title>/, "<title>Same</title>"));
+    const problems: string[] = checkSite(dist);
+    undo();
+    undo2();
+    expect(problems).toContain("about.html: missing twitter:title");
+    expect(problems).toContain("about.html: has a noindex robots tag on a public page");
+    expect(problems.some((p) => /whats-new\.html: same title as about\.html/.test(p))).toBe(true);
+    expect(problems.some((p) => /404\.html: has a noindex/.test(p))).toBe(false);
+  });
+
+  it("catches a robots.txt that blocks search engines, is missing, or ignores the sitemap", () => {
+    const f = path.join(dist, "robots.txt");
+    const original = readFileSync(f, "utf8");
+    writeFileSync(f, "User-agent: *\nDisallow: /\n");
+    const blocked: string[] = checkSite(dist);
+    rmSync(f);
+    const missing: string[] = checkSite(dist);
+    writeFileSync(f, original);
+    expect(blocked).toContain("robots.txt blocks the whole site (Disallow: /)");
+    expect(missing).toContain("robots.txt is missing");
+    const withUrl = path.join(tmp, "dist-robots");
+    build({ outDir: withUrl, siteUrl: "https://example.test", portalUrl: "" });
+    writeFileSync(path.join(withUrl, "robots.txt"), "User-agent: *\nAllow: /\n");
+    expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toContain("robots.txt does not point to sitemap.xml");
+  });
+
   it("catches a phone picture that points at nothing", () => {
     const undo = edit("index.html", (h) => h.replace('srcset="/img/card-phone.webp"', 'srcset="/img/gone.webp"'));
     const problems: string[] = checkSite(dist);
@@ -275,5 +418,67 @@ describe("check", () => {
     const problems: string[] = checkSite(dist);
     undo();
     expect(problems).toContain('styles.css: url() "/img/gone.webp" does not exist');
+  });
+});
+
+describe("Umami page statistics", () => {
+  const scriptUrl = "https://stats.example.com/script.js";
+  const websiteId = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+  let tracked: string;
+  beforeAll(() => {
+    tracked = path.join(tmp, "dist-umami");
+    build({ outDir: tracked, siteUrl: "https://example.test", portalUrl: "https://roadmap.example.com/p/abc", umamiScriptUrl: scriptUrl, umamiWebsiteId: websiteId });
+  });
+  const umami = { scriptUrl, origin: "https://stats.example.com", websiteId };
+
+  it("puts the script on every page, with no cookie banner and nothing that stores a cookie", () => {
+    const files = (readdirSync(tracked, { recursive: true }) as string[]).map(String).filter((f) => f.endsWith(".html"));
+    expect(files.length).toBeGreaterThan(5);
+    for (const f of files) {
+      const html = readFileSync(path.join(tracked, f), "utf8");
+      expect(html, f).toContain(`<script defer src="${scriptUrl}" data-website-id="${websiteId}" data-do-not-track="true" data-exclude-search="true"></script>`);
+    }
+    expect(checkSite(tracked, { siteUrl: "https://example.test", umami })).toEqual([]);
+  });
+
+  it("names the Install, GitHub and Roadmap clicks", () => {
+    const home = readFileSync(path.join(tracked, "index.html"), "utf8");
+    expect(home).toMatch(/<a class="btn small" href="\/guides\/install-boss-man" data-umami-event="install-click">Install<\/a>/);
+    expect(home).toMatch(/<a href="https:\/\/github\.com\/[^"]+" data-umami-event="github-click">GitHub<\/a>/);
+    expect(home).toMatch(/href="https:\/\/roadmap\.example\.com\/p\/abc"[^>]*data-umami-event="roadmap-click"/);
+    expect(home).not.toMatch(/data-umami-event="[^"]*"[^>]*data-umami-event=/);
+  });
+
+  it("lets the browser load the script and send numbers, and nothing else", () => {
+    const headers = readFileSync(path.join(tracked, "_headers"), "utf8");
+    expect(headers).toContain("script-src 'self' https://stats.example.com;");
+    expect(headers).toContain("connect-src https://stats.example.com;");
+    expect(readFileSync(path.join(dist, "_headers"), "utf8")).not.toContain("stats.example.com");
+  });
+
+  it("is off when not configured, and refuses half or odd settings", () => {
+    expect(read("index.html")).not.toContain("data-website-id");
+    expect(checkUmami("", "")).toBeNull();
+    for (const [u, i] of [[scriptUrl, ""], ["", websiteId], ["http://stats.example.com/script.js", websiteId], ["https://user:pw@stats.example.com/s.js", websiteId], ["https://stats/s.js", websiteId], [scriptUrl, "not-an-id"]]) {
+      expect(() => checkUmami(u, i), `${u} ${i}`).toThrow(/UMAMI_/);
+    }
+  });
+
+  it("fails the pre-publish check when a page lacks the script or the policy blocks it", () => {
+    const f = path.join(tracked, "about.html");
+    const original = readFileSync(f, "utf8");
+    writeFileSync(f, original.replace(/<script defer src="https:\/\/stats[^>]*><\/script>/, ""));
+    const missing: string[] = checkSite(tracked, { siteUrl: "https://example.test", umami });
+    writeFileSync(f, original.replace(`data-website-id="${websiteId}"`, 'data-website-id="00000000-0000-4000-8000-000000000000"'));
+    const wrongId: string[] = checkSite(tracked, { siteUrl: "https://example.test", umami });
+    writeFileSync(f, original);
+    expect(missing).toEqual(["about.html: missing the Umami tracking script (visits to this page would not be counted)"]);
+    expect(wrongId).toHaveLength(1);
+    const h = path.join(tracked, "_headers");
+    const headers = readFileSync(h, "utf8");
+    writeFileSync(h, headers.replace(" https://stats.example.com", ""));
+    const blocked: string[] = checkSite(tracked, { siteUrl: "https://example.test", umami });
+    writeFileSync(h, headers);
+    expect(blocked.join("\n")).toContain("_headers: the Content-Security-Policy does not allow https://stats.example.com");
   });
 });

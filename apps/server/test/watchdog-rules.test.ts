@@ -185,3 +185,49 @@ describe("watchdog rules (BOS-58)", () => {
     expect(backoffGapMs("stale_in_progress", { ...s, inProgressHours: 30 }, 3) / 3_600_000).toBe(30);
   });
 });
+
+describe("in progress waiting on the check queue (BOS-1760)", () => {
+  // The agent asked for a quick check and ended its run: the usual shape behind the retro's five false flags.
+  const asked = run({ startedAt: ago(300), endedAt: ago(290) });
+
+  it("stays quiet while a quick check or a merge is queued or running, however long", () => {
+    // Without the check, the same ticket is flagged.
+    expect(rules([ticket({ stateChangedAt: ago(310) })], [asked])).toEqual(["t1:run_ended_unmoved"]);
+    expect(rules([ticket({ stateChangedAt: ago(310), checks: [{ from: ago(291), to: null }] })], [asked])).toEqual([]);
+    // Never ran on it at all (the idle_agent shape), check queued for hours: quiet too.
+    expect(rules([ticket({ stateChangedAt: ago(600), checks: [{ from: ago(500), to: null }] })])).toEqual([]);
+    // Picked up, asked, ended normally: the short idle rule is quiet while the check waits.
+    expect(rules([ticket({ stateChangedAt: ago(40), checks: [{ from: ago(31), to: null }] })], [run({ startedAt: ago(39), endedAt: ago(30) })])).toEqual([]);
+    // A check queued before the ticket last moved but still live counts as well.
+    expect(rules([ticket({ stateChangedAt: ago(200), checks: [{ from: ago(220), to: null }] })], [run({ startedAt: ago(230), endedAt: ago(210) })])).toEqual([]);
+    // A check queued in the future (clock skew in the backtest) is not a wait yet.
+    expect(rules([ticket({ stateChangedAt: ago(310), checks: [{ from: new Date(NOW.getTime() + 60_000), to: null }] })], [asked])).toEqual(["t1:run_ended_unmoved"]);
+  });
+
+  it("restarts the clock when the check ends, and flags at the usual limits if no run follows the result", () => {
+    // Result 14 min ago, no run since: under the short limit, quiet.
+    expect(rules([ticket({ stateChangedAt: ago(310), checks: [{ from: ago(291), to: ago(14) }] })], [run({ startedAt: ago(309), endedAt: ago(290) })])).toEqual([]);
+    // Picked-up shape: 15 min after the result with no run, flagged as before.
+    const picked = run({ startedAt: ago(309), endedAt: ago(290) });
+    const trip = evaluate({ tickets: [ticket({ stateChangedAt: ago(310), checks: [{ from: ago(291), to: ago(15) }] })], runs: [picked], holds: [] }, s, NOW);
+    expect(trip.map((x) => x.rule)).toEqual(["idle_agent"]);
+    expect(trip[0]!.detail.idleMs).toBe(15 * 60_000);
+    // Never ran on it: the short limit counts from the result, not from the move.
+    expect(rules([ticket({ stateChangedAt: ago(600), checks: [{ from: ago(500), to: ago(14) }] })])).toEqual([]);
+    expect(rules([ticket({ stateChangedAt: ago(600), checks: [{ from: ago(500), to: ago(15) }] })])).toEqual(["t1:idle_agent"]);
+    // Past the 45-minute grace from the result: "ended without moving", as with no check.
+    expect(rules([ticket({ stateChangedAt: ago(310), checks: [{ from: ago(291), to: ago(45) }] })], [picked])).toEqual(["t1:run_ended_unmoved"]);
+    // A run that straddled the move: the long rule, 2 h from the result.
+    const straddle = run({ startedAt: ago(320), endedAt: ago(290) });
+    expect(rules([ticket({ stateChangedAt: ago(310), checks: [{ from: ago(291), to: ago(119) }] })], [straddle])).toEqual([]);
+    expect(rules([ticket({ stateChangedAt: ago(310), checks: [{ from: ago(291), to: ago(120) }] })], [straddle])).toEqual(["t1:stale_in_progress"]);
+    // The long rule doesn't count check time as idle: 5 h in progress, 4 h of it in the queue, 10 min of run.
+    const early = run({ startedAt: ago(300), endedAt: ago(290) });
+    expect(rules([ticket({ stateChangedAt: ago(300) })], [early])).toEqual(["t1:stale_in_progress"]);
+    expect(rules([ticket({ stateChangedAt: ago(300), checks: [{ from: ago(290), to: ago(50) }] })], [early])).toEqual([]);
+  });
+
+  it("a check that ended before the ticket last moved doesn't restart anything", () => {
+    expect(rules([ticket({ stateChangedAt: ago(15), checks: [{ from: ago(300), to: ago(20) }] })])).toEqual(["t1:idle_agent"]);
+  });
+});

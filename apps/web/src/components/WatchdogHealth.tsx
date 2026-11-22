@@ -24,7 +24,17 @@ export function healthLine(h: WatchdogHealthData, now = Date.now()): { text: str
 export function WatchdogHealth({ companyId }: { companyId: string }) {
   const s = usePoll((signal) => api<WatchdogHealthData>(`/api/companies/${companyId}/watchdog`, { signal }), 30_000, `watchdog-health-${companyId}`);
   // The board must never fail because the health line did.
-  if (!s.data?.settings) return null;
+  if (!s.data?.settings) {
+    if (!s.error) return null;
+    return (
+      <span className="tag amber" role="alert" aria-label="Watchdog health">
+        Watchdog: couldn't load its state ({s.error.message}){" "}
+        <button type="button" className="link" onClick={s.reload}>
+          Retry
+        </button>
+      </span>
+    );
+  }
   const h = healthLine(s.data);
   return (
     <a

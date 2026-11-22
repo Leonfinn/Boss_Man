@@ -14,6 +14,10 @@ import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
 import { runnerImageCommit } from "./runner-image.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
+import { backInBandReason } from "./cost-check.js";
+import { idleSlotsGoneReason } from "./idle-slots-alert.js";
+import { backupFreshReason } from "./daily-backup.js";
+import { sweepStepOkReason } from "./sweep-step-guard.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -68,7 +72,15 @@ export type ClearWhen =
    */
   | { kind: "featurePortalSettled"; featureId: string }
   /** A repeated-merge-failure card (BOS-1461): no failed attempt of that reason for 30 minutes. */
-  | { kind: "mergeFailuresCalm"; companyId: string; reason: string };
+  | { kind: "mergeFailuresCalm"; companyId: string; reason: string }
+  /** The cost sanity check's card (BOS-1866): the company's latest checked runs are all in band. */
+  | { kind: "costBackInBand"; companyId: string }
+  /** The idle-slots alert's card (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
+  | { kind: "idleSlotsGone"; companyId: string }
+  /** The daily-backup card (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
+  | { kind: "backupFresh" }
+  /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
+  | { kind: "sweepStepOk"; step: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -126,8 +138,20 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "serverCalm":
         if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
         break;
+      case "backupFresh":
+        out.push({ kind: "backupFresh" });
+        break;
       case "featurePortalSettled":
         if (typeof c.featureId === "string") out.push({ kind: "featurePortalSettled", featureId: c.featureId });
+        break;
+      case "costBackInBand":
+        if (typeof c.companyId === "string") out.push({ kind: "costBackInBand", companyId: c.companyId });
+        break;
+      case "idleSlotsGone":
+        if (typeof c.companyId === "string") out.push({ kind: "idleSlotsGone", companyId: c.companyId });
+        break;
+      case "sweepStepOk":
+        if (typeof c.step === "string") out.push({ kind: "sweepStepOk", step: c.step });
         break;
       case "mergeFailuresCalm":
         if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
@@ -177,6 +201,8 @@ export type AlertClearingDeps = {
   release?: (ticketId: string) => Promise<unknown>;
   /** Why a server-health rule's card can go (server-health.ts), or null while it can't; without it those cards stay open. */
   serverCalm?: (rule: "memory" | "freezes") => string | null;
+  /** How many more work runs the company could start now (the scheduler's `freeSlots`); without it the idle-slots card stays open. */
+  freeSlots?: (companyId: string) => Promise<number>;
   /** The commit this server was built from (BOSSMAN_COMMIT); without it a "server has commit" condition never clears. */
   liveCommit?: () => string | null;
   now?: () => Date;
@@ -288,6 +314,14 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "serverCalm":
         return deps.serverCalm?.(c.rule) ?? null;
+      case "backupFresh":
+        return backupFreshReason(db, (deps.now ?? (() => new Date()))());
+      case "costBackInBand":
+        return backInBandReason(db, c.companyId, card.createdAt);
+      case "idleSlotsGone":
+        return deps.freeSlots ? idleSlotsGoneReason(db, c.companyId, deps.freeSlots) : null;
+      case "sweepStepOk":
+        return sweepStepOkReason(db, c.step);
       case "mergeFailuresCalm": {
         // Calm for the whole window, and the card itself is at least that old.
         const since = new Date(now().getTime() - FAILURE_WINDOW_MS);

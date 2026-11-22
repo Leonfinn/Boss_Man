@@ -12,7 +12,7 @@ Boss Man imports a Paperclip company in one step: its company export plus one JS
 | Projects | projects, with the repo from the primary workspace |
 | Issues | tickets, keeping their state, parent and creation time; the body ends with `Imported from HOL-123` so the old ID still finds it |
 | Comments | the ticket's conversation; an agent's comment stays theirs, the rest show as yours or as system notes |
-| Issue documents (`plan`, `spec`, `claims`, …) | wiki pages under **Imported/HOL-123**, linked to the ticket. A document over 200,000 characters is split into parts |
+| Issue documents (`plan`, `spec`, `claims`, …) | wiki pages under **Imported/HOL-123**, linked to the ticket. A document over 190,000 characters is split into parts |
 | `continuation-summary` documents | skipped: they were Paperclip's notes between runs |
 
 Paperclip's `cancelled` has no Boss Man state, so those tickets arrive as done with the outcome "Cancelled in Paperclip.". Priorities, run history, costs and heartbeats don't come across.
@@ -24,8 +24,8 @@ Paperclip's `cancelled` has no Boss Man state, so those tickets arrive as done w
 2. **Export the issues** with the read-only query below. Paperclip's built-in database listens on `127.0.0.1:54329` (user and password `paperclip`, database `paperclip`), so run it wherever `psql` can reach that address, usually inside the Paperclip container. Change `'HOL'` to your company's issue prefix. `default_transaction_read_only=on` makes the session refuse any write.
 
 ```sh
-PGOPTIONS='-c default_transaction_read_only=on' psql -At -v ON_ERROR_STOP=1 \
-  "postgres://paperclip:paperclip@127.0.0.1:54329/paperclip" \
+PGPASSWORD=paperclip PGOPTIONS='-c default_transaction_read_only=on' psql -At -v ON_ERROR_STOP=1 \
+  "postgres://paperclip@127.0.0.1:54329/paperclip" \
   -f paperclip-issues.sql > paperclip-issues.json
 ```
 

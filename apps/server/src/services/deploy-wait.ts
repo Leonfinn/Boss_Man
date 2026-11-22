@@ -13,10 +13,11 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, decisions, settings } from "../db/schema.js";
-import { CANCEL_UPDATE, KEEP_WAITING_MORE, UPDATE_NOW_ANYWAY, markDecisionNotificationRead } from "./decisions.js";
+import { AnswerError, CANCEL_UPDATE, KEEP_WAITING_MORE, UPDATE_NOW_ANYWAY, markDecisionNotificationRead } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import type { Available, DeployStatus, Headroom } from "./self-deploy.js";
-import { DEPLOY_WAIT_KEY, SOFT_HOLD_MAX_MS, quietRuns as envQuietRuns, softHold } from "./deploy-wait-hold.js";
+import { DEPLOY_WAIT_KEY, quietRuns as envQuietRuns, softHold } from "./deploy-wait-hold.js";
+import { WAIT_RULES } from "./update-waits.js";
 
 export { DEPLOY_WAIT_KEY, SOFT_HOLD_MAX_MS } from "./deploy-wait-hold.js";
 export const WAIT_MINUTES = 30;
@@ -67,6 +68,8 @@ export type DeployWait = {
   /** The owner pressed the combined button (BOS-1086): the runner update follows this deploy. */
   thenRunners?: boolean;
   sentAt?: string;
+  /** BOS-2058: when the CEO was woken because this wait ran past its expected end (once per wait). */
+  ceoWokenAt?: string;
   windowUntil?: string;
   handoverSince?: string;
   quiet?: Quiet;
@@ -90,6 +93,10 @@ export type DeployWaitDeps = {
   /** The runner update's full hold (maintenance.ts) is on: it takes over from here. */
   drainOn: () => Promise<boolean>;
   notify: (n: NotifyInput) => Promise<unknown>;
+  /** BOS-1805: tells the CEO an owner's approved update was not sent (self-deploy's tellCeo); absent in tests that don't need it. */
+  tellCeo?: (note: string) => Promise<unknown>;
+  /** BOS-2058: wakes the CEO (the reply lane, which an update's hold never holds) when a wait runs past its expected end. */
+  wakeCeo?: (note: string) => Promise<unknown>;
   /** The hold lifted: start parked checks and held runs now rather than at their next poll. */
   released?: () => Promise<unknown> | unknown;
   quietRuns?: number;
@@ -240,6 +247,10 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     else await end("deployed; no standby window");
   }
 
+  /** The wait kind a phase counts as, and when it began, for the ends in update-waits.ts. The window and hand-over have ends of their own below. */
+  const stageOf = (w: DeployWait): { kind: "server-quiet" | "server-build"; since: string } | null =>
+    w.phase === "waiting" ? { kind: "server-quiet", since: w.approvedAt } : w.phase === "sent" ? { kind: "server-build", since: w.sentAt ?? w.approvedAt } : null;
+
   const self = {
     get,
 
@@ -253,7 +264,22 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
      */
     async begin(input: { decisionId: string; commit: string; fromCommit: string; origin?: "approve" | "hand"; thenRunners?: boolean }): Promise<DeployWait> {
       const have = await get();
-      if (have) return have;
+      if (have) {
+        if (have.decisionId === input.decisionId) return have;
+        // BOS-1805: a second approval used to be dropped here without a word (the card read "Deploy", nothing was sent).
+        // An earlier approval still waiting for quiet is replaced by this newer one: it keeps its place in the wait, and
+        // the host deploys the newest checked commit from the approved one either way (BOS-753).
+        if (have.phase === "waiting" && have.origin === "approve" && (input.origin ?? "approve") === "approve") {
+          const next: DeployWait = { ...have, decisionId: input.decisionId, commit: input.commit, fromCommit: input.fromCommit, ...(have.thenRunners || input.thenRunners ? { thenRunners: true } : {}) };
+          await save(next);
+          deps.log?.(`deploy wait: approval for ${short(input.commit)} replaces the waiting one for ${short(have.commit)}`);
+          return next;
+        }
+        // Anything further along can't take a second update now: the answer is refused with the reason, so the card
+        // stays open and the owner reads why at once.
+        const where = have.phase === "sent" ? "is with the host now" : have.phase === "waiting" ? "is waiting for you to apply it by hand" : "is live and in its standby window, where the host takes no other update";
+        throw new AnswerError(`Not sent: the update to ${short(have.commit)} ${where}. Boss Man takes one server update at a time, so this card stays open: answer it again once that one has finished (Settings → Server and runner → Updates shows it).`);
+      }
       const t = now();
       const w: DeployWait = { decisionId: input.decisionId, commit: input.commit, fromCommit: input.fromCommit, approvedAt: t.toISOString(), phase: "waiting", deadline: new Date(t.getTime() + WAIT_MINUTES * 60_000).toISOString(), minutes: WAIT_MINUTES, origin: input.origin ?? "approve", ...(input.thenRunners ? { thenRunners: true } : {}) };
       const q = await measure();
@@ -284,27 +310,56 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       let w = await get();
       if (!w) return null;
       const t = now();
-      if (t.getTime() - Date.parse(w.approvedAt) > SOFT_HOLD_MAX_MS) {
-        // A request the host is still holding for memory is taken back too (Freddy): left in the inbox it would start
-        // later on a busy machine, with no hold and no warning. One the host has already taken goes ahead as reported.
-        const unsent = w.origin === "approve" && (w.phase === "waiting" || (w.phase === "sent" && (await deps.takeBack(w.decisionId))));
-        await end("3-hour cap", {
-          level: "page",
-          title: "Update wait stopped after 3 hours",
-          body: unsent
-            ? `The update to ${short(w.commit)} never found a quiet machine, so it was not sent. Merge checks and runs are back to normal. Approve it again from Settings → Server and runner → Updates when the machine is quieter, or look at what keeps it busy.`
-            : `The update to ${short(w.commit)} kept merge checks and runs held back for 3 hours, which is too long, so the hold was lifted. Check Settings → Server and runner → Updates for how the update went.`,
-        });
-        return null;
+      // BOS-2058: every phase has its own end (update-waits.ts), not one 3-hour cap that threw the update away. Past the
+      // expected end the CEO is woken once (never the owner); past the end the update goes ahead, or, where going ahead is
+      // not safe (memory really is short, or a request the host holds), the hold lifts and the CEO is told.
+      let stage = stageOf(w);
+      if (stage?.kind === "server-build") {
+        // A request the host has already deployed (or switched back) is handled by the sent phase below, not cut off here.
+        const s = await deps.status();
+        if (s?.id === w.decisionId && s.result !== "running") stage = null;
+      }
+      if (stage) {
+        const rule = WAIT_RULES[stage.kind];
+        const aged = (t.getTime() - Date.parse(stage.since)) / 60_000;
+        if (aged >= rule.expectedMin && !w.ceoWokenAt && deps.wakeCeo) {
+          w = { ...w, ceoWokenAt: t.toISOString() };
+          await save(w);
+          await deps.wakeCeo(`The server update to ${short(w.commit)} has waited ${Math.round(aged)} minutes for ${rule.words}${w.quiet?.why.length ? ` (${w.quiet.why.join("; ")})` : ""}. It ${rule.atEnd === "go-ahead" ? "goes ahead by itself" : "gives up and lifts its hold"} at ${new Date(Date.parse(stage.since) + rule.endMin * 60_000).toISOString().slice(11, 16)} UTC. You don't need to do anything; look only if it is still waiting after that.`).catch((err) => deps.log?.(`deploy wait: waking the CEO failed: ${(err as Error).message}`));
+        }
+        if (aged >= rule.endMin) {
+          if (w.phase === "waiting" && w.origin === "approve") {
+            const q = await measure();
+            // Going ahead is safe unless memory is what is short (the update builds a second server beside the live one, 3 Nov).
+            const memoryShort = q.why.some((x) => !/merge checks? (is|are) running|runs are going/.test(x));
+            if (!memoryShort) {
+              deps.log?.(`deploy wait: ${Math.round(aged)} min with checks or runs still going: sending the update now`);
+              await deps.notify({ companyId: null, level: "note", title: `Update to ${short(w.commit)} is going ahead`, body: `It waited ${rule.endMin} minutes for the machine to be quiet. Memory is fine, so it is sent now; merge checks that were still going start again afterwards.`, link: "#/settings" });
+              return sendNow({ ...w, quiet: q }, true);
+            }
+          }
+          // A request the host is still holding for memory is taken back too (Freddy): left in the inbox it would start
+          // later on a busy machine, with no hold and no warning. One the host has already taken goes ahead as reported.
+          const unsent = w.origin === "approve" && (w.phase === "waiting" || (w.phase === "sent" && (await deps.takeBack(w.decisionId))));
+          await end(`${stage.kind} ended after ${rule.endMin} min`, {
+            level: "page",
+            title: `Update wait stopped after ${rule.endMin} minutes`,
+            body: unsent
+              ? `The update to ${short(w.commit)} waited ${rule.endMin} minutes for ${rule.words} and was not sent, because the machine is short of memory. Merge checks and runs are back to normal. Approve it again from Settings → Server and runner → Updates when the machine is quieter, or look at what uses the memory.`
+              : `The update to ${short(w.commit)} kept merge checks and runs held back for ${rule.endMin} minutes (${rule.words}), which is long enough, so the hold was lifted. Check Settings → Server and runner → Updates for how the update went.`,
+          });
+          // BOS-1805: an approval that was never sent leaves the server as it was: the CEO hears it too, with the reason.
+          if (unsent) await deps.tellCeo?.(`The owner's approved server update to ${short(w.commit)} was not sent: it waited ${rule.endMin} minutes for ${rule.words} and the machine is short of memory (${(w.quiet?.why ?? []).join("; ") || "no reason recorded"}). The live server is unchanged. Find what uses the memory, then tell the owner when to approve it again.`).catch((err) => deps.log?.(`deploy wait: telling the CEO failed: ${(err as Error).message}`));
+          return null;
+        }
       }
 
       if (w.phase === "waiting") {
         const a = await deps.available();
-        if (w.origin === "approve" && a?.tip && a.tip !== w.commit) {
-          // The host only deploys the tip, and the approved commit is pinned (BOS-124): this approval can't be used.
-          await end("main moved on", { level: "note", title: `Update to ${short(w.commit)} not sent: main moved on`, body: `While it waited for a quiet machine, main moved on to ${short(a.tip)}. Approve the new update when it is offered.` });
-          return null;
-        }
+        // BOS-1805: main moving on no longer voids the approval. It did before BOS-753, when the host only deployed the
+        // pinned commit; since then the request names the approved commit and the host deploys the newest checked commit
+        // on main from it, which is what the card promises. The lapse (with only a quiet note) is what threw away the
+        // owner's 18 Nov 14:37 "Deploy": a busy machine waited, BOS-1762 reached main, and nothing was ever sent.
         if (w.origin === "hand" && a?.deployed && a.deployed !== w.fromCommit) {
           // The owner applied it by hand: the hold stays through the standby window, as for a sent update.
           await afterDeployed(w);

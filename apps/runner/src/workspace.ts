@@ -22,16 +22,18 @@
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { createStageTracker, CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MergeCarried, type MainLogResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
+import type { SecretScanResult } from "@boss-man/shared";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
 import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
+import { carryVerdict, nameList } from "./merge-carry.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
 const run = promisify(execFile);
@@ -105,10 +107,11 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
   });
 }
 
+/** A split merge's step (BOS-316; `base` / `expectBase` are the merge train's, BOS-1366), and the git host's CI publish around it (BOS-1070). */
+export type MergeStep = { phase: "prepare"; base?: string; /** BOS-1820: the merge prepared earlier; answer whether its pass would carry. */ carryFrom?: { commit: string; tree: string } } |{ phase: "finish"; commit: string; tree: string; expectBase?: string; carry?: boolean };
+export type MergePhase = MergeStep | { phase: "publish"; commit: string } | { phase: "unpublish" };
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
-/** A server-queued merge's phase (BOS-316); `base` / `expectBase` are the merge train's (BOS-1366). */
-export type MergePhase = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string };
 
 /**
  * Git credentials from the run's granted secrets, passed through the environment only.
@@ -123,6 +126,16 @@ export function gitAuthEnv(secrets: Record<string, string | undefined>): Record<
     Object.assign(env, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}` });
   }
   return env;
+}
+
+/**
+ * BOS-2125: the login for the gate's bossman-ci/* pushes. GitHub emails a failed Actions run to whoever pushed, so with
+ * only GIT_TOKEN every gate failure emails the token's owner. An optional GIT_CI_TOKEN (a second account's token, with
+ * GIT_CI_USERNAME if the host needs one) is used for those two pushes alone; without it GIT_TOKEN is used as before.
+ */
+export function ciPushSecrets(secrets: Record<string, string | undefined>): Record<string, string | undefined> {
+  if (!secrets.GIT_CI_TOKEN) return secrets;
+  return { ...secrets, GIT_TOKEN: secrets.GIT_CI_TOKEN, GIT_USERNAME: secrets.GIT_CI_USERNAME };
 }
 
 export const branchFor = (ticketId: string) => `bossman/${ticketId}`;
@@ -211,6 +224,33 @@ export async function diskUsage(target: string): Promise<number> {
 /** BOS-1413: a merge pinned to the reviewed head refuses any other branch commit. No pin (an older server) keeps the old behaviour. */
 function pinMoved(branchSha: string, pin: string | undefined): { status: "branch_moved"; head: string; pinned: string } | null {
   return pin && branchSha !== pin ? { status: "branch_moved", head: branchSha, pinned: pin } : null;
+}
+
+/**
+ * BOS-2089: the repo lock is a lease. Its holder touches a `lease` file inside the lock folder every
+ * REPO_LOCK_BEAT_MS; a lock whose lease went untouched for REPO_LOCK_STALE_MS was left by a process that died
+ * holding it (a runner or check worker restarted mid-operation) and is taken over. Before this, a dead holder's
+ * lock blocked every repo operation for 10 minutes, longer than the merge's restart retries (20 Nov, 14:05-14:15).
+ * A lock with no lease file is an older holder's: it keeps the old 10-minute rule, so a live one is never taken.
+ */
+export let REPO_LOCK_BEAT_MS = 5_000;
+export let REPO_LOCK_STALE_MS = 45_000;
+export const REPO_LOCK_LEGACY_STALE_MS = 10 * 60_000;
+/** How long one operation waits for the lock before giving up with RepoLockTimeout. */
+export let REPO_LOCK_WAIT_MS = 60_000;
+/** Tests only: shorter beat, lease and wait. */
+export const setRepoLockTiming = (t: { beatMs?: number; staleMs?: number; waitMs?: number }) => {
+  if (t.beatMs !== undefined) REPO_LOCK_BEAT_MS = t.beatMs;
+  if (t.staleMs !== undefined) REPO_LOCK_STALE_MS = t.staleMs;
+  if (t.waitMs !== undefined) REPO_LOCK_WAIT_MS = t.waitMs;
+};
+
+/** How long ago the lock at lockDir was last known alive, and which rule judges it. Null when there is no lock. */
+export function repoLockAge(lockDir: string, now = Date.now()): { ms: number; staleAfterMs: number } | null {
+  const lease = statSync(path.join(lockDir, "lease"), { throwIfNoEntry: false });
+  if (lease) return { ms: now - lease.mtimeMs, staleAfterMs: REPO_LOCK_STALE_MS };
+  const dir = statSync(lockDir, { throwIfNoEntry: false });
+  return dir ? { ms: now - dir.mtimeMs, staleAfterMs: REPO_LOCK_LEGACY_STALE_MS } : null;
 }
 
 /** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
@@ -375,7 +415,18 @@ export class Workspaces {
       mkdirSync(this.reposRoot(), { recursive: true });
       place = {};
     }
-    const extra = { ...opts.env, ...place };
+    const extra: Record<string, string> = { ...opts.env, ...place };
+    // Tests only (BOS-1761): BOSSMAN_GIT_NO_MAINTENANCE=1 in the process env turns git's detached auto-maintenance off, which can
+    // delete empty object folders under a running merge-tree. Never set on the real runner, so production git is unchanged.
+    if (this.baseEnv.BOSSMAN_GIT_NO_MAINTENANCE === "1") {
+      let n = Number(extra.GIT_CONFIG_COUNT) || 0;
+      for (const [k, v] of [["gc.auto", "0"], ["maintenance.auto", "false"]] as const) {
+        extra[`GIT_CONFIG_KEY_${n}`] = k;
+        extra[`GIT_CONFIG_VALUE_${n}`] = v;
+        n++;
+      }
+      extra.GIT_CONFIG_COUNT = String(n);
+    }
     // A clone is always fenced. So is any ticket folder of a runner that makes clones, whatever its .git now is: an agent that swaps the clone's .git for a pointer at a git dir it controls would otherwise move the runner's git out of the fence.
     if (this.fenceCloneGit && opts.cwd && opts.repo && (clone || this.newCopiesAreClones())) return this.fencedGit(args, opts.cwd, opts.repo, extra, opts.reads);
     const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(extra) };
@@ -612,27 +663,44 @@ export class Workspaces {
 
   /**
    * Serialises work on one repo: in-process with a promise chain, and across processes with
-   * a lock directory in the repo's folder. A lock left by a dead process expires after 10 minutes.
+   * a lock directory in the repo's folder. The lock is a lease its holder keeps touching (BOS-2089, repoLockAge):
+   * one left by a dead process is taken over once its lease is REPO_LOCK_STALE_MS old.
    */
   private async withRepoLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.locks.get(projectId) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(async () => {
       const lockDir = path.join(this.root, "repos", `${projectId}.lock`);
+      const lease = path.join(lockDir, "lease");
       mkdirSync(path.dirname(lockDir), { recursive: true });
-      for (let i = 0; ; i++) {
+      const deadline = Date.now() + REPO_LOCK_WAIT_MS;
+      for (;;) {
         try {
           mkdirSync(lockDir);
           break;
         } catch {
-          const age = Date.now() - (statSync(lockDir, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-          if (age > 10 * 60_000) rmSync(lockDir, { recursive: true, force: true });
-          else if (i > 600) throw new RepoLockTimeout(projectId);
+          const age = repoLockAge(lockDir);
+          if (age && age.ms > age.staleAfterMs) rmSync(lockDir, { recursive: true, force: true });
+          else if (Date.now() > deadline) throw new RepoLockTimeout(projectId);
           else await new Promise((r) => setTimeout(r, 100));
         }
       }
+      // The lease: written at once, then touched while fn runs, so a holder that dies stops renewing it.
+      const touch = () => {
+        try {
+          const now = new Date();
+          writeFileSync(lease, "");
+          utimesSync(lease, now, now);
+        } catch {
+          // The folder went (taken over after a long stall): fn carries on, as it did before leases.
+        }
+      };
+      touch();
+      const beat = setInterval(touch, REPO_LOCK_BEAT_MS);
+      beat.unref?.();
       try {
         return await fn();
       } finally {
+        clearInterval(beat);
         rmSync(lockDir, { recursive: true, force: true });
       }
     });
@@ -1009,6 +1077,24 @@ export class Workspaces {
     }
   }
 
+  /**
+   * `git add -A` into a scratch index while the author may be writing files. A file that shrinks while git reads it fails
+   * with "short read while indexing" (exit 128); that passes once the write finishes, so try again until the deadline.
+   * Any other failure is thrown at once.
+   */
+  private async addAllRetrying(dir: string, repo: string, env: Record<string, string>) {
+    const deadline = Date.now() + this.reviewLockWaitMs;
+    for (;;) {
+      try {
+        return await this.git(["add", "-A"], { cwd: dir, env, repo });
+      } catch (err) {
+        const text = `${(err as { stderr?: string }).stderr ?? ""}\n${(err as Error)?.message ?? ""}`;
+        if (!/short read while indexing|unable to index file|failed to insert into database/.test(text) || Date.now() >= deadline) throw err;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+  }
+
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
   private async snapshot(repo: string, dir: string): Promise<string> {
     // Each index in a folder of its own: a fenced git may write its index's folder, and no other.
@@ -1016,7 +1102,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const who = this.authorEnv();
       return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who, repo });
@@ -1238,7 +1324,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       // No external diff program or textconv driver: the diff is git's own (BOS-332).
       // No rename detection either (BOS-1100): git would fold a move into one `old => new` line, and the
       // owner-approval check matches exact paths, so a branch could move scripts/check-all.sh away (or move
@@ -1253,9 +1339,32 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}) };
+      const mergedInto = tip && head !== recorded ? await this.landedOn(repo, dir, head, tip) : null;
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}), ...(mergedInto ? { mergedInto } : {}) };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * BOS-1647: the commit on `tip` that brought `head` in, or null when head isn't inside tip. A merge commit's own
+   * files come with it; a fast-forward (head is on tip's first-parent line) is head itself. Never throws: a git failure
+   * reads as "not merged", which leaves the ticket to the normal merge path.
+   */
+  private async landedOn(repo: string, dir: string, head: string, tip: string): Promise<{ commit: string; files?: string[] } | null> {
+    try {
+      if ((await this.gitCode(["merge-base", "--is-ancestor", head, tip], { cwd: dir, repo })).code !== 0) return null;
+      if (head === tip) return { commit: head };
+      const line = (await this.git(["rev-list", "--first-parent", "--ancestry-path", `${head}..${tip}`], { cwd: dir, repo })).split("\n").filter(Boolean);
+      const first = line[line.length - 1];
+      if (!first) return { commit: head };
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", first], { cwd: dir, repo })).split(" ").slice(1);
+      // The first commit of the target's own line that holds head: a merge of the branch when head isn't its first parent.
+      if (parents[0] === head || parents.length < 2) return { commit: head };
+      const names = await this.git(["diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", parents[0]!, first], { cwd: dir, repo });
+      return { commit: first, files: names ? names.split("\n") : [] };
+    } catch {
+      return null;
     }
   }
 
@@ -1305,7 +1414,7 @@ export class Workspaces {
     const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
       await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
-      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      await this.addAllRetrying(dir, repo, env);
       const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const list = await this.checkpoints(spec.projectId, spec.ticketId);
       const last = list[list.length - 1];
@@ -1786,8 +1895,12 @@ export class Workspaces {
           logRest = logRest.slice(-room);
         }
       };
+      const stageTracker = createStageTracker(started);
       const onData = (chunk: string) => {
-        if (job) keepLog(chunk);
+        if (job) {
+          keepLog(chunk);
+          stageTracker.feed(chunk, Date.now());
+        }
         tail = (tail + chunk).slice(-8192);
         job?.onOutput?.(tail);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
@@ -1816,7 +1929,7 @@ export class Workspaces {
         if (tmp) rmSync(tmp, { recursive: true, force: true });
         // Only a log that is going to be kept is cut and redacted (a pass is not stored); a stop by the server adds its own line after.
         const fullLog = job && !(exitCode === 0 && !timedOut) ? prepareFullLog(logHead + (logCut ? `\n[... ${logCut} characters cut from the middle of the log ...]\n` : "") + logRest).log : undefined;
-        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started, ...fenced, ...(fullLog !== undefined ? { fullLog } : {}) });
+        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started, ...fenced, ...(fullLog !== undefined ? { fullLog } : {}), ...(job ? { stages: stageTracker.result().stages, ranFull: stageTracker.result().full } : {}) });
       };
       let timer: NodeJS.Timeout;
       const arm = (ms: number) => {
@@ -1882,9 +1995,10 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string, expectTree?: string, scanList?: string): Promise<MergeResult> {
+    if (phase?.phase === "publish" || phase?.phase === "unpublish") return this.ciPublish(spec, secrets, phase, scanList);
     if (phase) return this.mergePhase(spec, target, message, secrets, phase, pin);
-    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, pin);
+    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, expectTree, pin);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -1901,6 +2015,8 @@ export class Workspaces {
         const moved = pinMoved(tried.branchSha, pin);
         if (moved) return moved;
         const { tree, targetSha, branchSha } = tried;
+        // The git host's CI passed this tree (BOS-1070): anything else would land untested by it.
+        if (expectTree && tree !== expectTree) return { status: "main_moved" };
         // Drizzle silently skips a migration whose "when" isn't later than the newest applied one (BOS-360): read both journals, nothing is checked out.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
         const problems = journalProblems(await journalAt(gitIn, targetSha), await journalAt(gitIn, tree), Date.now(), target);
@@ -1920,7 +2036,7 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase, pin?: string): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergeStep, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
     const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
@@ -1946,12 +2062,40 @@ export class Workspaces {
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
       if (problems.length) return { status: "migration_journal" as const, problems };
       if (phase.phase === "prepare") {
+        // BOS-1820: the gate asks, for a merge whose check still waits, whether a pass of the earlier merge could be carried onto
+        // this one by finish's rule. Read-only. A diff that fails counts as "can't carry" (the gate rebuilds, the safe side).
+        const from = phase.carryFrom;
+        const carry = from && from.tree !== tried.tree
+          ? await this.carryAcross(repo, from, tried).then(
+              (c) => (c.ok ? { ok: true as const } : { ok: false as const, why: c.why, ...(c.files ? { files: c.files.slice(0, 30) } : {}) }),
+              (err: Error) => ({ ok: false as const, why: `the carry check failed: ${err.message.slice(0, 200)}` }),
+            )
+          : undefined;
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
-        await this.git(["update-ref", keep, commit], { cwd: repo });
-        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
+        // With carryFrom the gate moves to the new merge only when the carry is refused; otherwise the earlier merge stays the
+        // one queued and published for CI, so the keep ref (which "publish" insists on) stays on it.
+        if (!from || carry?.ok === false) await this.git(["update-ref", keep, commit], { cwd: repo });
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}), ...(carry ? { carry } : {}) };
       }
-      // The target moved to something whose merge differs from what was checked: check again.
-      if (tried.tree !== phase.tree) return { status: "main_moved" };
+      // The target moved to something whose merge differs from what was checked: check again, unless the passed merge may be
+      // carried across the move (BOS-1762).
+      if (tried.tree !== phase.tree) {
+        if (!phase.carry) return { status: "main_moved" };
+        const carry = await this.carryAcross(repo, phase, tried);
+        if (!carry.ok) return { status: "main_moved", notCarried: { why: carry.why, ...(carry.files ? { files: carry.files.slice(0, 30) } : {}) } };
+        const toPush = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
+        const pushed = await this.pushOrigin(repo, toPush, target, auth);
+        if (pushed.code !== 0) {
+          // A push by URL doesn't move origin's tracking ref, so fetch to tell a race from a push refused for good.
+          await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+          const again = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+          if (again === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
+          // Lost a race with another landing: the same tested merge may be tried on the newer tip without preparing again.
+          return { status: "main_moved", carryEligible: true };
+        }
+        await this.git(["update-ref", "-d", keep], { cwd: repo }).catch(() => undefined);
+        return { status: "merged", commit: toPush, checked: { sha: phase.commit, tree: phase.tree, ms: 0 }, carried: carry.carried };
+      }
       // Same tree. The checked commit itself if its parents are still current; otherwise a new commit with the same tree.
       const parents = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
       const same = parents[0] === tried.targetSha && parents[1] === tried.branchSha;
@@ -1969,6 +2113,76 @@ export class Workspaces {
   }
 
   /**
+   * BOS-1762: whether the passed merge `phase.commit` (built on the tested base, its first parent) may land as the new merge
+   * `tried` on main's newer tip without being tested again. The branch must be the one tested, nothing renumbered, main only
+   * moved forward, and merge-carry.ts's rule must hold for the three file lists. Read-only.
+   */
+  private async carryAcross(repo: string, phase: { commit: string; tree: string }, tried: { tree: string; targetSha: string; branchSha: string; renamed?: unknown[] }): Promise<{ ok: true; carried: MergeCarried } | { ok: false; why: string; files?: string[] }> {
+    const [testedBase, testedBranch] = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
+    if (!testedBase || testedBranch !== tried.branchSha) return { ok: false, why: "the branch is not the one that was tested" };
+    if (tried.renamed?.length) return { ok: false, why: "the merge renumbers a migration" };
+    const forward = await this.gitCode(["merge-base", "--is-ancestor", testedBase, tried.targetSha], { cwd: repo });
+    if (forward.code !== 0) return { ok: false, why: "main did not move forward from the tested base" };
+    // A diff git couldn't make must never read as "no files": that would carry anything.
+    const names = async (a: string, b: string) => {
+      const r = await this.gitCode(["diff", "--no-renames", "--name-only", "-z", a, b], { cwd: repo });
+      if (r.code !== 0) throw new Error(`git diff failed (exit ${r.code}): ${r.stderr.slice(0, 300)}`);
+      return nameList(r.stdout);
+    };
+    const mine = await names(testedBase, phase.commit);
+    const theirs = await names(testedBase, tried.targetSha);
+    const drift = await names(phase.tree, tried.tree);
+    const v = carryVerdict({ mine, theirs, drift });
+    if (!v.ok) return v;
+    const commits = Number(await this.git(["rev-list", "--count", `${testedBase}..${tried.targetSha}`], { cwd: repo }));
+    return { ok: true, carried: { from: testedBase, to: tried.targetSha, commits, files: theirs.length } };
+  }
+
+  /**
+   * The merge gate's CI publish (BOS-1070). "publish" force-pushes a commit "prepare" built (kept under refs/bossman/merge/<id>)
+   * to origin's bossman-ci/<id>, so the git host's CI runs on exactly what would land; a commit with no .github/workflows has
+   * no CI to run, so nothing is pushed and the server is told. "unpublish" deletes that branch once the merge is done.
+   * Neither records a refs/remotes/origin ref (unlike pushOrigin): the branch is the host's, not a ticket's.
+   */
+  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }, scanList?: string): Promise<MergeResult> {
+    const auth = gitAuthEnv(ciPushSecrets(secrets));
+    const repo = this.repoDir(spec.projectId);
+    const branch = ciBranchFor(spec.ticketId);
+    return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
+      const url = await this.remoteUrl(repo);
+      if (phase.phase === "unpublish") {
+        const r = await this.gitCode(["push", "--quiet", url, `:refs/heads/${branch}`], { cwd: repo, env: auth });
+        // Never published, or already deleted: nothing to do.
+        if (r.code !== 0 && !/remote ref does not exist|unable to delete/i.test(r.stderr)) throw new Error(`Couldn't delete ${branch} on origin: ${r.stderr.slice(0, 500)}`);
+        // A fetch since publishing copied it into the agents' view; it goes from there too.
+        await this.git(["update-ref", "-d", `refs/remotes/origin/${branch}`], { cwd: repo }).catch(() => undefined);
+        return { status: "unpublished", branch };
+      }
+      // Only the commit this ticket's prepare built: never an arbitrary sha from the request.
+      const kept = await this.git(["rev-parse", "--verify", "--quiet", `refs/bossman/merge/${spec.ticketId}^{commit}`], { cwd: repo }).catch(() => "");
+      if (kept !== phase.commit) throw new Error(`The commit to publish (${phase.commit.slice(0, 12)}) isn't the one this ticket's merge prepared; prepare it again.`);
+      const workflows = await this.gitCode(["ls-tree", "--name-only", phase.commit, ".github/workflows/"], { cwd: repo });
+      const hasWorkflows = workflows.code === 0 && /\.ya?ml$/m.test(workflows.stdout);
+      if (!hasWorkflows) return { status: "published", branch, commit: phase.commit, hasWorkflows: false };
+      // BOS-1664: the push makes the commit public (and readable by sha after the branch is deleted), so the secrets scan
+      // (BOS-979, the runner's own installed copy) must pass on exactly this commit first. A runner without it skips the scan.
+      const scanDir = path.join(this.scratch("ci-scan"), "tree");
+      try {
+        await this.git(["worktree", "add", "--quiet", "--detach", scanDir, phase.commit], { cwd: repo });
+        const blocked = await this.scanBeforeCheck(scanDir, spec.projectId, scanList);
+        if (blocked) throw new Error(`Not pushed to GitHub: the secrets scan found something in the branch.\n${blocked.slice(0, 800)}`);
+      } finally {
+        await this.git(["worktree", "remove", "--force", scanDir], { cwd: repo }).catch(() => undefined);
+        rmSync(path.dirname(scanDir), { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+      }
+      const r = await this.gitCode(["push", "--quiet", "--force", url, `${phase.commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
+      if (r.code !== 0) throw new Error(`Couldn't push the merge commit to ${branch} for the git host's CI: ${r.stderr.slice(0, 500)}`);
+      return { status: "published", branch, commit: phase.commit, hasWorkflows: true };
+    });
+  }
+
+  /**
    * Merges like merge(), but checks the merge commit itself before pushing it (BOS-313, F6).
    * Two branches that each pass alone can break the target together, so the check runs on a
    * temporary detached worktree of the commit that will be pushed, and exactly that commit is
@@ -1976,7 +2190,7 @@ export class Workspaces {
    * moved meanwhile, the merge is built again: an unchanged merged tree keeps the earlier check,
    * a changed one is checked again (three checks at most, then main_moved so the caller retries).
    */
-  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number, pin?: string): Promise<MergeResult> {
+  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number, expectTree?: string, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
@@ -2008,6 +2222,8 @@ export class Workspaces {
         const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
         if (problems.length) return { status: "migration_journal" as const, problems };
         if (refused && refused.targetSha === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${refused.stderr.slice(0, 500)}`);
+        // Only the tree the git host's CI passed may land (BOS-1070); a different one goes back to be published again.
+        if (expectTree && tried.tree !== expectTree) return { status: "main_moved" as const };
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         if (!checked || tried.tree !== checked.tree) {
           dir = path.join(base, `${round}-${Date.now().toString(36)}`);
@@ -2127,6 +2343,74 @@ export class Workspaces {
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
     });
+  }
+
+  /**
+   * The target's newest `max` first-parent commits after a fetch, newest first (BOS-1645): the server compares them with the
+   * merges it recorded, so a merge whose answer was lost (a runner swap between push and record) is still recorded.
+   * Read-only. `filesFor`: commits to list changed files for, against their first parent (what a merge brought in).
+   */
+  async mainLog(projectId: string, target: string, max: number, filesFor: string[] = [], secrets: Record<string, string | undefined> = {}): Promise<MainLogResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(projectId, async () => {
+      const repo = this.repoDir(projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) return { commits: [] };
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      const ref = `refs/remotes/origin/${target}`;
+      if ((await this.gitCode(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo })).code !== 0) return { commits: [] };
+      // NUL-separated records of unit-separated fields: a message can hold any other character. The full message (%B), not
+      // just %s: %s is only the first paragraph, so a title holding a blank line could make it name another ticket (Jane, BOS-1645).
+      const out = await this.git(["log", "--first-parent", `--max-count=${Math.max(1, Math.min(200, Math.floor(max)))}`, "--format=%H%x1f%cI%x1f%B%x00", ref], { cwd: repo });
+      const wanted = new Set(filesFor.map((s) => s.toLowerCase()));
+      const commits: MainLogResult["commits"] = [];
+      for (const rec of out.split("\0")) {
+        // The message is the last field, so a unit separator inside it stays part of it.
+        const [sha, at, ...body] = rec.replace(/^\n/, "").split("\x1f");
+        if (!sha || !/^[0-9a-f]{40}$/.test(sha) || !at) continue;
+        const message = body.join("\x1f").trim();
+        // The subject as git's %s gives it (the first paragraph, its lines joined by spaces), for display only.
+        const subject = (message.split(/\n[ \t]*\n/)[0] ?? "").split("\n").map((l) => l.trim()).join(" ");
+        const c: MainLogResult["commits"][number] = { sha, at, subject, message };
+        if (wanted.has(sha)) {
+          // A root commit has no first parent: then nothing to compare it with, and no files are claimed.
+          const d = await this.gitCode(["diff", "--name-only", `${sha}^1`, sha], { cwd: repo });
+          if (d.code === 0) c.files = d.stdout.split("\n").filter(Boolean);
+        }
+        commits.push(c);
+      }
+      return { commits };
+    });
+  }
+
+  /**
+   * The whole-tree secrets pass (BOS-1932): fetches, reads the target's commit, then runs the runner's OWN installed scanner
+   * (BOSSMAN_SCAN_SCRIPT, root-owned, from the image, as for the merge-line scan) with `--tree <sha> --json` in the shared
+   * repo. It reads git objects only: nothing is checked out and no branch code runs. The repo lock is held for the fetch
+   * only, so merges don't wait the scan's ~20 s; the commit's objects can't change under it. The answer never holds a
+   * matched value (the scanner prints none).
+   */
+  async secretScan(projectId: string, target: string, secrets: Record<string, string | undefined> = {}): Promise<SecretScanResult> {
+    const none = (reason: string): SecretScanResult => ({ scanned: null, reason, files: 0, skipped: [], findings: [] });
+    const script = this.baseEnv.BOSSMAN_SCAN_SCRIPT;
+    if (!script || !path.isAbsolute(script) || !existsSync(script)) return none("This runner has no secrets scanner installed (an older runner image).");
+    const auth = gitAuthEnv(secrets);
+    const repo = this.repoDir(projectId);
+    const sha = await this.withRepoLock(projectId, async () => {
+      if (!existsSync(path.join(repo, "HEAD"))) return null;
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      return (await this.gitCode(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${target}^{commit}`], { cwd: repo })).stdout.trim() || null;
+    });
+    if (!sha) return none(existsSync(path.join(repo, "HEAD")) ? `The repo has no branch "${target}".` : "This runner has no copy of that project's repo yet.");
+    const env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME };
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile(process.execPath, [script, "--tree", sha, "--json"], { cwd: repo, env, timeout: 10 * 60_000, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) reject(new Error(`the secrets scanner failed: ${String(stderr || (err as Error).message).trim().slice(0, 500)}`));
+        else resolve(stdout);
+      });
+    });
+    const r = JSON.parse(out.trim().split("\n").pop() ?? "{}") as { commit?: string; files?: number; skipped?: SecretScanResult["skipped"]; findings?: SecretScanResult["findings"] };
+    if (r.commit !== sha || !Array.isArray(r.findings)) throw new Error("the secrets scanner gave an answer this runner can't read");
+    return { scanned: sha, files: Number(r.files) || 0, skipped: r.skipped ?? [], findings: r.findings };
   }
 
   /**

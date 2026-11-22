@@ -1,11 +1,14 @@
 // Skills (R71): the company's library of Agent Skills, and who has each. A skill is added from
 // a GitHub link (pinned to a commit), written here, or uploaded as a folder, files or a zip.
 import { RUNNER_ADDONS } from "@boss-man/shared";
+import { NoCompany } from "../components/NoCompany";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
 import { api, ApiError, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
-import { usePoll } from "../hooks";
+import { Loader } from "../components/Loader";
+import { useOlder, usePoll } from "../hooks";
+import { ShowOlder } from "../components/ShowOlder";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
@@ -102,7 +105,7 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
         <div className="field">
           <label htmlFor="skill-url">GitHub link to a repository, a folder or a SKILL.md</label>
           <input id="skill-url" type="url" placeholder="https://github.com/owner/repo/tree/main/skills" value={url} onChange={(e) => setUrl(e.target.value)} />
-          <small className="muted">Every skill under the link is added, pinned to the commit it points at now; several from one link become a pack you can give in one go. Public repositories only for now; a link straight to a SKILL.md file anywhere also works.</small>
+          <small className="muted">Every skill under the link is added, pinned to the commit it points at now; several from one link become a pack you can give in one go. Private repositories work when the company has a git token that can read them (Settings → Secrets); a link straight to a SKILL.md file anywhere also works.</small>
         </div>
       )}
       {tab === "written" && (
@@ -221,7 +224,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   const [editing, setEditing] = useState<{ name: string; description: string; body: string } | null>(null);
   const s = skill.data;
   if (skill.error && !away(skill.error)) return <p className="error" role="alert">{skill.error.message}</p>;
-  if (!s) return null;
+  if (!s) return <Loader label="Loading the skill" size={16} />;
   const chosen = holders ?? s.agents.map((a) => a.id);
   const run = async (f: () => Promise<string>) => {
     try {
@@ -366,7 +369,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
           })}
         </div>
         <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
-          A skill that needs an add-on is left out of runs while the runner doesn't have it working, and you're told once. See Settings → Server and runner.
+          A skill that needs an add-on is left out of runs while the runner doesn't have it working, and you're told once. See Settings → Server and runner → Runner → Add-ons.
         </p>
       </fieldset>
 
@@ -553,6 +556,7 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
+const PROPOSALS_PAGE = 50;
 type ProposalRow = { id: string; name: string; source: "draft" | "link" | "retro"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
 const PROPOSAL_STATUS: Record<string, string> = {
   proposed: "Waiting",
@@ -566,8 +570,11 @@ const PROPOSAL_STATUS: Record<string, string> = {
 
 /** Skills the CEO proposed, and where each one stands. The decision itself is answered in Decisions. */
 function Proposals({ companyId }: { companyId: string }) {
-  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals`, { signal }), 30_000, companyId);
-  const rows = (list.data ?? []).slice(0, 10);
+  // The newest PROPOSALS_PAGE, then older ones on "Show older" (BOS-2165): the server never sends the files here.
+  // Paths written out inside api(…): the screen inventory (screen-scan.ts) only sees a read written there.
+  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals?limit=${PROPOSALS_PAGE}`, { signal }), 30_000, companyId);
+  const older = useOlder(list.data, PROPOSALS_PAGE, (before) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals?limit=${PROPOSALS_PAGE}&before=${before}`), companyId);
+  const rows = older.rows ?? [];
   if (!rows.length) return null;
   return (
     <section className="card" aria-label="Skill proposals" style={{ marginBottom: 16 }}>
@@ -582,6 +589,7 @@ function Proposals({ companyId }: { companyId: string }) {
           </li>
         ))}
       </ul>
+      <ShowOlder older={older} />
     </section>
   );
 }
@@ -592,7 +600,7 @@ export function Skills({ company }: { company: Company | undefined }) {
   const [pickedPack, setPickedPack] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
-  if (!company) return <p>Create a company on the Kanban first.</p>;
+  if (!company) return <NoCompany />;
   const rows = list.data ?? [];
   const packs = [...new Set(rows.map((r) => r.pack).filter((p): p is string => !!p))].sort();
   const loose = rows.filter((r) => !r.pack);

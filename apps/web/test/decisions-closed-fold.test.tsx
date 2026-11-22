@@ -10,7 +10,7 @@ import { Decisions } from "../src/pages/Decisions";
 // "Closed for you" update cards, each showing its whole "It includes …" paragraph at full size, six
 // of them above the one open card. The page now folds those under one "Closed (N)" group at the
 // bottom, one line each, and clips the line with an ellipsis. The update card's own ticket list
-// shows three and "+N more". This renders the real component to markup and measures it in a
+// shows three and "and N more". This renders the real component to markup and measures it in a
 // headless browser at a desktop window and at the owner's recorded foldable profile.
 //
 // Skipped, not failed, where no browser is installed.
@@ -206,9 +206,9 @@ describe.skipIf(!browser)("closed Decisions cards fold away (BOS-809)", () => {
       // Every covered line is a single clipped line (its text is far longer than one line).
       expect(m.singleLine).toBe(true);
       for (const h of m.lineHeights) expect(h).toBeLessThan(40);
-      // The update's ticket list shows 3 + "+9 more", not all 12. (Desktop: no 44px tap target.)
+      // The update's ticket list shows 3 + one "and 9 more" line (BOS-1826), not all 12. (Desktop: no 44px tap target.)
       expect(m.updateListItems).toBe(4);
-      expect(m.moreButton).toBe("+9 more");
+      expect(m.moreButton).toBe("and 9 more");
       // Closed cards are not counted as waiting.
       expect(m.waiting).toContain("1 needs you");
       // No sideways overflow.

@@ -576,7 +576,7 @@ async function readJson(req: http.IncomingMessage): Promise<unknown> {
 }
 
 /** The HTTP server: a bearer key on every call, the five routes, and an audit line per call. */
-export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.log(JSON.stringify(e))) {
+export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.log(JSON.stringify(e)), explain: (err: unknown) => string | undefined = () => undefined) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://launcher");
     const entry: Record<string, unknown> = { at: new Date().toISOString(), method: req.method, path: url.pathname };
@@ -657,7 +657,9 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
         return send(502, { error: err.message });
       }
       entry.error = String((err as Error)?.message ?? err);
-      return send(500, { error: "The launcher failed; see its log." });
+      // BOS-1892: a permission or missing-path error names the fix (socket group, data folder owner) instead of "see its log".
+      const fix = explain(err);
+      return send(500, { error: fix ?? "The launcher failed; see its log." });
     }
   });
 }

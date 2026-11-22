@@ -3,14 +3,17 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { preCompress } from "./compress";
+import { firstLoadLimit } from "./first-load";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 export default defineConfig({
   // Under a busy shared runner, jsdom tests can take over the 5 s default (as the server and runner suites already allow for).
-  test: { testTimeout: 30_000, hookTimeout: 30_000 },
+  // browser-setup.ts: one shared, deadline-bound Chromium start for every browser test, warmed before its tests (BOS-1784).
+  test: { testTimeout: 30_000, hookTimeout: 30_000, setupFiles: ["./test/browser-setup.ts"] },
   // Writes .br/.gz next to each built file (BOS-411), which the server serves without re-compressing.
-  plugins: [react(), preCompress()],
+  // firstLoadLimit (BOS-1843) fails the build when the first screen's JavaScript outgrows its limit.
+  plugins: [react(), firstLoadLimit(), preCompress()],
   // The artwork lives in assets/brand at the repository root.
   server: {
     fs: { allow: [repoRoot] },

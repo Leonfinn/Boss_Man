@@ -9,7 +9,8 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, OWNER_MESSAGE_MAX, RISK_TIERS, SYSTEM_STATES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { projects } from "../db/schema.js";
+import { companies, projects } from "../db/schema.js";
+import { record } from "../services/activity.js";
 import { FeedbackError, type feedbackService } from "../services/feedback.js";
 import { logoType } from "../services/image-type.js";
 import type { workService } from "../services/work.js";
@@ -59,10 +60,21 @@ export function featureRoutes(
     const s = await feedback.settings(id);
     return { ...s, portalUrl: portalUrl?.replace(/\/+$/, "") || null, emailReady: !!mailer && (await mailer.isConfigured()), drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
   });
-  owner.patch("/api/companies/:id/feedback-settings", async (req) => {
+  owner.patch("/api/companies/:id/feedback-settings", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const b = z.object({ demandWeight: z.number().int().min(0).max(10), ceoTriage: z.boolean() }).partial().parse(req.body);
-    return feedback.setSettings(id, b);
+    const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!company) return reply.code(404).send({ error: "not_found" });
+    const before = await feedback.settings(id);
+    const saved = await feedback.setSettings(id, b);
+    // One plain line per value that really changed, so the owner can see who moved the ranking or triage and when.
+    if (b.demandWeight !== undefined && b.demandWeight !== before.demandWeight) {
+      await record(db, { companyId: id, kind: "settings", summary: `Owner changed demand weight from ${before.demandWeight} to ${b.demandWeight}` });
+    }
+    if (b.ceoTriage !== undefined && b.ceoTriage !== before.ceoTriage) {
+      await record(db, { companyId: id, kind: "settings", summary: `Owner turned CEO triage ${b.ceoTriage ? "on" : "off"}` });
+    }
+    return saved;
   });
   owner.post("/api/companies/:id/feature-drivers", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
@@ -76,15 +88,23 @@ export function featureRoutes(
 
   owner.patch("/api/companies/:id/portal", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable(), confirmByEmail: z.boolean(), confirmLinkHours: z.number().int().min(1).max(168), rememberAddressDays: z.number().int().min(1).max(365) }).partial().parse(req.body);
+    const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable(), confirmByEmail: z.boolean(), portalAtBareAddress: z.boolean(), confirmLinkHours: z.number().int().min(1).max(168), rememberAddressDays: z.number().int().min(1).max(365) }).partial().parse(req.body);
     // BOS-1388: posts can only wait for an email once email can be sent, and a link needs the portal's own address.
     if (b.confirmByEmail) {
-      if (!mailer || !(await mailer.isConfigured())) throw new FeedbackError(422, "Set up outgoing email first (Settings → Server and runner → Outgoing email): the confirmation links are sent from it.");
+      if (!mailer || !(await mailer.isConfigured())) throw new FeedbackError(422, "Set up outgoing email first (Settings → Server and runner → Email): the confirmation links are sent from it.");
       if (!portalUrl) throw new FeedbackError(422, "The confirmation links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide).");
     }
     // BOS-967: the back link must be a full https address, or empty for none.
     if (b.backUrl && !/^https:\/\/[^\s]+$/i.test(b.backUrl)) throw new FeedbackError(422, "Enter a full web address that starts with https://");
-    return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
+    const before = await feedback.settings(id);
+    const saved = await feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
+    // BOS-2101: a line in Activity for each switch that really changed. Never the link's token.
+    const lines: string[] = [];
+    if (b.enabled !== undefined && b.enabled !== before.portalEnabled) lines.push(b.enabled ? "Owner turned the public portal on" : "Owner turned the public portal off");
+    if (b.portalAtBareAddress !== undefined && b.portalAtBareAddress !== before.portalAtBareAddress) lines.push(b.portalAtBareAddress ? "Owner made the portal the one the bare public address opens" : "Owner stopped the portal opening at the bare public address");
+    if (b.confirmByEmail !== undefined && b.confirmByEmail !== before.confirmByEmail) lines.push(b.confirmByEmail ? "Owner turned on email confirmation of portal posts, comments and votes" : "Owner turned off email confirmation of portal posts, comments and votes");
+    for (const summary of lines) await record(db, { companyId: id, kind: "settings", summary });
+    return saved;
   });
   owner.put("/api/companies/:id/feedback/portal-logo", { bodyLimit: 400 * 1024 }, async (req, reply) => {
     const { id } = IdParam.parse(req.params);
@@ -106,7 +126,12 @@ export function featureRoutes(
     return logo ? sendLogo(reply, logo) : reply.code(404).send({ error: "not_found", message: "No logo." });
   });
 
-  owner.post("/api/companies/:id/portal/rotate", async (req) => feedback.rotatePortal(IdParam.parse(req.params).id));
+  owner.post("/api/companies/:id/portal/rotate", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    const saved = await feedback.rotatePortal(id);
+    await record(db, { companyId: id, kind: "settings", summary: "Owner made a new portal link; old links stop working" });
+    return saved;
+  });
   owner.get("/api/companies/:id/features", async (req) => feedback.scored(IdParam.parse(req.params).id));
   owner.post("/api/companies/:id/features", async (req, reply) => {
     const { id } = IdParam.parse(req.params);

@@ -19,6 +19,24 @@ describe("chat while a runner update waits (BOS-349)", () => {
     expect(screen.getByRole("status").textContent).toBe("Update waiting for 2 agents to finish: chat stays open until then.");
   });
 
+  it("gives the real expected time, or says it is overdue, instead of 'back in a moment' (BOS-1877)", () => {
+    const iso = new Date(2026, 10, 19, 14, 5).toISOString();
+    const { unmount } = render(<UpdateNote m={{ on: true, runs: 0, chatOpen: false, phase: "waiting", expectedFinishAt: iso }} />);
+    expect(screen.getByRole("status").textContent).toMatch(/^Update pending: expected to finish about .*\. New messages are saved/);
+    expect(screen.getByRole("status").textContent).not.toMatch(/back in a moment/);
+    unmount();
+    render(<UpdateNote m={{ on: true, runs: 0, chatOpen: false, phase: "waiting", expectedFinishAt: null, overdue: true }} />);
+    expect(screen.getByRole("status").textContent).toMatch(/taking longer than expected/);
+  });
+
+  it("says a merge being pushed, or a wait on nothing it can name, keeps chat open (BOS-1951)", () => {
+    const { unmount } = render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", merges: 1 }} />);
+    expect(screen.getByRole("status").textContent).toBe("Update waiting for a merge being pushed to main: chat stays open until then.");
+    unmount();
+    render(<UpdateNote m={{ on: true, runs: 0, chatOpen: true, phase: "waiting", overdue: true, unknownWait: true }} />);
+    expect(screen.getByRole("status").textContent).toMatch(/running late.*Chat stays open.*stop waiting or cancel/);
+  });
+
   it("says it in the singular for one agent", () => {
     render(<UpdateNote m={{ on: true, runs: 1, chatOpen: true }} />);
     expect(screen.getByRole("status").textContent).toBe("Update waiting for 1 agent to finish: chat stays open until then.");
@@ -36,7 +54,8 @@ describe("chat while a runner update waits (BOS-349)", () => {
       }),
     );
     render(<ChatPage companies={[company]} companyId="c1" agentId="a1" maintenance={{ on: true, runs: 0, chatOpen: false }} go={() => {}} onChanged={() => {}} />);
-    expect((await screen.findByRole("status")).textContent).toBe("Updating, back in a moment. New messages are saved and answered when it is done.");
+    // The loader is a status too while the first load runs, so find the banner by its words.
+    expect(await screen.findByText("Update pending. New messages are saved and answered when it is done.")).toBeTruthy();
     // The message is still sent: it is stored and answered once the update is done.
     const box = (await screen.findByLabelText("Message to Radagast")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "wind up please" } });

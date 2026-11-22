@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { BUILT_IN_RULES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, ceoChapters, checkJobs, checkWorkers, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { READ_ONLY_TOOLS, TRACED_TOOLS } from "../src/mcp-trace.js";
 
@@ -58,6 +58,170 @@ describe("owner chat", () => {
     expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: agent paused");
   });
 
+  it("DR-069 D1: the CEO's chat prompt carries the Owner's setup section with each worker and the owner's last word on it; a worker's chat does not", async () => {
+    const c = await setup();
+    await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
+    await c.db.insert(decisions).values({
+      companyId: c.company.id,
+      kind: "question",
+      question: "Please turn the check worker Truenas off for now so the merge line stops using it",
+      options: ["Done"],
+      recommendedOption: "Done",
+      raisedByAgentId: c.ceo.id,
+      status: "answered",
+      answer: "Done: worker is off",
+      answeredAt: new Date(Date.now() - 86_400_000),
+      context: { type: "question", steps: ["Switch Truenas off."], ownerMustDo: true },
+    });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Let Truenas take merges?" });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Status?", agentId: c.worker.id });
+    await c.scheduler.tick();
+    const starts = c.sent.filter((x): x is Start => x.type === "run.start");
+    const ceoStart = starts.find((x) => x.agentId === c.ceo.id)!;
+    expect(ceoStart.prompt).toContain("## Owner's setup");
+    expect(ceoStart.prompt).toMatch(/- Worker Truenas: .*switched off.*owner's last word: card .*Done: worker is off/);
+    const workerStart = starts.find((x) => x.agentId === c.worker.id);
+    if (workerStart) expect(workerStart.prompt).not.toContain("## Owner's setup");
+  });
+
+  it("BOS-2116: with ticket meaning search on, the CEO's brief lists close tickets for the owner's message; off or failing, it adds nothing", async () => {
+    const c = await setup();
+    const { embedMissingMeaning } = await import("../src/services/ticket-meaning.js");
+    const vec = (s: string) => {
+      const v = new Array(768).fill(0);
+      v[/queue|waiting|checked/i.test(s) ? 1 : 2] = 1;
+      return v;
+    };
+    const e = { model: "m", dims: 768, embed: async (xs: string[]) => xs.map(vec) };
+    await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "Board: Being checked section", systemState: "done", outcome: "completed", stateChangedAt: new Date() });
+    await embedMissingMeaning(c.db, c.company.id, e);
+    const ask = async (text: string) => {
+      await c.req("POST", `/api/companies/${c.company.id}/chat`, { text });
+      await c.scheduler.tick();
+      return c.sent.filter((x): x is Start => x.type === "run.start").filter((x) => x.agentId === c.ceo.id).at(-1)!.prompt;
+    };
+    // Off (the default): the brief has no meaning block.
+    expect(await ask("Add a Waiting label to cards")).not.toContain("Possible matches by meaning");
+    // Provider down: still none, and the message is still answered.
+    (c.semantic as { ticketEmbedder: unknown }).ticketEmbedder = async () => ({ ...e, embed: async () => { throw new Error("down"); } });
+    const { runs: runsTable } = await import("../src/db/schema.js");
+    await c.db.delete(runsTable);
+    expect(await ask("Add a Waiting label for cards, please")).not.toContain("Possible matches by meaning");
+    (c.semantic as { ticketEmbedder: unknown }).ticketEmbedder = async () => e;
+    await c.db.delete(runsTable);
+    const prompt = await ask("Add a Waiting label for cards, thanks");
+    expect(prompt).toContain("## Possible matches by meaning");
+    expect(prompt).toMatch(/- ticket APP-\d+ "Board: Being checked section" \(done\), 100%/);
+  });
+
+  it("DR-069 D2: the chat prompt names what the record and the owner say about each thing the owner's message names, newest first; a message naming nothing adds no section", async () => {
+    const c = await setup();
+    await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
+    const card = (question: string, answer: string, daysAgo: number) =>
+      c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question, options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer, answeredAt: new Date(Date.now() - daysAgo * 86_400_000), context: { type: "question", steps: ["Do it."], ownerMustDo: true } }).returning({ id: decisions.id });
+    await card("Please turn the check worker Truenas off for now", "Done: worker is off", 5);
+    await card("Should Truenas take merge checks again?", "Done: Truenas stays off", 1);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Let Truenas take merges?" });
+    await c.scheduler.tick();
+    const section = c.sent.filter((x): x is Start => x.type === "run.start").find((x) => x.agentId === c.ceo.id)!.prompt;
+    expect(section).toContain("## What the record and the owner already say about the things named here");
+    const line = section.slice(section.indexOf("## What the record and the owner already say")).split("\n").find((l) => l.startsWith("- Worker Truenas:"))!;
+    expect(line).toMatch(/record: .*switched off/);
+    // newest answer first, at most 2 per thing, and a line is at most 300 characters
+    expect(line, line).toContain("worker is off");
+    expect(line.indexOf("Truenas stays off")).toBeGreaterThan(-1);
+    expect(line.indexOf("Truenas stays off")).toBeLessThan(line.indexOf("worker is off"));
+    expect(line.length).toBeLessThanOrEqual(300);
+    // a message that names nothing known gets no section
+    const { namedThingsSection } = await import("../src/services/named-things.js");
+    expect(await namedThingsSection(c.db, c.company.id, ["How is the board looking today?"])).toEqual([]);
+  });
+
+  it("DR-069 D2: each kind is recognised from the record; unknown things and other companies' names say nothing; the section holds at most 8 lines", async () => {
+    const c = await setup();
+    const { namedThingsSection, namedThingLines, NAMED_MAX_LINES } = await import("../src/services/named-things.js");
+    const [d] = await c.db
+      .insert(decisions)
+      // fixed id: the detector only reads an 8-hex token with both a letter and a digit as a card short id, so a random uuid failed ~2.4% of runs
+      .values({ id: "3f9a1c27-5b4e-4d8a-9c3e-7a1b2c3d4e5f", companyId: c.company.id, kind: "question", question: "Keep the Penpot add-on?", options: ["Yes"], recommendedOption: "Yes", raisedByAgentId: c.ceo.id, status: "answered", answer: "Yes keep Penpot", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } })
+      .returning({ id: decisions.id });
+    const short = d!.id.slice(0, 8);
+    const addons = async () => ({ tailscale: { state: "unknown", since: null, source: "x" }, ntfy: { state: "unknown", since: null, source: "x" }, penpot: { state: "running", since: "2026-11-10T09:00:00Z", source: "x" } }) as never;
+    // a card by its 8-hex short id, an add-on by name (with the owner's newest answer naming it), a git token by phrase
+    const lines = await namedThingsSection(c.db, c.company.id, [`What happened on card ${short}? And is Penpot ok? The git token too.`], { addons, gitTokenProbe: async () => "yes" });
+    const text = lines.join("\n");
+    expect(text).toMatch(new RegExp(`- Card ${short}: record: answered .*Yes keep Penpot`));
+    expect(text).toMatch(/- Add-on Penpot: record: running since 2026-11-10 · owner .*card .*Yes keep Penpot/);
+    expect(text).toContain("- Git token: record: can read GitHub Actions runs");
+    // by design an all-digit or all-letter 8-hex token is not a card (it would match plain numbers and words)
+    const [n] = await c.db.insert(decisions).values({ id: "12345678-5b4e-4d8a-9c3e-7a1b2c3d4e5f", companyId: c.company.id, kind: "question", question: "Digits only?", options: ["Yes"], recommendedOption: "Yes", raisedByAgentId: c.ceo.id, status: "answered", answer: "Yes", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } }).returning({ id: decisions.id });
+    expect(await namedThingsSection(c.db, c.company.id, [`What happened on card ${n!.id.slice(0, 8)}?`])).toEqual([]);
+    // a worker that isn't this company's, and a ticket number that doesn't exist, say nothing
+    expect(await namedThingsSection(c.db, c.company.id, ["What about APP-99999 and Mystery-box?"])).toEqual([]);
+    // the cap
+    const names = Array.from({ length: 11 }, (_, i) => `Box${i}`);
+    for (const name of names) await c.db.insert(checkWorkers).values({ name, tokenHash: randomUUID(), companyIds: [c.company.id] });
+    const capped = (await namedThingsSection(c.db, c.company.id, [names.join(" and ")])).filter((l) => l.startsWith("- "));
+    expect(capped).toHaveLength(NAMED_MAX_LINES);
+    expect(NAMED_MAX_LINES).toBe(8);
+    expect(await namedThingLines(c.db, c.company.id, [{ kind: "Worker", name: "Unknown", needles: ["Unknown"], record: null }])).toEqual([]);
+  });
+
+  it("BOS-2087: a CEO reply naming a worker the owner answered a card about gets no 'You said' footer; old saved footers are hidden", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.db.insert(checkWorkers).values({ name: "Truenas", tokenHash: randomUUID(), companyIds: [c.company.id], enabled: false });
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Keep Truenas off?", options: ["Done"], recommendedOption: "Done", raisedByAgentId: c.ceo.id, status: "answered", answer: "Done: Truenas stays off", answeredAt: new Date(Date.now() - 86_400_000), context: { type: "question" } });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What should we do about merges?" });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "I'd move merges to Truenas." } });
+    await c.settle();
+    const { ownerChatMessages } = await import("../src/db/schema.js");
+    await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.ceo.id, role: "assistant", text: 'Old reply.\n\nYou said "Done: Truenas stays off" on card abcd1234, 2026-11-19, about Truenas, which your messages here didn\'t name.\nYou said "x" in chat, 2026-11-18, about Foo, which your messages here didn\'t name.' });
+    const items = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items as Array<{ role: string; text: string }>;
+    const replies = items.filter((m) => m.role === "assistant").map((m) => m.text);
+    expect(replies.some((t) => t.startsWith("I'd move merges to Truenas."))).toBe(true);
+    expect(replies).toContain("Old reply.");
+    expect(items.some((m) => m.text.includes("You said"))).toBe(false);
+  });
+
+  it("BOS-2167: the chat list pages back from a message id with hasMore, and an unknown id is a 404", async () => {
+    const c = await setup();
+    const { ownerChatMessages } = await import("../src/db/schema.js");
+    const base = Date.now() - 1_000_000;
+    await c.db.insert(ownerChatMessages).values(Array.from({ length: 450 }, (_, i) => ({ companyId: c.company.id, agentId: c.ceo.id, role: "owner" as const, text: `m${i}`, createdAt: new Date(base + i * 1000) })));
+    const url = `/api/companies/${c.company.id}/chat?agentId=${c.ceo.id}`;
+    const first = (await c.req("GET", url)).json();
+    expect(first.items).toHaveLength(200);
+    expect(first.items[0].text).toBe("m250");
+    expect(first.hasMore).toBe(true);
+    const second = (await c.req("GET", `${url}&before=${first.items[0].id}`)).json();
+    expect(second.items).toHaveLength(200);
+    expect(second.items[0].text).toBe("m50");
+    expect(second.items.at(-1).text).toBe("m249");
+    expect(second.hasMore).toBe(true);
+    const third = (await c.req("GET", `${url}&before=${second.items[0].id}`)).json();
+    expect(third.items).toHaveLength(50);
+    expect(third.hasMore).toBe(false);
+    const missing = await c.req("GET", `${url}&before=${randomUUID()}`);
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().message).toBe("message not found");
+  });
+
+  it("BOS-1870: a Settings path through Limits shows the saved and in-force values; other paths and a failing source say nothing", async () => {
+    const c = await setup();
+    const { namedThingsSection } = await import("../src/services/named-things.js");
+    const held = { saved: 6, inForce: 3, because: "a server update is waiting for a quiet machine", since: "2026-11-19T10:00:00.000Z", until: "2026-11-19T13:00:00.000Z" };
+    const free = { saved: 2, inForce: 2, because: null, since: null, until: null };
+    const text = "Why is Settings → Server and runner → Limits and checks lower than I set?";
+    const out = (await namedThingsSection(c.db, c.company.id, [text], { limits: async () => ({ allCompanies: held, background: free }) })).join("\n");
+    expect(out).toContain("record: agents at once, all companies: saved 6, in force 3 (a server update is waiting for a quiet machine, until 2026-11-19 at the latest); background: 2 (saved and in force)");
+    // a path that is not about limits, and a source that fails, add no record
+    expect(await namedThingsSection(c.db, c.company.id, ["See Settings → Add-ons."], { limits: async () => ({ allCompanies: held, background: free }) })).toEqual([]);
+    expect(await namedThingsSection(c.db, c.company.id, [text], { limits: async () => { throw new Error("down"); } })).toEqual([]);
+  });
+
   it("stays open while an update waits and an agent is still working (BOS-349)", async () => {
     const c = await setup();
     // The CEO is busy with its own work, then a runner update starts to drain.
@@ -84,6 +248,17 @@ describe("owner chat", () => {
       expect(c.sent.some((x) => x.type === "run.start")).toBe(false);
       expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: update pending");
     })();
+  });
+
+  it("stays open while an update waits only on a running check, not only on agents (BOS-1877)", async () => {
+    const c = await setup();
+    const [t] = await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.maintenance.start({ minutes: 30 });
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What's the update waiting on?" })).statusCode).toBe(201);
+    await c.scheduler.tick();
+    expect(c.sent.find((x): x is Start => x.type === "run.start")).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("answering");
   });
 
   it("answers with a board-only run beside the CEO's own work, and the reply lands in the chat", async () => {
@@ -134,7 +309,7 @@ describe("owner chat", () => {
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "board", "clear_check", "create_feature", "create_ticket", "decisions", "deploy", "devices", "engagement", "features", "feedback", "handoff", "link_tickets", "list_my_work", "log_feedback", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "raise_decision", "rename_agent", "report_key_result", "request_check", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "server_status", "set_agent_picture", "set_milestone", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "submit_plan", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "board", "clear_check", "create_feature", "create_ticket", "decisions", "deploy", "devices", "engagement", "features", "feedback", "handoff", "link_tickets", "list_my_work", "log_feedback", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "owner_answers", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "raise_decision", "rename_agent", "report_key_result", "request_check", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "server_status", "set_agent_picture", "set_milestone", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "submit_plan", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision"]);
     // The CEO can build the roadmap from chat too.
     expect(textOf(await client.callTool({ name: "roadmap", arguments: { action: "add_objective", title: "Grow search traffic", reason: "Owner asked in chat." } }))).toMatch(/^Added the objective "Grow search traffic"/);
     // It asks a colleague itself, rather than asking the owner to pass a message on.
@@ -277,6 +452,7 @@ describe("owner chat", () => {
       "notes",
       "nudge",
       "open_attachment",
+      "owner_answers",
       "propose_hire",
       "propose_model_change",
       "propose_rule",
@@ -357,7 +533,61 @@ describe("owner chat", () => {
     const second = c.sent.find((x): x is Start => x.type === "run.start")!;
     await c.emit({ type: "run.ended", runId: second.runId, stopReason: "end_turn", error: null });
     await c.settle();
-    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "system", text: "CEO finished without a reply." });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "system", text: 'CEO finished without a reply (it ended its turn without writing one; stop reason "end_turn"), so it was asked again.' });
+  });
+
+  it("asks a run that ended without a reply again once, then tells the owner why and flags it (BOS-1734)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    const chat = () => c.req("GET", `/api/companies/${c.company.id}/chat`).then((r) => r.json().items as Array<{ role: string; text: string; runId: string | null }>);
+    const starts = () => c.sent.filter((x): x is Start => x.type === "run.start");
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Stop the background workers for the update." });
+    await c.scheduler.tick();
+    const first = starts().at(-1)!;
+    await c.emit({ type: "run.ended", runId: first.runId, stopReason: "max_turn_requests", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    // Asked again straight away, as a chat run, and the owner's message moves to the new run.
+    const second = starts().at(-1)!;
+    expect(second.runId).not.toBe(first.runId);
+    expect(second).toMatchObject({ boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.ceo.id}` });
+    expect((await chat()).find((m) => m.role === "owner")!.runId).toBe(second.runId);
+    expect((await chat()).at(-1)).toMatchObject({ role: "system", text: 'CEO finished without a reply (it hit its step limit; stop reason "max_turn_requests"), so it was asked again.' });
+    expect((await c.db.select().from(runs).where(eq(runs.id, first.runId)))[0]!.outcome).toBe("max_turn_requests");
+
+    // Silent again: no third run; the owner reads why, that the message is kept, and gets a flag.
+    await c.emit({ type: "run.ended", runId: second.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    expect(starts().at(-1)!.runId).toBe(second.runId);
+    expect((await chat()).at(-1)).toMatchObject({ role: "system", text: 'CEO finished without a reply again (it ended its turn without writing one; stop reason "end_turn"). Your message is kept: CEO\'s next chat run answers it, and sending another message starts one.' });
+    const feed = (await c.req("GET", "/api/notifications")).json().items as Array<{ level: string; title: string; link: string }>;
+    expect(feed.filter((n) => n.title === "CEO didn't answer your chat message")).toMatchObject([{ level: "flag", link: `#/chat/${c.company.id}/${c.ceo.id}` }]);
+    // The kept message goes to the next run the owner starts.
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Hello?" });
+    await c.scheduler.tick();
+    const third = starts().at(-1)!;
+    expect((await chat()).filter((m) => m.role === "owner").map((m) => m.runId)).toEqual([third.runId, third.runId]);
+
+    // A run that replied is not asked again.
+    await c.emit({ type: "run.update", runId: third.runId, update: { kind: "agent_message", text: "Workers stopped." } });
+    await c.settle();
+    await c.emit({ type: "run.ended", runId: third.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    expect(starts().at(-1)!.runId).toBe(third.runId);
+    expect((await chat()).at(-1)).toMatchObject({ role: "assistant" });
+
+    // A run someone stopped by hand isn't restarted behind their back; it still says why.
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "And the reviewers?" });
+    await c.scheduler.tick();
+    const fourth = starts().at(-1)!;
+    await c.db.update(runs).set({ cancelRequestedAt: new Date() }).where(eq(runs.id, fourth.runId));
+    await c.emit({ type: "run.ended", runId: fourth.runId, stopReason: "cancelled", error: null });
+    await c.settle();
+    await c.scheduler.tick();
+    expect(starts().at(-1)!.runId).toBe(fourth.runId);
+    expect((await chat()).at(-1)!.text).toBe('CEO finished without a reply (it was cancelled; stop reason "cancelled"). Your message is kept: CEO\'s next chat run answers it, and sending another message starts one.');
   });
 
   it("says when a run fails, and asks again after a runner restart", async () => {

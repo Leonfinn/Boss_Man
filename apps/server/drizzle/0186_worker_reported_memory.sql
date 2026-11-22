@@ -1,0 +1,1 @@
+ALTER TABLE "check_workers" ADD COLUMN "reported_memory_mb" integer;

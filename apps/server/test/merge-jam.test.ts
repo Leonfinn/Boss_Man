@@ -5,7 +5,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions, notifications, reviewRequests, settings, ticketDependencies, tickets } from "../src/db/schema.js";
 import { carriedNoteText, carriedTitles, waitedText } from "../src/services/merge-queue.js";
-import { jammedRows, JAM_REMINDER_MS, mergeJamService } from "../src/services/merge-jam.js";
+import { JAM_REMINDER_MS, mergeJamService } from "../src/services/merge-jam.js";
 
 const HOUR = 3_600_000;
 
@@ -81,24 +81,6 @@ describe("merge line jam alert (BOS-766)", () => {
     const old = 'Waiting: its branch also carries unapproved work from "Ship the API" (medium risk), which must merge first.';
     expect(carriedTitles(old)).toEqual(["Ship the API"]);
     expect(carriedNoteText(old)).toBe(old);
-  });
-
-  it("counts only long merge checks and stuck work Boss Man is meant to move", () => {
-    const jam = jammedRows({
-      running: [
-        { what: "merge_check", overLimit: true } as never,
-        { what: "agent_check", overLimit: true } as never,
-        { what: "merge_check", overLimit: false } as never,
-      ],
-      waiting: [
-        { stuck: true, actor: "system", decisionId: null } as never,
-        { stuck: true, actor: "owner", decisionId: "d1" } as never,
-        { stuck: true, actor: "agent", decisionId: null } as never,
-        { stuck: false, actor: "system", decisionId: null } as never,
-      ],
-    });
-    expect(jam.running).toHaveLength(1);
-    expect(jam.waiting).toHaveLength(1);
   });
 
   it("shows approved work held by the carried-work guard as waiting for that ticket", async () => {

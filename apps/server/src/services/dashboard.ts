@@ -4,8 +4,10 @@ import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runners as runnersTable, runs, tickets, wakes } from "../db/schema.js";
 import { liveRuns, runOriginQuery } from "./runs.js";
-import { isWorkingRun } from "./agent-wip.js";
+import { cantMoveSql, isWorkingRun } from "./agent-wip.js";
 import { passedReviewTickets } from "./review-kinds.js";
+import { blockedSplit } from "./go-live-note.js";
+import type { LimitInForce } from "./deploy-wait-hold.js";
 
 export const DAYS = 14;
 
@@ -25,6 +27,8 @@ export type DashboardHealth = {
   usage: { agents: number; accounts: string[]; firstResetAt: string | null } | null;
   /** A server update waiting for a quiet machine, or null when none is. `undefined` from an older server never happens here. */
   update: { waiting: boolean; phase: string | null; deadline: string | null } | null;
+  /** BOS-1634: agents at once across all companies, as saved and in force, with why when lower (scheduler.limitsInForce). */
+  runLimit?: LimitInForce | null;
 };
 
 export function dashboardService(
@@ -36,6 +40,8 @@ export function dashboardService(
     runnerConnected?: (runnerId: string) => boolean;
     /** The server update waiting for a quiet machine (BOS-420), if any. */
     updateWait?: () => Promise<{ on: boolean; phase?: string; deadline?: string }>;
+    /** BOS-1634: the all-companies run limit as saved and in force (scheduler.limitsInForce). */
+    runLimit?: () => Promise<LimitInForce>;
   } = {},
 ) {
   const now = deps.now ?? (() => new Date());
@@ -73,7 +79,8 @@ export function dashboardService(
           return { waiting: w.on, phase: w.phase ?? null, deadline: w.deadline ?? null };
         })
       : null;
-    return { runner, usage, update };
+    const runLimit = deps.runLimit ? await attempt(deps.runLimit) : null;
+    return { runner, usage, update, runLimit };
   };
   /**
    * Each agent's latest run, and why it started (BOS-407). The latest run is picked first, on the
@@ -120,6 +127,17 @@ export function dashboardService(
         .where(eq(tickets.companyId, companyId))
         .groupBy(tickets.systemState);
       const count = (s: string) => states.find((x) => x.state === s)?.n ?? 0;
+      const blockedCounts = await blockedSplit(db, companyId);
+      // BOS-1909: "Tasks in progress" is the counted work only (the WIP rule); the three groups that move by themselves are counted apart.
+      const [groups] = await db
+        .select({
+          counted: sql<number>`(count(*) filter (where ${tickets.systemState} = 'in_progress' and not ${cantMoveSql}))::int`,
+          nextUp: sql<number>`(count(*) filter (where ${tickets.systemState} = 'ready' and ${tickets.nextUpAt} is not null))::int`,
+          beingChecked: sql<number>`(count(*) filter (where ${tickets.systemState} = 'review' and ${tickets.checkHoldAt} is not null))::int`,
+          mergedInProgress: sql<number>`(count(*) filter (where ${tickets.systemState} = 'in_progress' and ${tickets.mergedAt} is not null))::int`,
+        })
+        .from(tickets)
+        .where(eq(tickets.companyId, companyId));
       // Of the tickets in review, those every reviewer has approved: only the merge (or the owner's sign-off) is left (BOS-667).
       const inReviewIds = count("review") ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))).map((r) => r.id) : [];
       const approved = (await passedReviewTickets(db, inReviewIds)).size;
@@ -208,12 +226,18 @@ export function dashboardService(
           running: new Set(live.filter(isWorkingRun).map((r) => r.agentId)).size,
           paused: team.filter((a) => a.paused).length,
           inProgress: count("in_progress"),
+          inProgressCounted: groups?.counted ?? 0,
+          nextUp: groups?.nextUp ?? 0,
+          beingChecked: groups?.beingChecked ?? 0,
+          watching: blockedCounts.liveCheck + (groups?.mergedInProgress ?? 0),
           inReview: count("review"),
           // inReview split in two, so the owner sees whether reviewers or the merge line hold work up.
           awaitingReview: count("review") - approved,
           approvedToMerge: approved,
           open: states.reduce((n, s) => n + (s.state === "done" ? 0 : s.n), 0),
-          blocked: count("blocked"),
+          // BOS-1636: only real blocks; merged work waiting for its live check is counted apart.
+          blocked: blockedCounts.blocked,
+          waitingLiveCheck: blockedCounts.liveCheck,
           decisionsWaiting,
           monthCostMicros: Number(spent?.micros ?? 0),
           monthSubscriptionTokens: { input: Number(tokens?.input ?? 0), output: Number(tokens?.output ?? 0) },

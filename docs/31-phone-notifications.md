@@ -24,10 +24,7 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
 
 ## Steps
 
-1. **Make the data folder** and give it to user ID 1000. It goes in your Boss Man data folder (`BOSSMAN_DATA` in `.env`; `<install-dir>/data` if you followed the install guide), so your usual backup and move steps already cover it. Replace the path with yours:
-   ```sh
-   mkdir -p /opt/boss-man/data/ntfy && chown 1000:1000 /opt/boss-man/data/ntfy
-   ```
+1. **Nothing to make by hand: the data folder.** It goes in your Boss Man data folder (`BOSSMAN_DATA` in `.env`; `<install-dir>/data` if you followed the install guide), so your usual backup and move steps already cover it. A one-off `ntfy-init` step in `deploy/ntfy.yml` creates it and hands it to ntfy's user (ID 1000) each time ntfy starts, on any Docker host, so there is no `mkdir` or `chown` to run. (Only if you set `NTFY_DATA` to a folder on a share that refuses ownership changes, make that folder writable by user ID 1000 yourself.)
    It holds the users, tokens and cache. Keep it in your backup: restoring it on a new host keeps the tokens and the phone subscription working.
 
 2. **Add one line to `.env`.** Back up `.env` first. The address is the same ts.net name as your Tailscale Serve address, with port 8443:
@@ -36,11 +33,7 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
    ```
    Nothing else is needed. ntfy finds the `edge` network by its default name (`boss-man_edge`). Only if you changed the Compose project name, or want a different data folder, set `NTFY_EDGE_NETWORK` (the network's name, which `docker network ls` lists; it ends in `_edge`) or `NTFY_DATA`.
 
-3. **Start it.** First check that Tailscale Serve publishes port 8443. This must print `1`:
-   ```sh
-   grep -c ':8443' deploy/tailscale/serve.json
-   ```
-   Then start ntfy:
+3. **Start it.** Tailscale Serve already publishes port 8443 (it is in `deploy/tailscale/serve.json`). Start ntfy:
    ```sh
    docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
    ```
@@ -50,33 +43,14 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
    ```
    It should list `https://<host-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it mentions Funnel, stop and run the rollback below.
 
-4. **Pick a topic and make two users.** Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make one user that can only publish and one that can only read. `ntfy user add` asks for a password, so type a long one each time:
-   ```sh
-   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
-   ```
-   ```sh
-   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add phone-read
-   ```
-   ```sh
-   docker exec boss-man-ntfy-ntfy-1 ntfy access bossman-publish <topic> write-only
-   ```
-   ```sh
-   docker exec boss-man-ntfy-ntfy-1 ntfy access phone-read <topic> read-only
-   ```
-   ```sh
-   docker exec boss-man-ntfy-ntfy-1 ntfy token add bossman-publish
-   ```
-   The last command prints the **publish token** (it starts with `tk_`). Copy it now.
+4. **Set ntfy up from Boss Man.** Open **Notifications** in the side menu and choose **Set up ntfy for me** under **How you're told** (it needs `openssl` on the host, and the page says if that or the add-on is missing). Within a minute it makes the `bossman-publish` user, gives it write-only access to your topic, makes its **publish token**, and saves the token encrypted as "ntfy access token". If you have not chosen a topic it picks 20 random letters and digits (the topic is a password, so keep it out of tickets and chat) and fills in **ntfy server** as `http://ntfy:80` (Boss Man and ntfy share the private `edge` network, so no tailnet name is needed). The token is never shown, so there is nothing to copy. Pressing the button again finds all three and changes nothing, so it is safe after an update or a move to a new host.
 
-5. **Tell Boss Man.** Open **Notifications** in the side menu. In the **How you're told** box below the feed:
-   - Tick **Send to my phone through my own ntfy server**.
-   - **ntfy server:** `http://ntfy:80`. Boss Man and ntfy share the private `edge` network, so Boss Man needs no tailnet name.
-   - **Topic:** your topic.
-   - **Access token:** the publish token from step 4. Boss Man stores it encrypted as "ntfy access token", so you do not add it under **Settings > Secrets** yourself.
+5. **Check and save the rest.** In the same **How you're told** box:
    - **Boss Man's address on your phone, so a tap opens the evidence:** Boss Man's https Tailscale address.
    - Choose **Save**.
+   - Prefer a topic or server address of your own? Type them before you press the button (and Save): the button keeps what you chose.
 
-   Already saved on the **Notifications** page? The **Create phone login** button under **Set up your phone** makes the `phone-read` user and its read-only access for you and shows the password once, so you can skip the `phone-read` lines in step 4 (it needs `openssl` on the host; the page says if it is missing). If you try the button after making the user by hand, it says the user exists and offers **Reset password**.
+   Then the **Create phone login** button under **Set up your phone** makes the `phone-read` user and its read-only access for you and shows the password once (it needs `openssl` on the host; the page says if it is missing). If you try the button after making the user by hand, it says the user exists and offers **Reset password**.
 
 6. **Set up the phone.** In the ntfy app, choose **Use another server** and enter exactly the `NTFY_BASE_URL` value from step 2, with its port. Log in as `phone-read` with its password and subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. The **Notifications** page shows the right address under **Set up your phone**, with a link to check from the phone's browser: `<ntfy address>/v1/health` should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet.
 
@@ -100,19 +74,30 @@ From a device that is not on your tailnet the address must not answer at all.
 
 iPhones only get instant delivery from a self-hosted server if the server forwards a wake-up through ntfy.sh. If you use an iPhone, add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run step 3's `docker compose` command again. ntfy sends ntfy.sh only a poll request containing the message ID, never the title, text or buttons ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)). Android doesn't need this: leave it unset.
 
+## After you restart ntfy (Android)
+
+The Android app does not use Google's push service with a self-hosted server. It keeps its own long connection open to your ntfy address (the "Listening for instant notifications" entry in the notification shade) and only fetches by hand when you open it. Restarting ntfy (an update, or adding `deploy/ntfy-bluegreen.yml`) most likely cuts that connection. If the app does not reconnect by itself, messages wait on the server and show only when you open the app, even though Boss Man reports the push as accepted. This happened on 14 Nov (BOS-1481): fully closing and reopening the app fixed it. That is the only evidence so far. The ntfy server log from that restart was not read, so the cause is not proven; the `deploy/ntfy-bluegreen.yml` file does not change the route from the phone to ntfy. You do not need to remember a phone step after an update: ntfy is never restarted by a Boss Man update or a blue/green switch (only by running its own `docker compose` command), and the host deployer now reports when ntfy last started and how many phones are connected to it (`ntfy.startedAt` and `ntfy.subscribers` in the host facts, BOS-1589). A count of 0 soon after a restart is a silent phone, and is the only time the app needs a look. ntfy's metrics (used for the count) are on a port that is not published.
+
+The step is the same however ntfy was restarted (the deployer, the blue/green switch, or by hand). An iPhone that uses `NTFY_UPSTREAM_BASE_URL` is woken through ntfy.sh instead, so it should not need it, but the test in step 2 is worth sending there too.
+
+After every ntfy restart:
+1. On the phone, open the ntfy app, then swipe it away from recent apps and open it again.
+2. In Boss Man, open Notifications and choose **Send a test to my phone**, with the app closed and the screen off. It should pop up without you opening the app.
+3. If it only appears when you open the app: in the app's Settings turn on "Instant delivery in doze mode", turn on "Instant delivery" on that subscription, and in Android Settings → Apps → ntfy → Battery choose "Unrestricted".
+
 ## Approve buttons
 
 The buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet. The Approve button only turns on when all of these hold:
 - the ntfy server has a publish token;
 - the **ntfy server** address is `https://...` or exactly the bundled `http://ntfy:80` (any other `http://` address is refused, so the token never crosses an untrusted network in clear text);
 - Boss Man's public URL is https;
-- **Approve buttons** haven't been switched off in Notifications.
+- **Offer an Approve button on simple agent questions** is ticked in Notifications (it is, unless you untick it).
 
 If one fails, Notifications says which.
 
 ## Blue/green installs
 
-With blue/green the two Boss Man copies are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command, and in the rollback command. It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 5 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
+With blue/green the two Boss Man copies are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command, and in the rollback command. It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings from steps 4 and 5 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
 
 ## Per host
 
@@ -128,7 +113,7 @@ ntfy rides on the Tailscale container, which runs in Tailscale's userspace mode 
 docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down
 ```
 
-Port 8443 then answers with an error until you start it again. To remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Messages are only kept for an hour and are not worth restoring. The users and tokens live in `user.db` in the ntfy data folder; copy that file first if you want to keep them.
+Port 8443 then answers with an error until you start it again. That is harmless. Do not edit `deploy/tailscale/serve.json` to remove it: it is part of the checkout, and a changed file makes `scripts/deploy.sh` refuse to run. Messages are only kept for an hour and are not worth restoring. The users and tokens live in `user.db` in the ntfy data folder; copy that file first if you want to keep them.
 
 ## Related pages
 

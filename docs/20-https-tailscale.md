@@ -1,6 +1,6 @@
 # HTTPS through Tailscale Serve (any Docker host)
 
-Gives Boss Man an `https://boss-man.<your-tailnet>.ts.net` address with a valid certificate, reachable only from devices signed in to your tailnet. It uses Tailscale **Serve**, not Funnel, so nothing is on the public internet. It fronts the owner's web/login port (3100) only, never the feedback portal. The plain LAN address keeps working. The installable web app and phone notifications need this address.
+Gives Boss Man an `https://boss-man.<your-tailnet>.ts.net` address with a valid certificate, reachable only from devices signed in to your tailnet. It uses Tailscale **Serve**, not Funnel, so nothing is on the public internet. It fronts the owner's web/login port (3100) on port 443, and the optional ntfy add-on for phone notifications on port 8443 ([docs/31](31-phone-notifications.md)); never the feedback portal. The plain LAN address keeps working. The installable web app and phone notifications need this address.
 
 Works on a plain Linux Docker host, a Proxmox VM running Docker, and a Proxmox LXC container running Docker. Host-specific notes are at the end.
 
@@ -45,7 +45,7 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    cp .env .env.bak
    sed -i "s#^COMPOSE_FILE=.*#&:deploy/tailscale.yml#" .env
    # the leading space keeps this line out of shell history in bash by default (zsh needs HIST_IGNORE_SPACE; or edit .env in an editor instead)
-    echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
+    echo "TS_AUTHKEY=PASTE_YOUR_TAILSCALE_AUTH_KEY_HERE" >> .env
    chmod 600 .env
    ```
 
@@ -71,14 +71,14 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    docker compose exec tailscale tailscale serve status
    ```
 
-   It must show `https://boss-man.<tailnet>.ts.net` proxying to `http://server:3100` and say "(tailnet only)", not "Funnel on". Use the address this prints, not one guessed from the example.
-7. Prove the trusted address is not shared with LAN traffic. This lists everything on `edge`; it must be only the `tailscale` and `server` containers:
+   It must show `https://boss-man.<tailnet>.ts.net` proxying to `http://server:3100` and say "(tailnet only)", not "Funnel on". Use the address this prints, not one guessed from the example. It also shows a second entry, `https://boss-man.<tailnet>.ts.net:8443` proxying to `http://ntfy:80`, even if you have not set up ntfy: that is the phone notifications add-on ([docs/31](31-phone-notifications.md)), and it answers with an error until ntfy runs.
+7. Prove the trusted address is not shared with LAN traffic. This lists everything on `edge`; it must be only the `tailscale` and `server` containers, plus `ntfy` if you run the phone notifications add-on:
 
    ```sh
    docker network inspect $(docker network ls -q --filter name=edge) --format '{{.Name}}: {{range .Containers}}{{.Name}} {{.IPv4Address}}; {{end}}'
    ```
 8. From your phone, on the tailnet, open the address. The padlock should be valid and login should work. After logging in, open the browser developer tools (Application or Storage > Cookies) and check the `bm_session` cookie is marked **Secure**. If it is not, Serve is not passing the HTTPS marker on; logins still work but tell Boss Man's engineer rather than guessing. Off the tailnet (mobile data with Tailscale turned off) it must not load.
-9. In Boss Man, open **Notifications** and set **Boss Man's address on your phone** to the ts.net address, so notification links open it.
+9. In Boss Man, open **Notifications**, type the ts.net address into **Boss Man's address on your phone** and save, so notification links open it. Boss Man does not fill in a ts.net address for you, because only devices on your tailnet can open it.
 
 To undo: `docker compose stop tailscale`, remove `:deploy/tailscale.yml` from `COMPOSE_FILE` (or restore `.env.bak`), then `docker compose up -d server`. The LAN address is unaffected throughout.
 
@@ -99,27 +99,22 @@ Tailscale's login is kept in `$BOSSMAN_DATA/tailscale`. Include that folder in y
 
 For blue/green (the Caddy front door in `deploy/truenas-bluegreen.yml`) add a second file after `deploy/tailscale.yml`. The path is tailnet, then Tailscale, then Caddy port 3100, then the live colour. Caddy believes forwarded headers only from the Tailscale container, and each colour believes them only from Caddy. The feedback portal (3101) is never reachable through Tailscale.
 
-1. Do steps 1 to 6 above, but in step 4 use this line in `.env` (swap the host file for yours; the blue/green file must come first):
+1. Do steps 1 to 4 above, but in step 4 use this line in `.env` (swap the host file for yours; the blue/green file must come first):
 
    ```
    COMPOSE_FILE=docker-compose.yml:deploy/truenas-bluegreen.yml:deploy/tailscale.yml:deploy/tailscale-bluegreen.yml
    ```
 
-2. Two private networks are used: `edge` (Tailscale and Caddy) and `front` (Caddy and the two colours). Defaults are `172.30.0.0/29` and `172.30.0.16/28`. If either clashes with a network on your host, compose stops with "Pool overlaps". Check what is used:
+2. Two private networks are used: `edge` (Tailscale and Caddy) and `front` (Caddy and the two colours). Defaults are `172.30.0.0/29` and `172.30.0.16/28`. The check in step 3 above covers both, because both start with 172.30.0. If either clashes, compose stops with "Pool overlaps". To change them, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP`, `BOSSMAN_EDGE_PROXY_IP`, `BOSSMAN_FRONT_SUBNET`, `BOSSMAN_FRONT_PROXY_IP` and `BOSSMAN_FRONT_RANGE` in `.env`; every address must sit inside its subnet.
+3. Start it instead of step 5 above. This restarts Caddy for a few seconds. Name the services: a bare `docker compose up -d`, or naming `server`, would start a second server on the same database.
 
    ```
-   docker network inspect $(docker network ls -q) --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
+   docker compose up -d --no-deps proxy tailscale
    ```
 
-   To change them, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP`, `BOSSMAN_EDGE_PROXY_IP`, `BOSSMAN_FRONT_SUBNET`, `BOSSMAN_FRONT_PROXY_IP` and `BOSSMAN_FRONT_RANGE` in `.env`; every address must sit inside its subnet.
-3. Apply it (this restarts Caddy and the colours for a few seconds; it is a deployment-file change, so do it by hand, not through the self-update):
-
-   ```
-   docker compose up -d
-   ```
-
-4. Check: `docker compose exec tailscale tailscale serve status` shows `http://server:3100` and no `3101`. `docker network inspect` for `front` lists only the proxy and the two colours. Log in over `https://<your machine>.<tailnet>.ts.net` and confirm the session cookie is Secure; over the LAN address it stays plain.
-5. Undo: remove the two Tailscale files from `COMPOSE_FILE`, run `docker compose up -d`, and rewrite `active.caddy` in the old form if you rolled back the deployment files (see `docs/06-install-truenas.md`).
+   Then do steps 5a and 6 above, and remove the key from `.env` as step 5 says (restart with `docker compose up -d --no-deps tailscale`).
+4. Check: `docker compose exec tailscale tailscale serve status` shows `http://server:3100` and no `3101` (the second entry, port 8443 to `http://ntfy:80`, is the ntfy add-on and is expected). `docker network inspect` for `front` lists only the proxy and the two colours. Log in over `https://<your machine>.<tailnet>.ts.net` and confirm the session cookie is Secure; over the LAN address it stays plain.
+5. Undo: `docker compose stop tailscale`, remove the two Tailscale files from `COMPOSE_FILE`, then `docker compose up -d --no-deps proxy`.
 
 Behaviour change: the colours now see real client addresses, so the login limit counts each device separately, where before all devices looked like Caddy.
 

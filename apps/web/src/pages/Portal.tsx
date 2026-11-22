@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { Loader } from "../components/Loader";
 
 type Importance = "nice_to_have" | "important" | "critical";
 const LEVELS: Array<{ id: Importance; label: string }> = [
@@ -16,6 +17,9 @@ const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "planned", label: "Planned", help: "On the way. Your vote still helps us decide what comes first." },
   { id: "released", label: "Released", help: "Done recently." },
 ];
+// BOS-1921: a summary that only repeats the title is shown once (nothing stored changes).
+const squash = (s: string) => s.toLowerCase().replace(/\s+/g, " ").replace(/[\s.!?…:;,]+$/, "").trim();
+const sameText = (title: string, body: string) => squash(title) === squash(body);
 type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
 type Portal = { title: string; intro: string | null; hasLogo: boolean; confirmByEmail?: boolean; rememberedEmail?: string | null; back: { url: string; text: string } | null; features: PortalFeature[] };
 /** BOS-1388: with "Confirm posts by email" on, the address is needed and the reason is said once, next to the box. */
@@ -84,7 +88,7 @@ function FeatureCard({ f, onChanged, ask }: { f: PortalFeature; onChanged: () =>
   return (
     <li className="card portal-card">
       <h3>{f.title}</h3>
-      {f.description && <p style={{ whiteSpace: "pre-wrap" }}>{f.description}</p>}
+      {f.description && !sameText(f.title, f.description) && <p style={{ whiteSpace: "pre-wrap" }}>{f.description}</p>}
       {canVote && (
         <>
           <p className="label">How much would this matter to you?</p>
@@ -231,10 +235,11 @@ export function PortalApp() {
   const [stage, setStage] = useState<Stage>("considering");
   const logo = useLogo(data?.hasLogo);
   const load = useCallback(() => {
-    if (!token()) return setError("This link is incomplete. Ask for the full portal link.");
+    // BOS-1680: with no secret in the link the server decides: it opens the portal the owner chose for the bare
+    // address, or answers 404, which is when "incomplete" is the true thing to say.
     void call<Portal>("/api/portal").then(
       (d) => (setData(d), setError(null), (document.title = d.title)),
-      (err: Error) => setError(err.message),
+      (err: Error) => setError(token() ? err.message : "This link is incomplete. Ask for the full portal link."),
     );
   }, []);
   useEffect(() => {
@@ -250,7 +255,12 @@ export function PortalApp() {
         </p>
       </main>
     );
-  if (!data) return null;
+  if (!data)
+    return (
+      <main className="portal">
+        <Loader label="Loading the feedback page" />
+      </main>
+    );
   const shown = data.features.filter((f) => f.stage === stage);
   const ask: Ask = { required: !!data.confirmByEmail, remembered: data.rememberedEmail ?? null };
   // BOS-967: when the owner sets a website address, the page gains a bar at the top and a link at the

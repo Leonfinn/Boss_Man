@@ -70,6 +70,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
         switch (msg.type) {
           case "hello":
             if (msg.protocol !== PROTOCOL_VERSION) {
+              workers.refuse(worker.id, msg.protocol);
               send({ type: "error", message: `Protocol ${msg.protocol} is not supported; expected ${PROTOCOL_VERSION}.` });
               socket.close(4000, "protocol");
               return;
@@ -77,7 +78,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
             queue = queue
               .then(async () => {
                 const helloAt = new Date();
-                const row = await workers.touch(worker.id, { imageCommit: msg.imageCommit, imageVersion: msg.imageVersion, checkSlots: msg.checkSlots, features: msg.features });
+                const row = await workers.touch(worker.id, { imageCommit: msg.imageCommit, toolchain: msg.toolchain, imageVersion: msg.imageVersion, checkSlots: msg.checkSlots, memoryMb: msg.memoryMb, features: msg.features });
                 // Turned off or removed since the upgrade: close, and the redial is refused in preValidation.
                 if (!row?.enabled) {
                   socket.close(WORKER_OFF_CLOSE, "worker off");

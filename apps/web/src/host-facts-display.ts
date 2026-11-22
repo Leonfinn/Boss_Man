@@ -31,10 +31,8 @@ const OWNER_FACT_HELP: Record<string, { what: string; needs: string; where: stri
   },
 };
 
-/** A check fact that is a count of things wrong, or of something that went wrong: a non-zero value is a problem. */
-export const CHECK_TROUBLE = /^(unhealthy|notRunning|stale|ageSeconds|lastExitCode)$/;
-/** The host's own answer to "can Boss Man reach the code host": anything but "ok" is a failing check. */
-export const CHECK_OK = /(^|\.)(probe|health)$/;
+// What counts as a failing check is one rule shared with the server's close gate (BOS-1586).
+export { CHECK_OK, CHECK_TROUBLE, isFailingCheck } from "@boss-man/shared";
 
 /** The flattened value of the named stopped containers (the server writes it; see host-facts.ts). */
 export const STOPPED_CONTAINERS_KEY = "check.container_status.stopped.names";

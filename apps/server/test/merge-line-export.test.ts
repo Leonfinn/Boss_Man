@@ -54,15 +54,45 @@ describe("merge_line_records", () => {
     await row(ctx.mine, "2026-11-08T21:00:00Z", "merge_line", { event: "approved", by: "Jane" });
     await row(ctx.mine, "2026-11-08T21:30:00Z", "merge_line", { event: "check_ended", check: "gate", passed: false, way: "gate", jobId: "j1", why: "private why" });
     await row(ctx.mine, "2026-11-09T01:00:00Z", "merge_line", { event: "hold_ended", hold: "card", since: "x", heldMs: 1234, note: "private note" });
+    // BOS-1515: a train clash exports who it clashed with (ids only, never titles) and the files.
+    await row(ctx.mine, "2026-11-09T02:00:00Z", "merge_line", { event: "train_clash", on: "ahead", action: "land_alone", with: [{ ticketId: "t-1", ref: "APP-1", title: "private title" }, { ticketId: "t-2", ref: null, title: "x" }], files: ["src/a.ts", "src/b.ts"] });
     const c = await asCeo(ctx.mine);
     const out = JSON.parse(textOf(await call(c, { since: "2026-11-08T21:22:00Z" }))) as { rows: Array<Record<string, unknown>> };
-    expect(out.rows.map((r) => r.event)).toEqual(["check_ended", "hold_ended"]);
-    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null, commit: null });
+    expect(out.rows.map((r) => r.event)).toEqual(["check_ended", "hold_ended", "train_clash"]);
+    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null, commit: null, with: null, files: null, note: null, action: null, rebuilds: null, reason: null });
     expect(out.rows[1]).toMatchObject({ hold: "card", heldMs: 1234 });
+    expect(out.rows[2]).toMatchObject({ with: "t-1 t-2", files: "src/a.ts,src/b.ts" });
     const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", format: "csv" }));
-    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by,commit");
+    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by,commit,with,files,note,action,rebuilds,reason");
     for (const leak of ["private", "secret summary", "jobId", "j1"]) expect(all).not.toContain(leak);
     expect(textOf(await call(c, { since: "2026-11-01T00:00:00Z", until: "2026-11-08T21:10:00Z" }))).toContain('"event":"approved"');
+    await c.close();
+  });
+
+  it("exports the landing-turn holder, the turn's action, and why a merge was rebuilt (BOS-1823)", async () => {
+    await row(ctx.mine, "2026-11-09T01:00:00Z", "merge_line", { event: "landing_turn", action: "taken", rebuilds: 3, capMin: 20 });
+    await row(ctx.mine, "2026-11-09T01:01:00Z", "merge_line", { event: "hold_started", hold: "turn", note: '"Holder ticket" has the landing turn; this merge pushes when it lands or the turn ends' });
+    await row(ctx.mine, "2026-11-09T01:02:00Z", "merge_line", { event: "rebuilt", rebuilds: 2, why: "main changed build or check files", files: ["package.json"] });
+    await row(ctx.mine, "2026-11-09T01:03:00Z", "merge_line", { event: "landing_turn", action: "ended" });
+    await row(ctx.mine, "2026-11-09T01:04:00Z", "merge_line", { event: "check_ended", check: "gate", passed: true, why: "private why", note: "private note" });
+    const c = await asCeo(ctx.mine);
+    const out = JSON.parse(textOf(await call(c, { since: "2026-11-09T00:00:00Z" }))) as { rows: Array<Record<string, unknown>> };
+    expect(out.rows[0]).toMatchObject({ event: "landing_turn", action: "taken", rebuilds: 3 });
+    expect(out.rows[1]).toMatchObject({ event: "hold_started", hold: "turn", note: expect.stringContaining("Holder ticket") });
+    expect(out.rows[2]).toMatchObject({ event: "rebuilt", rebuilds: 2, reason: "main changed build or check files" });
+    expect(out.rows[3]).toMatchObject({ action: "ended" });
+    expect(out.rows[4]).toMatchObject({ note: null, reason: null });
+    expect(JSON.stringify(out.rows)).not.toContain("private");
+    await c.close();
+  });
+
+  it("exports a restart failure's own reason, and no other failure's note (BOS-2089)", async () => {
+    await row(ctx.mine, "2026-11-09T02:00:00Z", "merge_line", { event: "attempt_failed", reason: "restart", note: "Timed out waiting for the lock on p1." });
+    await row(ctx.mine, "2026-11-09T02:01:00Z", "merge_line", { event: "attempt_failed", reason: "git_transport", note: "private transport note" });
+    const c = await asCeo(ctx.mine);
+    const out = JSON.parse(textOf(await call(c, { since: "2026-11-09T01:59:00Z" }))) as { rows: Array<Record<string, unknown>> };
+    expect(out.rows[0]).toMatchObject({ event: "attempt_failed", reason: "restart", note: "Timed out waiting for the lock on p1." });
+    expect(out.rows[1]).toMatchObject({ event: "attempt_failed", reason: "git_transport", note: null });
     await c.close();
   });
 
@@ -92,7 +122,7 @@ describe("merge_line_records", () => {
   it('what: "check_jobs" returns every check job and reused request by queue time, with only the named fields, own company only (BOS-1309)', async () => {
     const job = (co: typeof ctx.mine, over: Record<string, unknown>) =>
       ctx.db.insert(checkJobs).values({ companyId: co.company.id, projectId: co.ticket.projectId, ticketId: co.ticket.id, commit: "secretcommit", tree: "secrettree", command: "secret-cmd", logTail: "secret log", ...over } as never);
-    await job(ctx.mine, { kind: "pre_review", scope: "quick", state: "passed", queuedAt: new Date("2026-11-09T00:00:00Z"), startedAt: new Date("2026-11-09T00:04:00Z"), endedAt: new Date("2026-11-09T00:07:00Z") });
+    await job(ctx.mine, { kind: "pre_review", scope: "quick", state: "passed", queuedAt: new Date("2026-11-09T00:00:00Z"), startedAt: new Date("2026-11-09T00:04:00Z"), endedAt: new Date("2026-11-09T00:07:00Z"), busyAtStart: 3, ranFull: true, stages: JSON.stringify([{ name: "typecheck", seconds: 90 }, { name: "related tests", seconds: 120 }]) });
     await job(ctx.mine, { kind: "merge", scope: "full", state: "queued", queuedAt: new Date("2026-11-09T00:02:00Z") });
     await job(ctx.mine, { kind: "pre_review", scope: "quick", state: "passed", queuedAt: new Date("2026-11-01T00:00:00Z") });
     await job(ctx.other, { kind: "pre_review", scope: "quick", state: "passed", queuedAt: new Date("2026-11-09T00:01:00Z") });
@@ -103,15 +133,15 @@ describe("merge_line_records", () => {
     const t = ctx.mine.ticket.id;
     expect(out.rows).toEqual([
       // ran_on (BOS-1435): where a started job ran; null for one that never started and for a reused request.
-      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:00:00.000Z", started: "2026-11-09T00:04:00.000Z", finished: "2026-11-09T00:07:00.000Z", outcome: "passed", reused: null, ran_on: "company runner" },
-      { ticket_id: t, kind: "merge", scope: "full", queued: "2026-11-09T00:02:00.000Z", started: null, finished: null, outcome: "queued", reused: null, ran_on: null },
-      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:03:00.000Z", started: null, finished: null, outcome: "passed", reused: "passed", ran_on: null },
+      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:00:00.000Z", started: "2026-11-09T00:04:00.000Z", finished: "2026-11-09T00:07:00.000Z", outcome: "passed", reused: null, ran_on: "company runner", busy_at_start: 3, ran: "quick+full", steps: "typecheck=90 related_tests=120" },
+      { ticket_id: t, kind: "merge", scope: "full", queued: "2026-11-09T00:02:00.000Z", started: null, finished: null, outcome: "queued", reused: null, ran_on: null, busy_at_start: null, ran: null, steps: null },
+      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:03:00.000Z", started: null, finished: null, outcome: "passed", reused: "passed", ran_on: null, busy_at_start: null, ran: null, steps: null },
     ]);
     const cut = JSON.parse(textOf(await call(c, { since: "2026-11-08T00:00:00Z", what: "check_jobs", limit: 2 }))) as { note: string; rows: unknown[] };
     expect(cut.rows).toHaveLength(2);
     expect(cut.note).toContain("since=2026-11-09T00:02:00.000Z");
     const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", until: "2026-11-09T00:01:00Z", what: "check_jobs", format: "csv" }));
-    expect(all.split("\n")[0]).toBe("ticket_id,kind,scope,queued,started,finished,outcome,reused,ran_on");
+    expect(all.split("\n")[0]).toBe("ticket_id,kind,scope,queued,started,finished,outcome,reused,ran_on,busy_at_start,ran,steps");
     expect(all.split("\n")).toHaveLength(4);
     for (const leak of ["secret", "Other Co"]) expect(all).not.toContain(leak);
     await c.close();

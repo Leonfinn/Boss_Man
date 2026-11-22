@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, plainReason, runnerProgress, updateStatus, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, historyWaitingOn, wrapUpBannerText, plainReason, runnerProgress, updateStatus, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
@@ -59,6 +59,28 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(s.normal.map((b) => b.id)).toEqual(["cancel-update"]);
   });
 
+  it("2. Only a merge check left (BOS-1600): says what it waits for, offers stop-the-checks, not wrap up", () => {
+    const check = { ticket: "BOS-1525", kind: "merge", scope: "full", startedAt: iso(-19), runningForMinutes: 19, usuallyMinutes: 15 };
+    const m = maintUpdate({ runs: 0, companies: 0, checks: 1, checksList: [check] });
+    const s = updateStatus(base(), m, null, NOW);
+    expect(s.tag).toBe("Waiting for checks");
+    expect(s.say).toContain("waiting for 1 check to finish before swapping the runners: BOS-1525 merge check, started ");
+    expect(s.say).toContain("usually about 15 min");
+    expect(s.say).not.toContain("swapping the runners now");
+    expect(s.primary).toMatchObject({ id: "update-now", label: "Stop the check and update now" });
+    expect(waitingFor(m as never)).toContain("BOS-1525 merge check");
+  });
+
+  it("2. Agents and checks are listed separately; with nothing left it says swapping now (BOS-1600)", () => {
+    expect(waitingFor({ runs: 2, companies: 1, checks: 1, checksList: [] })).toBe("waiting for 2 runs in 1 company to finish, and for 1 check to finish before swapping the runners");
+    expect(waitingFor({ runs: 0, companies: 0, checks: 0 })).toBe("swapping the runners now");
+    expect(waitingFor({ runs: 0, companies: 0 })).toBe("swapping the runners now");
+    // BOS-1951: a merge being pushed is named; a wait on nothing known is never a bare "swapping"/"updating".
+    expect(waitingFor({ runs: 0, companies: 0, merges: 1, mergesList: [{ ticket: "BOS-7" }] })).toBe("waiting for 1 merge being pushed to main (BOS-7)");
+    expect(waitingFor({ runs: 1, companies: 1, merges: 2 })).toBe("waiting for 1 run in 1 company to finish, and for 2 merges being pushed to main");
+    expect(waitingFor({ runs: 0, companies: 0, unknownWait: true })).toMatch(/cannot name/);
+  });
+
   it("2. Waiting for agents, wrap-up asked, before the deadline: no main button", () => {
     const s = updateStatus(base(), asked([run()], { deadline: iso(5) }), null, NOW);
     expect(s.tag).toBe("Waiting for agents");
@@ -86,6 +108,29 @@ describe("updateStatus: one row per state, first match wins", () => {
     const s = updateStatus(base(), m, null, NOW);
     expect(s.tag).toBe("Wrapping up");
     expect(s.primary).toBeNull();
+  });
+
+  it("2c. BOS-2056: a wrap-up names the update it is for, or says none was waiting", () => {
+    const mk = (over: Record<string, unknown>) => ({ on: true, kind: "wrapup", deadline: iso(5), runs: 0, companies: 1, wrapAsked: true, notRespondingAfter: 10, runsList: [], wrapSince: iso(-20), ...over }) as unknown as MaintenanceView;
+    const server = updateStatus(base(), mk({ wrapForUpdate: "server" }), null, NOW);
+    expect(server.say).toContain("Wrapping up for the server update");
+    expect(server.more).toContain("lifts by itself");
+    const none = updateStatus(base(), mk({ wrapForUpdate: "none" }), null, NOW);
+    expect(none.more).toContain("no update was waiting");
+    expect(none.more).not.toContain("Nothing new starts until you press");
+    expect(wrapUpBannerText({ runs: 1, wrapSince: iso(-20), wrapForUpdate: "none" })).toMatch(/^You asked agents to wrap up at .+ \(no update was waiting\)\./);
+    expect(wrapUpBannerText({ runs: 0, wrapSince: iso(-20), wrapForUpdate: "server" })).toContain("Wrapping up for the server update");
+  });
+
+  it("2d. BOS-2056: every Waiting row in Recent updates says what it waits on", () => {
+    const row = (over: Partial<HistoryRow>) => ({ id: "h1", at: iso(-5), target: "server", result: "queued", changes: 2, message: "", ...over }) as unknown as HistoryRow;
+    expect(historyTag(row({})).tag).toBe("Waiting");
+    expect(historyWaitingOn(row({}), null, null, false)).toContain("your approval");
+    const w: DeployWaitView = { on: true, phase: "waiting", origin: "approve", commit: "bbbbbbbb22", deadline: iso(20), quiet: { ready: false, runs: 1, checks: 0, freeMb: null, needMb: null, why: ["1 agent is running"] } };
+    expect(historyWaitingOn(row({}), w, null, false)).toContain("a quiet machine: 1 agent is running");
+    expect(historyWaitingOn(row({ target: "runner" }), null, maintUpdate(), false)).toContain("the runner swap: waiting for 2 runs");
+    expect(historyWaitingOn(row({ target: "runner" }), null, null, true)).toContain("in front of it");
+    expect(historyWaitingOn(row({ result: "deployed" }), null, null, false)).toBeNull();
   });
 
   it("3. Approved, waiting for a quiet machine: no main button, a Cancel, BOS-420's line", () => {
@@ -137,6 +182,38 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(s.more).toContain("Server updated");
   });
 
+  // BOS-1648: the runner line is the server's one answer, word for word; never "may be needed".
+  describe("8b. the runner line", () => {
+    const at = (runnerUpdate: SelfDeployView["runnerUpdate"]) => updateStatus(base({ status: st({ result: "deployed" }), runnerImage: { running: "aaaaaaa1", needed: "bbbbbbb2" }, runnerUpdate }), null, null, NOW);
+
+    it("not needed: green, names the server-only changes", () => {
+      const words = "Runners are up to date: the changes since they were built (BOS-1635) are server-only.";
+      const s = at({ state: "not_needed", words, tickets: ["BOS-1635"] });
+      expect([s.tone, s.tag, s.say]).toEqual(["green", "Up to date", "Boss Man is up to date."]);
+      expect(s.more).toContain(words);
+    });
+
+    it("needed: amber, names the tickets and the button", () => {
+      const words = "Runner update needed: BOS-1583 changes what the runners are built from (they were built from aaaaaaa1; the server runs bbbbbbb2).";
+      const s = at({ state: "needed", words, tickets: ["BOS-1583"] });
+      expect([s.tone, s.tag]).toEqual(["amber", "Runner update needed"]);
+      expect(s.more).toContain(`${words} Press Build and update runners under Other actions.`);
+    });
+
+    it("can't tell: amber, says why, never 'not needed'", () => {
+      const words = "Boss Man can't tell whether a runner update is needed, because the server runs bbbbbbb2, which isn't a merge Boss Man recorded.";
+      const s = at({ state: "unknown", words, tickets: [] });
+      expect([s.tone, s.tag]).toEqual(["amber", "Can't tell"]);
+      expect(s.more).toContain(words);
+      expect(s.more).not.toMatch(/up to date: the changes/);
+    });
+
+    it("never says 'may', in any state", () => {
+      for (const state of ["needed", "not_needed", "unknown"] as const) expect(at({ state, words: "x.", tickets: [] }).more).not.toMatch(/\bmay\b/);
+      expect(at(null).more).not.toMatch(/\bmay\b|Runner image/);
+    });
+  });
+
   it("never more than one blue main button, in any row", () => {
     const rows = [
       updateStatus(offered(), null, null, NOW),
@@ -184,7 +261,7 @@ describe("plain failure reasons", () => {
       expect(s.primary?.disabled).toBeFalsy();
       const upToDate = updateStatus(base({ status: refusal, deployWait: { until: iso(2), target: "runner" }, runnerImage: { running: "aaaaaaa1", needed: "bbbbbbb2" } }), null, null, NOW);
       expect(upToDate.more).toContain("Runner update: press Build and update runners again from ");
-      expect(upToDate.more).toContain("Runner image: aaaaaaa1; the live server needs bbbbbbb2 (a runner update may still be needed).");
+      expect(upToDate.more).not.toMatch(/may still be needed/);
     });
   });
 

@@ -1,6 +1,6 @@
 # 00 — First-time install
 
-This is the short path from nothing to a working Boss Man on a Linux host with Docker, building the images from the source. If you would rather pull ready-made images and need nothing on the host but Docker, use [docs/33-install-from-images.md](33-install-from-images.md). It has the install steps only. Tuning (memory limits and more) and troubleshooting are in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md). For a worked example on TrueNAS SCALE, see [docs/06-install-truenas.md](06-install-truenas.md).
+This is the short path from nothing to a working Boss Man on a Linux host with Docker, building the images from the source. If you would rather pull ready-made images and need nothing on the host but Docker, use [docs/33-install-from-images.md](33-install-from-images.md). This guide has the install steps only. Tuning (memory limits and more) and troubleshooting are in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md). On TrueNAS SCALE, follow this guide too, with the differences in the next section and the extras in [docs/06-install-truenas.md](06-install-truenas.md).
 
 > **Verification:** every file name, setting and button label in this guide was checked against the code. The full install was **not** re-run on a fresh machine for this edit, so treat the exact command output as unverified.
 
@@ -12,7 +12,8 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
 ## What you need first
 
-- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is sized at 16 GB of memory for one check slot, less on a smaller host.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. There is no measured minimum for RAM or disk yet (BOS-212); the website's install guide gives estimates under "What machine do I need". With the launcher, each runner gets 2 GB, plus 1 GB per agent at once, plus 3 GB per check: 11 GB with the defaults (6 agents, 1 check). It is kept within the host's memory less 2 GB. See [docs/29, "Memory limits"](29-tune-and-troubleshoot.md#memory-limits).
+- **Mac and Windows: not supported yet, but we're testing Docker Desktop.** On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet ([docs/27](27-netguard.md)), and Windows hasn't been tested. For now, use a Linux machine. The remaining work is BOS-1033.
 - **On Proxmox, a VM, not an LXC container.** Install Docker in the VM and follow these steps inside it. Why: [docs/32-proxmox.md](32-proxmox.md).
 - **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.
@@ -153,7 +154,7 @@ mkdir -p $B/data/postgres
 ## 4. Write the settings file
 
 Boss Man reads a file called `.env` in the repo folder. This one:
-- turns on the **launcher**, which starts each company's runner for you (details in [docs/06, step 7b](06-install-truenas.md#7b-let-the-launcher-run-the-runners-recommended));
+- turns on the **launcher**, which starts each company's runner for you. It is the only container that can reach Docker, and it accepts only "start, stop or restart company X's runner";
 - opens the web page on your host's LAN address only.
 
 Before you run the command, replace `<host-ip>` (the `BOSSMAN_BIND` line) with your host's address on your home network, for example `192.168.1.20`. The command reads the Docker socket's group number for you.
@@ -205,25 +206,19 @@ Go to the repo folder. Every `docker compose` command must run from here.
 cd $B/src
 ```
 
-Build the server (it includes the web page), the launcher and netguard. The network guard (netguard) is not a service of its own: the launcher starts one small guard container beside every runner, so its image must be built too (name it, as below). Your Docker dashboard may show "update check failed" on the runner and guard containers; that is expected and harmless (the images are built here, not pulled), and you update them with Build and update runners:
+Build the server (it includes the web page) and the launcher:
 
 ```sh
-docker compose build server launcher netguard
+docker compose build server launcher
 ```
 
-Using the optional blue/green setup? Build both server copies instead:
-
-```sh
-docker compose build server-blue server-green launcher netguard
-```
-
-Build the runner image. This builds it, runs a safety check (the "canary") with networking off and no credentials, and only then marks it ready. It then starts everything.
+Build the runner image and the network guard that runs beside each runner. The script builds them, runs a safety check (the "canary") with networking off and no credentials, and only then marks the runner image ready. It then starts everything.
 
 ```sh
 scripts/update-runner.sh
 ```
 
-Expect a line saying no launcher is running, so it restarts runners at once. That is harmless on a first install: it is how the script brings the stack up. If the canary fails, it says so and leaves the runner image unset.
+Expect a line saying no launcher is running, so it restarts runners at once. That is harmless on a first install: it is how the script brings the stack up. If the canary fails, it says so and leaves the runner image unset; on a first install it still starts the database, server and launcher so you can open the web page, then exits with an error. Fix the cause it names and run `scripts/update-runner.sh` again. Your Docker dashboard may later show "update check failed" on the runner and guard containers. That is expected: the images are built here, not pulled.
 
 Check it worked:
 
@@ -236,10 +231,16 @@ You should see `db` and `server` as running (the server `healthy` after a short 
 Check the server answers:
 
 ```sh
-curl -s http://<host-ip>:3100/api/health
+curl -sS http://<host-ip>:<your BOSSMAN_HOST_PORT, 3100 unless you changed it>/api/health
 ```
 
-You should get a short line of JSON. The database tables are created by themselves when the server starts.
+For example, `curl -sS http://192.168.1.50:3100/api/health`.
+
+A good answer is a short line of JSON. The database tables are created by themselves when the server starts.
+
+If you see `Connection refused`, the server has not started yet or the port is wrong. Wait a minute and run the command again, and check that the port matches `BOSSMAN_HOST_PORT` in your `.env`. If it still fails after a few minutes, run `docker compose ps` and `docker compose logs server` to see why the server is not running, and see [docs/29](29-tune-and-troubleshoot.md).
+
+Container logs are capped so they can't slowly fill the disk: each container keeps at most 3 files of 10 MB (`docker compose logs` shows what is kept). To change that, set `BOSSMAN_LOG_MAX_SIZE` and `BOSSMAN_LOG_MAX_FILE` in `.env` (compose services; runners the launcher starts keep the fixed 10m × 3). A new cap applies to a container when it is next recreated by an update.
 
 ## 6. Open the web page and make the owner account
 
@@ -269,37 +270,46 @@ Check it worked: you see "Saved." and the step shows a tick.
 3. Leave **Default branch** as it is unless yours differs. Under **When work is approved**, choose **Merge into the default branch** or **Open a pull request**. Choose the pull request option if your default branch only accepts pull requests.
 4. Save, then **Next**.
 
-**The runner.** It's the container where the company's agents work. It connects out to Boss Man, so it needs no open ports.
-- With the launcher on, the step shows the container `boss-man-runner-<slug>`. If the connection says **Not started**, choose **Start runner**.
-- Wait for the tag to say **Connected**. It goes through **Starting…** first. This can take up to a minute.
+**The runner.** It's the container where the company's agents work. It connects out to Boss Man, so it needs no open ports. This step only shows its status.
+- If the tag says **Connected**, there is nothing to do.
+- If it says **Not connected** and the launcher is on, choose **Start the runner**. Without the launcher, the step points you to **Settings → Server and runner → Runner**: follow the steps there.
+- If something is wrong (the launcher can't be reached, the runner's container has stopped, or its network guard won't start), the step says which, with a link to the fix in [docs/29](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
+- Wait for the tag to say **Connected**. This can take up to a minute; the page updates by itself.
 
-Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected). To run runners without the launcher instead, see [docs/06, step 7](06-install-truenas.md#7-the-runner-token).
+Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
 
 ## 9. Wizard steps "Claude" and "A git token"
 
 Make each secret on your own computer, then paste it into the form. Boss Man encrypts it and never shows it again. Paste a token only into these forms, never into a chat or a ticket.
 
-**Claude.** Choose **Claude setup-token** under **Add**. On your own computer:
+**Claude.** One box, **Claude setup token**. On your own computer:
 
 ```sh
 claude setup-token
 ```
 
-It prints a long-lived token for your subscription. Paste it into **Value**, leave **Variable name** as `CLAUDE_CODE_OAUTH_TOKEN`, then choose **Check** and save. Boss Man refuses a token with stray spaces or quotes and says why. In the table, choose **Check with Claude**: it runs one tiny prompt on the runner and uses a little of your allowance. If you use an API key instead, choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
+Sign in with your Claude Pro or Max account. It prints a long-lived token. Paste it into the box and choose **Save the token**. Boss Man refuses a token with stray spaces or quotes and says why. Saving also makes the funding source and sets the CEO to run on it, so you skip "What pays for the CEO". The step then shows **Connected**; to change it later, use **Settings → Money and access → Secrets**, in the section named after your company (for example "Acme's variables"). If you use an API key instead, open **Use an API key instead** and choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
 
 **A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Boss Man's runner uses it as `GIT_TOKEN` for git; agents' own sessions never see it.
-- **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Checks read, so Boss Man can read CI results.
+- **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Actions read-only, so Boss Man can read CI runs.
 - **Gitea:** Settings > Applications > Generate New Token, with repository scope **Read and Write** (`write:repository`).
 
 Paste it and save. Then choose **Check the token against <project>**.
 
 Check it worked: the message says "The token can read and push to the repo." If it says it can read but not push, add write permission to the token.
 
+**Optional: a second account for the merge gate's CI branches.** GitHub emails the account that pushed a branch whenever a GitHub Actions run on it fails. Boss Man's merge gate pushes a `bossman-ci/<ticket>` branch for every merge, so with one token a failed run there emails the token's owner. To send those emails elsewhere, use a second (bot) account:
+1. Create the account (or use a teammate's) and add it as a collaborator with write access to the repo.
+2. As that account, create a fine-grained token with Contents read and write (and Workflows read and write if the repo's workflows change).
+3. In Boss Man, add a secret named `GIT_CI_TOKEN` with that token and grant it to the company. Add `GIT_CI_USERNAME` only if your git host needs a user name (GitHub does not).
+
+Only the two pushes to `bossman-ci/*` use it; everything else keeps `GIT_TOKEN`. Without it nothing changes: the pushes use `GIT_TOKEN` and its owner gets the emails. Agents never see either token. The other way is to mute those emails on the owner's account: GitHub, Settings > Notifications > System > Actions, choose "Don't notify". That also mutes real failures of the owner's own pushes.
+
 ## 10. Wizard steps "Checks before merging" and "What pays for the CEO"
 
 **Checks before merging.** Boss Man looks at the repo through the runner and proposes what runs before work merges. Under **Before merging, Boss Man will**, choose one. If the list is the standard one, choose **Re-detect** now that the runner and git token work.
 
-**What pays for the CEO.** This tracks cost and quota.
+**What pays for the CEO.** If you saved a Claude setup token in step 9, the wizard skips this step: the token already made the funding source. If you used an API key instead, this tracks cost and quota:
 1. Under **Funding sources**, name it (for example "Claude Max") and choose a **Kind**: **Subscription (setup-token)** for a Pro or Max plan, or **API credit, monthly grant** for an API key (then give the monthly grant in USD).
 2. Choose **Add**.
 3. Under "The CEO runs on", pick that source.
@@ -340,31 +350,19 @@ Check it worked: the ticket shows on the board and the page says "Added".
 - **Decisions** is where Boss Man asks you things: a plan to approve, a review, a question. A run may wait there for you.
 - **Notifications** shows what needs your attention.
 
-Check it worked: a run appears under **Runs** within a minute or two and the ticket's state changes on the board. If nothing starts, check that the agent isn't paused and the runner says **Connected** in **Settings > Server and runner**.
+Check it worked: a run appears under **Runs** within a minute or two and the ticket's state changes on the board. If nothing starts, check that the agent isn't paused and the runner says **Connected** in **Settings > Server and runner > Runner**.
 
 ## 14. Updating later
 
-Set `B` first if this is a new shell (step 1).
-
-**The server and web page.** The deploy script backs up the database to `<install-dir>`, pulls the code, rebuilds, restarts, waits for the server to be healthy, and updates runners only if their code changed:
+Read [docs/23-updating.md](23-updating.md) before each update. In short, from the checkout:
 
 ```sh
 cd $B/src && scripts/deploy.sh
 ```
 
-Add `--dry-run` to see the steps without running them. It stops if the checkout has uncommitted changes or isn't on the default branch, and says so. If the health check fails it prints the rollback commands and changes nothing by itself.
+It backs up the database to `<install-dir>`, pulls the code, rebuilds, restarts, waits for the server to be healthy, and offers to update the runners when their code changed. Docs/23 covers the runners, backups and what to do if an update goes wrong.
 
-**The runner** (roughly weekly, for new Claude Code releases, and after any change under `apps/runner`, `apps/launcher` or `packages/shared`). It builds a new image and checks it. With the launcher on, Boss Man then drains (nothing new starts, runs finish) and swaps each runner when its company is idle. It doesn't back up anything.
-
-```sh
-cd $B/src && scripts/update-runner.sh
-```
-
-Follow it in the status box at the top of **Settings > Server and runner > Updates**, which also has **Cancel the runner update**. The script asks Boss Man to drain through the folder in `BOSSMAN_DEPLOYER`. If that folder has no `inbox` (you haven't set up the host deployer), it tells you to start the swap in Boss Man with **Update runners (finish runs first)** on the same card. With the host deployer set up, that button is under **For a hand-built runner image**. To undo, run `scripts/update-runner.sh --rollback`.
-
-**Update from the web page (optional).** With the host deployer, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates** appears. Set it up with [docs/30-in-app-updates.md](30-in-app-updates.md).
-
-Before each update, read [docs/23-updating.md](23-updating.md).
+To update from the web page instead, with one approval on **Decisions**, set up the host deployer: [docs/30-in-app-updates.md](30-in-app-updates.md).
 
 ## Security notes
 
@@ -375,7 +373,7 @@ Before each update, read [docs/23-updating.md](23-updating.md).
 - **Never paste tokens into chats, tickets or wiki pages.** Anything an agent can read, it may repeat.
 - **Back up `secrets/master.key` off the host.** Without it, stored secrets can't be decrypted.
 - **Give git tokens the least access needed:** only the repos the company works on.
-- **Protect your default branch** so agents can only land reviewed pull requests, especially if you set up Deploy latest.
+- **Protect your default branch** so agents can only land reviewed pull requests, especially if you set up updates from the web page.
 
 ## Next steps
 
@@ -385,8 +383,8 @@ Before each update, read [docs/23-updating.md](23-updating.md).
 - [docs/20-https-tailscale.md](20-https-tailscale.md): HTTPS through Tailscale, for access away from home.
 - [docs/32-proxmox.md](32-proxmox.md): running Boss Man on Proxmox (use a VM).
 - [docs/21-move-to-new-host.md](21-move-to-new-host.md): moving Boss Man to another Docker host.
-- [docs/06-install-truenas.md](06-install-truenas.md): a worked example on TrueNAS SCALE, with backups, blue/green and the feedback portal.
-- [docs/09-self-deploy.md](09-self-deploy.md): how "Deploy latest", the drain and blue/green updates work.
+- [docs/06-install-truenas.md](06-install-truenas.md): TrueNAS SCALE extras: the dataset, snapshots, blue/green and the feedback portal.
+- [docs/09-self-deploy.md](09-self-deploy.md): how updates from the web page, the drain and blue/green updates work.
 - [docs/12-runner-add-ons.md](12-runner-add-ons.md): optional tools in the runner image, such as a browser for agents.
 - [docs/14-paperclip-migration.md](14-paperclip-migration.md): move a company over from Paperclip, as an optional later step.
 - [docs/11-import-export.md](11-import-export.md): export a company as a backup or import one (**Settings > Import and export**).

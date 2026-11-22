@@ -35,9 +35,13 @@ Pick a `--wait` selector that only the finished screen has (a section id, not `h
 
 Why hand-run Chromium failed on the runner (BOS-1053): (1) the run's temp path is long and Chromium's socket path limit is 107 characters ("Socket path too long", the crash on its temp folder); the script points `TMPDIR` at a short link. (2) `/dev/shm` on the runner is 64 MB and can be nearly full, so pointing Chromium at it, or letting it use it for renderer memory, gives a blank page; the script passes `--disable-dev-shm-usage` and never writes there except the link.
 
+## Claims about a video or image
+
+Any claim about a video in owner-facing text (a README line, a ticket reply, a release note) quotes the output of `node scripts/media-facts.mjs FILE`: duration, size, resolution, frame rate, and `audio: yes` or `audio: no (silent)` with the track list. Never copy such a claim from another reply: the README once said "with sound" about a video that had no audio track (BOS-1569). The script reads MP4/WebM files in plain Node and uses `ffprobe` when it is installed, so it works on the runner. For an image, quote the pixel size from a measured source (the screenshot script's output, or `file`), not from memory.
+
 ## When a ticket names a device
 
-The generic phone size above is not the owner's phone. Each of the owner's browsers is recorded as a device profile (Settings → Server and runner → Your devices) and saved as `apps/web/test/device-profiles/*.json`. So the acceptance line for a UI ticket that names a device is:
+The generic phone size above is not the owner's phone. Each of the owner's browsers is recorded as a device profile (Settings → Server and runner → Devices and privacy, in the "Your devices" section) and saved as `apps/web/test/device-profiles/*.json`. So the acceptance line for a UI ticket that names a device is:
 
 > checked at that device's recorded profile (profile rendering test) as well as the plain-http phone check above
 

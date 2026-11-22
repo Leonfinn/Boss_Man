@@ -105,8 +105,7 @@ describe("feature state toggles", () => {
 
     unmount();
     render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Filter" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
+    // The view is now saved with the other filters, so the Features view is already on after a reload.
     expect(await screen.findByRole("article", { name: "Feature Old idea" })).toBeTruthy();
     expect(screen.queryByRole("article", { name: "Feature Export" })).toBeNull();
   });
@@ -169,6 +168,70 @@ describe("board lanes", () => {
     expect(within(mine).getByText("Senior Developer approved. Needs your sign-off to merge.")).toBeTruthy();
     expect(within(mine).getAllByRole("link", { name: "Review and approve" })[0]!.getAttribute("href")).toBe("#/tickets/t6");
     expect(within(mine).getByText("No agent can review this. Open it to approve or send it back.")).toBeTruthy();
+    columns.pop();
+  });
+
+  // BOS-1565: approved tickets Boss Man holds until another ticket is live sat in a "Passed, held" lane off screen,
+  // while "Approved, merging" said 0 and gave no pointer.
+  it("says what held approved tickets wait for, and points to them from the empty merging lane", async () => {
+    const hold = { id: "h1", system: true, reason: "x", reviewer: null, releaseAt: null, ready: false, label: "waits on BOS-1557", waits: [] };
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t10", title: "Held by Boss Man", reviewStage: "held", hold })] });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const merging = await screen.findByRole("region", { name: "Approved, merging" });
+    expect(within(merging).getByText(/Nothing is merging right now\. 1 approved task is held/)).toBeTruthy();
+    const held = screen.getByRole("region", { name: "Passed, held" });
+    expect(within(held).getByText(/the merge waits on another ticket to be merged and live/)).toBeTruthy();
+    expect(within(held).getByTestId("board-held-note").textContent).toBe("Approved. Boss Man holds the merge: waits on BOS-1557. It merges by itself afterwards.");
+    columns.pop();
+  });
+
+  // BOS-1636: merged work in Blocked that only waits for its live check has its own lane and says what it waits for.
+  it("puts merged tickets waiting for a live check in their own Blocked sub-lane", async () => {
+    columns.push({
+      id: "c4",
+      name: "Blocked",
+      systemState: "blocked",
+      wipLimit: null,
+      tickets: [
+        card({ id: "t20", title: "Really stuck", systemState: "blocked" }),
+        card({ id: "t21", title: "Waits for server", systemState: "blocked", mergeCommit: "a".repeat(40), goLiveNote: { text: "Merged. Waiting to go live: the server update.", cardId: "d1" } }),
+        card({ id: "t22", title: "Waits for report", systemState: "blocked", mergeCommit: "b".repeat(40) }),
+        card({ id: "t23", title: "Waits for owner", systemState: "blocked", mergeCommit: "c".repeat(40), ownerQuestionId: "d9" }),
+        // BOS-1907: a split-out check ticket joins through its parent; a recorded watch shows its line and end date.
+        card({ id: "t24", title: "Check ticket", systemState: "blocked", checksParentMerged: true }),
+        card({ id: "t25", title: "Watches a week", systemState: "blocked", mergeCommit: "d".repeat(40), watchingFor: "a week of real use", watchEndsAt: "2026-12-03T00:00:00.000Z", watchUntil: "2026-12-03T00:00:00.000Z" }),
+      ],
+    });
+    // An older merged ticket still in In progress shows in the same lane, not in In progress (criterion 7).
+    columns.push({ id: "c2", name: "In progress", systemState: "in_progress", wipLimit: null, tickets: [card({ id: "t26", title: "Old merged row", systemState: "in_progress", mergeCommit: "e".repeat(40), watchEndsAt: "2026-12-03T00:00:00.000Z" })] });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const lane = await screen.findByRole("region", { name: "Merged, watching" });
+    // BOS-1909: a parked lane shows 4 cards, then "Show N more" (6 cards here).
+    fireEvent.click(within(lane).getByRole("button", { name: "Show 2 more" }));
+    expect(within(lane).getByText("Check ticket")).toBeTruthy();
+    expect(within(lane).getByText("Old merged row")).toBeTruthy();
+    expect(within(lane).getByText(/Watching for: a week of real use · until /)).toBeTruthy();
+    expect(within(lane).getByText("Waits for server")).toBeTruthy();
+    expect(within(lane).getByText("Merged. Waiting to go live: the server update.")).toBeTruthy();
+    expect(within(lane).getAllByText(/Waiting for the agent to report the after-merge check/).length).toBeGreaterThan(0);
+    expect(within(lane).getAllByRole("link", { name: "Open the card" }).map((a) => a.getAttribute("href")).sort()).toEqual(["#/decisions/d1", "#/decisions/d9"]);
+    expect(within(lane).queryByText("Really stuck")).toBeNull();
+    const blocked = screen.getByRole("region", { name: "Blocked" });
+    expect(within(blocked).getByText("Really stuck")).toBeTruthy();
+    expect(within(blocked).queryByText("Waits for report")).toBeNull();
+    columns.pop();
+    columns.pop();
+  });
+
+  it("keeps the plain empty text when nothing is held or merging", async () => {
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [] });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const merging = await screen.findByRole("region", { name: "Approved, merging" });
+    expect(within(merging).getByText("Nothing approved is waiting to merge.")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Passed, held" })).toBeNull();
     columns.pop();
   });
 

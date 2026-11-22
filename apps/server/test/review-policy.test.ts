@@ -181,8 +181,10 @@ describe("an approval whose merge fails", () => {
     expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_failed"))))[0]?.summary).toBe("Approved, but the merge couldn't run: The runner went away");
     const [d] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`));
     expect(d).toMatchObject({ status: "open", tier: "ceo", options: ["Run the check again", "Send it back to the agent"] });
+    // BOS-1873: the CEO gets the first hour, so the owner's queue doesn't show it yet.
+    expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((x) => x.id)).not.toContain(d!.id);
     // It holds up the approved ticket, so it ranks above a question that blocks nothing.
-    const queued = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string; blocks: Array<{ ticketId: string }>; score: number }>;
+    const queued = (await c.decisions.queue({ companyId: c.company.id, includeAll: true })) as Array<{ id: string; blocks: Array<{ ticketId: string }>; score: number }>;
     expect(queued.find((x) => x.id === d!.id)).toMatchObject({ blocks: [expect.objectContaining({ ticketId: t.id })], score: expect.any(Number) });
     expect(queued.find((x) => x.id === d!.id)!.score).toBeGreaterThan(0);
 
@@ -397,6 +399,42 @@ describe("review policy API", () => {
     expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, p)).statusCode).toBe(400);
     expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, { low: {} })).statusCode).toBe(400);
     expect((await c.req("GET", `/api/companies/${c.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
+  });
+
+  it("writes a settings line in the activity log for each successful change, and none for a refused one (BOS-1969)", async () => {
+    const c = await setup();
+    const lines = async () => (await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")))).map((a) => a.summary);
+    const before = await lines();
+    const rival = (await c.req("POST", "/api/companies", { name: "Rival Co" })).json();
+    const bad = structuredClone(DEFAULT_REVIEW_POLICY);
+    bad.low.reviewer = rival.ceo.id;
+    const missing = randomUUID();
+    // Refused (400) and unknown (404) requests write nothing.
+    expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, bad)).statusCode).toBe(400);
+    expect((await c.req("PUT", `/api/companies/${missing}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(404);
+    expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, bad)).statusCode).toBe(400);
+    expect((await c.req("PUT", `/api/projects/${missing}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(404);
+    expect((await c.req("DELETE", `/api/projects/${missing}/review-policy`)).statusCode).toBe(404);
+    expect(await lines()).toEqual(before);
+    // Each successful change writes its own line.
+    expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(200);
+    expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, DEFAULT_REVIEW_POLICY)).statusCode).toBe(200);
+    expect((await c.req("DELETE", `/api/projects/${c.project.id}/review-policy`)).statusCode).toBe(200);
+    expect((await lines()).filter((s) => !before.includes(s)).sort()).toEqual(
+      ["Owner changed the review policy", "Owner changed the review policy for project Customer app", "Owner reset project Customer app to the company review policy"].sort(),
+    );
+  });
+
+  it("editing a project's settings writes one settings line naming the fields, not the values, and a refused edit writes none (BOS-1987)", async () => {
+    const c = await setup();
+    const lines = async () => (await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")))).map((a) => a.summary);
+    const before = await lines();
+    expect((await c.req("PATCH", `/api/projects/${randomUUID()}`, { verifyCommand: "make test" })).statusCode).toBe(404);
+    expect((await c.req("PATCH", `/api/projects/${c.project.id}`, { monthlyCapUsd: -1 })).statusCode).toBe(400);
+    expect(await lines()).toEqual(before);
+    const ok = await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "secret-check-cmd", monthlyCapUsd: 12.5 });
+    expect(ok.statusCode).toBe(200);
+    expect((await lines()).filter((s) => !before.includes(s))).toEqual(["Owner changed project Customer app: verifyCommand, monthlyCapUsd"]);
   });
 
   it("gives a new company a security review on high and critical work, and leaves existing companies alone (BOS-824)", async () => {

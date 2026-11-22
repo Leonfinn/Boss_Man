@@ -20,9 +20,14 @@ check docs/x no
 check apps/runner/Dockerfile yes
 check apps/launcher/src/m.ts yes
 check apps/netguard/netguard.sh yes
-check packages/shared/i.ts yes
+check packages/shared/src/i.ts yes
 check pnpm-lock.yaml yes
 check apps/runner-extra/y no
+# BOS-1648: only what the image builds COPY in counts; tests beside the code don't, a script the runner image copies does.
+check packages/shared/test/i.test.ts no
+check apps/runner/test/r.test.ts no
+check scripts/check-slot.sh yes
+check apps/server/package.json no
 
 # --commit deploys exactly that commit even when main has moved on, using a fake docker.
 cd /; t="$(mktemp -d)"; trap 'rm -rf "$d" "$t"' EXIT
@@ -36,7 +41,7 @@ mkdir "$t/bin"; cat >"$t/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
-  *pg_dump*) echo dump ;; *"config --services"*) echo server ;; *"ps -q"*) echo cid ;; *inspect*) echo "${FAKE_HEALTH:-healthy}" ;;
+  *pg_dump*) echo dump ;; *"config --services"*) printf 'server\nbackup\n' ;; *"ps -q"*) echo cid ;; *inspect*) echo "${FAKE_HEALTH:-healthy}" ;;
   *"logs --no-color"*) echo "Error: EACCES: permission denied, open '/app/x.ts'" ;;
 esac
 FAKE
@@ -48,6 +53,8 @@ PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/nu
 grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: status result"; exit 1; }
 grep -q "\"to_commit\":\"$two\"" "$t/backups/deploy-status.json" || { echo "FAIL: status commit"; exit 1; }
 grep -q "compose up -d" "$FAKE_LOG" || { echo "FAIL: did not restart"; exit 1; }
+# BOS-2176: an update also starts the daily backup service (an older install would never get it otherwise).
+grep -q "compose up -d --no-deps backup" "$FAKE_LOG" || { echo "FAIL: did not ensure the daily backup service"; exit 1; }
 ! grep -E "compose (up|run) " "$FAKE_LOG" | grep -v -- "--no-deps" | grep -q . || { echo "FAIL: a compose up/run without --no-deps"; exit 1; }
 for f in "$t"/backups/bossman-*.sql.gz; do [[ "$(stat -c %a "$f")" == 600 ]] || { echo "FAIL: backup is not mode 600 under umask 022"; exit 1; }; done
 git reset -q --hard "$three"
@@ -120,6 +127,16 @@ grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: r
 git reset -q --hard "$one"; : >"$FAKE_LOG"
 PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null
 ! grep -q -- "--force-recreate" "$FAKE_LOG" || { echo "FAIL: a normal deploy force-recreated"; exit 1; }
+# BOS-1588: a good deploy refreshes the host's copy of the deployer; a refresh that can't be done only warns.
+cp "$here/install-deployer.sh" scripts/; printf '#!/usr/bin/env bash\necho fresh\n' >scripts/host-deployer.sh
+mkdir -p "$t/deployer"; chmod 755 "$t/deployer"; printf 'stale\n' >"$t/deployer/host-deployer.sh"; chmod 750 "$t/deployer/host-deployer.sh"
+git reset -q --hard "$one"; : >"$FAKE_LOG"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/refresh.out" 2>&1 || { echo "FAIL: deploy with a deployer copy"; cat "$t/refresh.out"; exit 1; }
+cmp -s scripts/host-deployer.sh "$t/deployer/host-deployer.sh" || { echo "FAIL: deploy did not refresh the deployer copy"; exit 1; }
+printf 'stale\n' >"$t/deployer/host-deployer.sh"; chmod 777 "$t/deployer"; git reset -q --hard "$one"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/refresh.out" 2>&1 || { echo "FAIL: a refresh failure failed the deploy"; cat "$t/refresh.out"; exit 1; }
+grep -q "deployer copy was not refreshed" "$t/refresh.out" || { echo "FAIL: no warning when the refresh failed"; exit 1; }
+chmod 755 "$t/deployer"
 # The readable-check is one text in the three scripts.
 for s in rebuild-live host-deployer; do
   [[ "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/$s.sh")" == "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/deploy.sh")" ]] || { echo "FAIL: readable-check in $s.sh differs from deploy.sh"; exit 1; }

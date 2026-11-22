@@ -37,7 +37,8 @@ function answer(p: string): unknown {
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
   if (p === "/api/private-details") return { total: 0, counts: {} };
-  if (p === "/api/netguard-allow") return { report: null };
+  // The Network guard section only shows once a runner has reported (the panel hides itself with no report), so the walk gives it one.
+  if (p === "/api/netguard-allow") return { report: { mode: "on", entries: [], lineCanGo: false, automatic: [], env: { lines: [], reportedAt: now(), envFound: true }, warnings: [] } };
   if (p === "/api/host-facts") return { hostName: "host", reportedAt: now(), ownerFacts: [], facts: {} };
   if (p === "/api/companies/c1/projects") return [{ id: "p1", companyId: "c1", name: "Boss Man", starred: false }];
   if (p === "/api/policy-rules") return { company: [], global: [], defaults: [], shadowedIds: [] };
@@ -151,7 +152,13 @@ const MAP: Record<string, string[]> = {
   team: ["Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references"],
   watchdog: ["Watchdog"],
   permissions: ["Advice on permission cards", "Second opinion from a model (optional)", "Agent fence"],
-  system: ["Updates", "Stop all work", "Runner", "Workspace disk", "Agents at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
+  // "Server and runner" is six pages (BOS-1492); each of its old panels is on the page the BOS-1491 table gives it.
+  updates: ["Updates", "Stop all work"],
+  limits: ["Agents at once", "Tickets in progress", "Checks"],
+  runner: ["Runner", "Workspace disk"],
+  email: ["Outgoing email"],
+  server: ["Server", "This host", "Network guard"],
+  devices: ["Your devices", "Private details to block"],
   transfer: ["Import a company"],
 };
 const SIZES = [
@@ -161,11 +168,13 @@ const SIZES = [
 ];
 
 describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page", () => {
-  it("shows each mapped section, with no page error, at desktop, foldable and phone sizes", async () => {
+  // One test per size (BOS-1708): the three sizes walked in one test shared a single 90 s budget, which GitHub's
+  // slower runners overran; each size now has its own, and the walk waits for each page's events, not a sleep.
+  for (const vp of SIZES) it(`shows each mapped section, with no page error, at ${vp.name}`, async () => {
     const browser = await launch();
     if (!browser) return;
     try {
-      for (const vp of SIZES) {
+      {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
         const errors: string[] = [];
         const wide: string[] = [];
@@ -175,7 +184,22 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           await page.waitForSelector(".set-page h2", { timeout: 8000 }).catch(async (e: any) => {
             throw new Error(`${vp.name}: ${id} shows no section: ${String(e).slice(0, 80)}; page says ${JSON.stringify((await page.locator("body").innerText()).slice(-300))}`);
           });
-          await new Promise((r) => setTimeout(r, 500));
+          // Wait for the mapped headings to show (a section that loads its own answer draws them late), with a
+          // deadline; a miss falls through to the assertion below, which names what was found.
+          await page
+            .waitForFunction(
+              (hs: string[]) => {
+                const texts = [...document.querySelectorAll(".set-page h2, .set-page h3")].map((e) => (e.textContent ?? "").trim());
+                return hs.every((h) => texts.some((f) => f === h || f.startsWith(h)));
+              },
+              headings,
+              { timeout: 10_000, polling: 100 },
+            )
+            .catch(() => undefined);
+          if (id === "funding") {
+            await page.waitForSelector(".set-page .source-card", { timeout: 10_000 }).catch(() => undefined);
+            await page.waitForSelector(".set-page table", { timeout: 10_000 }).catch(() => undefined);
+          }
           const found = (await page.locator(".set-page h2, .set-page h3").allInnerTexts()).map((t: string) => t.trim());
           for (const h of headings) {
             expect(found.some((f: string) => f === h || f.startsWith(h)), `${vp.name}: "${h}" on ${id}; found ${JSON.stringify(found)}; errors ${JSON.stringify(errors)}; body ${JSON.stringify((await page.locator("main, body").first().innerText()).split("TypeError")[1]?.slice(0, 200))}`).toBe(true);
@@ -200,18 +224,46 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
   }, 90_000);
 
   // BOS-1063: a plain "#id" link replaced the route and sent the owner to the dashboard.
-  it("every 'On this page' link keeps the route and brings its own section into view", async () => {
+  // One test per size (BOS-1708), for the same reason as the walk above.
+  for (const vp of SIZES) it(`every 'On this page' link keeps the route and brings its own section into view at ${vp.name}`, async () => {
     const browser = await launch();
     if (!browser) return;
     try {
-      for (const vp of SIZES) {
+      {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
-        for (const id of ["team", "permissions", "system"]) {
+        for (const id of ["team", "permissions"]) {
+          // A hash change keeps the old page's links on screen for a moment, which the wait below would take for
+          // the new page's; a blank page in between gives each id a clean start.
+          await page.goto("about:blank");
           await page.goto(`${base}/#/settings/c1/${id}`);
-          await page.waitForSelector(".set-jump a", { timeout: 8000 });
-          await new Promise((r) => setTimeout(r, 500));
-          const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
-          expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
+          // The links can draw, vanish and draw again while the section loads its answer, so "more than 3 links"
+          // must hold for a moment before they are read (the old 500 ms sleep stood in for this hold). The wait
+          // also returns the links it saw holding, rather than reading them again after it: a separate read is a
+          // later round-trip, and a section reloading its answer in between could empty the list and be read as 0.
+          const held = await page
+            .waitForFunction(
+              () => {
+                const w = window as any;
+                const links = Array.from(document.querySelectorAll(".set-jump a")).map((a) => (a.getAttribute("href") || "").slice(1));
+                if (links.length <= 3) {
+                  w.__jumpSince = 0;
+                  return false;
+                }
+                w.__jumpSince = w.__jumpSince || Date.now();
+                return Date.now() - w.__jumpSince >= 400 ? links : false;
+              },
+              undefined,
+              { timeout: 10_000, polling: 100 },
+            )
+            .catch(() => undefined);
+          const hrefs: string[] = held ? ((await held.jsonValue()) as string[]) : [];
+          // If the hold never held, say what the page actually showed (its jump links and headings), so the next
+          // bounce tells whether the page was still drawing or the section ids were missing.
+          const seen =
+            hrefs.length > 3
+              ? ""
+              : `; saw links ${JSON.stringify(await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href"))))}, headings ${JSON.stringify(await page.locator(".set-page h2, .set-page h3").allInnerTexts())}`;
+          expect(hrefs.length, `${vp.name}/${id} has jump links${seen}`).toBeGreaterThan(3);
           for (const target of hrefs) {
             // Bring the section into view and confirm it settles there (BOS-1319/BOS-1336). A single click + "is it
             // in view once" is not enough: the page can still be growing (a section above shows "Loading…" until
@@ -244,10 +296,6 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
             }
             expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
             expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
-            // Proof pictures on request: BOSSMAN_SHOT_DIR=<folder> saves the page after the Checks jump.
-            if (process.env.BOSSMAN_SHOT_DIR && id === "system" && target === "check-queue-h") {
-              await page.screenshot({ path: path.join(process.env.BOSSMAN_SHOT_DIR, `after-checks-${vp.name}.png`) });
-            }
           }
         }
         await page.close();
@@ -279,6 +327,8 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
       ["settings/c1/workflow", "settings/c1/reviews"],
       ["rules/c1", "settings/c1/permissions"],
       ["settings/c1/gone", "settings"],
+      // BOS-1492: the one-page "Server and runner" opens Updates, the first of its six pages.
+      ["settings/c1/system", "settings/c1/updates"],
     ]);
   }, 60_000);
 

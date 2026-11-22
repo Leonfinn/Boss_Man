@@ -33,6 +33,15 @@
 #                          outbox/headroom.json, with the live server's own use (liveServerMb) beside it.
 #   DEPLOY_BUILD_MEMORY_MB what an image build needs (3072); the deployer logs the lowest free memory of each update to tune it
 #   DEPLOY_NEW_SERVER_MB   blue/green: what a freshly started server colour needs (4096)
+#   STAGING_DIR            the staging install folder (its own checkout, docs/22-staging.md). Empty = the staging lane is off.
+#                          With it set, inbox/staging-request.json (the same five-field format, target "staging") deploys a
+#                          commit that is on main to staging with scripts/deploy-staging.sh, runs scripts/smoke-staging.sh, and
+#                          writes outbox/staging-status.json and outbox/staging-lane.json. Never touches production's files.
+#   STAGING_RATE_LIMIT_SECONDS  min gap between two staging deploys (300)
+#   STAGING_TIMEOUT_SECONDS     longest a staging deploy may run before it is stopped (1800). The lane shares the deployer's one lock, so
+#                               a production request that arrives meanwhile waits for it (at most this long, and an urgent one too).
+# The smoke checks sign in with an optional smoke account: a file $BOSSMAN_DEPLOYER/smoke-credentials (same rules as host.conf:
+# plain file, owned by the user running this, mode 600) holding smoke_username=<name> and smoke_password=<password>. Without it those checks are skipped.
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
 # names deploy/truenas-bluegreen.yml, target "server" does a zero-downtime colour swap instead of deploy.sh.
@@ -49,8 +58,13 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron'
 D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
+STAGING_DIR="" STAGING_RATE_LIMIT_SECONDS=300 STAGING_TIMEOUT_SECONDS=1800 # the staging lane (BOS-1472); off while STAGING_DIR is empty
 BG_STOP_SECONDS="${BG_STOP_SECONDS:-60}" # a planned stop's grace before Docker sends SIGKILL (BOS-794); the server's shutdown drains work
 [[ $BG_STOP_SECONDS =~ ^[0-9]{1,4}$ ]] || BG_STOP_SECONDS=60
+# BOS-2058 (rule b): the idle colour's build has an end of its own. A build that hangs is stopped here, the update fails
+# and the live colour stays; the server's "server-build" wait ends at 45 min, so this stays inside it.
+BG_BUILD_SECONDS="${BG_BUILD_SECONDS:-2400}"
+[[ $BG_BUILD_SECONDS =~ ^[0-9]{1,5}$ ]] || BG_BUILD_SECONDS=2400
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
 DEPLOY_MIN_FREE_MB="${DEPLOY_MIN_FREE_MB:-}" DEPLOY_BUILD_MEMORY_MB="${DEPLOY_BUILD_MEMORY_MB:-3072}" DEPLOY_NEW_SERVER_MB="${DEPLOY_NEW_SERVER_MB:-4096}"
 # Where memory is read from (the tests point these at files of their own).
@@ -63,12 +77,15 @@ if [[ -e $CONF ]]; then
 fi
 INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # Files that change how Boss Man runs or deploys. Build-only scripts (make-app-icons, check-*, test-*, lint-migrations, backups) are not on it (BOS-269);
-# docs/09-self-deploy.md lists the same files.
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+# docs/09-self-deploy.md lists the same files. scripts/host-deployer.sh stays on the list (BOS-1588, security review): it is
+# what root runs, so a change to it is applied by the owner on the hand-apply card; that hand deploy then refreshes the copy
+# itself with scripts/install-deployer.sh (also on the list, as it runs as root).
+INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
-# Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
-RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
+# Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
+# packages/shared/src/go-live.ts: what the runner, launcher and netguard images COPY in, read from their Dockerfiles (BOS-1648).
+RUNNER_PATHS='^(apps/runner/Dockerfile$|apps/runner/package\.json$|apps/runner/src/|apps/runner/claude-pack/|apps/launcher/Dockerfile$|apps/launcher/package\.json$|apps/launcher/tsconfig\.json$|apps/launcher/tsconfig\.build\.json$|apps/launcher/src/|apps/netguard/Dockerfile$|apps/netguard/netguard\.sh$|packages/shared/package\.json$|packages/shared/src/|scripts/check-slot\.sh$|scripts/scan-added-lines\.mjs$|scripts/scan-allow\.txt$|package\.json$|pnpm-workspace\.yaml$|pnpm-lock\.yaml$|tsconfig\.base\.json$|NOTICE$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
@@ -267,11 +284,14 @@ compose_project() {
 # commit, so relative bind mounts render the same and don't look like a change), with the checkout's own .env, and
 # rendered under the live project's name and a pinned BOSSMAN_COMMIT, so nothing differs but the settings themselves.
 # Nothing in the checkout is touched. Returns non-zero (and logs why) when it can't render.
+unpack_commit() { (set -o pipefail; g archive "$1" | tar -x -C "$RENDER_DIR"); } # commit: into $RENDER_DIR
 render_hashes() { # commit project
   local commit=$1 project=$2 out="" rc=0
   [[ -n $project ]] || { log "Service compare: could not tell the compose project name."; return 1; }
   rm -rf "$RENDER_DIR"; mkdir -p "$RENDER_DIR"
-  if ! (set -o pipefail; g archive "$commit" | tar -x -C "$RENDER_DIR") 2>>"$LOG"; then
+  # A function and not `if ! ( … ) 2>>"$LOG"`: bash does not apply the `!` when a group's or subshell's own redirect
+  # fails, so that form would carry on unpacked (BOS-1689). scripts/negated-redirect.test.sh guards the pattern.
+  if ! unpack_commit "$commit" 2>>"$LOG"; then
     log "Service compare: could not unpack ${commit:0:8}."; rm -rf "$RENDER_DIR"; return 1
   fi
   # The commit may carry its own .env or secrets (even a link to another file): remove them first, so the copy below
@@ -357,7 +377,10 @@ refresh_available() {
   if [[ $tip != "$head" ]]; then
     g fetch --quiet origin main || { log "git fetch failed; will try again."; return 0; }
     if g merge-base --is-ancestor "$head" "$tip"; then
-      g log --format='%H %s' -n 30 "$head..$tip" >"$commits"
+      # The whole range, never a page of it: the card's change count, its ticket list and the "urgent fix" heading are all
+      # read from this list. Until BOS-1826 it stopped at the newest 30 (-n 30), so a long gap between deploys showed
+      # "30 changes" and dropped older merges, live fixes among them. A line is ~120 bytes, so even 1,000 commits is small.
+      g log --format='%H %s' "$head..$tip" >"$commits"
       g diff --name-only "$head" "$tip" >"$paths"
     else
       tip="" # main is not a fast-forward of what runs: nothing can be offered
@@ -368,12 +391,14 @@ refresh_available() {
     [[ -n ${line//[[:space:]]/} ]] || continue
     sha="${line%% *}"; out+="$sep{\"sha\": $(jstr "$sha"), \"subject\": $(jstr "${line#* }")}"; sep=", "
   done <"$commits"
-  local clist="[$out]" plist="" ilist="" runner=false n=0 ni=0
+  local clist="[$out]" plist="" ilist="" runner=false
   sep="" out=""
+  # Every changed path, uncapped (BOS-1826): the card counts files and migrations from this list and looks in it for
+  # scripts/host-deployer.sh, which git lists late (paths are sorted), so the old 300-path cap could hide the copy step.
   while IFS= read -r p; do
     [[ -n ${p//[[:space:]]/} ]] || continue
-    if ((n < 300)); then plist+="$sep$(jstr "$p")"; sep=", "; n=$((n + 1)); fi
-    if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]] && ((ni < 50)); then ilist+="${ilist:+, }$(jstr "$p")"; ni=$((ni + 1)); fi
+    plist+="$sep$(jstr "$p")"; sep=", "
+    if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]]; then ilist+="${ilist:+, }$(jstr "$p")"; fi
     if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
   done <"$paths"
   # What this install really looks like, so the owner's hand-apply steps never guess a folder (BOS-269).
@@ -652,8 +677,17 @@ host_extra_facts() {
       # deployer reads main itself, so a failed main read is only a probe failure when HEAD fails too).
       local errf="$STATE/repo-probe.err" rc=0 ok=0
       : >"$errf" 2>/dev/null || true
-      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
-      if ((!ok)) && (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
+      # BOS-1584: the probe must reach origin exactly as a deploy's `g fetch` does. Git ranks GIT_SSH_COMMAND above the
+      # checkout's `core.sshCommand` (where the docs put the deploy key, `-i key -o IdentitiesOnly=yes`), so setting
+      # GIT_SSH_COMMAND to a bare `ssh` dropped the key and said "Permission denied (publickey)" on a host whose
+      # deploys work. Start from the command a deploy would use (the environment's, else the checkout's setting, else
+      # `ssh`) and only add the no-prompt options; ssh keeps the first value of an option, so the key stays.
+      local sshbase="${GIT_SSH_COMMAND:-}"
+      [[ -n $sshbase ]] || sshbase="$(g config --get core.sshCommand 2>/dev/null || true)"
+      [[ -n $sshbase ]] || sshbase="ssh"
+      local probe_ssh="$sshbase -o BatchMode=yes -o ConnectTimeout=10"
+      if (GIT_SSH_COMMAND="$probe_ssh" timeout 20 git -C "$REPO" ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
+      if ((!ok)) && (GIT_SSH_COMMAND="$probe_ssh" timeout 20 git -C "$REPO" ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
       if ((ok)); then probe=ok; else probe=failed; fi
       probed="$(now)"
       # One short line saying which part failed, secret-free: drop anything that looks like a URL or a credential,
@@ -752,6 +786,18 @@ host_extra_facts() {
       nparts+="${nparts:+, }\"serverReach\": $reach"
     fi
   fi
+  # BOS-1589: after an ntfy restart a phone that does not reconnect gets no push. Two host facts make that visible:
+  # when this ntfy container last started, and how many subscribers (open phone connections) it has right now.
+  # Subscribers come from ntfy's own metrics, served on an in-container-only port (deploy/ntfy.yml), read with
+  # `docker exec`; nothing is published. A count of 0 shortly after startedAt is a silent phone. Left out when unreadable.
+  if [[ -n $ncont ]]; then
+    local nstart nsubs
+    # shellcheck disable=SC2016 # Go template for docker
+    nstart="$(dk inspect -f '{{.State.StartedAt}}' "$ncont")" || nstart=""
+    [[ $nstart =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$ ]] && nparts+="${nparts:+, }\"startedAt\": $(jstr "$nstart")"
+    nsubs="$(dk exec "$ncont" wget -qO- http://localhost:9090/metrics </dev/null | sed -n 's/^ntfy_subscribers_total \([0-9][0-9]*\).*/\1/p' | head -n1)" || nsubs=""
+    [[ $nsubs =~ ^[0-9]{1,9}$ ]] && nparts+="${nparts:+, }\"subscribers\": $nsubs"
+  fi
   [[ -n $nparts ]] && out+="$sep\"ntfy\": {$nparts}"
   # --- BOS-1004: can this host seal a phone-login password? (openssl is what "Create phone login" needs)
   if command -v openssl >/dev/null 2>&1; then out+="$sep\"phoneLogin\": {\"openssl\": true}"; else out+="$sep\"phoneLogin\": {\"openssl\": false}"; fi
@@ -827,6 +873,13 @@ host_extra_facts() {
       local i
       for i in "${!idsarr[@]}"; do exit_code["${idsarr[i]}"]="${ecodes[i]:-}"; done
     fi
+    # Is the live colour's server container running? (BOS-1584: the standby filter below needs it.)
+    local live_up=false
+    if [[ -n $colour ]]; then
+      while IFS=$'\t' read -r _ _ cstate_str _ _ _ csvc; do
+        [[ $csvc == "server-$colour" && $cstate_str == running ]] && live_up=true
+      done <"$listing"
+    fi
     while IFS=$'\t' read -r cid cname cstate_str cstatus csince _ csvc; do
       [[ -n $cstate_str ]] || continue
       # One entry per container name: a stack run twice on one host (BOS-986's duplicate compose-file entry on
@@ -858,6 +911,10 @@ host_extra_facts() {
       # finished window, so a stopped colour is never counted as "not running" (a colour that crashed exits non-zero
       # and is counted below).
       if [[ $cexit == 0 && $csvc =~ ^server-(blue|green)$ ]]; then continue; fi
+      # BOS-1584: the standby after a swap is stopped with `docker stop`, which ends in exit 137 when the server does not
+      # quit within the grace time. So when the live colour is known and its container is up, the other colour is meant
+      # to be stopped whatever its exit code. A crashed live colour is never hidden: it is the one that is not up.
+      if [[ -n $colour && $csvc =~ ^server-(blue|green)$ && $csvc != "server-$colour" && $live_up == true ]]; then continue; fi
       notrun=$((notrun + 1))
       # `exit` is a string, never bare: if instead of a number inspect returns nothing (the container was removed
       # between ps and inspect, or inspect was denied), a bare value would leave `"exit": ,` and break the whole
@@ -882,10 +939,10 @@ host_extra_facts() {
 }
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
-do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
+do_deploy_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
 # A restart on a single server (BOS-647): --force rebuilds and recreates what is checked out; --commit pins it to the
 # commit the request named, which main() has already checked is HEAD, so nothing new can come in.
-do_restart_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
+do_restart_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
 # so this lock is not held while runs finish. The swap itself is reported by the server.
 do_update_runner() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/update-runner.sh); }
@@ -1035,6 +1092,23 @@ backup_database() {
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
   old="$(find "$dir" -maxdepth 1 -type f -name 'bossman-*.sql.gz' -printf '%T@ %p\n' | sort -rn | tail -n +15 | cut -d' ' -f2-)"
   [[ -z $old ]] || while IFS= read -r f; do rm -f -- "$f"; done <<<"$old"
+  ensure_daily_backup
+}
+
+# The daily backup service (BOS-2176). Swaps name the services they start and use --no-deps, so an install made before
+# that service existed would never start it: every swap and rollback starts it here, right after its own backup. A no-op
+# when it already runs; a failure (an older Compose file without the service, a Docker hiccup) never stops the swap.
+ensure_daily_backup() {
+  # The service sees only a `daily` folder inside the backup folder. Make it here, with the backup folder's owner, so the
+  # files in it stay readable by the host user; Docker would make it root-owned. Best effort: never stops a swap.
+  local bdir="${BOSSMAN_BACKUP_DIR:-$D/..}"
+  if mkdir -p "$bdir/daily" 2>>"$LOG"; then
+    chown --reference="$bdir" "$bdir/daily" 2>/dev/null || true
+  else
+    log "Note: could not make the daily backup folder $bdir/daily."
+  fi
+  compose up -d --no-deps backup >>"$LOG" 2>&1 || log "Note: the daily backup service did not start (docker compose up -d backup); the swap goes on."
+  return 0
 }
 
 BG_RESULT="" BG_MSG="" BG_BACKUP="" BG_LIVE="" BG_IDLE="" BG_PREV=""
@@ -1278,7 +1352,10 @@ do_deploy_bluegreen() {
   mem_start before-build
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
-  BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
+  local brc=0
+  (cd "$REPO" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT="$COMMIT" timeout -k 30 "$BG_BUILD_SECONDS" docker compose build "server-$BG_IDLE") >>"$LOG" 2>&1 || brc=$?
+  if ((brc == 124 || brc == 137)); then pre_fail "Building $BG_IDLE did not finish within $((BG_BUILD_SECONDS / 60)) minutes, so it was stopped."; return 1; fi
+  ((brc == 0)) || { pre_fail "Building $BG_IDLE failed."; return 1; }
   mem_sample after-build
   # Expand-only migrations: the live colour keeps working on the new schema.
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
@@ -1455,6 +1532,154 @@ recover_interrupted() {
   finish failed "The ${TARGET:-deploy} run for ${COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way).$reset Check what runs before deploying again."
 }
 
+# ---- The staging lane (BOS-1472, docs/22-staging.md) ----
+# Staging has its own request, status and history files, so it never shares a slot with production's. It runs under the
+# same lock as everything else (one deployer run at a time), and only when no production request is waiting. It deploys
+# commits that are on main, with the staging checkout's own scripts/deploy-staging.sh, then the smoke checks. Nothing from
+# the request reaches a command line unchecked: the commit is 40 hex characters and must be an ancestor of origin/main.
+S_ID="" S_COMMIT="" S_STARTED="" S_KV=()
+write_staging_status() { # result message
+  ((DRY)) && { log "[dry-run] staging status: $1: $2"; return 0; }
+  local ended=""
+  case $1 in running | held) ;; *) ended="$(now)" ;; esac
+  json id="$S_ID" target=staging result="$1" message="$2" to_commit="$S_COMMIT" started="$S_STARTED" ended="$ended" at="${ended:-$S_STARTED}" ${S_KV[@]+"${S_KV[@]}"} >"$OUTBOX/staging-status.json.tmp"
+  chmod 644 "$OUTBOX/staging-status.json.tmp"
+  mv "$OUTBOX/staging-status.json.tmp" "$OUTBOX/staging-status.json"
+  [[ -z $ended ]] || cat "$OUTBOX/staging-status.json" >>"$OUTBOX/staging-history.jsonl"
+}
+# The last 30 lines this staging run added to the deployer log (from byte offset $1), short lines, secrets blanked, at most
+# 2500 characters, so a failed run's reason is readable from the staging record without opening the host.
+staging_log_tail() { # offset
+  [[ -f $LOG ]] || return 0
+  tail -c +"$(($1 + 1))" "$LOG" 2>/dev/null | tail -n 30 | cut -c1-200 \
+    | sed -E 's/(authorization[=: ]+)(bearer|basic)[ ]+[^ ]+/\1[redacted]/Ig; s/(bearer[ ]+)[^ ]+/\1[redacted]/Ig; s/((token|secret|password|passwd|api[_-]?key|authorization|bearer|credential)[A-Za-z0-9_-]*[=: ]+)[^ ]+/\1[redacted]/Ig; s/(ghp_|github_pat_|sk-|xox[bp]-)[A-Za-z0-9_-]+/[redacted]/g; s#(https?://)[^/@ ]+@#\1[redacted]@#g' \
+    | tail -c 2500 || true
+}
+staging_done() { log "staging $1: $2"; write_staging_status "$1" "$2"; return 0; } # result message: record the outcome; the tick goes on
+staging_lane_file() { # tells the server whether the lane is on, so it only offers a staging target when it can be used
+  ((DRY)) && return 0
+  local on=false origin=""; [[ -z $STAGING_DIR ]] || on=true
+  # Which repository the staging checkout follows (credentials, if any, dropped). The server offers the staging target only to a
+  # company whose project is this repository, so another company's fork can never ask this host to deploy (BOS-1472 review).
+  if [[ $on == true ]]; then origin="$(staging_git remote get-url origin 2>/dev/null | sed -E 's#//[^@/]*@#//#' | head -n 1 || true)"; fi
+  json configured="$on" origin="$origin" >"$OUTBOX/staging-lane.json.tmp"
+  chmod 644 "$OUTBOX/staging-lane.json.tmp"; mv "$OUTBOX/staging-lane.json.tmp" "$OUTBOX/staging-lane.json"
+}
+staging_git() { (umask 022; git -c safe.directory="$STAGING_DIR" -C "$STAGING_DIR" "$@"); }
+smoke_credentials_ok() { # the smoke account file: a plain file of ours, mode 600
+  local f="$D/smoke-credentials"
+  [[ -f $f && ! -L $f && $(stat -c %u "$f") == "$(id -u)" && $(stat -c %a "$f") =~ ^[0-7]00$ ]]
+}
+# A staging deploy that was cut off (host restart, killed deployer, out of memory) leaves staging-status.json at "running" for
+# ever, and the server then refuses every later staging request. Same rule as recover_interrupted: we hold the lock here, so
+# nothing is running; say so. Files only; no container is touched.
+recover_staging_interrupted() {
+  local sf="$OUTBOX/staging-status.json" st
+  [[ -f $sf && ! -L $sf ]] || return 0
+  st="$(cat "$sf")"
+  [[ $(jfield result <<<"$st") == running ]] || return 0
+  ((DRY)) && { log "[dry-run] the last staging run was cut off (status still 'running'); a real tick would mark it failed"; return 0; }
+  S_ID="$(jfield id <<<"$st")" S_COMMIT="$(jfield to_commit <<<"$st")" S_STARTED="$(jfield started <<<"$st")" S_KV=(smoke=skipped)
+  [[ -z $S_ID ]] && S_ID="interrupted-$(date +%s)"
+  staging_done failed "The staging deploy of ${S_COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way). Check what staging runs, then ask again; scripts/deploy-staging.sh --rollback in the staging folder puts the last good commit back."
+}
+staging_tick() {
+  local sreq="$INBOX/staging-request.json"
+  staging_lane_file
+  [[ -e $sreq || -L $sreq ]] || return 0
+  if [[ -z $STAGING_DIR ]]; then
+    # Lane off: answer once so the requester isn't left waiting, and drop the file.
+    S_ID="" S_COMMIT="" S_STARTED="$(now)"
+    # Read the id only from a plain file (a symlink could point at a file the server can't read) and only if it looks like a UUID.
+    if [[ -f $sreq && ! -L $sreq ]]; then S_ID="$(jfield id <"$sreq" 2>/dev/null || true)"; fi
+    [[ $S_ID =~ ^[0-9a-fA-F-]{36}$ ]] || S_ID=""
+    ((DRY)) || rm -f "$sreq"
+    staging_done rejected "Rejected: staging is not configured on this host (STAGING_DIR in host.conf is empty)."; return 0
+  fi
+  [[ $STAGING_RATE_LIMIT_SECONDS =~ ^[0-9]{1,6}$ && $STAGING_TIMEOUT_SECONDS =~ ^[0-9]{1,6}$ ]] || { log "STAGING_RATE_LIMIT_SECONDS and STAGING_TIMEOUT_SECONDS must be whole numbers; the staging lane is skipped."; return 0; }
+  # Staging must not starve production: held while an update would not have the memory it needs (BOS-420's numbers).
+  if [[ -n ${MEM_AVAIL:-} && -n ${NEED_MB:-} ]] && ((MEM_AVAIL < NEED_MB)); then
+    S_ID="" S_COMMIT="" S_STARTED="$(now)"; S_KV=()
+    if [[ -f $sreq && ! -L $sreq ]]; then S_ID="$(jfield id <"$sreq" 2>/dev/null || true)"; fi
+    [[ -z $S_ID || ! $S_ID =~ ^[0-9a-fA-F-]{36}$ ]] && S_ID=""
+    write_staging_status held "Held: only $MEM_AVAIL MB of memory is free and an update needs $NEED_MB MB. The staging deploy runs when memory frees up."
+    return 0
+  fi
+  local mine="$STATE/staging-request.$$.json"
+  if ((DRY)); then cp -P "$sreq" "$mine"; else mv -T "$sreq" "$mine"; fi
+  S_STARTED="$(now)" S_ID="" S_COMMIT="" S_KV=()
+  local flat id commit target at by k
+  if [[ ! -f $mine || -L $mine ]] || (($(stat -c %s "$mine") > 4096)) || [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -ne $(stat -c %s "$mine") ]]; then
+    rm -f "$mine"; staging_done rejected "Rejected: the request file is not a plain file under 4 KB."; return 0
+  fi
+  flat="$(LC_ALL=C tr -d ' \t\r\n' <"$mine")"; rm -f "$mine"
+  local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9_.:+-]{0,64}"'
+  local ok=1
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || ok=0
+  if ((ok)); then for k in id target commit requestedAt approvedBy; do
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || ok=0
+  done; fi
+  id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
+  at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target == staging && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] || ok=0
+  if ((!ok)); then staging_done rejected "Rejected: the staging request file does not match the expected format."; return 0; fi
+  S_ID=$id S_COMMIT=$commit
+  if [[ -s $OUTBOX/staging-history.jsonl ]] && grep -qE "\"id\":[[:space:]]*\"$id\"" "$OUTBOX/staging-history.jsonl"; then
+    staging_done rejected "Rejected: this staging request was already handled."; return 0
+  fi
+  [[ -d $STAGING_DIR/.git || -f $STAGING_DIR/.git ]] || { staging_done failed "The staging folder (STAGING_DIR) is not a git checkout."; return 0; }
+  [[ -x $STAGING_DIR/scripts/deploy-staging.sh ]] || { staging_done failed "The staging checkout has no scripts/deploy-staging.sh to run."; return 0; }
+  # Only merged work: staging's launcher holds the host's Docker socket, so a commit nobody reviewed must not go there unasked.
+  staging_git fetch --quiet origin main || { staging_done rejected "Rejected: git fetch from GitHub failed in the staging checkout."; return 0; }
+  if ! staging_git cat-file -e "$commit^{commit}" 2>/dev/null || ! staging_git merge-base --is-ancestor "$commit" origin/main; then
+    staging_done rejected "Rejected: ${commit:0:8} is not on main. Staging only takes merged commits, because its launcher holds the host's Docker socket."; return 0
+  fi
+  # A commit from before the lane existed has no smoke script: it can't be checked, so it isn't deployed.
+  if ! staging_git cat-file -e "$commit:scripts/smoke-staging.sh" 2>/dev/null; then
+    staging_done rejected "Rejected: ${commit:0:8} is older than the staging lane (it has no scripts/smoke-staging.sh), so it can't be checked. Ask for a newer commit on main."; return 0
+  fi
+  local last wait
+  last="$(cat "$STATE/last-staging" 2>/dev/null || echo 0)"
+  wait=$((last + STAGING_RATE_LIMIT_SECONDS - $(date +%s)))
+  if ((wait > 0)); then staging_done rejected "Rejected: only one staging deploy every $((STAGING_RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."; return 0; fi
+  if ((DRY)); then log "[dry-run] staging checks passed: would run scripts/deploy-staging.sh ${commit:0:8} in the staging folder, then the smoke checks"; return 0; fi
+
+  printf '%s\n' "$(date +%s)" >"$STATE/last-staging"
+  write_staging_status running "Running: staging ${commit:0:8}"
+  log "Running the staging deploy for ${commit:0:8} (request $id)."
+  local before="" rc=0 log_from=0
+  log_from="$(stat -c %s "$LOG" 2>/dev/null || echo 0)"
+  have_docker && before="$(docker ps -q --filter "label=com.docker.compose.project=${SMOKE_PRODUCTION_PROJECT:-boss-man}" 2>/dev/null | sort | paste -sd, - || true)"
+  # BOSSMAN_PRODUCTION_DIRS: staging's isolation checks compare against production's folder, wherever it is.
+  (cd "$STAGING_DIR" && BOSSMAN_PRODUCTION_DIRS="$REPO" timeout "$STAGING_TIMEOUT_SECONDS" scripts/deploy-staging.sh "$commit") >>"$LOG" 2>&1 || rc=$?
+  if ((rc != 0)); then
+    S_KV=(smoke=skipped)
+    local tail_text
+    tail_text="$(staging_log_tail "$log_from")"
+    [[ -z $tail_text ]] || S_KV+=("log_tail=$tail_text")
+    staging_done failed "The staging deploy of ${commit:0:8} stopped with an error (exit $rc). The last lines of its log are in the staging record (log_tail); the deployer log on the host has the rest. Staging was not rolled back: scripts/deploy-staging.sh --rollback in the staging folder does that."; return 0
+  fi
+  # The smoke checks, from the checkout just deployed (merged code, like the deploy script itself).
+  local sm="$STAGING_DIR/scripts/smoke-staging.sh" out="" src=0 name res why img="" failed=""
+  if [[ -x $sm ]]; then
+    if smoke_credentials_ok; then export SMOKE_CREDENTIALS="$D/smoke-credentials"; else unset SMOKE_CREDENTIALS; fi
+    out="$(SMOKE_PRODUCTION_BEFORE="$before" timeout 300 "$sm" "$STAGING_DIR" "$commit" 2>>"$LOG")" || src=$?
+    while IFS=$'\t' read -r name res why; do
+      [[ $name =~ ^[a-z_]{1,32}$ && $res =~ ^(pass|fail|skipped)$ ]] || continue
+      S_KV+=("check_$name=$res" "why_$name=${why:0:200}")
+      [[ $res != fail ]] || failed+="${failed:+, }$name"
+      if [[ $name == runner && $why =~ image\ ([A-Za-z0-9._-]{1,64})$ ]]; then img="${BASH_REMATCH[1]}"; fi
+    done <<<"$out"
+    if [[ -n $failed ]]; then S_KV=(smoke=failed failed_checks="$failed" "${S_KV[@]}")
+    elif ((src != 0)); then S_KV=(smoke=failed failed_checks=smoke-script "${S_KV[@]}")
+    else S_KV=(smoke=passed "${S_KV[@]}"); fi
+  else
+    S_KV=(smoke=skipped)
+  fi
+  [[ -z $img ]] || S_KV+=(runner_image="$img")
+  staging_done deployed "Staging runs ${commit:0:8}.${failed:+ Smoke checks failed: $failed.}"
+}
+
 # BOS-1004: "Create phone login". The server asks (inbox/phone-login.json) for the phone's read-only ntfy user; this
 # makes it inside the ntfy container and hands the password back sealed (RSA-OAEP) to a public key that only the
 # server's memory holds the private half of. The password is never written anywhere in the clear: not the inbox, the
@@ -1462,6 +1687,9 @@ recover_interrupted() {
 # The request is data only. Every field is checked against its own pattern, and the only commands that run inside the
 # container are these fixed ones: ntfy user list | user add | user change-pass | access <user> <topic> read-only.
 PHONE_USER='phone-read' # the only account this request may make or reset: the server is not trusted to pick another (an owner's admin login would be one reset away)
+# BOS-1581: action "setup" makes (or finds) the one account Boss Man itself publishes with, write-only on the topic, and
+# one access token for it. Same rules: the user is fixed here, and the token goes back sealed like the password does.
+PUBLISH_USER='bossman-publish'
 PHONE_SEAL_OPTS=(-pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256)
 PL_USER=""
 phone_result() { # id result message [sealed]: the answer the server polls for. Only the sealed (encrypted) password is ever in it.
@@ -1473,6 +1701,33 @@ phone_result() { # id result message [sealed]: the answer the server polls for. 
 ntfy_exec() { # container-id args...: a fixed ntfy command in the container; a NTFY_PASSWORD set by the caller is passed on through the environment
   local cid=$1; shift
   timeout 30 docker exec -e NTFY_PASSWORD "$cid" ntfy "$@" </dev/null 2>&1
+}
+phone_setup_run() { # id user topic workdir cid: BOS-1581. Make or find the publish user, its write-only access and its token; seal the token.
+  local id=$1 user=$2 topic=$3 td=$4 cid=$5 out pw tok made=0
+  # Only fixed commands: ntfy user list | user add | access <user> <topic> write-only | token list <user> | token add <user>.
+  # Running it again finds all three and adds nothing. The token is only ever in the sealed answer.
+  if ! out="$(ntfy_exec "$cid" user list)"; then phone_result "$id" failed "Failed: ntfy could not list its users: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; fi
+  if ! grep -qE "^user $user( |$)" <<<"$out"; then
+    # The account needs a password to exist; nobody is ever shown it (Boss Man signs in with the token), so it is thrown away.
+    pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24)" || true
+    [[ ${#pw} -eq 24 ]] || { phone_result "$id" failed "Failed: could not make a password."; return 0; }
+    out="$(NTFY_PASSWORD="$pw" ntfy_exec "$cid" user add --role=user "$user")" || { phone_result "$id" failed "Failed: ntfy could not add the user: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; }
+    made=1
+  fi
+  out="$(ntfy_exec "$cid" access "$user" "$topic" write-only)" || { phone_result "$id" failed "Failed: ntfy refused the write-only access on topic $topic: $(head -n 1 <<<"$out" | cut -c1-160). Press the button again to retry."; return 0; }
+  out="$(ntfy_exec "$cid" token list "$user")" || { phone_result "$id" failed "Failed: ntfy could not list the tokens of $user: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; }
+  tok="$(grep -oE 'tk_[a-z0-9]{29}' <<<"$out" | head -n 1 || true)"
+  if [[ -z $tok ]]; then
+    out="$(ntfy_exec "$cid" token add "$user")" || { phone_result "$id" failed "Failed: ntfy could not make a token for $user: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; }
+    tok="$(grep -oE 'tk_[a-z0-9]{29}' <<<"$out" | head -n 1 || true)"
+    made=1
+  fi
+  [[ $tok =~ ^tk_[a-z0-9]{29}$ ]] || { phone_result "$id" failed "Failed: ntfy answered in a form this deployer did not expect, so no token was read."; return 0; }
+  local sealed
+  sealed="$(printf '%s' "$tok" | openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$td/pub.der" "${PHONE_SEAL_OPTS[@]}" 2>/dev/null | base64 -w0)" || sealed=""
+  [[ $sealed =~ ^[A-Za-z0-9+/]{100,}={0,2}$ ]] || { phone_result "$id" failed "Failed: could not seal the token."; return 0; }
+  if ((made)); then phone_result "$id" setup "Made the publish user $user with write-only access to topic $topic and a token." "$sealed"
+  else phone_result "$id" setup "The publish user $user, its write-only access to topic $topic and its token were already there. Nothing was changed." "$sealed"; fi
 }
 phone_login_run() { # file: handle one request; never exits the deployer
   local f=$1 flat k id action user topic pubkey now_s last
@@ -1491,8 +1746,10 @@ phone_login_run() { # file: handle one request; never exits the deployer
   [[ $id =~ ^[0-9a-fA-F-]{36}$ ]] || { log "Phone login request ignored: bad id."; return 0; }
   if grep -qs " $id " "$STATE/phone-login.log"; then log "Phone login request $id ignored: already handled."; return 0; fi
   PL_USER=$user
-  [[ $action =~ ^(create|reset)$ ]] || { PL_USER=-; phone_result "$id" rejected "Rejected: the action must be create or reset."; return 0; }
-  if [[ $user != "$PHONE_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: a phone login can only be made for the user $PHONE_USER."; return 0; fi
+  [[ $action =~ ^(create|reset|setup)$ ]] || { PL_USER=-; phone_result "$id" rejected "Rejected: the action must be create, reset or setup."; return 0; }
+  if [[ $action == setup ]]; then
+    if [[ $user != "$PUBLISH_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: the ntfy setup can only be made for the user $PUBLISH_USER."; return 0; fi
+  elif [[ $user != "$PHONE_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: a phone login can only be made for the user $PHONE_USER."; return 0; fi
   [[ $topic =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { phone_result "$id" rejected "Rejected: the topic may only have letters, digits, - and _ (1 to 64)."; return 0; }
   [[ $pubkey =~ ^[A-Za-z0-9+/]{100,900}={0,2}$ ]] || { phone_result "$id" rejected "Rejected: the sealing key is not valid."; return 0; }
   now_s="$(date +%s)"; last="$(cat "$STATE/last-phone-login" 2>/dev/null || echo 0)"
@@ -1521,6 +1778,7 @@ phone_login_run() { # file: handle one request; never exits the deployer
   fi
   cid="$cids"
   [[ $cid =~ ^[0-9a-f]{12,64}$ ]] || { rm -rf "$td"; phone_result "$id" failed "Failed: docker named the ntfy container in a form that was not expected."; return 0; }
+  if [[ $action == setup ]]; then phone_setup_run "$id" "$user" "$topic" "$td" "$cid"; rm -rf "$td"; return 0; fi
   # The password is made and sealed before anything changes, so a failure here leaves ntfy as it was.
   local pw sealed out exists=0
   pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24)" || true
@@ -1599,8 +1857,9 @@ main() {
   fi
   handle_phone_login
   recover_interrupted
+  recover_staging_interrupted
   if bluegreen_enabled; then soak_tick; fi
-  if [[ ! -e $req && ! -L $req ]]; then refresh_available; exit 0; fi
+  if [[ ! -e $req && ! -L $req ]]; then staging_tick || log "The staging lane stopped with an error; production is unaffected."; refresh_available; exit 0; fi
   # The floor: left in the inbox, so the next minute looks again.
   [[ -z $HOLDING ]] || exit 0
 
@@ -1615,17 +1874,25 @@ main() {
   # The request is untrusted: it must be one flat object whose five fields are plain strings of safe characters.
   # Whitespace is dropped first, so the shape check below is one strict pattern; nothing is evaluated or sourced.
   local k flat id target commit at by
-  [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -eq $(stat -c %s "$mine") ]] || finish rejected "Rejected: the request file does not match the expected format."
+  # BOS-2213: each refusal below names which check failed (a fixed word, never the request's own text), so a
+  # rejected request in a gate log shows whether the file was empty, damaged or had a bad id or commit. The
+  # message still starts with the old sentence, and no check is looser than before.
+  local fmt="Rejected: the request file does not match the expected format"
+  [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -eq $(stat -c %s "$mine") ]] || finish rejected "$fmt (it holds a NUL byte)."
   flat="$(LC_ALL=C tr -d ' \t\r\n' <"$mine")"
   local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9_.:+-]{0,64}"'
-  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || finish rejected "Rejected: the request file does not match the expected format."
+  [[ -n $flat ]] || finish rejected "$fmt (the file is empty)."
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || finish rejected "$fmt (it is not one flat object of short plain strings)."
   for k in id target commit requestedAt approvedBy; do
-    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || finish rejected "Rejected: the request file does not match the expected format."
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || finish rejected "$fmt (the field $k is missing or repeated)."
   done
   id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
   at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
-  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner|restart)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
-    finish rejected "Rejected: the request file does not match the expected format."
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ ]] || finish rejected "$fmt (the id is not a 36-character id)."
+  [[ $target =~ ^(server|runner|restart)$ ]] || finish rejected "$fmt (the target is not server, runner or restart)."
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || finish rejected "$fmt (the commit is not one 40-character hash)."
+  [[ $by =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || finish rejected "$fmt (approvedBy is not a plain name)."
+  [[ $at =~ ^[0-9T:.+Z-]{10,40}$ ]] || finish rejected "$fmt (requestedAt is not a timestamp)."
   REQ_ID=$id TARGET=$target COMMIT=$commit
 
   # Accept both spacings: history lines written by older versions may be compact.
@@ -1718,6 +1985,8 @@ main() {
   if [[ $TARGET != runner ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
     # A good swap keeps measuring through the standby window (soak_tick); anything else ends here.
+    # BOS-1588: a good swap also refreshes this deployer's own copy (it takes effect on the next run); a failure only warns.
+    if [[ $BG_RESULT == deployed && -x $REPO/scripts/install-deployer.sh ]]; then BOSSMAN_DEPLOYER="$D" "$REPO/scripts/install-deployer.sh" >>"$LOG" 2>&1 || log "Warning: the deployer copy was not refreshed."; fi
     [[ $BG_RESULT == deployed ]] || { mem_report; BG_MSG="${BG_MSG:-The blue/green ${TARGET/server/swap} stopped with an error (exit $rc).} See $LOG on the host."; }
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi

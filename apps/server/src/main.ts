@@ -1,4 +1,4 @@
-import { loadMasterKey } from "./crypto.js";
+import { loadMasterKey, MasterKeyFileError } from "./crypto.js";
 import { databaseUrl } from "./database-url.js";
 import { openPglite, openPostgres } from "./db/client.js";
 import { buildApp } from "./app.js";
@@ -6,7 +6,7 @@ import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
 import { parseClientHeader, parseTrustedProxies } from "./portal-ip.js";
-import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
+import { failureSignaturesDays, pruneExpiredPolicyRules, pruneFailureSignatures, prunePermissionDecisions, permissionLogDays, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
 import { checkLimitReconciler, readRunnerAgents } from "./services/check-limit.js";
 import { checkQueue } from "./services/check-queue.js";
@@ -17,7 +17,15 @@ const env = process.env;
 // The password may live in a file (BOS-974); the rest of start-up, including the leader lock, then reads DATABASE_URL as before.
 const resolvedUrl = databaseUrl(env);
 if (resolvedUrl) env.DATABASE_URL = resolvedUrl;
-const master = loadMasterKey(env);
+const master = (() => {
+  try {
+    return loadMasterKey(env);
+  } catch (e) {
+    if (!(e instanceof MasterKeyFileError)) throw e;
+    console.error(`boss-man: ${e.message}`);
+    return process.exit(1);
+  }
+})();
 // BOSSMAN_MIGRATE_ON_START=0: a separate step (node dist/migrate.js) migrates; this server only checks the database is current.
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL, { migrate: env.BOSSMAN_MIGRATE_ON_START !== "0" }) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
@@ -33,7 +41,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, mailer, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, dailyBackup, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, wiki, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -89,19 +97,35 @@ const bg = createBackground(
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
     // Deploy tag moves (DR-033) that a restart or a leader change cut off: picked up again; the runner's lease makes a repeat harmless. // leader-only
+    // BOS-1472: the host's staging lane: offers the staging target and records each staging deploy's result. // leader-only
+    { name: "staging sync", everyMs: Number(env.BOSSMAN_STAGING_SYNC_MS ?? 30_000), run: async () => { await deploys.syncStaging(); await selfDeploy.stagingTick(); } },
     { name: "deploy tags", everyMs: Number(env.BOSSMAN_DEPLOY_TAGS_MS ?? 60_000), run: () => deploys.resumeTags() },
+    // Expired owner logins (BOS-2159): refused already; this deletes the rows so the table doesn't grow. // leader-only
+    { name: "expired sessions", everyMs: Number(env.BOSSMAN_SESSION_SWEEP_MS ?? 60 * 60_000), run: async () => { await sweepExpiredSessions(); } },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
     { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: async () => { await notes.markAnsweredRead(); await notes.clearSettledPushes(); } },
+    // BOS-2199: the one retry, a minute later, of an alert that failed to reach a Slack, Discord or webhook destination. Kept in the database, so a restart doesn't lose it.
+    { name: "alert retries", everyMs: Number(env.BOSSMAN_ALERT_RETRY_MS ?? 30_000), run: async () => { await webhooks.sweepRetries(); } },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
     { name: "watchdog", everyMs: Number(env.BOSSMAN_WATCHDOG_MS ?? 5 * 60_000), run: () => watchdog.run() },
+    // BOS-2195: the optional weekly email, Monday from 8 owner time; the last-sent time is stored, so a restart never repeats it. // leader-only
+    { name: "weekly summary", everyMs: Number(env.BOSSMAN_WEEKLY_SUMMARY_MS ?? 10 * 60_000), run: () => weeklySummary.runAll() },
     // Workflow retros (docs/19): wakes the retro agent every 20 finished tickets or 7 days, whichever comes first. No model here.
     { name: "retro", everyMs: Number(env.BOSSMAN_RETRO_MS ?? 15 * 60_000), run: () => retro.sweep() },
     // Server health (BOS-640): rss against the memory the server may use, and freezes in the last 10 minutes; raises the memory card (CEO) and the freeze card (owner). // leader-only
     { name: "server health", everyMs: Number(env.BOSSMAN_SERVER_HEALTH_MS ?? 60_000), run: async () => { await serverHealth.check(); } },
+    // The daily database backup (BOS-2176): one owner alert when the newest automatic backup is over 36 hours old. // leader-only
+    { name: "daily backup watch", everyMs: Number(env.BOSSMAN_DAILY_BACKUP_WATCH_MS ?? 15 * 60_000), run: async () => { await dailyBackup.check(); } },
     // Boss Man's own alerts that sat on the Scrum Master or the CEO past the time limit move up a rung (BOS-64).
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
+    // Main's GitHub CI (BOS-1072): one ticket per distinct failing step, later runs added to it, a note when green again. Quiet where there is no GitHub CI. // leader-only
+    { name: "main CI watch", everyMs: Number(env.BOSSMAN_MAIN_CI_MS ?? 10 * 60_000), run: async () => { await mainCi.run(); } },
+    // The whole-repo secrets pass (BOS-1932): each project's main once a day (the pass itself skips a project scanned in the last 20 h, so restarts don't repeat it); the first tick soon after start is the one-off pass after an update. Tickets go to the security reviewer. // leader-only
+    { name: "secret scan", everyMs: Number(env.BOSSMAN_SECRET_SCAN_MS ?? 60 * 60_000), firstAfterMs: Number(env.BOSSMAN_SECRET_SCAN_FIRST_MS ?? 10 * 60_000), run: async () => { await secretScan.run(); } },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).
     { name: "pull request sync", everyMs: Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000), run: () => review.syncPullRequests() },
+    // Merges on main the gate never recorded (BOS-1645): a runner swap between push and record. Recorded within minutes.
+    { name: "missed merges", everyMs: Number(env.BOSSMAN_MISSED_MERGES_MS ?? 3 * 60_000), run: () => review.recordMissedMerges() },
     // Project briefs whose branch moved on the git host, merges made outside Boss Man included.
     { name: "brief upkeep", everyMs: Number(env.BOSSMAN_BRIEF_UPKEEP_MS ?? 30 * 60_000), run: briefUpkeep },
     // What the host deployer reports: raises "Deploy?" when main moves and tells the owner how a deploy went. // leader-only
@@ -112,6 +136,8 @@ const bg = createBackground(
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
     { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
+    // The GitHub watcher (BOS-1393): files new issues, discussions and comments into the feedback inbox. Each watch has its own interval (default 60 min, minimum 15); this tick only runs the ones that are due. Calls api.github.com. // leader-only
+    { name: "github watch", everyMs: Number(env.BOSSMAN_GITHUB_WATCH_MS ?? 60_000), run: () => githubWatch.runDue() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
     // A server update waiting for a quiet machine (BOS-420): sends it when quiet, asks the owner at 30 min, follows it through the standby window. // leader-only
     { name: "deploy wait", everyMs: Number(env.BOSSMAN_DEPLOY_WAIT_MS ?? 15_000), run: async () => { await deployWait.step(); } },
@@ -123,9 +149,14 @@ const bg = createBackground(
     { name: "synthetic quota", everyMs: Number(env.BOSSMAN_SYNTHETIC_QUOTA_MS ?? 5 * 60_000), run: () => refreshSyntheticQuota() },
     // Housekeeping (BOS-416): deletes runner events older than BOSSMAN_RUNNER_EVENTS_DAYS (default 60), in small batches. // leader-only
     // First pass 15 min after start (clear of the start-up memory burst), then daily: this server restarts several times a day.
+    { name: "permission decisions prune", everyMs: 24 * 3_600_000, firstAfterMs: 20 * 60_000, run: () => prunePermissionDecisions(db, { days: permissionLogDays(env.BOSSMAN_PERMISSION_LOG_DAYS), stop: () => leader.role() !== "leader" }) },
+    // Timed allow rules that ended more than 7 days ago (BOS-2188). // leader-only
+    { name: "expired permission rules prune", everyMs: 24 * 3_600_000, firstAfterMs: 25 * 60_000, run: () => pruneExpiredPolicyRules(db, { stop: () => leader.role() !== "leader" }) },
     { name: "runner events prune", everyMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneRunnerEvents(db, { days: runnerEventsDays(env.BOSSMAN_RUNNER_EVENTS_DAYS), stop: () => leader.role() !== "leader" }) },
     // Failure signatures are only read over the two-hour loop-guard window (loop-guards.ts, BOS-611); the rest go daily, in small batches. // leader-only
     { name: "failure signatures prune", everyMs: Number(env.BOSSMAN_FAILURE_SIGNATURES_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneFailureSignatures(db, { days: failureSignaturesDays(env.BOSSMAN_FAILURE_SIGNATURES_DAYS), stop: () => leader.role() !== "leader" }) },
+    // Deleted wiki pages are removed for good once they have waited 30 days in the Deleted pages list (BOS-2197). // leader-only
+    { name: "deleted wiki pages purge", everyMs: Number(env.BOSSMAN_WIKI_PURGE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => wiki.purgeDeleted() },
   ],
   (err, name) => app.log.error({ err }, `${name} failed`),
 );

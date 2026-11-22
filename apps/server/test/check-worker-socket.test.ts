@@ -14,7 +14,12 @@ import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY, checkQueue } from "../src/servic
 import { BUNDLE_FEATURE, WORKER_REPLACED_CLOSE } from "../src/services/check-workers.js";
 import { WORKER_NO_HELLO_CLOSE } from "../src/routes/check-worker-socket.js";
 
-const HEARTBEAT = 100;
+// BOS-1804: the server drops a socket silent for three heartbeats, judged by a timer that reads the wall clock. On a slow,
+// busy runner the server's own process stalls for more than 300 ms (PGlite queries run in-process), the timer then fires
+// before the pong already waiting in the socket is read, and the socket is dropped as "offline": the job never reaches the
+// worker, however long the test waits. 1.5 s (a 4.5 s drop) is out of reach of those stalls. What it still catches: a socket
+// that is silent for three heartbeats is closed (the no-hello test below); nothing else here depends on the interval.
+const HEARTBEAT = 1500;
 const COMMIT = "c".repeat(40);
 
 async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 5000): Promise<T> {
@@ -25,6 +30,15 @@ async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 
     if (Date.now() > end) throw new Error(`timed out; last value ${JSON.stringify(v)}`);
     await new Promise((r) => setTimeout(r, 25));
   }
+}
+
+/**
+ * The server closes a worker socket that is silent for three heartbeats (4.5 s here). A real worker answers every ping; a
+ * raw test socket must too, or a slow runner (hello handled late) sees the server drop it as "offline" and the job never
+ * reaches it. Only the no-hello test below leaves this out on purpose, and it answers pings itself.
+ */
+function answerPing(ws: WebSocket, m: { type?: string }) {
+  if (m.type === "ping") ws.send(JSON.stringify({ type: "pong" }));
 }
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -125,7 +139,11 @@ describe("check worker socket (BOS-1435)", () => {
     const { token } = await ctx.addWorker();
     const ws = new WebSocket(workerUrl(), { headers: { authorization: `Bearer ${token}` } });
     const got: Array<{ type: string; message?: string }> = [];
-    ws.on("message", (raw) => got.push(JSON.parse(String(raw))));
+    ws.on("message", (raw) => {
+      const m = JSON.parse(String(raw));
+      got.push(m);
+      answerPing(ws, m);
+    });
     await new Promise((r) => ws.on("open", r));
     ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "t", imageVersion: null, features: ["check-jobs"] }));
     await waitFor(() => got.some((m) => m.type === "welcome"), Boolean);
@@ -141,7 +159,13 @@ describe("check worker socket (BOS-1435)", () => {
     const { id, token } = await ctx.addWorker();
     const ws = new WebSocket(workerUrl(), { headers: { authorization: `Bearer ${token}` } });
     const closed = new Promise<number>((r) => ws.on("close", (code) => r(code)));
-    const welcomed = new Promise((r) => ws.on("message", (raw) => JSON.parse(String(raw)).type === "welcome" && r(true)));
+    const welcomed = new Promise((r) =>
+      ws.on("message", (raw) => {
+        const m = JSON.parse(String(raw));
+        answerPing(ws, m);
+        if (m.type === "welcome") r(true);
+      }),
+    );
     await new Promise((r) => ws.on("open", r));
     ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "t", imageVersion: null, features: ["check-jobs"] }));
     await welcomed;
@@ -158,7 +182,11 @@ describe("check worker socket (BOS-1435)", () => {
     const ws = new WebSocket(workerUrl(), { headers: { authorization: `Bearer ${token}` } });
     const got: Array<{ type: string; command?: { type: string; jobId: string } }> = [];
     const closed = new Promise<number>((r) => ws.on("close", (code) => r(code)));
-    ws.on("message", (raw) => got.push(JSON.parse(String(raw))));
+    ws.on("message", (raw) => {
+      const m = JSON.parse(String(raw));
+      got.push(m);
+      answerPing(ws, m);
+    });
     await new Promise((r) => ws.on("open", r));
     ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "t", imageVersion: null, imageCommit: COMMIT, checkSlots: 2, features: ["check-jobs", BUNDLE_FEATURE] }));
     await waitFor(() => got.some((m) => m.type === "welcome"), Boolean);
@@ -202,7 +230,9 @@ describe("check worker socket (BOS-1435)", () => {
     const { job } = await checkQueue(db).enqueue({ companyId: ctx.companyId, projectId: p!.id, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: "c1000000", tree: "tree-1" } as never);
     const { id, token } = await ctx.addWorker();
     const w = await readyWorker(token);
-    await waitFor(w.runs, (r) => r.includes(job.id));
+    // 20 s is a deadline for a slow GitHub runner, not a pace: the wait returns the moment the job arrives.
+    // It still catches a job that is never handed to a connected worker.
+    await waitFor(w.runs, (r) => r.includes(job.id), 20_000);
     expect((await ctx.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]).toMatchObject({ state: "running", workerId: id });
     expect((await ctx.app.inject({ method: "DELETE", url: `/api/settings/check-workers/${id}`, headers: { cookie: ctx.cookie } })).statusCode).toBe(200);
     expect((await ctx.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]).toMatchObject({ state: "queued", workerId: null, runnerId: null, reason: expect.stringMatching(/removed the check worker/) });

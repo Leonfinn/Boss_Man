@@ -2,6 +2,7 @@
 // ticket link back to it, and every save is kept, so an older version can be put back.
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Menu as MenuIcon } from "lucide-react";
+import { NoCompany } from "../components/NoCompany";
 import { api, type Company } from "../api";
 import { useFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -12,6 +13,8 @@ import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
+import { DeletedNotice, DeletedPages } from "../components/DeletedPages";
+import { WikiCompare } from "../components/WikiCompare";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
@@ -146,8 +149,9 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   // Versions opened from "Show older versions", older than the first page the page carries (BOS-496).
   const [older, setOlder] = useState<{ rows: Revision[]; busy: boolean; error: string | null }>({ rows: [], busy: false, error: null });
   const [old, setOld] = useState<OldVersion | null>(null);
+  const [cmp, setCmp] = useState<{ from: string; to: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => (setEditing(false), setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
+  useEffect(() => (setCmp(null), setEditing(false),setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
   const p = page.data;
   const versions = [...(p?.revisions ?? []), ...older.rows];
   const hasMore = !!p && versions.length < (p.revisionCount ?? p.revisions.length);
@@ -181,7 +185,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
     else page.reload();
   };
   const remove = async () => {
-    if (!p || !window.confirm(`Delete "${p.title}" and its history? This can't be undone.`)) return;
+    if (!p || !window.confirm(`Delete "${p.title}"? It waits 30 days under Deleted pages, where you can restore it.`)) return;
     try {
       await api(`/api/companies/${companyId}/wiki/${slug}`, { method: "DELETE" });
       onChanged();
@@ -215,7 +219,8 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   };
 
   if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} /> : away(page.error) ? null : <p className="error" role="alert">{page.error.message}</p>;
-  if (!p) return null;
+  if (!p) return <Loader label="Loading the page" />;
+  if ("deleted" in p) return <DeletedNotice companyId={companyId} slug={slug} stub={p as never} onRestored={() => (onChanged(), page.reload())} />;
   if (editing) return <Editor draftKey={`wiki/${companyId}/${slug}`} initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -268,6 +273,14 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
                 by {r.agent ?? "you"}
                 {typeof r.size === "number" && <span className="muted"> · {r.size.toLocaleString("en-GB")} characters</span>}
                 {i === 0 && " (current)"}
+                {versions[i + 1] && (
+                  <>
+                    {" · "}
+                    <button type="button" className="link" onClick={() => setCmp({ from: (versions[i + 1] as Revision).id, to: r.id })}>
+                      Compare
+                    </button>
+                  </>
+                )}
                 {r.runId && (
                   <>
                     {" · "}
@@ -289,6 +302,19 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
             </p>
           )}
         </section>
+      )}
+      {cmp && (
+        <WikiCompare
+          companyId={companyId}
+          versions={versions}
+          from={cmp.from}
+          to={cmp.to}
+          onClose={() => setCmp(null)}
+          onRestore={(id) => {
+            setCmp(null);
+            void restoreOld(id);
+          }}
+        />
       )}
       {old && (
         <div className="banner" role="status" style={{ flexWrap: "wrap" }}>
@@ -316,7 +342,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
 /** Not a stored page: the server builds it when asked (R84). "~" can't appear in a page address. */
 const BRIEF = "~brief";
 
-type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; status?: { pages: number; indexed: number; lastError: { message: string; at: string } | null } };
+type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; ownerAnswers: boolean; ticketMeaning: boolean; status?: { pages: number; indexed: number; lastError: { message: string; at: string } | null } };
 
 /** Semantic search: off by default. The key is a secret from the encrypted store. */
 function SemanticSettings({ companyId }: { companyId: string }) {
@@ -338,9 +364,9 @@ function SemanticSettings({ companyId }: { companyId: string }) {
   const save = (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId } })
+    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId, ownerAnswers: v.ownerAnswers, ticketMeaning: v.ticketMeaning } })
       .then(
-        () => (sv.markSaved(), setMsg(v.enabled ? "Saved. Pages are being embedded in the background." : "Saved.")),
+        () => (sv.markSaved(), setMsg(v.enabled || v.ownerAnswers || v.ticketMeaning ? "Saved. Embedding runs in the background." : "Saved.")),
         (err: Error) => setMsg(err.message),
       )
       .finally(() => setBusy(false));
@@ -353,6 +379,18 @@ function SemanticSettings({ companyId }: { companyId: string }) {
         <label>
           <input type="checkbox" checked={v.enabled} onChange={(e) => setV({ ...v, enabled: e.target.checked })} /> Search by meaning as well as words
         </label>
+        <label>
+          <input type="checkbox" checked={v.ownerAnswers} onChange={(e) => setV({ ...v, ownerAnswers: e.target.checked })} /> Also search your past answers by meaning
+        </label>
+        <small className="muted" style={{ marginTop: -8 }}>
+          Before anyone asks you something, Boss Man checks whether you already answered it (cards, ticket messages, chat and the CEO's notes). That check always matches by words. Tick this to also catch the same question in different words: your answers and messages are then sent to the provider below too. Off by default.
+        </small>
+        <label>
+          <input type="checkbox" checked={v.ticketMeaning} onChange={(e) => setV({ ...v, ticketMeaning: e.target.checked })} /> Also search tickets and the CEO's earlier advice by meaning
+        </label>
+        <small className="muted" style={{ marginTop: -8 }}>
+          Before the CEO creates a ticket, Boss Man checks for open or recently finished tickets with similar titles. Tick this to also catch the same idea in different words, and to show the CEO the closest tickets, wiki pages and its own earlier advice to you when you write to it. Ticket text and the CEO's replies are then sent to the provider below. Needs the API key below; it is saved with the rest. Off by default.
+        </small>
         <div className="field">
           <label htmlFor="sem-url">Provider address</label>
           <input id="sem-url" value={v.baseUrl} onChange={(e) => setV({ ...v, baseUrl: e.target.value })} />
@@ -408,7 +446,7 @@ function SemanticSettings({ companyId }: { companyId: string }) {
 function BriefView({ companyId }: { companyId: string }) {
   const brief = usePoll((signal) => api<{ markdown: string }>(`/api/companies/${companyId}/brief`, { signal }), 30_000, companyId);
   if (brief.error && !away(brief.error)) return <p className="error" role="alert">{brief.error.message}</p>;
-  if (!brief.data) return null;
+  if (!brief.data) return <Loader label="Loading the company brief" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <h2 style={{ fontSize: 22, fontWeight: 600 }}>Company brief</h2>
@@ -449,6 +487,51 @@ type OpenFolders = Record<string, boolean>;
 /** Which folders are open. A folder the reader has touched keeps their choice; the rest open when the page in them is open. */
 function folderOpen(over: OpenFolders, key: string, currentFolder: string): boolean {
   return over[key] ?? `${currentFolder}/`.startsWith(`${key.slice(1)}/`);
+}
+
+const RECENT_KEY = "wiki-recent-open";
+
+/** The 10 pages changed last, newest first, above the folders. Collapsible; the choice is kept in this browser. */
+function RecentlyChanged({ pages, companyId, current, onPick }: { pages: PageRow[]; companyId: string; current: string | undefined; onPick: () => void }) {
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(RECENT_KEY) !== "closed";
+    } catch {
+      return true;
+    }
+  });
+  const recent = [...pages].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 10);
+  if (recent.length === 0) return null;
+  return (
+    <details
+      className="wiki-recent"
+      open={open || undefined}
+      onToggle={(e) => {
+        const now = (e.target as HTMLDetailsElement).open;
+        if (now === open) return;
+        setOpen(now);
+        try {
+          localStorage.setItem(RECENT_KEY, now ? "open" : "closed");
+        } catch {
+          // Private mode: the choice just isn't kept.
+        }
+      }}
+    >
+      <summary>Recently changed</summary>
+      <ul>
+        {recent.map((p) => (
+          <li key={p.id}>
+            <a href={`#/wiki/${companyId}/${p.slug}`} aria-current={p.slug === current ? "page" : undefined} onClick={onPick} title={p.title}>
+              <span className="t">{p.title}</span>
+              <small>
+                {p.folder ? `${p.folder} · ` : ""}changed {when(p.updatedAt)} by {p.updatedBy ?? "you"}
+              </small>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
 }
 
 function TreeList({ folder, companyId, current, currentFolder, openAll, over, onToggle, onPick }: { folder: Folder; companyId: string; current: string | undefined; currentFolder: string; openAll: boolean; over: OpenFolders; onToggle: (key: string, open: boolean) => void; onPick: () => void }) {
@@ -554,7 +637,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
         </p>
       )}
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <NoCompany />
       ) : (
         <div className="wiki">
           {narrow && (
@@ -593,8 +676,10 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
                 </li>
               </ul>
             )}
+            {list.error && !away(list.error) && <p className="error" role="alert">Couldn't load the page list: {list.error.message}</p>}
             {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "Only the company brief so far."}</p>}
             <SemanticSettings companyId={company.id} />
+            {!q.trim() && <RecentlyChanged pages={pages} companyId={company.id} current={creating === null ? pageSlug : undefined} onPick={() => (setCreating(null), closeDrawer())} />}
             <TreeList
               folder={tree(pages)}
               companyId={company.id}
@@ -605,6 +690,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               onToggle={onToggleFolder}
               onPick={() => (setCreating(null), closeDrawer())}
             />
+            <DeletedPages companyId={company.id} go={go} onChanged={list.reload} />
           </nav>
           <div>
             {creating !== null ? (

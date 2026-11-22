@@ -6,7 +6,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { TOOL_KINDS } from "@boss-man/shared";
+import { RuleMatchSchema, TOOL_KINDS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
@@ -43,7 +43,10 @@ export function policyRoutes(
     const p = await checkPolicy(id, req.body);
     if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
     const [c] = await db.update(companies).set({ reviewPolicy: p }).where(eq(companies.id, id)).returning({ policy: companies.reviewPolicy });
-    return c ? c.policy : reply.code(404).send({ error: "not_found" });
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    // A line in the log, so a surprise in who reviewed a ticket can be traced to when the policy changed (BOS-1969).
+    await record(db, { companyId: id, kind: "settings", summary: "Owner changed the review policy" });
+    return c.policy;
   });
   // Owner-tier permission cards by deciding rule, across every company (BOS-1456). Read-only.
   owner.get("/api/permission-report", async (req, reply) => {
@@ -77,6 +80,22 @@ export function policyRoutes(
       throw err;
     }
   });
+  // "Remember this" from Chat (BOS-2184): adds one new line at the end, never overwriting what is there.
+  owner.post("/api/companies/:id/standing-rules/append", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const b = z.object({ text: z.string() }).parse(req.body);
+    const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    const line = b.text.replace(/\r\n/g, "\n").trim();
+    if (!line) return reply.code(400).send({ error: "invalid_standing_rules", message: "There is no text to add." });
+    const current = (await getStandingRules(db, id)).text.trim();
+    const combined = current ? `${current}\n${line}` : line;
+    const problem = standingRulesError(combined);
+    if (problem) return reply.code(400).send({ error: "invalid_standing_rules", message: `That doesn't fit: the standing rules are capped at ${STANDING_RULES_MAX} characters and this would make them ${combined.length}. Shorten it, or trim the rules in Settings → Team.` });
+    const saved = await setStandingRules(db, id, { text: combined, by: "the owner", byAgentId: await standingRulesCeo(id) });
+    await record(db, { companyId: id, kind: "settings", summary: "Owner added a line to the standing rules from Chat" });
+    return { ...saved, max: STANDING_RULES_MAX };
+  });
   owner.post("/api/companies/:id/standing-rules/undo", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const ceo = await standingRulesCeo(id);
@@ -92,33 +111,56 @@ export function policyRoutes(
   });
 
   // Decision rules (R19): what happens when an agent asks to use a tool.
-  const Match = z.object({
-    kinds: z.array(z.string()).max(10).optional(),
-    commandPattern: z.string().min(1).max(500).optional(),
-    titlePattern: z.string().min(1).max(500).optional(),
-    safeOnly: z.boolean().optional(),
-    scratchOnly: z.boolean().optional(),
-    agentIds: z.array(z.string().min(1).max(64)).min(1).max(50).optional(),
-  });
+  const Match = RuleMatchSchema;
   const Outcome = z.enum(["allow", "ceo", "owner", "deny"]);
   const ruleErrors = (reply: FastifyReply) => (err: unknown) => {
     if (err instanceof RuleError) return reply.code(err.status).send({ error: "rejected", message: err.message });
     throw err;
   };
   owner.get("/api/policy-rules", async (req) => rules.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null));
+  // Every change leaves a "settings" activity line (BOS-1963). A rule for every company (companyId null)
+  // has no single company, so the same line is recorded against each company.
+  const noteRuleChange = async (companyId: string | null, summary: string, detail: Record<string, unknown>) => {
+    const ids = companyId ? [companyId] : (await db.select({ id: companies.id }).from(companies)).map((c) => c.id);
+    for (const id of ids) await record(db, { companyId: id, kind: "settings", summary, detail });
+  };
+  const scopeText = (companyId: string | null) => (companyId ? "" : " for every company");
   owner.post("/api/policy-rules", async (req, reply) => {
     const b = z.object({ companyId: Uuid.nullable(), name: z.string().trim().min(1).max(120), match: Match, outcome: Outcome }).parse(req.body);
-    return rules.create(b).then((r) => reply.code(201).send(r), ruleErrors(reply));
+    return rules.create(b).then(async (r) => {
+      await noteRuleChange(r.companyId, `Owner added the permission rule "${r.name}"${scopeText(r.companyId)} (outcome: ${r.outcome})`, { ruleId: r.id, change: "created", outcome: r.outcome });
+      return reply.code(201).send(r);
+    }, ruleErrors(reply));
   });
   owner.patch("/api/policy-rules/:id", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const b = z.object({ name: z.string().trim().min(1).max(120), match: Match, outcome: Outcome }).partial().parse(req.body);
-    return rules.update(id, b).catch(ruleErrors(reply));
+    const before = await rules.get(id);
+    return rules.update(id, b).then(async (r) => {
+      const fields: string[] = [];
+      if (b.name !== undefined && b.name !== before?.name) fields.push("name");
+      if (b.match !== undefined && JSON.stringify(r.match) !== JSON.stringify(before?.match))fields.push("what it matches");
+      if (b.outcome !== undefined && b.outcome !== before?.outcome) fields.push("outcome");
+      const edited = fields.length ? fields.join(", ") : "nothing changed";
+      const renamed = before && before.name !== r.name ? ` (was "${before.name}")` : "";
+      await noteRuleChange(r.companyId, `Owner edited the permission rule "${r.name}"${renamed}${scopeText(r.companyId)}: ${edited}; outcome now ${r.outcome}`, { ruleId: r.id, change: "edited", fields, outcome: r.outcome, previousOutcome: before?.outcome ?? null });
+      return r;
+    }).catch(ruleErrors(reply));
   });
-  owner.delete("/api/policy-rules/:id", async (req, reply) => rules.remove(IdParam.parse(req.params).id).then(() => reply.code(204).send(), ruleErrors(reply)));
+  owner.delete("/api/policy-rules/:id", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const before = await rules.get(id);
+    return rules.remove(id).then(async () => {
+      if (before) await noteRuleChange(before.companyId, `Owner deleted the permission rule "${before.name}"${scopeText(before.companyId)} (outcome was ${before.outcome})`, { ruleId: id, change: "deleted", outcome: before.outcome });
+      return reply.code(204).send();
+    }, ruleErrors(reply));
+  });
   owner.post("/api/policy-rules/order", async (req, reply) => {
     const b = z.object({ companyId: Uuid.nullable(), ids: z.array(Uuid).max(500) }).parse(req.body);
-    return rules.reorder(b.companyId, b.ids).catch(ruleErrors(reply));
+    return rules.reorder(b.companyId, b.ids).then(async (list) => {
+      await noteRuleChange(b.companyId, `Owner reordered the permission rules${scopeText(b.companyId)}: ${list.map((r) => r.name).join(" > ")}`.slice(0, 500), { change: "reordered", order: list.map((r) => r.id) });
+      return list;
+    }).catch(ruleErrors(reply));
   });
   // The owner asks in plain words; the CEO drafts the rule and it comes back as a decision.
   owner.post("/api/companies/:id/rule-requests", async (req, reply) => {
@@ -133,9 +175,14 @@ export function policyRoutes(
     });
     return reply.code(202).send({ ceo });
   });
-  owner.post("/api/policy-rules/test", async (req) => {
-    const b = z.object({ companyId: Uuid, command: z.string().max(5000).optional(), title: z.string().max(500).optional(), kind: z.string().max(40).optional() }).parse(req.body);
-    return rules.test(b.companyId, { title: b.title ?? b.command ?? null, kind: b.kind ?? (b.command ? "execute" : null), rawInput: b.command ? { command: b.command } : null });
+  owner.post("/api/policy-rules/test", async (req, reply) => {
+    // `draft` is a rule not saved yet (BOS-2188): tried first, never stored. A bad pattern is a 422 with the reason.
+    const b = z.object({ companyId: Uuid, command: z.string().max(5000).optional(), title: z.string().max(500).optional(), kind: z.string().max(40).optional(), draft: z.object({ match: Match, outcome: Outcome }).optional() }).parse(req.body);
+    try {
+      return await rules.test(b.companyId, { title: b.title ?? b.command ?? null, kind: b.kind ?? (b.command ? "execute" : null), rawInput: b.command ? { command: b.command } : null }, b.draft);
+    } catch (err) {
+      return ruleErrors(reply)(err);
+    }
   });
 
   owner.delete("/api/grants/:id", async (req, reply) => {

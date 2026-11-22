@@ -49,6 +49,7 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 
 - **R5.** Every agent connects through **ACP v1**. ACP v2 stays behind a feature flag until it is stable.
 - **R6.** Claude runs as the **official, unmodified Claude Code** shipped in the runner image. The `claude-agent-acp` adapter drives it, pointed at that binary through `CLAUDE_CODE_EXECUTABLE`.
+  - *Now (Nov 2026):* the runner image holds no Anthropic code (DR-050; `apps/runner/test/no-anthropic-code.test.ts` checks it). Claude Code is installed by the Claude pack on first start, and `CLAUDE_CODE_EXECUTABLE` points at that install. See "The Claude pack" in [02-architecture.md](02-architecture.md).
 - **R7.** Codex runs through `codex-acp`. Other ACP agents (Gemini CLI, OpenCode and so on) can be added through configuration.
 - **R8.** Model lists come from each agent's ACP `configOptions` (category `model`). A **free-text model override** is always available. Nothing is hard-coded.
   - *Spike S2 found:* both adapters reject unlisted models over ACP. The override is therefore applied when the agent starts:
@@ -56,6 +57,7 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
     - **Codex:** `CODEX_CONFIG.model`.
   - Both worked in the spike.
 - **R9.** Runner images are rebuilt on a schedule (weekly by default) and on demand, to pick up new Claude Code and Codex releases.
+  - *Now (Nov 2026):* there is no schedule. Runner images are rebuilt on demand only, roughly weekly: Settings → Server and runner → Updates → **Build and update runners**, which runs `scripts/update-runner.sh`.
 - **R10.** Claude credentials, in order of preference:
   1. A `claude setup-token` one-year token. It is stored in the secrets store and injected as `CLAUDE_CODE_OAUTH_TOKEN`.
   2. Anthropic's own login, completed inside the runner through a relayed terminal.
@@ -186,7 +188,7 @@ These come from cline/kanban (Apache-2.0) and its issue tracker; see [04-researc
   - **Quiet hours** demote a notification to a lower level rather than drop it.
   - **Evidence:** every notification links to its evidence.
   - **Phone push** uses Web Push (Boss Man only sends outbound requests) or a self-hosted ntfy reached over Tailscale. Boss Man is never exposed at the router.
-  - **What reaches the phone (BOS-1006):** by default only urgent cards, at ntfy priority 5, and only if the card is on the owner's tier and still open when sent (BOS-1097): a deploy carrying the fix for a live problem, a page, a card the CEO escalated with `urgent: true` (stored as `context.urgentPush`), and the test push. Blocking a ticket no longer counts. Each push is published with the notification id as ntfy `sequence_id`; answering or withdrawing the card sends `PUT /<topic>/<id>/clear` (ntfy 2.14+; the pinned v2.11.0 image cannot, and Notifications says so). Notifications → Recent phone pushes lists the last 20 with the reason. Routine cards stay in the app. Notifications → "Send to my phone" can switch to "All decisions", which sends routine ones at priority 3. The "Flags" tick is separate. Quiet hours still lower an urgent ask to a flag first.
+  - **What reaches the phone (BOS-1006):** by default only urgent cards, at ntfy priority 5, and only if the card is on the owner's tier and still open when sent (BOS-1097): a deploy carrying the fix for a live problem, a page, a card the CEO escalated with `urgent: true` (stored as `context.urgentPush`), and the test push. Blocking a ticket no longer counts. Each push is published with the notification id as ntfy `sequence_id`; answering or withdrawing the card sends `PUT /<topic>/<id>/clear` (ntfy 2.14+; the pinned v2.11.0 image cannot, and Notifications says so. *Now (Nov 2026):* the pin is v2.37.2 in `deploy/ntfy.yml`, which can clear; Notifications warns only when your ntfy server is older than 2.14). Notifications → Recent phone pushes lists the last 20 with the reason. Routine cards stay in the app. Notifications → "Send to my phone" can switch to "All decisions", which sends routine ones at priority 3. The "Flags" tick is separate. Quiet hours still lower an urgent ask to a flag first.
 - **R45. Web hardening.** WebSocket upgrades check `Origin` and `Host`. Login has a rate limit and a lockout after repeated failures.
 
 ### From the Nimbalyst and Aperant reviews (2026-10-16)

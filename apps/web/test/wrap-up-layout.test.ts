@@ -130,21 +130,43 @@ const saveShot = (name: string, page: Page) => {
 };
 
 describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
-  it("is inside the Updates box, above the update buttons, with the bottom panel gone, at desktop and foldable", async () => {
-    const browser = await launch();
+  // One test per size and mode (BOS-1708 pattern, one step finer after BOS-1790): each keeps the 60 s limit (not raised)
+  // but covers ONE page load. The browser is started once, in beforeAll, so a cold GitHub runner's Chromium start-up
+  // is not charged to the first test; the tests still time only the page work.
+  // The limit still catches a page that never draws the mode's data (the wait below has a 20 s deadline).
+  let browser: Browser | null = null;
+  beforeAll(async () => {
+    browser = await launch();
+  }, 180_000);
+  afterAll(async () => {
+    await browser?.close();
+  });
+  const sizes = [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "brave1667", width: 1667, height: 724, touch: true, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }];
+  const cases = sizes.flatMap((vp) => ["waiting", "asked", "late", "none"].map((m) => ({ vp, m, name: vp.name })));
+  it.each(cases)("is inside the Updates box, above the update buttons, with the bottom panel gone, at $name in mode $m", async ({ vp, m }) => {
     if (!browser) return; // no browser here: skipped, not passed
     try {
-      for (const vp of [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "brave1667", width: 1667, height: 724, touch: true, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }]) {
-        for (const m of ["waiting", "asked", "late", "none"]) {
+      {
+        {
           mode = m;
           const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.dsf, hasTouch: vp.touch });
           const errors: string[] = [];
           page.on("pageerror", (e) => errors.push(String(e)));
           // The Updates box is on Settings → Server and runner since the Settings menu redesign; #/settings alone is the menu.
-          await page.goto(`${base}/#/settings/${company.id}/system`);
+          await page.goto(`${base}/#/settings/${company.id}/updates`);
           await page.waitForSelector("body", { timeout: 4000 });
           await page.waitForSelector("section.card:has(h2#deploy-h)", { timeout: 8000 });
-          await new Promise((r) => setTimeout(r, 1200));
+          // Wait for the data of this mode to be drawn (an event, with a deadline), not a fixed sleep: a cold GitHub
+          // runner is several times slower than a dev machine. The page-error check below still sees late errors
+          // because the elements waited on only exist once the maintenance answer has been rendered.
+          const sec0 = "section.card:has(h2#deploy-h)";
+          const ready: Record<string, string> = {
+            none: `${sec0} [data-testid='update-tag']:has-text('Up to date')`,
+            waiting: `${sec0} [data-testid='update-tag']:has-text('Waiting for agents')`,
+            asked: `${sec0} [data-testid='wrapup-runs']`,
+            late: `${sec0} [data-testid='update-main']:has-text('Stop 4 and carry on')`,
+          };
+          await page.waitForSelector(ready[m]!, { timeout: 20000 });
           expect(JSON.stringify(errors), `${vp.name}/${m} page errors`).toBe("[]");
           const updates = page.locator("section.card:has(h2#deploy-h)");
           const box = await updates.boundingBox();
@@ -200,7 +222,7 @@ describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
         }
       }
     } finally {
-      await browser.close();
+      /* the shared browser is closed in afterAll */
     }
   }, 60_000);
 });

@@ -1,11 +1,11 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, deploys, runners, secretAccessLog, wakes } from "../src/db/schema.js";
-import { endpointProblem } from "../src/services/deploys.js";
+import { activity, decisions, deploys, deployTargets, runners, secretAccessLog, wakes } from "../src/db/schema.js";
+import { endpointProblem, liveTagOf } from "../src/services/deploys.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -42,9 +42,69 @@ describe("deploy targets (R14)", () => {
     const raw = await c.target({ name: "Docker", kind: "docker", endpoint: "unix:///var/run/docker.sock" });
     expect(raw.statusCode).toBe(422);
     expect(raw.json().message).toMatch(/socket proxy/);
-    expect((await c.target({ name: "Git", kind: "git", endpoint: "https://bot:ghp_0123456789abcdefghijABCDEFGHIJ@github.com/x/y.git" })).statusCode).toBe(422);
+    expect((await c.target({ name: "Git", kind: "git", endpoint: `https://bot:${"ghp_"}0123456789abcdefghijABCDEFGHIJ@github.com/x/y.git` /* joined: no key-shaped line for the secret scans (BOS-1932) */ })).statusCode).toBe(422);
     const ok = await c.target({ name: "Docker", kind: "docker", endpoint: "tcp://socket-proxy:2375", isProduction: true });
     expect(ok.statusCode).toBe(201);
+  });
+
+  it("leaves an activity line when a target is added, changed or removed, and none for a refused request (BOS-2100)", async () => {
+    const c = (ctx = await setup());
+    const lines = async () => (await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")))).map((a) => a.summary);
+    const ok = await c.target({ name: "Production", kind: "ssh", endpoint: "deploy@nas.lan", isProduction: true, requiresApproval: true });
+    expect(ok.statusCode).toBe(201);
+    const id = ok.json().id as string;
+    expect(await lines()).toEqual(["Owner added deploy target Production"]);
+
+    // Refused: validation and unknown id write nothing.
+    expect((await c.req("PATCH", `/api/deploy-targets/${id}`, { endpoint: "nas.lan" })).statusCode).toBe(422);
+    expect((await c.req("PATCH", `/api/deploy-targets/${randomUUID()}`, { isProduction: false })).statusCode).toBe(404);
+    expect((await c.req("DELETE", `/api/deploy-targets/${randomUUID()}`)).statusCode).toBe(404);
+    expect(await lines()).toHaveLength(1);
+
+    // A save that changes nothing writes nothing; each real change is named, without the values.
+    expect((await c.req("PATCH", `/api/deploy-targets/${id}`, { isProduction: true })).statusCode).toBe(200);
+    expect(await lines()).toHaveLength(1);
+    expect((await c.req("PATCH", `/api/deploy-targets/${id}`, { requiresApproval: false, endpoint: "ops@nas.lan" })).statusCode).toBe(200);
+    const all = await lines();
+    expect(all).toHaveLength(2);
+    expect(all.at(-1)).toBe("Owner changed deploy target Production: approval needed turned off, endpoint changed");
+    expect(all.join(" ")).not.toContain("nas.lan");
+
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}`)).statusCode).toBe(204);
+    expect((await lines()).at(-1)).toBe("Owner removed deploy target Production");
+  });
+
+  it("refuses to remove a target with a live deploy, and asks before erasing past deploys (BOS-2158)", async () => {
+    const c = (ctx = await setup());
+    const id = (await c.target({ name: "Production", kind: "ssh", endpoint: "deploy@nas.lan", isProduction: true })).json().id as string;
+    const r = await c.deploys.request(c.actor, { target: "Production", ref: "v1.0.0" });
+    expect(r.deploy.status).toBe("pending_approval");
+
+    // Live: refused, even with force; nothing erased.
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}`)).statusCode).toBe(409);
+    const forced = await c.req("DELETE", `/api/deploy-targets/${id}?force=1`);
+    expect(forced.statusCode).toBe(409);
+    expect(forced.json().error).toBe("live");
+    expect(forced.json().message).toContain("v1.0.0");
+    expect(await c.db.select().from(deploys)).toHaveLength(1);
+    expect(await c.db.select().from(deployTargets)).toHaveLength(1);
+
+    // Finished: history needs the owner's confirmation.
+    await c.db.update(deploys).set({ status: "succeeded" }).where(eq(deploys.id, r.deploy.id));
+    const ask = await c.req("DELETE", `/api/deploy-targets/${id}`);
+    expect(ask.statusCode).toBe(409);
+    expect(ask.json().error).toBe("has_history");
+    expect(ask.json().message).toContain("1 past deploy");
+    expect(await c.db.select().from(deploys)).toHaveLength(1);
+    expect((await c.req("DELETE", `/api/deploy-targets/${id}?force=true`)).statusCode).toBe(204);
+    expect(await c.db.select().from(deployTargets)).toHaveLength(0);
+    expect((await c.db.select().from(activity).where(eq(activity.kind, "settings"))).map((a) => a.summary)).toContain("Owner removed deploy target Production");
+    expect(await c.db.select().from(deploys)).toHaveLength(0);
+    // The approval card the deploy raised is closed with a reason, not left open pointing at nothing.
+    const cards = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ status: "withdrawn" });
+    expect(JSON.stringify(cards[0]!.context)).toContain("deploy target was removed");
   });
 
   it("checks the endpoint shape for each kind", () => {
@@ -120,5 +180,30 @@ describe("deploys (R15)", () => {
     await c.target({ name: "Staging", kind: "docker", endpoint: "tcp://socket-proxy:2375" });
     await expect(c.deploys.request(c.actor, { target: "Prod", ref: "v1" })).rejects.toThrow(/Targets: Staging/);
     await expect(c.deploys.request(c.actor, { target: "Staging", ref: "v1", notes: "key AKIAIOSFODNN7EXAMPLE" })).rejects.toThrow(/AWS access key/);
+  });
+});
+
+describe("liveTagOf (DR-033)", () => {
+  const live = { projectId: "11111111-1111-4111-8111-111111111111", name: "live-deployed" };
+
+  it("returns a target's well-formed deploy tag", () => {
+    expect(liveTagOf({ rules: { liveTag: live } })).toEqual(live);
+    // A copy, not the stored object: the caller can't change the target's rules through it.
+    expect(liveTagOf({ rules: { liveTag: live } })).not.toBe(live);
+    // Unknown keys the stored rules may carry are dropped.
+    expect(liveTagOf({ rules: { liveTag: { ...live, extra: true } } })).toEqual(live);
+  });
+
+  it("returns null for empty or unknown rules, or a malformed tag", () => {
+    expect(liveTagOf({ rules: null })).toBeNull();
+    expect(liveTagOf({ rules: {} })).toBeNull();
+    expect(liveTagOf({ rules: { requiresApproval: true } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: null } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: "live-deployed" } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { name: live.name } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: live.projectId } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: live.projectId, name: "" } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: 42, name: live.name } } })).toBeNull();
+    expect(liveTagOf({ rules: { liveTag: { projectId: live.projectId, name: 7 } } })).toBeNull();
   });
 });

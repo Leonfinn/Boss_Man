@@ -9,9 +9,12 @@ import { NO_CHECK, STANDARD_CHECKS, SYSTEM_STATES, findCredential, parseRepoUrl,
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, fundingSources, projects, runners as runnersTable, runs as runsTable, secretGrants, tickets } from "../db/schema.js";
 import type { gitHostService } from "../services/git-hosts.js";
+import { DEFAULT_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, WATCH_TOKEN_ENV, type githubWatchService } from "../services/github-watch.js";
 import type { launcherService } from "../services/launcher.js";
+import { record } from "../services/activity.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
-import { monthStartUtc, projectSpendMicros } from "../services/project-spend.js";
+import { summarizeCostChecks } from "../services/cost-check.js";
+import { monthStartUtc, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
 import type { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { runnersService } from "../services/runners.js";
 import type { secretsService } from "../services/secrets.js";
@@ -37,10 +40,11 @@ export function projectRoutes(
     checkPolicy: (companyId: string, body: unknown) => ReturnType<typeof checkPolicyIn>;
     /** Notes new scope for the CEO's next run; app.ts uses it for objectives and milestones too. */
     teamCheck: (companyId: string, what: string) => Promise<void>;
+    githubWatch: ReturnType<typeof githubWatchService>;
     now?: () => Date;
   },
 ) {
-  const { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck } = deps;
+  const { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch } = deps;
 
   /** The project's own policy, or null when it uses the company's. */
   owner.get("/api/projects/:id/review-policy", async (req, reply) => {
@@ -49,16 +53,73 @@ export function projectRoutes(
   });
   owner.put("/api/projects/:id/review-policy", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
-    const [proj] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, id));
+    const [proj] = await db.select({ companyId: projects.companyId, name: projects.name }).from(projects).where(eq(projects.id, id));
     if (!proj) return reply.code(404).send({ error: "not_found" });
     const p = await checkPolicy(proj.companyId, req.body);
     if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
     await db.update(projects).set({ reviewPolicy: p }).where(eq(projects.id, id));
+    // Logged like the company's policy (routes/policy.ts), so a change in who reviews can be traced (BOS-1969).
+    await record(db, { companyId: proj.companyId, kind: "settings", summary: `Owner changed the review policy for project ${proj.name}` });
     return { policy: p };
   });
   owner.delete("/api/projects/:id/review-policy", async (req, reply) => {
-    const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ id: projects.id });
-    return p ? { policy: null } : reply.code(404).send({ error: "not_found" });
+    const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ companyId: projects.companyId, name: projects.name });
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    await record(db, { companyId: p.companyId, kind: "settings", summary: `Owner reset project ${p.name} to the company review policy` });
+    return { policy: null };
+  });
+
+  // The GitHub watcher's setting (BOS-1393): owner only, never an agent tool. The token is a company secret
+  // (GITHUB_WATCH_TOKEN); only whether it is there is shown, never its value.
+  const WatchBody = z
+    .object({
+      enabled: z.boolean(),
+      repo: z.string().trim().max(140).regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, "The repository must look like owner/name."),
+      intervalMinutes: z.number().int().min(MIN_INTERVAL_MINUTES, `Check at most every ${MIN_INTERVAL_MINUTES} minutes.`).max(MAX_INTERVAL_MINUTES),
+      watchAlerts: z.boolean(),
+      watchIssues: z.boolean(),
+      watchDiscussions: z.boolean(),
+      skipLogins: z.array(z.string().trim().max(45)).max(20),
+    })
+    .partial();
+  const watchView = async (projectId: string, companyId: string) => {
+    const w = await githubWatch.get(projectId);
+    // The grant's name only: reading it doesn't decrypt the token.
+    const hasToken = (await secretsSvc.grantsForCompany(companyId)).some((g) => g.envName === WATCH_TOKEN_ENV && !g.deployTargetId);
+    return {
+      enabled: w?.enabled ?? false,
+      repo: w?.repo ?? "",
+      intervalMinutes: w?.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES,
+      watchAlerts: w?.watchAlerts ?? true,
+      // BOS-2126: the other project that holds this repo's alert watching (old data only), so the choice is never silent.
+      alertsHeldBy: await githubWatch.alertsHeldBy(projectId, companyId),
+      watchIssues: w?.watchIssues ?? true,
+      watchDiscussions: w?.watchDiscussions ?? true,
+      skipLogins: w?.skipLogins ?? [],
+      status: w?.status ?? "idle",
+      lastError: w?.lastError ?? null,
+      lastRunAt: w?.lastRunAt ?? null,
+      lastNewNotes: w?.lastNewNotes ?? 0,
+      backoffUntil: w?.backoffUntil ?? null,
+      hasToken,
+      tokenName: WATCH_TOKEN_ENV,
+    };
+  };
+  owner.get("/api/projects/:id/github-watch", async (req, reply) => {
+    const [p] = await db.select({ id: projects.id, companyId: projects.companyId }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+    return p ? watchView(p.id, p.companyId) : reply.code(404).send({ error: "not_found" });
+  });
+  owner.put("/api/projects/:id/github-watch", async (req, reply) => {
+    const [p] = await db.select({ id: projects.id, companyId: projects.companyId }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    await githubWatch.save(p.id, p.companyId, WatchBody.parse(req.body));
+    return watchView(p.id, p.companyId);
+  });
+  owner.post("/api/projects/:id/github-watch/check-now", async (req, reply) => {
+    const [p] = await db.select({ id: projects.id, companyId: projects.companyId }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    await githubWatch.runOne(p.id, { force: true });
+    return watchView(p.id, p.companyId);
   });
 
   owner.get("/api/companies/:id/projects", async (req) => {
@@ -125,7 +186,11 @@ export function projectRoutes(
       .returning();
     // A new repo address (or archiving) changes which git host the company's runner may reach.
     if (p && (fields.repoUrl !== undefined || archived !== undefined)) void launch.syncAllow(p.companyId);
-    return p ?? reply.code(404).send({ error: "not_found" });
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    // Names the fields only, never their values: a repo address or command could carry something private (BOS-1987).
+    const changed = Object.keys(b);
+    if (changed.length) await record(db, { companyId: p.companyId, kind: "settings", summary: `Owner changed project ${p.name}: ${changed.join(", ")}` });
+    return p;
   });
 
   // What a project has cost (money only, as on the dashboard: subscription use is excluded). "This month" is the UTC calendar month.
@@ -137,27 +202,33 @@ export function projectRoutes(
     const monthStart = monthStartUtc(t);
     const month = await projectSpendMicros(db, id, monthStart);
     const all = await projectSpendMicros(db, id);
+    // Costliest tasks: pay-as-you-go money and plan (subscription) list-price estimate, ranked by the two together (BOS-1563).
     const sum = sql<string>`sum(${costEvents.costMicros})`;
+    const paygSum = sql<string>`coalesce(sum(${costEvents.costMicros}) filter (where ${fundingSources.kind} <> 'subscription'), 0)`;
+    const planSum = sql<string>`coalesce(sum(${costEvents.costMicros}) filter (where ${fundingSources.kind} = 'subscription'), 0)`;
     const top = await db
-      .select({ id: tickets.id, title: tickets.title, micros: sum })
+      .select({ id: tickets.id, title: tickets.title, micros: paygSum, planMicros: planSum })
       .from(costEvents)
       .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
       .innerJoin(runsTable, eq(runsTable.id, costEvents.runId))
       .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
-      .where(and(eq(tickets.projectId, id), ne(fundingSources.kind, "subscription")))
+      .where(eq(tickets.projectId, id))
       .groupBy(tickets.id, tickets.title)
       .orderBy(desc(sum))
       .limit(10);
+    const plan = await projectPlanUse(db, id, monthStart);
     // Tokens from every run on the project's tasks, subscription runs included (they have no money cost but still use the plan).
     const tokenSum = (since?: Date) =>
       db
-        .select({ input: sql<string>`coalesce(sum(${runsTable.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runsTable.outputTokens}), 0)` })
+        .select({ input: sql<string>`coalesce(sum(${runsTable.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runsTable.outputTokens}), 0)`, cacheRead: sql<string>`coalesce(sum(${runsTable.cachedReadTokens}), 0)`, cacheWrite: sql<string>`coalesce(sum(${runsTable.cachedWriteTokens}), 0)` })
         .from(runsTable)
         .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
         .where(since ? and(eq(tickets.projectId, id), gte(runsTable.startedAt, since)) : eq(tickets.projectId, id))
-        .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0) }));
+        .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0), cacheRead: Number(r?.cacheRead ?? 0), cacheWrite: Number(r?.cacheWrite ?? 0) }));
     const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
-    return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
+    // The cost sanity check (BOS-1866): runs on this project's tasks whose recorded cost disagrees with their tokens at list price, and runs not checked.
+    const costCheck = await summarizeCostChecks(db, sql`${runsTable.ticketId} in (select ${tickets.id} from ${tickets} where ${tickets.projectId} = ${id})` as ReturnType<typeof and>);
+    return { costCheck, tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
   });
 
   // The setup wizard (R56): where the owner is in it, and what's still to do for a company.

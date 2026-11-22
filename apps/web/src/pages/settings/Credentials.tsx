@@ -2,17 +2,20 @@ import { useState, type FormEvent } from "react";
 import { api, type Agent, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
+import { LoadError } from "../../components/LoadError";
+import { Loader } from "../../components/Loader";
 import { Section, useAction } from "./shared";
 
 /** What each kind of credential is called inside an agent's environment by default. */
 const CREDENTIALS = [
   { kind: "claude_oauth_token", label: "Claude setup-token", env: "CLAUDE_CODE_OAUTH_TOKEN", help: "Run `claude setup-token` on your own computer and paste the token it prints." },
-  { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents, Pull requests and Workflows read and write. Gitea: a token with the write:repository scope." },
+  { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents, Pull requests and Workflows read and write, plus Actions read-only (so Boss Man can read CI runs). Gitea: a token with the write:repository scope." },
   { kind: "anthropic_api_key", label: "Anthropic API key", env: "ANTHROPIC_API_KEY", help: "From the Anthropic Console. Runs on it are billed to your API credit." },
   { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },
   { kind: "generic", label: "OpenRouter API key", env: "OPENROUTER_API_KEY", help: "For OpenCode agents. Models are named openrouter/<model>." },
   { kind: "generic", label: "Ollama Cloud API key", env: "OLLAMA_API_KEY", help: "For OpenCode agents. Models are named ollama-cloud/<model>." },
   { kind: "generic", label: "Synthetic API key", env: "SYNTHETIC_API_KEY", help: "For OpenCode agents. Models are named synthetic/<model>, e.g. synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" },
+  { kind: "generic", label: "GitHub watcher token", env: "GITHUB_WATCH_TOKEN", help: "A fine-grained GitHub token for the project's GitHub watcher: Metadata read, plus Issues, Discussions, Secret scanning alerts and Dependabot alerts read and write (write lets Support answer and close issues and discussions, and the security reviewer close an alert, from inside Boss Man; it changes nothing else on GitHub)." },
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose. The one exception is GITHUB_WATCH_TOKEN, the GitHub watcher's token: only the server reads it and no agent run ever gets it." },
 ] as const;
 
@@ -39,15 +42,14 @@ function GrantAgents({ grant, agents, busy, onSave }: { grant: Grant; agents: Ag
           </label>
         ))}
       </fieldset>
-      <button type="button" className="btn small" disabled={busy} onClick={() => onSave(picked)} aria-label={`Save agents for ${grant.envName}`}>
-        Save
-      </button>
+      <SaveButton dirty={[...picked].sort().join() !== [...grant.agentIds].sort().join()} saved={false} busy={busy} onClick={() => onSave(picked)} ariaLabel={`Save agents for ${grant.envName}`} />
     </details>
   );
 }
 
 export function Credentials({ company, onChanged, title = "Credentials" }: { company: Company; onChanged?: () => void; title?: string }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
+  const targets = usePoll((signal) => api<{ id: string; name: string }[]>(`/api/companies/${company.id}/deploy-targets`, { signal }), 30_000, `deploy-targets-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   // No default kind: a value checked as the wrong kind fails confusingly, so the owner always picks.
   const [choice, setChoice] = useState(-1);
@@ -154,7 +156,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                   <td className="mono">{g.envName}</td>
                   <td>{g.secretName}</td>
                   <td className="mono muted">{g.hint ?? ""}</td>
-                  <td>{g.deployTargetId ? "One deploy target" : "Every run"}</td>
+                  <td>{g.deployTargetId ? (targets.data?.find((t) => t.id === g.deployTargetId)?.name ?? "One deploy target") : "Every run"}</td>
                   <td>
                     <GrantAgents key={g.agentIds.join()} grant={g} agents={company.agents} busy={act.busy} onSave={(ids) => setAgents(g, ids)} />
                   </td>
@@ -171,8 +173,12 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
             </tbody>
           </table>
         </div>
-      ) : (
+      ) : grants.data ? (
         <p>No credentials yet. Agents need at least a Claude setup-token or an API key to run.</p>
+      ) : grants.error ? (
+        <LoadError what="the credentials" message={grants.error.message} onRetry={grants.reload} />
+      ) : (
+        <Loader label="Loading the credentials" size={16} />
       )}
       {grants.data?.some((g) => g.envName === CLAUDE_TOKEN_ENV) && (
         <p className="muted" style={{ fontSize: 13 }}>

@@ -1,6 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUS_LABEL, type ScoredFeatures, type TicketDetail, type TicketLinks as Links } from "../api";
 import { usePoll } from "../hooks";
+import { short } from "../short-date";
+
+const KIND_WORDS = { ticket: "Task", engagement: "Another company's work", decision: "Your decision" } as const;
 
 type Tree = Array<{ id: string; title: string; status: string; milestones: Array<{ id: string; title: string; targetDate: string | null }> }>;
 type OpenTicket = { id: string; title: string; state: string; project: string };
@@ -18,14 +21,18 @@ export function TicketLinks({ t, onChanged, bare = false, links: given }: { t: T
   const [candidates, setCandidates] = useState<OpenTicket[] | null>(null);
   const [blocker, setBlocker] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const fail = (err: Error) => setError(err.message);
 
   const setMilestone = (milestoneId: string) =>
     void api(`/api/tickets/${t.id}`, { method: "PATCH", body: { milestoneId: milestoneId || null } }).then(() => (setError(null), onChanged()), fail);
   const add = (e: FormEvent) => {
     e.preventDefault();
-    if (!blocker) return;
-    void api(`/api/tickets/${t.id}/dependencies`, { method: "POST", body: { ticketId: blocker } }).then(() => (setBlocker(""), setError(null), links.reload(), onChanged()), fail);
+    if (!blocker || adding) return;
+    setAdding(true);
+    void api(`/api/tickets/${t.id}/dependencies`, { method: "POST", body: { ticketId: blocker } })
+      .then(() => (setBlocker(""), setError(null), links.reload(), onChanged()), fail)
+      .finally(() => setAdding(false));
   };
   const remove = (dependencyId: string) => void api(`/api/dependencies/${dependencyId}`, { method: "DELETE" }).then(() => (setError(null), links.reload(), onChanged()), fail);
   const loadCandidates = () => {
@@ -63,7 +70,7 @@ export function TicketLinks({ t, onChanged, bare = false, links: given }: { t: T
               {o.milestones.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.title}
-                  {m.targetDate ? ` (${m.targetDate})` : ""}
+                  {m.targetDate ? ` (${short(m.targetDate)})` : ""}
                 </option>
               ))}
             </optgroup>
@@ -83,13 +90,13 @@ export function TicketLinks({ t, onChanged, bare = false, links: given }: { t: T
             {links.data.waitsOn.map((w) => (
               <li key={w.dependencyId}>
                 <span className={`tag ${w.open ? "red" : "green"}`}>{w.open ? "Open" : "Done"}</span>
-                <span className="muted">{w.kind}</span>
+                <span className="muted">{KIND_WORDS[w.kind]}</span>
                 <a href={w.link}>{w.title}</a>
                 {w.kind === "ticket" && w.until && <span className="muted">(until {w.until})</span>}
                 {w.kind === "decision" ? (
                   <span className="muted">Answer it to release this task.</span>
                 ) : (
-                  <button type="button" className="btn small" onClick={() => remove(w.dependencyId)}>
+                  <button type="button" className="btn small" aria-label={`Remove wait on ${w.title}`} onClick={() => window.confirm(`Stop this ticket waiting on ${w.title}? It may start straight away.`) && remove(w.dependencyId)}>
                     Remove
                   </button>
                 )}
@@ -98,6 +105,11 @@ export function TicketLinks({ t, onChanged, bare = false, links: given }: { t: T
           </ul>
         ) : (
           links.data && <p className="muted">Nothing.</p>
+        )}
+        {!links.data && links.error && (
+          <p className="error" role="alert">
+            Couldn't load what this waits on.
+          </p>
         )}
         <form onSubmit={add} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 8 }}>
           <div className="field" style={{ flex: "1 1 280px" }}>
@@ -113,7 +125,7 @@ export function TicketLinks({ t, onChanged, bare = false, links: given }: { t: T
                 ))}
             </select>
           </div>
-          <button className="btn" type="submit" disabled={!blocker}>
+          <button className="btn" type="submit" disabled={!blocker || adding}>
             Add
           </button>
         </form>

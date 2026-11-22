@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { activity, checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { checkQueue } from "../src/services/check-queue.js";
+import { landingTurns } from "../src/services/landing-turn.js";
 
 // BOS-1384: urgent merges go ahead of ordinary ones (read live from the ticket), and "Move to front" puts a merge next.
 const shared = openPglite();
@@ -74,6 +75,37 @@ describe("merge line order (BOS-1384)", () => {
     expect(again.frontBy).toBe("Sam");
     expect(again.frontAt).not.toBeNull();
   });
+
+  // BOS-1822: every other passed merge of the project waits to push while a ticket holds the landing turn (BOS-1762), so the
+  // holder's re-check must start next, not wait at its ordinary tier and place behind older, urgent or moved-to-front jobs.
+  it("serves the landing-turn holder's re-check first, below only a fix for main", async () => {
+    const s = await setup();
+    const old = await s.merge({ minutesAgo: 50 });
+    const urgent = await s.merge({ minutesAgo: 40, urgent: true });
+    const moved = await s.merge({ minutesAgo: 30 });
+    await s.q.moveToFront(s.co.id, moved.ticketId, "Sam");
+    const holder = await s.merge({ minutesAgo: 1 });
+    const [h] = await s.db.select().from(tickets).where(eq(tickets.id, holder.ticketId));
+    const projectId = h!.projectId;
+    try {
+      // Two rebuilds after a pass take the turn (capMs 25 minutes).
+      landingTurns.rebuilt(projectId, holder.ticketId, 25 * 60_000);
+      expect(landingTurns.rebuilt(projectId, holder.ticketId, 25 * 60_000).turn).toBe("taken");
+      expect(await s.order()).toEqual([holder.ticketId, moved.ticketId, urgent.ticketId, old.ticketId]);
+      expect((await s.q.list(s.co.id)).rows.find((r) => r.ticketId === holder.ticketId)!.why).toBe("holds the landing turn");
+      // A fix for a red main still goes first.
+      const fix = await s.merge({ minutesAgo: 0, fixesMain: true });
+      expect((await s.order()).slice(0, 2)).toEqual([fix.ticketId, holder.ticketId]);
+      // The free slot goes to the fix, the next one to the holder, not to the older jobs.
+      expect((await s.q.claimNext(null)).map((j) => j.ticketId)).toEqual([fix.ticketId]);
+      await s.db.update(checkJobs).set({ state: "passed", endedAt: new Date() }).where(eq(checkJobs.id, fix.jobId));
+      expect((await s.q.claimNext(null)).map((j) => j.ticketId)).toEqual([holder.ticketId]);
+    } finally {
+      landingTurns.done(projectId, holder.ticketId);
+    }
+    // The turn over, the others keep their usual order.
+    expect(await s.order()).toEqual([moved.ticketId, urgent.ticketId, old.ticketId]);
+  });
 });
 
 // BOS-1519: an urgent or moved-to-front quick check ranks with the aged quick checks (DR-056's "with the merges" group) from
@@ -137,5 +169,23 @@ describe("urgent and moved-to-front quick checks (BOS-1519)", () => {
     const [run] = await s.q.claimNext(null);
     expect(run!.id).toBe(q1.jobId);
     expect(await s.q.moveToFront(s.co.id, q1.ticketId, "Sam")).toBeNull();
+  });
+
+  // BOS-2105: a full pre-review check (request_check scope full) was never in the with-merges group, so it waited behind every
+  // merge and aged quick check however long it had waited, and urgency did nothing. It now ages and ranks like a quick check.
+  it("a full pre-review check ages into the merge line, and an urgent one joins it at once", async () => {
+    const s = await setup();
+    const merge = await s.merge({ minutesAgo: 20 });
+    const agedQuick = await quick(s, { minutesAgo: 15 });
+    const full = await quick(s, { minutesAgo: 30, scope: "full" });
+    const fresh = await quick(s, { minutesAgo: 1 });
+    // Waited 30 minutes: it sorts by queue time with the merges, ahead of the newer merge and aged quick check.
+    expect(await s.order()).toEqual([full.ticketId, merge.ticketId, agedQuick.ticketId, fresh.ticketId]);
+    // Queued just now and not urgent: it waits below the aged group, as a fresh quick check does.
+    await s.db.update(checkJobs).set({ queuedAt: new Date(Date.now() - 60_000) }).where(eq(checkJobs.id, full.jobId));
+    expect((await s.order()).slice(0, 2)).toEqual([merge.ticketId, agedQuick.ticketId]);
+    // Urgent: top tier in the with-merges group from the moment it is queued.
+    await s.db.update(tickets).set({ urgent: true }).where(eq(tickets.id, full.ticketId));
+    expect(await s.order()).toEqual([full.ticketId, merge.ticketId, agedQuick.ticketId, fresh.ticketId]);
   });
 });

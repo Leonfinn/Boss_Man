@@ -1,13 +1,27 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { SCRATCH_RULE } from "@boss-man/shared";
-import { api, type Company } from "../api";
+import { api, type Agent, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { LoadError } from "../components/LoadError";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
 type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; reservedTmpRemoval?: boolean; destructive?: boolean; pushing?: boolean };
-type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null };
+type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null; expiresAt?: string | null };
+
+/** "Expires in 45 min" / "Expires today at 23:59" / "Expired at 15:42" for a timed rule; nothing for one that never ends (BOS-2188). */
+export function expiryOf(expiresAt: string | null | undefined, now: Date = new Date()): { expired: boolean; text: string } {
+  if (!expiresAt) return { expired: false, text: "" };
+  const end = new Date(expiresAt);
+  const clock = end.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const sameDay = end.toDateString() === now.toDateString();
+  const day = sameDay ? "" : `${end.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} `;
+  if (end <= now) return { expired: true, text: `Expired ${sameDay ? "at" : "on"} ${day}${clock}` };
+  const mins = Math.ceil((end.getTime() - now.getTime()) / 60_000);
+  if (mins < 60) return { expired: false, text: `Expires in ${mins} min` };
+  return { expired: false, text: sameDay ? `Expires today at ${clock}` : `Expires on ${day}at ${clock}` };
+}
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }>; shadowedIds?: string[] };
 
 const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"];
@@ -22,9 +36,16 @@ const outcomeTag = (o: Outcome) => {
   return <span className={`tag ${x.tone}`}>{x.label}</span>;
 };
 
-function describeMatch(m: Match) {
+/** "from Kit" / "from Kit or Zippy"; an id no agent list knows falls back to the old wording. */
+function describeAgents(ids: string[], agents: Agent[]) {
+  const names = ids.map((id) => agents.find((a) => a.id === id)?.name);
+  if (names.some((n) => !n)) return ids.length === 1 ? "the request is from one named agent" : "the request is from one of several named agents";
+  return `the request is from ${names.join(" or ")}`;
+}
+
+function describeMatch(m: Match, agents: Agent[] = []) {
   const parts: string[] = [];
-  if (m.agentIds?.length) parts.unshift(`the request is from one named agent`);
+  if (m.agentIds?.length) parts.unshift(describeAgents(m.agentIds, agents));
   if (m.kinds?.length) parts.push(`tool kind is ${m.kinds.join(" or ")}`);
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
@@ -38,17 +59,102 @@ function describeMatch(m: Match) {
   return parts.join(" and ");
 }
 
-function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule[]; shadowed: string[]; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
+/** The row as a form (BOS-2186). Save sends name, match and outcome in one PATCH; the match keeps any field this form doesn't show (agents, safe-only…). A server refusal shows under the form and nothing is saved. */
+function RuleEditForm({ rule, onSave, onCancel }: { rule: Rule; onSave: (patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onCancel: () => void }) {
+  const [f, setF] = useState({ name: rule.name, kinds: rule.match.kinds ?? [], commandPattern: rule.match.commandPattern ?? "", titlePattern: rule.match.titlePattern ?? "", outcome: rule.outcome });
+  const [problem, setProblem] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const id = (s: string) => `edit-${rule.id}-${s}`;
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (saving) return;
+    const { kinds, commandPattern, titlePattern, ...rest } = rule.match;
+    void kinds;
+    void commandPattern;
+    void titlePattern;
+    const match: Match = { ...rest, ...(f.kinds.length ? { kinds: f.kinds } : {}), ...(f.commandPattern ? { commandPattern: f.commandPattern } : {}), ...(f.titlePattern ? { titlePattern: f.titlePattern } : {}) };
+    setSaving(true);
+    setProblem(null);
+    try {
+      await onSave({ name: f.name, match, outcome: f.outcome });
+    } catch (err) {
+      setProblem((err as Error).message);
+      setSaving(false);
+    }
+  };
+  return (
+    <form onSubmit={save} aria-label={`Edit ${rule.name}`} style={{ gridColumn: "1 / -1", display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end" }}>
+      <div className="field" style={{ gridColumn: "1 / -1" }}>
+        <label htmlFor={id("name")}>Rule name</label>
+        <input id={id("name")} required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={id("command")}>Command matches (regex)</label>
+        <input id={id("command")} className="mono" value={f.commandPattern} onChange={(e) => setF({ ...f, commandPattern: e.target.value })} aria-invalid={problem ? true : undefined} aria-describedby={problem ? id("problem") : undefined} />
+      </div>
+      <div className="field">
+        <label htmlFor={id("title")}>Tool title matches (regex)</label>
+        <input id={id("title")} className="mono" value={f.titlePattern} onChange={(e) => setF({ ...f, titlePattern: e.target.value })} aria-invalid={problem ? true : undefined} />
+      </div>
+      <div className="field">
+        <label htmlFor={id("outcome")}>Then</label>
+        <select id={id("outcome")} value={f.outcome} onChange={(e) => setF({ ...f, outcome: e.target.value as Outcome })}>
+          {OUTCOMES.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <fieldset style={{ gridColumn: "1 / -1", border: 0, padding: 0, margin: 0, display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+        <legend style={{ fontSize: 13, fontWeight: 500, marginBottom: 6 }}>Tool kinds (any of)</legend>
+        {KINDS.map((k) => (
+          <label key={k} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+            <input type="checkbox" checked={f.kinds.includes(k)} onChange={(e) => setF({ ...f, kinds: e.target.checked ? [...f.kinds, k] : f.kinds.filter((x) => x !== k) })} />
+            {k}
+          </label>
+        ))}
+      </fieldset>
+      {problem && (
+        <p id={id("problem")} className="error" role="alert" style={{ gridColumn: "1 / -1" }}>
+          {problem}
+        </p>
+      )}
+      <span className="row-actions" style={{ gridColumn: "1 / -1" }}>
+        <button className="btn primary small" type="submit" disabled={saving}>
+          Save
+        </button>
+        <button className="btn small" type="button" onClick={onCancel}>
+          Cancel
+        </button>
+      </span>
+    </form>
+  );
+}
+
+function RuleRows({ rules, agents, shadowed, editingId, onEdit, onSave, onMove, onChange, onDelete }: { rules: Rule[]; agents: Agent[]; shadowed: string[]; editingId: string | null; onEdit: (id: string | null) => void; onSave: (r: Rule, patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
   if (!rules.length) return <p className="muted">None yet.</p>;
   return (
     <ol className="rules">
-      {rules.map((r, i) => (
-        <li key={r.id}>
+      {rules.map((r, i) =>
+        editingId === r.id ? (
+          <li key={r.id}>
+            <span className="mono muted">{i + 1}</span>
+            <RuleEditForm rule={r} onSave={(p) => onSave(r, p)} onCancel={() => onEdit(null)} />
+          </li>
+        ) : (
+        <li key={r.id} style={expiryOf(r.expiresAt).expired ? { opacity: 0.6 } : undefined}>
           <span className="mono muted">{i + 1}</span>
           <div style={{ minWidth: 0 }}>
             <strong>{r.name}</strong>
+            {r.expiresAt && (
+              <p className={expiryOf(r.expiresAt).expired ? "muted" : "tag amber"} style={{ fontSize: 12.5 }}>
+                {expiryOf(r.expiresAt).text}
+                {expiryOf(r.expiresAt).expired ? ". It no longer matches; Boss Man removes it a week after it ended." : ""}
+              </p>
+            )}
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
-              When {describeMatch(r.match)}
+              When {describeMatch(r.match, agents)}
             </p>
             {r.createdBy && (
               <p className="muted" style={{ fontSize: 12.5 }}>
@@ -71,12 +177,18 @@ function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule
             <button type="button" className="btn small" aria-label={`Move ${r.name} down`} disabled={i === rules.length - 1} onClick={() => onMove(i, 1)}>
               ↓
             </button>
+            {!expiryOf(r.expiresAt).expired && (
+              <button type="button" className="btn small" aria-label={`Edit ${r.name}`} onClick={() => onEdit(r.id)}>
+                Edit
+              </button>
+            )}
             <button type="button" className="btn small" onClick={() => onDelete(r)}>
               Delete
             </button>
           </span>
         </li>
-      ))}
+        ),
+      )}
     </ol>
   );
 }
@@ -84,16 +196,22 @@ function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule
 export function Rules({ companies, companyId, go }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void }) {
   const scopeId = companyId && companyId !== "all" ? companyId : null;
   const company = companies.find((c) => c.id === scopeId);
+  const allAgents = (scopeId ? company?.agents : companies.flatMap((c) => c.agents)) ?? [];
   const list = usePoll((signal) => api<RuleList>(`/api/policy-rules${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 60_000, scopeId ?? "all");
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [ask, setAsk] = useState("");
   // The "what should this rule do?" text is kept in this browser as it is typed (DR-045).
   const askDraftKey = `rule-ask/${scopeId ?? "all"}`;
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [probe, setProbe] = useState({ companyId: scopeId ?? companies[0]?.id ?? "", command: "" });
   const [verdict, setVerdict] = useState<{ outcome: Outcome; rule: string } | null>(null);
+  const [useDraft, setUseDraft] = useState(false);
 
+  // `submitting` disables the two submit buttons; the ref stops a second click that lands before React re-renders.
+  const [submitting, setSubmitting] = useState(false);
+  const submitLock = useRef(false);
   const act = async (fn: () => Promise<unknown>) => {
     try {
       await fn();
@@ -101,6 +219,17 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
       list.reload();
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+  const submitOnce = async (fn: () => Promise<unknown>) => {
+    if (submitLock.current) return;
+    submitLock.current = true;
+    setSubmitting(true);
+    try {
+      await act(fn);
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
     }
   };
   const rules = list.data ? (scopeId ? list.data.company : list.data.global) : [];
@@ -117,23 +246,26 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
       ...(form.commandPattern ? { commandPattern: form.commandPattern } : {}),
       ...(form.titlePattern ? { titlePattern: form.titlePattern } : {}),
     };
-    void act(async () => {
+    void submitOnce(async () => {
       await api("/api/policy-rules", { method: "POST", body: { companyId: scopeId, name: form.name, match, outcome: form.outcome } });
       setForm({ name: "", kinds: [], commandPattern: "", titlePattern: "", outcome: "owner" });
     });
   };
   const askCeo = (e: FormEvent) => {
     e.preventDefault();
-    void act(async () => {
+    void submitOnce(async () => {
       const r = await api<{ ceo: { name: string } }>(`/api/companies/${scopeId}/rule-requests`, { method: "POST", body: { text: ask } });
       setSentTo(r.ceo.name);
       setAsk("");
       clearDraft(askDraftKey);
     });
   };
+  // The rule being typed in "Add a rule", if it has anything to match on: "Try a command" can test it before it is saved (BOS-2188).
+  const draftMatch: Match | null = form.kinds.length || form.commandPattern || form.titlePattern ? { ...(form.kinds.length ? { kinds: form.kinds } : {}), ...(form.commandPattern ? { commandPattern: form.commandPattern } : {}), ...(form.titlePattern ? { titlePattern: form.titlePattern } : {}) } : null;
   const test = (e: FormEvent) => {
     e.preventDefault();
-    void api<{ outcome: Outcome; rule: string }>("/api/policy-rules/test", { method: "POST", body: { ...probe, companyId: probe.companyId || companies[0]!.id } }).then(setVerdict, (err: Error) => setError(err.message));
+    const draft = useDraft && draftMatch ? { draft: { match: draftMatch, outcome: form.outcome } } : {};
+    void api<{ outcome: Outcome; rule: string }>("/api/policy-rules/test", { method: "POST", body: { ...probe, companyId: probe.companyId || companies[0]!.id, ...draft } }).then((v) => { setVerdict(v); setError(null); }, (err: Error) => setError(err.message));
   };
 
   return (
@@ -168,15 +300,27 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         <h2 id="rules-h" style={{ fontSize: 17, fontWeight: 600 }}>
           {company ? `${company.name}'s rules` : "Rules for every company"}
         </h2>
-        <RuleRows
+        {!list.data && !list.error && <p className="muted" role="status">Loading…</p>}
+        {!list.data && list.error && <LoadError what="the rules" message={list.error.message} onRetry={list.reload} />}
+        {list.data && <RuleRows
           rules={rules}
+          agents={allAgents}
           shadowed={list.data?.shadowedIds ?? []}
+          editingId={editingId}
+          onEdit={setEditingId}
+          onSave={async (r, patch) => {
+            await api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: patch });
+            setEditingId(null);
+            setError(null);
+            list.reload();
+          }}
           onMove={move}
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}
           onDelete={(r) => window.confirm(`Delete "${r.name}"?`) && void act(() => api(`/api/policy-rules/${r.id}`, { method: "DELETE" }))}
-        />
+        />}
       </section>
 
+      {list.data && <>
       <section className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600 }}>
           <input
@@ -203,7 +347,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
               <DraftTextarea draftKey={askDraftKey} id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={setAsk} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
             </div>
             <div className="actions">
-              <button className="btn primary" type="submit" disabled={!ask.trim()}>
+              <button className="btn primary" type="submit" disabled={!ask.trim() || submitting}>
                 Ask the CEO to draft it
               </button>
             </div>
@@ -244,12 +388,13 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
               </label>
             ))}
           </fieldset>
-          <button className="btn primary" type="submit">
+          <button className="btn primary" type="submit" disabled={submitting}>
             Add rule
           </button>
         </form>
         </details>
       </section>
+      </>}
 
       {companies.length > 0 && (
         <form className="card" onSubmit={test} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end" }}>
@@ -268,6 +413,12 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
             <label htmlFor="probe-command">wants to run</label>
             <input id="probe-command" className="mono" required placeholder="docker restart web" value={probe.command} onChange={(e) => setProbe({ ...probe, command: e.target.value })} />
           </div>
+          {draftMatch && (
+            <label style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+              <input type="checkbox" checked={useDraft} onChange={(e) => setUseDraft(e.target.checked)} />
+              Try it with the rule I'm typing under "Add a rule" first (nothing is saved)
+            </label>
+          )}
           <button className="btn" type="submit">
             Check
           </button>
