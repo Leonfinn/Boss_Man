@@ -7,6 +7,7 @@ import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { when } from "./Runs";
+import { buildCsv, download } from "../csv";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { STATUS_TONE } from "./Features";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -569,6 +570,16 @@ function ConfirmByEmail({ companyId, d, run }: { companyId: string; d: FeedbackS
   );
 }
 
+/** The notes shown as a spreadsheet. The list rows carry only how many features a note is linked to, not their titles, so that count is the last column. */
+export function notesToCsv(rows: NoteSummary[]): string {
+  return buildCsv(
+    ["received", "from", "title", "text", "state", "linked_features"],
+    rows.map((n) => [new Date(n.createdAt).toISOString(), n.customer ?? "", n.title ?? "", n.text, n.state, n.insightCount]),
+  );
+}
+
+const fileSafe = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "company";
+
 export function Feedback({ companies, companyId, noteId, go }: { companies: Company[]; companyId: string | undefined; noteId: string | undefined; go: (to: string) => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const [tab, setTab] = useState<State>("unprocessed");
@@ -629,6 +640,14 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                 <input id="fb-search" className="search" type="search" placeholder="Search text or who it's from" value={q} onChange={(e) => setQ(e.target.value)} />
                 <button className="btn small" type="submit">
                   Search
+                </button>
+                <button
+                  type="button"
+                  className="btn small"
+                  disabled={!list.data?.length}
+                  onClick={() => list.data && download(`feedback-${fileSafe(company.name)}-${tab}-${new Date().toISOString().slice(0, 10)}.csv`, notesToCsv(list.data))}
+                >
+                  Download CSV
                 </button>
               </form>
               {list.data && !list.data.length && <p className="muted">{search ? "Nothing matches." : tab === "unprocessed" ? "Nothing waiting. Add feedback above." : "Nothing here."}</p>}
