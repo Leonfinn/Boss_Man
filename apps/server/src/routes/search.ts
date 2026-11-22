@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { agents, companies, ownerChatMessages, tickets, wikiPages } from "../db/schema.js";
+import { liveWikiPage } from "../services/wiki.js";
 
 /** At most this many results per group. */
 export const SEARCH_GROUP_MAX = 8;
@@ -69,7 +70,7 @@ export async function search(db: Db, companyId: string, rawQ: string): Promise<S
     db
       .select({ slug: wikiPages.slug, title: wikiPages.title, body: around(wikiPages.body, q), titleHit: sql<boolean>`${wikiPages.title} ilike ${like}` })
       .from(wikiPages)
-      .where(and(eq(wikiPages.companyId, companyId), or(sql`${wikiPages.title} ilike ${like}`, sql`${wikiPages.body} ilike ${like}`)))
+      .where(and(eq(wikiPages.companyId, companyId), liveWikiPage, or(sql`${wikiPages.title} ilike ${like}`, sql`${wikiPages.body} ilike ${like}`)))
       .orderBy(sql`(${wikiPages.title} ilike ${like}) desc`, desc(wikiPages.updatedAt))
       .limit(SEARCH_GROUP_MAX),
     db

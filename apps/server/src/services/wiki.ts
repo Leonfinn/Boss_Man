@@ -863,6 +863,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
    * has (BOS-1552: DR-059 clashed because the index lagged). Refuses, naming the page and the next
    * free number. Checked on creation only, so an update to the same slug is never refused.
    */
+  // Deleted pages still count here on purpose: a binned DR keeps its number until it is purged or restored.
   async function refuseTakenDrNumber(conn: Db, companyId: string, slug: string, title: string) {
     const num = (s: string) => /^dr-(\d{1,6})(?!\d)/i.exec(s)?.[1];
     const wanted = num(title.trim()) ?? num(slug.split("/").at(-1) ?? "");

@@ -41,6 +41,12 @@ beforeAll(async () => {
 afterAll(async () => void (await t?.close()));
 
 describe("search route (BOS-2192)", () => {
+  it("does not return a wiki page that is in the Deleted pages bin (BOS-2197)", async () => {
+    await t.db.insert(wikiPages).values({ companyId: A.company, slug: "binned-page", title: "Binned quokka", body: "The quokka notes.", deletedAt: new Date() });
+    const r = await find(A.company, "quokka");
+    expect(r.wiki).toEqual([]);
+  });
+
   it("finds a ticket title, a wiki page body and a chat message, grouped, each with a snippet", async () => {
     const r = await find(A.company, "PELICAN");
     expect(r.tickets.map((x) => x.title)).toEqual(["Teach the pelican to land"]);
