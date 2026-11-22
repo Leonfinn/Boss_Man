@@ -48,9 +48,10 @@ jobs:
         run: |
           set -euo pipefail
           # The Release run has no tag in its payload, so take the newest published (not draft) release made since that run
-          # started, not just the newest one: a draft, or an older release that sorts first, is never picked.
-          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,createdAt,isDraft \
-            | jq -r --arg s "$RUN_STARTED" '[.[] | select(.isDraft | not) | select(.createdAt >= $s)] | sort_by(.createdAt) | last | .tagName // empty')"
+          # started (by publishedAt: GitHub dates createdAt by the tagged commit, which is older than the run),
+          # not just the newest one: a draft, or an older release that sorts first, is never picked.
+          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,publishedAt,isDraft \
+            | jq -r --arg s "$RUN_STARTED" '[.[] | select(.isDraft | not) | select(.publishedAt >= $s)] | sort_by(.publishedAt) | last | .tagName // empty')"
           [ -n "$tag" ] || { echo "The Release run succeeded but no release made since $RUN_STARTED was found to test."; exit 1; }
           echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
       - name: Check the release can be installed at all
