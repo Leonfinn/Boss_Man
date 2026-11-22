@@ -277,6 +277,22 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
   const [selected, setSelected] = useState<string | null>(null);
   const sel = o.milestones.find((m) => m.id === selected) ?? null;
   const setStatus = (status: "done" | "dropped" | "active") => void api(`/api/objectives/${o.id}`, { method: "PATCH", body: { status } }).then(onChanged);
+  // "Change": rename the objective or change its priority (BOS-2254). Only title and priority are sent; the reload
+  // brings the objectives back in the server's priority order.
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(o.title);
+  const [priority, setPriority] = useState(o.priority);
+  const [error, setError] = useState<string | null>(null);
+  const open = () => (setTitle(o.title), setPriority(o.priority), setError(null), setEditing(true));
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    // `required` lets a title of only spaces through; it would trim to "" on the server.
+    if (!title.trim()) return setError("Give the objective a name.");
+    void api(`/api/objectives/${o.id}`, { method: "PATCH", body: { title: title.trim(), priority } }).then(
+      () => (setEditing(false), onChanged()),
+      (err: Error) => setError(err.message),
+    );
+  };
   return (
     <article className="rm-obj" aria-labelledby={`obj-${o.id}`}>
       <div className="rm-head">
@@ -288,6 +304,32 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
             {o.title}
             {o.status !== "active" && <span className="tag"> {o.status === "dropped" ? "removed" : o.status}</span>}
           </h3>
+          {editing && (
+            <form onSubmit={save} style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end", margin: "8px 0" }}>
+              <div className="field" style={{ flex: "2 1 220px" }}>
+                <label htmlFor={`obj-t-${o.id}`}>Objective</label>
+                <input id={`obj-t-${o.id}`} required maxLength={200} autoFocus value={title} onChange={(e) => setTitle(e.target.value)} />
+              </div>
+              <div className="field">
+                <label htmlFor={`obj-p-${o.id}`}>Priority</label>
+                <select id={`obj-p-${o.id}`} value={priority} onChange={(e) => setPriority(Number(e.target.value))}>
+                  {[1, 2, 3, 4, 5].map((p) => (
+                    <option key={p} value={p}>
+                      P{p}
+                      {p === 1 ? " (highest)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button className="btn primary small" type="submit">
+                Save
+              </button>
+              <button className="btn small" type="button" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+              {error && <p className="error">{error}</p>}
+            </form>
+          )}
           {o.keyResults.length > 0 && (
             <ul className="rm-krs">
               {o.keyResults.map((k) => (
@@ -298,6 +340,11 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <AddMilestone objectiveId={o.id} onAdded={onChanged} />
+          {!editing && (
+            <button type="button" className="btn small" aria-label={`Change the objective ${o.title}`} onClick={open}>
+              Change
+            </button>
+          )}
           {o.status === "active" ? (
             <>
               <button type="button" className="btn small" onClick={() => setStatus("done")}>
