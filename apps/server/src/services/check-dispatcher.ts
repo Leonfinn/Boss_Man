@@ -8,7 +8,7 @@ import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, t
 import type { Db } from "../db/client.js";
 import { checkJobs, runners, tickets } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
-import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, SUPERSEDED_TEXT, type CheckDecline, type CheckJob, type MachineView } from "./check-queue.js";
+import { checkQueue, DEFAULT_SLOT_POLICY, MACHINE_RUNNER, isDefaultPolicy, SUPERSEDED_TEXT, type CheckDecline, type CheckJob, type MachineView } from "./check-queue.js";
 
 /** R46: one machine with a free check slot that is not taking a queued job it could take. */
 export type IdleSlot = CheckDecline & { companyId: string; machineKey: string; machine: string; since: Date; minutes: number };
@@ -249,11 +249,20 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       // an "either" slot. The second fills the either slots as before. With nothing set there are no such slots, the first
       // pass claims nothing and this is the old order: the runner first, then each worker.
       const split = !isDefaultPolicy(await queue.runnerPolicy()) || workers.some((w) => w.policy && !isDefaultPolicy(w.policy));
+      // BOS-2225: an out-of-memory retry avoids a machine only if another machine would really accept this job, or it would
+      // sit queued with no card. A merge or full job needs a machine that takes merges and is not draining; a worker also
+      // needs the job's code (noCodeOn). A quick job is never avoided (only merge jobs carry an avoid).
+      const runnerPolicy = runnerUp ? await queue.runnerPolicy() : null;
+      const otherTakes = (job: CheckJob, thisKey: string): boolean => {
+        const long = job.kind === "merge" || job.scope === "full";
+        if (thisKey !== MACHINE_RUNNER && runnerUp && (!long || runnerPolicy!.takes !== "checks")) return true;
+        return workers.some((w) => w.id !== thisKey && w.limit > 0 && (!long || (!workerQuickOnly && w.policy?.takes !== "checks")) && !noCodeOn.get(job.id)?.has(w.id));
+      };
       for (const dedicatedOnly of split ? [true, false] : [false]) {
         // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
         // limit is also capped by the slots it reported in hello.
         if (runnerUp) {
-          const r = await queue.claimNextWhy(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly, othersUp: workers.length > 0 });
+          const r = await queue.claimNextWhy(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly, othersUp: otherTakes });
           if (!dedicatedOnly) declined.set(`runner:${runner!.id}`, { machine: "the company runner", why: r.declined });
           for (const job of r.jobs) {
             const sent = deps.send(runner!.id, runCommand(job, list));
@@ -265,7 +274,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
         // never holds up the line); a job this worker couldn't get the code for is left to the others.
         for (const w of workers) {
-          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly, quickOnly: workerQuickOnly, othersUp: runnerUp || workers.length > 1 });
+          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly, quickOnly: workerQuickOnly, othersUp: otherTakes });
           if (!dedicatedOnly) declined.set(`worker:${w.id}`, { machine: `check worker "${w.name}"`, why: r.declined });
           for (const job of r.jobs) track(codeFor(job, w, list, packer!, false));
         }

@@ -72,6 +72,11 @@ export type EnqueueInput = {
 
 /** BOS-2218: `avoidMachine` / `othersUp` key for the company runner; a check worker's key is its id. */
 export const MACHINE_RUNNER = "runner";
+/**
+ * BOS-2225: whether a retry may be steered off this machine. A plain boolean says another machine is up; a function says,
+ * per job, whether another machine would really accept that job (it takes that kind, can get the code, is not draining).
+ */
+export type OthersUp = boolean | ((job: CheckJob, thisKey: string) => boolean);
 
 export type EnqueueResult = { job: CheckJob; reused: "passed" | "live" | null };
 
@@ -469,12 +474,12 @@ export function checkQueue(db: Db) {
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean; othersUp?: boolean } = {}): Promise<CheckJob[]> {
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean; othersUp?: OthersUp } = {}): Promise<CheckJob[]> {
     return (await claimNextWhy(runnerId, now, companyId, runnerSlots, opts)).jobs;
   }
 
   /** `claimNext` with the reason a free runner slot took nothing (R46). */
-  async function claimNextWhy(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean; othersUp?: boolean } = {}): Promise<ClaimResult> {
+  async function claimNextWhy(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean; othersUp?: OthersUp } = {}): Promise<ClaimResult> {
     // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
     return claimOnWhy(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId, undefined, { policy: await runnerPolicy(), dedicatedOnly: opts.dedicatedOnly, othersUp: opts.othersUp });
   }
@@ -503,7 +508,7 @@ export function checkQueue(db: Db) {
     now = new Date(),
     companyId?: string,
     skip?: (jobId: string) => boolean,
-    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; othersUp?: boolean } = {},
+    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; othersUp?: OthersUp } = {},
   ): Promise<CheckJob[]> {
     return (await claimOnWhy(machine, limit, now, companyId, skip, opts)).jobs;
   }
@@ -519,7 +524,7 @@ export function checkQueue(db: Db) {
     now = new Date(),
     companyId?: string,
     skip?: (jobId: string) => boolean,
-    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; quickOnly?: boolean; othersUp?: boolean } = {},
+    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; quickOnly?: boolean; othersUp?: OthersUp } = {},
   ): Promise<ClaimResult> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
     // BOS-1748: the hold parks the company runner and every merge check, but a separate check worker still takes quick
@@ -539,7 +544,7 @@ export function checkQueue(db: Db) {
     // BOS-2218: an out-of-memory retry stays off the machine that lost its test process, but only while another machine is up;
     // with none, it runs here again rather than wait for ever.
     const thisKey = worker ?? MACHINE_RUNNER;
-    const avoided = (j: CheckJob) => !!opts.othersUp && j.avoidMachine === thisKey;
+    const avoided = (j: CheckJob) => j.avoidMachine === thisKey && (typeof opts.othersUp === "function" ? opts.othersUp(j, thisKey) : !!opts.othersUp);
     const candidates = ofCompany.filter((j) => !skip?.(j.id) && !avoided(j)).filter((j) => !longHeld || !isLong(j));
     if (candidates.length === 0) {
       const heldLong = longHeld ? ofCompany.find((j) => isLong(j) && !skip?.(j.id)) : undefined;

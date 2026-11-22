@@ -45,6 +45,22 @@ describe("out-of-memory retry placement", () => {
     expect(got.map((j) => j.id)).toEqual([job.id]);
   });
 
+  it("BOS-2225: when no other machine would accept this job, the retry runs on the same machine", async () => {
+    const s = await setup();
+    const { job } = await s.retry(s.workerId);
+    const got = await s.q.claimOn({ workerId: s.workerId }, 2, NOW, s.companyId, undefined, { othersUp: () => false });
+    expect(got.map((j) => j.id)).toEqual([job.id]);
+  });
+
+  it("BOS-2225: when another machine would accept it, the job is still steered away", async () => {
+    const s = await setup();
+    await s.retry(s.workerId);
+    const seen: string[] = [];
+    const got = await s.q.claimOn({ workerId: s.workerId }, 2, NOW, s.companyId, undefined, { othersUp: (_j, key) => (seen.push(key), true) });
+    expect(got).toEqual([]);
+    expect(seen).toEqual([s.workerId]);
+  });
+
   it("the retry keeps the place of the check it replaces", async () => {
     const s = await setup();
     const earlier = new Date(Date.UTC(2026, 10, 22, 10, 0));
