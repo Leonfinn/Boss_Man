@@ -10,7 +10,7 @@ import { ageWords, goLiveWaitWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, park
 import { systemMoveTicket } from "./ticket-transition.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, checkJobs, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
+import { activity, agents, checkJobs, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, ceoFirstMergeNote, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
@@ -831,26 +831,55 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return recorded;
   }
 
+  /**
+   * BOS-2210: the branch moved off the commit the approvals were given on (the author pushed a fix after the merge sent it
+   * back, and it now waits in review for its quick check or new round with the old approvals still the latest). Nothing
+   * stopped there: the merge already said "branch changed after approval" and the ticket is with its author, so neither the
+   * retry nor the "nothing merged it" card applies. Like BOS-970's dropped-for-newer check, it is left out. A head that only
+   * took clean merges of main still counts as approved (the landing merges it); unknown (no stamped head, head unreadable,
+   * runner can't say) keeps the card, so a real stop is never hidden.
+   */
+  async function approvedHeadMoved(ticketId: string): Promise<boolean> {
+    if (!opts.branchHead) return false;
+    const approved = (await latestRows(db, ticketId)).filter((r) => r.status === "approved");
+    const heads = [...new Set(approved.map((r) => r.head).filter((h): h is string => !!h))];
+    if (!heads.length) return false;
+    const head = await opts.branchHead(ticketId).catch(() => null);
+    if (!head) return false;
+    // Approvals on different commits (or some unstamped): the landing refuses that ("approved heads differ", BOS-1528) and sends it back, as for a move.
+    if (heads.length > 1 || approved.some((r) => !r.head)) return true;
+    if (heads[0] === head) return false;
+    const cover = opts.signoffCovers ? await opts.signoffCovers(ticketId, heads[0]!, head).catch(() => null) : null;
+    return cover ? !cover.covers : false;
+  }
+
   async function unmergedApprovals(t: Date) {
     let raised = 0;
     for (const ticket of await approvedUnmerged()) {
       // Quiet is measured from the last approval (BOS-362).
       if (ticket.approvedAt > t.getTime() - limits.mergeMissedAfterMs) continue;
       if (heldByCap.has(ticket.id)) continue;
+      if (await approvedHeadMoved(ticket.id)) continue;
       if (opts.retryLand && !retried.has(ticket.id)) {
         retried.add(ticket.id);
         await opts.retryLand(ticket.id).catch(() => undefined);
         raised++;
         continue;
       }
-      // A stored refusal (BOS-684, the carried-work gate) is the reason; otherwise the merge simply never finished.
-      // Either way the CEO can answer "Run the check again" on the card.
-      const why = ticket.refusal ? `the merge was refused and the sweep's one retry is used up: ${ticket.refusal.replace(/\.$/, "")}` : "it was approved, then nothing merged it; the server may have restarted part-way";
+      // A stored refusal (BOS-684, the carried-work gate) is the reason; then the last merge failure recorded since the
+      // approval (BOS-2210: the card used to guess "the server may have restarted" even when the merge had said why);
+      // only with neither did the merge simply never finish. Either way the CEO can answer "Run the check again" on the card.
+      const [failed] = ticket.refusal ? [] : await db.select({ summary: activity.summary }).from(activity).where(and(eq(activity.ticketId, ticket.id), eq(activity.kind, "merge_failed"), gte(activity.at, new Date(ticket.approvedAt)))).orderBy(desc(activity.at)).limit(1);
+      const why = ticket.refusal
+        ? `the merge was refused and the sweep's one retry is used up: ${ticket.refusal.replace(/\.$/, "")}`
+        : failed
+          ? `it was approved, but the merge stopped: ${failed.summary.replace(/\.$/, "")}`
+          : "it was approved, then nothing merged it and no merge result was recorded; the server may have restarted part-way";
       const [card] = await raiseMergeStuck(db, ticket, why);
       if (!card) continue;
       raised++;
       // BOS-1873: the card is on the CEO's rung; wake the CEO so the handover clock starts.
-      if (card.ceoFirst) await tellCeo(ticket.companyId, ceoFirstMergeNote(ticket.title, card.id, `nothing merged it (${why.slice(0, 300)})`)).catch(() => undefined);
+      if (card.ceoFirst) await tellCeo(ticket.companyId, ceoFirstMergeNote(ticket.title, card.id, `the merge didn't finish (${why.slice(0, 300)})`)).catch(() => undefined);
     }
     return raised;
   }
