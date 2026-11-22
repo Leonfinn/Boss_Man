@@ -103,14 +103,18 @@ describe("History and CEO notes: loading and failed loads (BOS-2279)", () => {
     expect(container.querySelectorAll(".loader").length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(screen.queryByText("No notes yet.")).toBeNull();
+    // The words appear after the Loader's one-second delay; the deadline only bounds the wait.
+    expect(await screen.findByText(/Loading history/, {}, { timeout: 5000 })).toBeTruthy();
+    expect(await screen.findByText(/Loading CEO notes/, {}, { timeout: 5000 })).toBeTruthy();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
+    expect(screen.queryByText("No notes yet.")).toBeNull();
   });
 
-  it("shows a load error with Retry for each, and the empty words once a retry answers", async () => {
+  it("shows a load error with Retry for each; Retry brings back the history and the (empty) notes", async () => {
     let fail = true;
     stub((url) => {
       if (fail && url.includes("/history")) return json({ error: "History down" }, 500);
       if (fail && url.includes("/notes")) return json({ error: "Notes down" }, 500);
-      if (url.includes("/history")) return json([]);
       return undefined as never;
     }, [ceo("a-fail")]);
     render(<Agents company={company} onChanged={() => {}} />);
@@ -121,7 +125,9 @@ describe("History and CEO notes: loading and failed loads (BOS-2279)", () => {
     expect(screen.queryByText("No notes yet.")).toBeNull();
     fail = false;
     for (const b of screen.getAllByRole("button", { name: "Retry" })) fireEvent.click(b);
-    expect(await screen.findByText("No changes yet.")).toBeTruthy();
+    // Retry brings the history back: the stub's one change, with its Undo.
+    expect(await screen.findByRole("button", { name: "Undo" })).toBeTruthy();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     await screen.findByText(/CEO notes \(0 of 20\)/);
     expect(screen.getByText("No notes yet.")).toBeTruthy();
     expect(screen.queryByText(/Couldn't load the/)).toBeNull();
