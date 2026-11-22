@@ -5,7 +5,7 @@ import { openPglite } from "../src/db/client.js";
 import { settings } from "../src/db/schema.js";
 import { alertClearing, clearWhenOf } from "../src/services/alert-clearing.js";
 import { kindCeiling, kindRow } from "../src/services/alert-kinds.js";
-import { backupFreshReason, dailyBackupService, dailyBackupStatus, FAILED_KEY, LAST_KEY } from "../src/services/daily-backup.js";
+import { backupFreshReason, backupSteps, dailyBackupService, dailyBackupStatus, FAILED_KEY, LAST_KEY } from "../src/services/daily-backup.js";
 
 let db: Awaited<ReturnType<typeof openPglite>>["db"];
 let close: () => Promise<void>;
@@ -48,6 +48,35 @@ describe("daily backup status", () => {
     await put(LAST_KEY, { at: T0.toISOString(), file: "f", bytes: 1 });
     expect((await dailyBackupStatus(db, hours(35.9))).stale).toBe(false);
     expect((await dailyBackupStatus(db, hours(36.1))).stale).toBe(true);
+  });
+});
+
+describe("backupSteps", () => {
+  it("says how to start it when the host has reported no compose command", () => {
+    const s = backupSteps(null);
+    expect(s).toContain("doesn't have this server's compose command");
+    expect(s).toContain("Settings → Server and runner → This server");
+    expect(s).toContain("up -d --no-deps backup");
+    expect(s).toContain("ps backup");
+    expect(s).toContain("logs --tail 30 backup");
+    expect(s).toContain("Do not leave out --no-deps");
+    expect(s).toContain("every 15 minutes");
+    // No guessed checkout folder or compose files.
+    expect(s).not.toContain("cd ");
+    expect(s).not.toContain("run these one at a time");
+  });
+
+  it("treats a blank command the same as none", () => {
+    expect(backupSteps("")).toBe(backupSteps(null));
+  });
+
+  it("puts each step on its own line with the host's reported compose command", () => {
+    const cmd = "cd /srv/example/boss-man/src && docker compose -f docker-compose.yml -f deploy/truenas.yml";
+    expect(backupSteps(cmd)).toBe(
+      `What to do: on the machine that runs Boss Man, run these one at a time:\n1. ${cmd} up -d --no-deps backup\n2. ${cmd} ps backup\n3. ${cmd} logs --tail 30 backup\nIf the disk is full, free some space; the backups restart by themselves (a pass runs every 15 minutes).`,
+    );
+    expect(backupSteps(cmd)).not.toContain("doesn't have this server's compose command");
+    expect(backupSteps(cmd)).not.toContain("up -d backup");
   });
 });
 
