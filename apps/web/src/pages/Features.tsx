@@ -602,6 +602,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const phone = useMediaQuery("(max-width: 640px)");
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
+  const [query, setQuery] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [fold, setFold] = useState(readFeatureOpen);
@@ -616,7 +617,13 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const d = data.data;
   const areas = settings.data?.areas ?? [];
   const order = (a: Feature, b: Feature) => (sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : b.createdAt.localeCompare(a.createdAt));
-  const shown = (d?.features ?? []).filter((f) => all || ACTIVE.includes(f.status));
+  const listed = (d?.features ?? []).filter((f) => all || ACTIVE.includes(f.status));
+  // Search (BOS-2256): a feature matches on title or description; its subfeatures stay under it, and a matching subfeature brings its parent.
+  const needle = query.trim().toLowerCase();
+  const hit = (f: Feature) => `${f.title}\n${f.description ?? ""}`.toLowerCase().includes(needle);
+  const shown = needle
+    ? listed.filter((f) => hit(f) || (f.parentId && listed.some((p) => p.id === f.parentId && hit(p))) || listed.some((s) => s.parentId === f.id && hit(s)))
+    : listed;
   const top = shown.filter((f) => !f.parentId || !shown.some((p) => p.id === f.parentId)).sort(order);
   const groups = [...areas.map((a) => ({ id: a.id, name: a.name })), { id: "", name: areas.length ? "No area" : "" }]
     .map((g) => ({ ...g, features: top.filter((f) => (f.areaId ?? "") === g.id) }))
@@ -662,6 +669,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           <section className="card features-toolbar">
             <AddFeature companyId={company.id} areas={areas} onAdded={(id) => go(`features/${company.id}/${id}`)} />
             <div className="features-toolbar-tools">
+              <input type="search" className="mini" placeholder="Search features" aria-label="Search features" value={query} onChange={(e) => setQuery(e.target.value)} />
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 Sort by
                 <select className="mini" value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
@@ -706,7 +714,19 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           {error && <p className="error">{error}</p>}
           {!d && data.error && <LoadError what="your features" message={data.error.message} onRetry={data.reload} />}
           {!d && !data.error && <Loader label="Loading features" />}
-          {d && !shown.length ? (
+          {d && needle && listed.length > 0 && (
+            <p className="muted" style={{ fontSize: 13 }} data-testid="search-count">
+              {shown.length} of {listed.length} features
+            </p>
+          )}
+          {d && !shown.length && needle && listed.length > 0 ? (
+            <p className="muted">
+              No feature matches "{query.trim()}"{" "}
+              <button type="button" className="btn small" onClick={() => setQuery("")}>
+                Clear
+              </button>
+            </p>
+          ) : d && !shown.length ? (
             <p className="muted">No features yet. Add one above, or create one while linking feedback in the inbox.</p>
           ) : d && phone ? (
             <div className="fcards">
