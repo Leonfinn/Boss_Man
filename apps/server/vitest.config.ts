@@ -3,6 +3,7 @@ import { freemem } from "node:os";
 import { defineConfig } from "vitest/config";
 import { checkThreads } from "../../scripts/check-threads.mjs";
 import { guardVitest } from "../../scripts/vitest-guard.mjs";
+import StaggerSequencer from "./test/stagger-sequencer.js";
 
 // Keeps whole-suite runs at the merge gate for agent sessions; see scripts/vitest-guard.mjs.
 guardVitest();
@@ -51,6 +52,8 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     maxWorkers: workers(),
+    // Don't start the four biggest files together (BOS-2220); see test/stagger-sequencer.ts.
+    sequence: { sequencer: StaggerSequencer },
     globalSetup: ["test/global-setup.ts"],
     setupFiles: ["test/live-run-tokens.ts"],
   },

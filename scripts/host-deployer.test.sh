@@ -718,7 +718,8 @@ case "$a" in
     [[ -z ${FAKE_NO_RENDER:-} ]] || exit 1
     echo "name: p"; echo "services:"; for f in svc-*; do [[ ! -f $f ]] || { echo "  ${f#svc-}:"; echo "    image: $(cat "$f")"; }; done; echo "volumes:"; echo "  data: {}" ;;
   "exec -T db pg_dump"*) echo dump ;;
-  "up -d --no-deps backup") echo "ensure backup service" >>"$DL" ;; # BOS-2176
+  "up -d --no-deps backup") # BOS-2176; BOS-2221: the daily folder must already exist (made by the host user, not by Docker)
+    [[ -d $BOSSMAN_BACKUP_DIR/daily ]] && echo "daily folder ready" >>"$DL"; echo "ensure backup service" >>"$DL" ;;
   "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; [[ -z ${FAKE_BUILD_HANG:-} ]] || exec sleep 30; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
   "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
@@ -818,6 +819,8 @@ has "$D/outbox/status.json" "green is live"
 has "$D/outbox/status.json" '"soak_seconds": "900"' # the host's own window rides in the status file (BOS-401)
 order "$DL" "pg_dump" "ensure backup service" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
+order "$DL" "daily folder ready" "ensure backup service" # BOS-2221: folder exists before the service starts
+[[ $(stat -c %u "$BOSSMAN_BACKUP_DIR/daily") == "$(stat -c %u "$BOSSMAN_BACKUP_DIR")" ]] || fail "daily folder owner differs from the backup folder"
 ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"
 for f in "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz; do [[ $(stat -c %a "$f") == 600 ]] || fail "backup $f is not mode 600"; done
 live_is green

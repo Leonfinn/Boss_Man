@@ -138,7 +138,14 @@ ensure_daily_backup() {
   # The service sees only this folder (a `daily` folder inside the backup folder). Make it as the host user, so the files
   # in it end up readable by the host user; Docker would make it root-owned.
   mkdir -p "${BOSSMAN_BACKUP_DIR:-..}/daily" 2>/dev/null || true
-  docker compose up -d --no-deps backup || say "Warning: the daily backup service did not start. Start it by hand: docker compose up -d --no-deps backup"
+  # Hosts with overlay files name them in COMPOSE_FILE (":"-separated); the hand command needs them as -f flags.
+  local cfl="${COMPOSE_FILE:-$(grep -s '^COMPOSE_FILE=' .env | tail -1 | cut -d= -f2- || true)}" fflags="" cf
+  if [[ -n $cfl ]]; then
+    local -a cfs
+    IFS=: read -ra cfs <<<"$cfl"
+    for cf in "${cfs[@]}"; do [[ -z $cf ]] || fflags+=" -f $cf"; done
+  fi
+  docker compose up -d --no-deps backup || say "Warning: the daily backup service did not start. Start it by hand: docker compose${fflags} up -d --no-deps backup"
 }
 
 rebuild_and_start() {

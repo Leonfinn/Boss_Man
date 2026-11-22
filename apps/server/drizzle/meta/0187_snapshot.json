@@ -1,5 +1,5 @@
 {
-  "id": "ba453194-ccdb-4028-94c3-27c9bdd751e2",
+  "id": "86d8094f-1831-46dd-a821-10069f378a65",
   "prevId": "1c6183aa-020d-4c38-bcd7-c829f9c37468",
   "version": "7",
   "dialect": "postgresql",
@@ -687,6 +687,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "working_hours": {
+          "name": "working_hours",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "duty": {
           "name": "duty",
@@ -12007,18 +12013,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "deleted_at": {
-          "name": "deleted_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "deleted_by_agent_id": {
-          "name": "deleted_by_agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -12039,21 +12033,6 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "wiki_pages_deleted_at": {
-          "name": "wiki_pages_deleted_at",
-          "columns": [
-            {
-              "expression": "deleted_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -12107,19 +12086,6 @@
           "tableTo": "agents",
           "columnsFrom": [
             "updated_by_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "wiki_pages_deleted_by_agent_id_agents_id_fk": {
-          "name": "wiki_pages_deleted_by_agent_id_agents_id_fk",
-          "tableFrom": "wiki_pages",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "deleted_by_agent_id"
           ],
           "columnsTo": [
             "id"
