@@ -8,7 +8,7 @@ import { buildApp } from "../src/app.js";
 import { issueRunToken } from "../src/mcp.js";
 import { openPglite } from "../src/db/client.js";
 import { agentNotes, decisions, ownerAnswerEmbeddings, ownerChatMessages, paAnswers, ticketMessages } from "../src/db/schema.js";
-import { describeOwnerAnswer, embedMissingOwnerAnswers, isRepeat, ownerAnswerSearch, searchOwnerAnswers } from "../src/services/owner-answers.js";
+import { describeOwnerAnswer, embedMissingOwnerAnswers, isRepeat, ownWords, ownerAnswerSearch, searchOwnerAnswers } from "../src/services/owner-answers.js";
 
 // A fake embedder: words that mean the same thing share a concept, so their vectors point the same way.
 const DIMS = 768;
@@ -513,5 +513,35 @@ describe("owner-answer memory (BOS-1593)", () => {
     const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
     expect(await searchOwnerAnswers(c.db, { companyId: other.company.id, q: "Is the repo going public?" })).toEqual([]);
     expect(await searchOwnerAnswers(c.db, { companyId: c.company.id, q: "Is the repo going public?" })).toHaveLength(1);
+  });
+});
+
+describe("ownWords: the owner's own words after a quoted agent line (BOS-1856)", () => {
+  it("returns a typical answer trimmed, with its words and casing kept", () => {
+    expect(ownWords("  Yes, do it.  ")).toBe("Yes, do it.");
+    expect(ownWords("Use UK spelling, please.")).toBe("Use UK spelling, please.");
+  });
+
+  it("returns an empty or blank answer as it was", () => {
+    expect(ownWords("")).toBe("");
+    expect(ownWords("   ")).toBe("   ");
+    expect(ownWords("\n\t ")).toBe("\n\t ");
+  });
+
+  it("drops leading quote lines and reads from the owner's own first line", () => {
+    expect(ownWords("> Shall we let Truenas take the merge checks?\n> It would free the runner.\nPlease just finish the login page first.")).toBe(
+      "Please just finish the login page first.",
+    );
+    expect(ownWords("  > A quoted line with leading spaces\nFinish the login page.")).toBe("Finish the login page.");
+  });
+
+  it("returns the whole message when every line is a quote, as there is nothing of their own to read", () => {
+    const quoted = "> Shall we let Truenas take the merge checks?\n> It would free the runner.\n";
+    expect(ownWords(quoted)).toBe(quoted);
+  });
+
+  it("leaves a quote that is not at the start alone, and takes the text after the quote's lines", () => {
+    expect(ownWords("First line.\n> A quote later in the message")).toBe("First line.\n> A quote later in the message");
+    expect(ownWords("> quoted\nnot an answer")).toBe("not an answer");
   });
 });
