@@ -123,6 +123,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Funding.tsx": "Funding",
   "pages/MergeQueue.tsx": "Merge queue",
   "pages/Notifications.tsx": "Notifications",
+  // The "Other places to send alerts" card on the Notifications page (BOS-2199).
+  "components/AlertDestinations.tsx": "Notifications",
   "pages/Plan.tsx": "Plan",
   "pages/Portal.tsx": "Feedback portal",
   "pages/Roadmap.tsx": "Roadmap",

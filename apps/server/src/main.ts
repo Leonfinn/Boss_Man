@@ -37,7 +37,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, sweepExpiredSessions, mailer, weeklySummary, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, dailyBackup, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, dailyBackup, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -100,6 +100,8 @@ const bg = createBackground(
     { name: "expired sessions", everyMs: Number(env.BOSSMAN_SESSION_SWEEP_MS ?? 60 * 60_000), run: async () => { await sweepExpiredSessions(); } },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
     { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: async () => { await notes.markAnsweredRead(); await notes.clearSettledPushes(); } },
+    // BOS-2199: the one retry, a minute later, of an alert that failed to reach a Slack, Discord or webhook destination. Kept in the database, so a restart doesn't lose it.
+    { name: "alert retries", everyMs: Number(env.BOSSMAN_ALERT_RETRY_MS ?? 30_000), run: async () => { await webhooks.sweepRetries(); } },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
     { name: "watchdog", everyMs: Number(env.BOSSMAN_WATCHDOG_MS ?? 5 * 60_000), run: () => watchdog.run() },
     // BOS-2195: the optional weekly email, Monday from 8 owner time; the last-sent time is stored, so a restart never repeats it. // leader-only

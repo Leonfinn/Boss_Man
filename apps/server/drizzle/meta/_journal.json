@@ -1184,6 +1184,13 @@
       "when": 1795320544086,
       "tag": "0187_agent_working_hours",
       "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1795327423519,
+      "tag": "0188_alert_destinations",
+      "breakpoints": true
     }
   ]
 }

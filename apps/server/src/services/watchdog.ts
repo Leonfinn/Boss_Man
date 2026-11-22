@@ -85,7 +85,7 @@ export type WatchdogDeps = {
    * The idle-capacity rules (BOS-659) read both; absent, those rules do nothing.
    */
   capacity?: (companyId: string) => Promise<{ busy: number; limit: number }>;
-  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string; /** Feed and browser only, never the phone (BOS-1097). */ noPush?: boolean }) => Promise<unknown>;
+  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string; /** Feed and browser only, never the phone (BOS-1097). */ noPush?: boolean; /** For the owner's Slack, Discord and webhook destinations (BOS-2199). */ kind?: "daily_summary" }) => Promise<unknown>;
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
   hosts?: () => Promise<HostFacts[]>;
@@ -1044,7 +1044,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       await log({ companyId, kind: "daily_summary", reason: `Record only: would have sent the daily summary (${s.title.toLowerCase()})`, after: { stuck: s.stuck, oldest: s.oldestRef, body: s.body }, summary: "Record only: Boss Man wrote this daily summary down instead of sending it. Nothing was sent." });
       return false;
     }
-    await deps.notifyOwner({ companyId, level: "note", title: s.title, body: s.body, link: "#/scrum-master" });
+    await deps.notifyOwner({ companyId, level: "note", title: s.title, body: s.body, link: "#/scrum-master", kind: "daily_summary" });
     await log({ companyId, kind: "daily_summary", reason: s.title, after: { stuck: s.stuck, oldest: s.oldestRef }, summary: "Boss Man sent the owner the Scrum Master's daily summary" });
     return true;
   }

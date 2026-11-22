@@ -8,6 +8,7 @@ import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
 import { MoreAbout } from "../components/MoreAbout";
+import { AlertDestinations } from "../components/AlertDestinations";
 import { WeeklySummaryForm } from "../components/WeeklySummaryForm";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
@@ -825,6 +826,7 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
         </ul>
       )}
       <SettingsForm />
+      <AlertDestinations />
       <WeeklySummaryForm companies={companies} />
     </>
   );

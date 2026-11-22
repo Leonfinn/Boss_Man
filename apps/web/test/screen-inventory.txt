@@ -134,15 +134,18 @@ reads:
 sections: 
   - How you're told
   - Notifications
+  - Other places to send alerts
   - Set up your phone
   - Weekly summary
 reads: 
+  - /api/alert-destinations
   - /api/companies/:id/weekly-summary
   - /api/host-facts
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
   - /api/notifications
   - /api/notifications/pushes
+  - /api/setup
 
 ## #/plan
 sections: 
