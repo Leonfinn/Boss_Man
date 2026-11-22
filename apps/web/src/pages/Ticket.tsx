@@ -27,6 +27,7 @@ type TicketImage = { id: string; name: string; caption: string | null; size: num
 import { when } from "./Runs";
 import { ago } from "./Dashboard";
 import { StatusLineView, type StatusLine } from "./MergeQueue";
+import { CopyLinkButton } from "../components/CopyLinkButton";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -788,6 +789,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </p>
           <h1>{t.title}</h1>
         </div>
+        <CopyLinkButton />
       </header>
 
       {statusLine.data?.statusLine && (

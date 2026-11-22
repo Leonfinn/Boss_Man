@@ -13,6 +13,7 @@ import { permissionAnsweredBy, permissionOutcome, permissionRule, type Permissio
 import { failureReason, outcomeTag, usage, when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
+import { CopyLinkButton } from "../components/CopyLinkButton";
 
 /** Steering (R37): a message after the current turn, or one that interrupts it, and stop. */
 function Steer({ runId, companyId, ticketId }: { runId: string; companyId: string; ticketId?: string | null }) {
@@ -196,6 +197,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
             </p>
           )}
         </div>
+        <CopyLinkButton />
       </header>
       {run && !run.endedAt && <Steer runId={runId} companyId={run.companyId} ticketId={run.ticketId} />}
       {dropped > 0 && (

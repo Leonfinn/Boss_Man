@@ -93,6 +93,8 @@ export const OWNER_CONTROLS = {
     "Load older messages", "Loading older messages",
     // The Scrum Master's log of this ticket.
     "Undo", "Undoing", "Scrum Master", "Show all …",
+    // The header's "Copy link", "Copied" for a moment after a copy (BOS-2233).
+    "Copy link", "Copied",
   ],
   // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
@@ -100,7 +102,8 @@ export const OWNER_CONTROLS = {
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   // Each project is a collapsed row; "Edit settings" opens its form and "Hide settings" folds it away (BOS-1876).
   Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings"],
-  Run: ["Send after this turn", "Interrupt and send", "Stop run"],
+  // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
+  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry"],
   // The Merge queue page's two views (BOS-1174).
@@ -250,7 +253,10 @@ export const OWNER_FIELDS = {
     "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
     "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
+    // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2233).
+    "Page address",
   ],
+  Run: ["Page address"],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
   Config: [
     "Reviews for this project", "Name", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",

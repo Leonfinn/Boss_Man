@@ -64,7 +64,8 @@ describe("R7: a card names a button that doesn't exist", () => {
     expect(checkAsk({ ...base, steps: ["Open BOS-368 and press Overrule and merge."] }).error).toMatch(/Overrule and merge/);
     expect(checkAsk({ ...base, steps: ["Press Merge it on this card, shown in Settings → Server and runner → This host."], options: ["Merge it", "Not yet"] }).error).toBeNull();
     // Overridable by the CEO with a reason, like R1 and R2 (the list can't see a label set in code).
-    const ceo = checkAsk({ ...base, steps: ["Press Copied under the command, shown in Settings → Server and runner → This host."], lintOverride: "The Copy button says Copied after a press.", byCeo: true });
+    // "Copy done" is a made-up label on no screen ("Copied" is listed under Ticket and Run since BOS-2233).
+    const ceo = checkAsk({ ...base, steps: ["Press Copy done under the command, shown in Settings → Server and runner → This host."], lintOverride: "The Copy button says Copy done after a press.", byCeo: true });
     expect(ceo.error).toBeNull();
     expect(ceo.lint?.override?.findings.map((x) => x.rule)).toEqual(["R7"]);
   });
@@ -96,6 +97,9 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/MoreAbout.tsx": "Any screen",
   // The "Show older" button under a paged list (BOS-2165): Skills and Engagements render it.
   "components/ShowOlder.tsx": "Any screen",
+  // "Copy link" in the Ticket and Run headers (BOS-2233). Not "Any screen", so it takes its screens from where
+  // it is rendered (screensOf): Ticket and Run.
+  "components/CopyLinkButton.tsx": "Ticket",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   // The weekly email switch on Settings → Notifications (BOS-2195).
