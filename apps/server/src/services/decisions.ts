@@ -1046,13 +1046,20 @@ export async function releasedNote(db: Db, ticketId: string, answered?: { questi
  * decision's dependency row is already gone by then, so its question and answer come in as `answered`.
  * The question is cut, never the answer: the answer is what the agent has to act on (BOS-951).
  */
-export async function unblockedNote(db: Db, ticketId: string, answered?: { question: string; answer: string }) {
+export async function unblockedNote(db: Db, ticketId: string, answered?: { question: string; answer: string; raisedByAgentId?: string | null }) {
   const blockers = await db
-    .select({ id: tickets.id, title: tickets.title, note: tickets.stateNote, question: decisions.question, answer: decisions.answer })
+    .select({ id: tickets.id, title: tickets.title, note: tickets.stateNote, question: decisions.question, answer: decisions.answer, raisedBy: decisions.raisedByAgentId })
     .from(ticketDependencies)
     .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
     .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
     .where(eq(ticketDependencies.blockedTicketId, ticketId));
+  // BOS-2291: a card the assignee did not raise is said so at the top, with who raised it and when they need to act.
+  const [own] = await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
+  const raisers = [...blockers.flatMap((b) => (b.question ? [b.raisedBy ?? null] : [])), ...(answered ? [answered.raisedByAgentId ?? null] : [])];
+  const others = [...new Set(raisers.filter((r) => r !== (own?.assignee ?? null) || r === null))];
+  const names = others.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, others.filter((r): r is string => !!r))) : [];
+  const raiserName = (r: string | null) => (r ? names.find((n) => n.id === r)?.name ?? "a colleague" : "Boss Man");
+  const byOther = (r: string | null | undefined) => (r ?? null) !== (own?.assignee ?? null);
   const ids = blockers.flatMap((b) => (b.id ? [b.id] : []));
   const made = ids.length
     ? await db
@@ -1067,11 +1074,12 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
       const outs = made.filter((m) => m.ticketId === b.id).map((m) => m.slug ?? m.title);
       return [`- "${b.title}" is done.${b.note ? ` Its note: ${b.note}` : ""}${outs.length ? ` It produced: ${outs.join(", ")}.` : ""}`];
     }
-    return b.question && b.answer ? [`- You asked "${asked(b.question)}"; the answer was: ${b.answer}`] : [];
+    return b.question && b.answer ? [byOther(b.raisedBy) ? `- ${raiserName(b.raisedBy ?? null)} asked "${asked(b.question)}"; the answer was: ${b.answer}` : `- You asked "${asked(b.question)}"; the answer was: ${b.answer}`] : [];
   });
-  if (answered) lines.push(`- You asked "${asked(answered.question)}"; the answer was: ${answered.answer}`);
+  if (answered) lines.push(byOther(answered.raisedByAgentId) ? `- ${raiserName(answered.raisedByAgentId ?? null)} asked "${asked(answered.question)}"; the answer was: ${answered.answer}` : `- You asked "${asked(answered.question)}"; the answer was: ${answered.answer}`);
   if (!lines.length) return undefined;
-  const text = `What you were waiting on:\n${lines.join("\n")}`;
+  const foreign = blockers.some((b) => b.question && b.answer && byOther(b.raisedBy)) || (!!answered && byOther(answered.raisedByAgentId));
+  const text = `${foreign ? "Not your card: you need to act on this answer only if it changes your work.\n" : ""}What you were waiting on:\n${lines.join("\n")}`;
   // A short note is sent whole. A long one keeps its first 800 characters, which now leaves room for the answer
   // because the question above is cut; the whole thing is on the ticket's conversation either way (BOS-951).
   return text.length <= UNBLOCKED_TOTAL_MAX ? text : `${text.slice(0, UNBLOCKED_TOTAL_MAX)}\n\n${UNBLOCKED_POINTER}`;
@@ -3702,7 +3710,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}` });
       }
       for (const t of unblocked) {
-        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
+        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer, raisedByAgentId: d.raisedByAgentId }) });
       }
       // The owner refused (BOS-1094): a "Send it back" / "Deny" / "Reject" button on an agent's card about a ticket in
       // review stops its merge. The card no longer holds it, so without this the merge went on (BOS-1071).
@@ -3720,7 +3728,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const cardTicketId = (ctx as { ticketId?: string | null }).ticketId ?? null;
       for (const t of kept) {
         if (heldKept.has(t.id) && cardTicketId && cardTicketId !== t.id) continue;
-        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
+        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `Not your card${d.raisedByAgentId ? "" : " (Boss Man raised it)"}: it held this ticket in review, and you need to act only if the answer changes your work.\nThe card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
       }
       // BOS-1591 (R21): the owner's answer to a question may be what other parked tickets wait for in a note only. Tell the CEO once.
       if (wake && ctx.type === "question" && !extra.settledBy && extra.by !== "ceo" && !(ctx as { plan?: boolean }).plan) {
