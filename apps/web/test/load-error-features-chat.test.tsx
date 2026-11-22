@@ -54,7 +54,21 @@ describe("Features and Chat: a failed load says so (BOS-1889)", () => {
     const toggle = await screen.findByRole("button", { name: "Criteria and areas" });
     panelOpen = true;
     fireEvent.click(toggle);
-    await screen.findByText(/settings boom/);
+    await screen.findByText(/Couldn't load the priority settings: settings boom/);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("a feature's page shows 'Couldn't load the feature' with Retry on a server error, and keeps the 404 block (BOS-2294)", async () => {
+    let status = 500;
+    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "feature boom" }, status)));
+    render(<Features companies={[{ ...company, id: "c3" }]} companyId="c3" featureId="f9" go={() => {}} />);
+    await screen.findByText(/Couldn't load the feature: feature boom/);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    cleanup();
+    status = 404;
+    render(<Features companies={[{ ...company, id: "c4" }]} companyId="c4" featureId="f10" go={() => {}} />);
+    await screen.findByText(/Feature not found/);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("Chat shows an error with Retry when the team fails to load", async () => {
