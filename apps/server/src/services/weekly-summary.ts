@@ -140,6 +140,24 @@ export function weeklySummaryService(
     async runAll() {
       for (const c of await db.select({ id: companies.id }).from(companies)) await this.run(c.id).catch((err) => deps.log?.(`weekly summary for ${c.id} failed: ${(err as Error).message}`));
     },
+    async companyExists(companyId: string): Promise<boolean> {
+      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
+      return !!c;
+    },
+    /** Sends the weekly email now, any day and hour, to the saved address. Leaves lastSentAt alone. A failure throws with the mail server's reason. */
+    async sendNow(companyId: string): Promise<{ to: string }> {
+      const s = await get(companyId);
+      if (!s.enabled || !s.to) throw Object.assign(new Error("Switch the weekly summary on and save an address first."), { statusCode: 422 });
+      if (!(await deps.isConfigured())) throw Object.assign(new Error("Outgoing email isn't set up yet. Add the mail server in Settings → Server and runner → Email."), { statusCode: 422 });
+      const w = weeklyText(await facts(companyId, now()));
+      try {
+        await deps.send({ to: s.to, subject: w.subject, text: w.text });
+      } catch (err) {
+        deps.log?.(`weekly summary for ${companyId} send-now failed: ${(err as Error).message}`);
+        throw Object.assign(new Error(`The mail server did not accept it: ${(err as Error).message}`), { statusCode: 502 });
+      }
+      return { to: s.to };
+    },
     async save(companyId: string, input: z.infer<typeof WeeklySettingsInput>) {
       if (input.enabled && !input.to) throw Object.assign(new Error("Give the address the weekly summary goes to."), { statusCode: 422 });
       const prev = await get(companyId);
@@ -157,7 +175,7 @@ export function weeklySummaryService(
       if (s.lastSentAt && t.getTime() - new Date(s.lastSentAt).getTime() < 6 * DAY) return false;
       if (!(await deps.isConfigured())) return false;
       const w = weeklyText(await facts(companyId, t));
-      // Written down before sending: a failed send is retried at the next sweep, a restart can't send twice.
+      // Written down after sending: a failed send leaves lastSentAt alone, so the next sweep retries it.
       try {
         await deps.send({ to: s.to, subject: w.subject, text: w.text });
       } catch (err) {

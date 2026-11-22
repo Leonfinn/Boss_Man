@@ -98,6 +98,23 @@ describe("weekly email", () => {
     void at;
   });
 
+  it("send-now mails the summary any day, leaves lastSentAt alone, and reports a refusal", async () => {
+    const [other] = await db.insert(companies).values({ name: "Other" }).returning();
+    const sent: Array<{ to: string; subject: string; text: string }> = [];
+    const tue = { t: new Date("2026-12-22T03:00:00Z") }; // a Tuesday, before 8
+    const w = make(tue, sent);
+    await expect(w.sendNow(other!.id)).rejects.toThrow(/Switch the weekly summary on/);
+    await w.save(other!.id, { enabled: true, to: "me@example.com" });
+    expect(await w.sendNow(other!.id)).toEqual({ to: "me@example.com" });
+    expect(sent).toHaveLength(1);
+    expect((await w.get(other!.id)).lastSentAt).toBeNull();
+    await expect(make(tue, sent, false).sendNow(other!.id)).rejects.toThrow(/isn't set up/);
+    const failing = weeklySummaryService(db, { send: async () => { throw new Error("down"); }, isConfigured: async () => true, localDayHour: () => ({ day: 2, hour: 3 }), now: () => tue.t });
+    await expect(failing.sendNow(other!.id)).rejects.toThrow(/did not accept it: down/);
+    expect(await w.companyExists(other!.id)).toBe(true);
+    expect(await w.companyExists("00000000-0000-4000-8000-000000000000")).toBe(false);
+  });
+
   it("groups merged tickets by feature and compares spend with the week before", () => {
     const w = weeklyText({ merged: [{ title: "A", feature: "Search" }, { title: "B", feature: "Search" }, { title: "C", feature: null }], spentMicros: 10_000_000, beforeMicros: 4_000_000, released: ["Search"], waiting: 0, oldestWaitingMs: null });
     expect(w.text).toContain("- Search: A; B");
