@@ -12,10 +12,38 @@ afterEach(() => {
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
 
 describe("decision rules", () => {
+  // BOS-2236: before the list arrives, or when it fails, the page must not pass for "no rules".
+  it("shows Loading, not 'None yet.', and no add controls while the rules are on their way", async () => {
+    let release: (r: Response) => void = () => {};
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { release = resolve; })));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    expect(screen.getByText("Loading…")).toBeTruthy();
+    expect(screen.queryByText("None yet.")).toBeNull();
+    expect(screen.queryByText("Add a rule")).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    // Let the request finish so it does not hold the page's request line for later tests.
+    release(new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }));
+    await screen.findByText("None yet.");
+  });
+
+  it("shows an error with Retry on a failed load, then the list once Retry works", async () => {
+    let ok = false;
+    vi.stubGlobal("fetch", vi.fn(async () => (ok ? new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }) : new Response(JSON.stringify({ error: "Boom" }), { status: 500 }))));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    const retry = await screen.findByRole("button", { name: /retry/i });
+    expect(screen.queryByText("None yet.")).toBeNull();
+    expect(screen.queryByText("Add a rule")).toBeNull();
+    ok = true;
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getByText("None yet.")).toBeTruthy());
+    expect(screen.getByText("Add a rule")).toBeTruthy();
+  });
+
   it("asks the CEO in plain words, with the manual form folded away", async () => {
     const fetch = vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("rule-requests") ? { ceo: { name: "Ada" } } : { company: [], global: [], defaults: [] }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    await screen.findByText("Add a rule");
 
     const advanced = screen.getByText("Advanced: write the rule yourself").closest("details")!;
     expect(advanced.open).toBe(false);
@@ -40,6 +68,7 @@ describe("decision rules", () => {
     });
     vi.stubGlobal("fetch", fetch);
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    await screen.findByText("Add a rule");
     const posts = () => fetch.mock.calls.filter((c) => c[1]?.method === "POST").length;
 
     fireEvent.change(screen.getByLabelText("What should this rule do?"), { target: { value: "Let agents read GitHub" } });
@@ -62,6 +91,7 @@ describe("decision rules", () => {
   it("re-enables the buttons and shows the error when a submit fails", async () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => (init?.method === "POST" ? new Response(JSON.stringify({ error: "Nope" }), { status: 500 }) : new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }))));
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    await screen.findByText("Add a rule");
     fireEvent.change(screen.getByLabelText("What should this rule do?"), { target: { value: "Something" } });
     const ask = screen.getByRole("button", { name: "Ask the CEO to draft it" }) as HTMLButtonElement;
     fireEvent.click(ask);
@@ -156,6 +186,7 @@ describe("decision rules", () => {
       const fetch = vi.fn(async (url: string, _init?: RequestInit) => new Response(JSON.stringify(url.includes("/test") ? { outcome: "allow", rule: "Your draft rule" } : { company: [], global: [], defaults: [] }), { status: 200 }));
       vi.stubGlobal("fetch", fetch);
       render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+      await screen.findByText("Add a rule");
       expect(screen.queryByLabelText(/Try it with the rule I'm typing/)).toBeNull();
       fireEvent.change(screen.getByLabelText("Command matches (regex)"), { target: { value: "^docker\\s+restart" } });
       fireEvent.click(screen.getByLabelText(/Try it with the rule I'm typing/));

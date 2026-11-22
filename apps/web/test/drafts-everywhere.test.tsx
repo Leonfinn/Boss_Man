@@ -65,7 +65,7 @@ describe("the rules box keeps what you type until the CEO request is sent (BOS-7
       }),
     );
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
-    const box = screen.getByLabelText("What should this rule do?") as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("What should this rule do?")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "Let agents read GitHub freely" } });
     expect(readDraft("rule-ask/c1")).toBe("Let agents read GitHub freely");
     fireEvent.click(screen.getByRole("button", { name: "Ask the CEO to draft it" }));
@@ -85,7 +85,7 @@ describe("the rules box keeps what you type until the CEO request is sent (BOS-7
       }),
     );
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
-    const box = screen.getByLabelText("What should this rule do?") as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("What should this rule do?")) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "Keep me on failure" } });
     fireEvent.click(screen.getByRole("button", { name: "Ask the CEO to draft it" }));
     await waitFor(() => expect(box.value).toBe("Keep me on failure"));
