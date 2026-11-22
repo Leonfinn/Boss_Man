@@ -41,6 +41,16 @@ describe("CopyLinkButton (BOS-2233)", () => {
     expect(button().textContent).toBe("Copy link");
   });
 
+  it("on a run page copies that run's address, and is a real button named Copy link", async () => {
+    window.location.hash = "#/runs/run-42";
+    copyText.mockResolvedValue(true);
+    render(<CopyLinkButton />);
+    const btn = screen.getByRole("button", { name: /Copy link/ });
+    expect(btn.tagName).toBe("BUTTON");
+    await click();
+    expect(copyText).toHaveBeenCalledWith(`${window.location.origin}${window.location.pathname}#/runs/run-42`);
+  });
+
   it("shows the address, selected, when copying fails", async () => {
     copyText.mockResolvedValue(false);
     render(<CopyLinkButton />);
