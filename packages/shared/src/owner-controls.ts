@@ -122,7 +122,7 @@ export const OWNER_CONTROLS = {
     "Show older versions", "Compare", "Close compare", "Show", "Restore this version",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
-    "Deleted pages", "Restore", "Restoring",
+    "Deleted pages", "Restore", "Restoring", "Download",
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
