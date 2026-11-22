@@ -2,6 +2,8 @@ import { useState, type FormEvent } from "react";
 import { api, type Agent, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
+import { LoadError } from "../../components/LoadError";
+import { Loader } from "../../components/Loader";
 import { Section, useAction } from "./shared";
 
 /** What each kind of credential is called inside an agent's environment by default. */
@@ -171,8 +173,12 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
             </tbody>
           </table>
         </div>
-      ) : (
+      ) : grants.data ? (
         <p>No credentials yet. Agents need at least a Claude setup-token or an API key to run.</p>
+      ) : grants.error ? (
+        <LoadError what="the credentials" message={grants.error.message} onRetry={grants.reload} />
+      ) : (
+        <Loader label="Loading the credentials" size={16} />
       )}
       {grants.data?.some((g) => g.envName === CLAUDE_TOKEN_ENV) && (
         <p className="muted" style={{ fontSize: 13 }}>
