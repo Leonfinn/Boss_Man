@@ -14,8 +14,9 @@ type ImportPreview = {
   projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
   gitHosts: Array<{ project: string; url: string; opens: string | null; stackService: boolean }>;
-  /** BOS-2242: one plain line per company setting the package carries (agent approvals, templates, retro, second opinion). */
-  settings: string[];
+  /** BOS-2242: one plain line per company setting the package carries (agent approvals, templates, retro, second opinion).
+   * Optional: a server from before BOS-2242 answers without it, and the page must still render. */
+  settings?: string[];
   warnings: string[];
 };
 
@@ -134,11 +135,11 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               </ul>
             </div>
           )}
-          {preview.settings.length > 0 && (
+          {(preview.settings ?? []).length > 0 && (
             <div style={{ fontSize: 14 }}>
               <strong>The company's own settings.</strong> These come in with it:
               <ul>
-                {preview.settings.map((s) => (
+                {(preview.settings ?? []).map((s) => (
                   <li key={s}>{s}</li>
                 ))}
               </ul>
