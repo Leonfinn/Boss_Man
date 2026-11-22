@@ -233,6 +233,33 @@ export const runnerEvents = pgTable(
 );
 
 /**
+ * Every permission decision (BOS-2185): the rule that matched, what it decided and who answered the
+ * card. Kept 60 days, then pruned in the daily clean-up. No foreign keys: the history outlives a
+ * deleted run or agent. The title is redacted before it is stored; raw tool input never is.
+ */
+export const permissionDecisions = pgTable(
+  "permission_decisions",
+  {
+    id: id(),
+    at: timestamp("at", { withTimezone: true }).notNull(),
+    companyId: uuid("company_id").notNull(),
+    runId: uuid("run_id").notNull(),
+    agentId: uuid("agent_id"),
+    ticketId: uuid("ticket_id"),
+    title: text("title"),
+    kind: text("kind"),
+    rule: text("rule").notNull(),
+    position: integer("position").notNull(),
+    outcome: text("outcome").notNull(),
+    tier: text("tier").notNull(),
+    decisionId: uuid("decision_id"),
+    answeredBy: text("answered_by"),
+    answeredAt: timestamp("answered_at", { withTimezone: true }),
+  },
+  (t) => [index("permission_decisions_run").on(t.runId, t.at), index("permission_decisions_at").on(t.at), index("permission_decisions_card").on(t.decisionId)],
+);
+
+/**
  * How many times applying one event of a runner has failed transiently (BOS-606), kept apart from the
  * event row because a retry rolls that row back and the count must survive it. An event that keeps
  * failing with no code is stored, marked and acked after a few tries so it can't stall the stream.

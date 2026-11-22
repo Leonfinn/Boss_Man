@@ -43,6 +43,7 @@ import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
+import { permissionStore } from "./services/permission-store.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { deployWaitService } from "./services/deploy-wait.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
@@ -618,7 +619,7 @@ export async function buildApp(opts: AppOptions) {
     launcher: (companyId) => launch.status(companyId),
     launcherOn: () => launch.enabled,
   });
-  const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
+  const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now, store: permissionStore(db) });
   decisionsSvc.setPermissionLog(permLog);
   // Memory logging (BOS-410 step 1). Built here so server_status can read it; main.ts starts it on
   // every process, standby too. Tests never start it, so no timer runs under vitest.

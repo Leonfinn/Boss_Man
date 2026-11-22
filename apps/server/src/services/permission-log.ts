@@ -2,8 +2,10 @@
 // rule allowed, sent on or refused each request, who answered when it became a card, and which
 // tool calls an agent reported as refused. Each entry is one log line carrying the run, ticket and
 // agent ids so it can be searched, and the last hour is kept in memory for server_status.
-// Nothing is stored in the database: the summary starts again when the server restarts.
+// The in-memory summary starts again when the server restarts; since BOS-2185 each decision and its
+// answer are also stored (permission-store.ts, 60 days) so the Run page can list them.
 import { sinceHours } from "@boss-man/shared";
+import type { PermissionStore } from "./permission-store.js";
 
 export type PermissionLogEntry = {
   at: Date;
@@ -31,9 +33,11 @@ const MAX_ENTRIES = 5000;
 
 const quote = (s: string | null | undefined) => JSON.stringify((s ?? "").slice(0, 200));
 
-export function createPermissionLog(opts: { log?: (line: string) => void; now?: () => Date } = {}) {
+export function createPermissionLog(opts: { log?: (line: string) => void; now?: () => Date; store?: PermissionStore } = {}) {
   const log = opts.log ?? (() => {});
   const now = opts.now ?? (() => new Date());
+  // A failed write must never hold up or change a permission decision: it is logged and dropped.
+  const stored = (what: Promise<void> | undefined) => void what?.catch((err) => log(`permission store failed: ${err instanceof Error ? err.message : "error"}`));
   let decided: PermissionLogEntry[] = [];
   let refused: RefusedCall[] = [];
   let answers: Answer[] = [];
@@ -50,7 +54,13 @@ export function createPermissionLog(opts: { log?: (line: string) => void; now?: 
   return {
     /** One decision by the rules. */
     decision(e: Omit<PermissionLogEntry, "at">) {
-      decided.push({ ...e, at: now() });
+      const entry = { ...e, at: now() };
+      decided.push(entry);
+      try {
+        stored(opts.store?.insert(entry));
+      } catch (err) {
+        log(`permission store failed: ${err instanceof Error ? err.message : "error"}`);
+      }
       trim();
       log(
         `permission decision run=${e.runId} agent=${e.agentId ?? "-"} ticket=${e.ticketId ?? "-"} tool=${quote(e.title)} kind=${e.kind ?? "-"} rule=${quote(e.rule)} position=${e.position} outcome=${e.outcome} tier=${e.tier}${e.decisionId ? ` card=${e.decisionId}` : ""}`,
@@ -58,7 +68,13 @@ export function createPermissionLog(opts: { log?: (line: string) => void; now?: 
     },
     /** A card for a request was answered; answeredBy is "ceo", "owner" or what settled it. */
     answer(e: { companyId: string; runId: string; agentId: string | null; ticketId: string | null; decisionId: string; answeredBy: string; answer: string }) {
-      answers.push({ at: now(), companyId: e.companyId, answeredBy: e.answeredBy });
+      const at = now();
+      answers.push({ at, companyId: e.companyId, answeredBy: e.answeredBy });
+      try {
+        stored(opts.store?.markAnswered(e.decisionId, e.answeredBy, at));
+      } catch (err) {
+        log(`permission store failed: ${err instanceof Error ? err.message : "error"}`);
+      }
       trim();
       log(`permission answer run=${e.runId} agent=${e.agentId ?? "-"} ticket=${e.ticketId ?? "-"} card=${e.decisionId} answeredBy=${e.answeredBy} answer=${quote(e.answer)}`);
     },
