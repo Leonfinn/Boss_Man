@@ -62,7 +62,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -232,7 +232,7 @@ export const OWNER_FIELDS = {
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
-    "Offer an Approve button on simple agent questions", "My phone",
+    "Offer an Approve button on simple agent questions", "My phone", "Weekly summary by email", "Send it to",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",

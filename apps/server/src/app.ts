@@ -133,6 +133,8 @@ import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
+import { weeklySummaryRoutes } from "./routes/weekly-summary.js";
+import { weeklySummaryService } from "./services/weekly-summary.js";
 import { PENPOT_ENV, penpotRoutes } from "./routes/penpot.js";
 import { mailerService } from "./services/mailer.js";
 import { wikiRoutes } from "./routes/wiki.js";
@@ -324,6 +326,14 @@ export async function buildApp(opts: AppOptions) {
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const mailer = mailerService(db, { reveal: (id) => secretsSvc.reveal(id), tlsOptions: opts.mailTlsOptions });
+  // BOS-2195: the optional weekly email, sent Monday from 8 owner time (main.ts runs it on a timer).
+  const weeklySummary = weeklySummaryService(db, {
+    send: (m) => mailer.send(m),
+    isConfigured: () => mailer.isConfigured(),
+    localDayHour: (t) => ({ day: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(formatDate("en-US", t, { weekday: "short", timeZone: OWNER_TZ })) + 1, hour: Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })) }),
+    now: opts.now,
+    log: (m) => app.log.error(m),
+  });
   const privateDetails = privateDetailsService(db, master);
   const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
@@ -1788,6 +1798,7 @@ export async function buildApp(opts: AppOptions) {
     notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin: phoneLoginService({ dir: opts.deployerDir, fact: (k) => hostFacts.value(k), now: () => (opts.now ? opts.now().getTime() : Date.now()), saveSetup: ntfySetupSaver({ notes, secretsSvc }) }) });
     // BOS-1387: Settings → Outgoing email.
     emailSettingsRoutes(owner, { mailer, secretsSvc });
+    weeklySummaryRoutes(owner, { weekly: weeklySummary, mailer });
     // BOS-1582: Settings → Tools → Penpot, one form for the four Penpot secrets.
     penpotRoutes(owner, { db, secretsSvc });
 
@@ -2791,5 +2802,5 @@ export async function buildApp(opts: AppOptions) {
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
   /** BOS-2159: removes login rows past their expiry (they are refused already; this stops the table growing). Returns how many. */
   const sweepExpiredSessions = async () => (await db.delete(sessions).where(lte(sessions.expiresAt, new Date())).returning({ h: sessions.tokenHash })).length;
-  return { app, sweepExpiredSessions, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, sweepExpiredSessions, mailer, weeklySummary, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, secretScan, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, ticketMeaningEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }
