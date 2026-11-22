@@ -21,6 +21,7 @@ export function checkMemoryWarning(o: { slots: number; perCheckMb: number | null
   if (need <= o.machineMb) return null;
   const gb = (mb: number) => `${Math.round((mb / 1024) * 10) / 10} GB`;
   const fits = Math.floor(o.machineMb / per);
-  const advice = fits >= 1 ? `lower the checks at once to ${fits}, or lower the memory per check` : "lower the memory per check or give the machine more memory";
+  const lower = fits >= 1 ? `lower the checks at once to ${fits} or the memory per check` : "lower the memory per check";
+  const advice = `raise mem_limit and memswap_limit in the worker's compose file and redeploy, or ${lower}`;
   return `${o.slots} check${o.slots === 1 ? "" : "s"} at once × ${gb(per)} each is ${gb(need)}, more than the ${gb(o.machineMb)} this machine has: ${advice}. Otherwise the machine can run out of memory before any check's own limit acts, and checks are stopped.`;
 }
