@@ -1,7 +1,7 @@
 // The board, roadmap, notes and list_my_work tools, moved out of mcp.ts unchanged (BOS-298 step 15):
 // the roadmap, the CEO's notes and note requests, the board overview and the agent's own open tickets.
 // Registered in the same places and order as before, so every kind of run sees the same tools.
-import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { describeRoles, HORIZONS, reviewRolesOf, SENIOR_DEV_TEMPLATE } from "@boss-man/shared";
@@ -199,7 +199,7 @@ export function registerRequestNote(server: Pick<McpServer, "registerTool">, db:
 export function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
   server.registerTool(
     "board",
-    { description: "See the company's board: projects, objectives with their milestones, agents (with the reviews each does under the company's Settings > Reviews, e.g. \"Code (all levels), Security (High+)\"; a project can override them), and open tickets with their ids.", inputSchema: {} },
+    { description: "See the company's board: projects, objectives with their milestones, agents (with the reviews each does under the company's Settings > Reviews, e.g. \"Code (all levels), Security (High+)\"; a project can override them), and open tickets with their ids (the oldest 300; past that, an openTicketsNote says how many exist, and tickets find state=… lists the rest).", inputSchema: {} },
     async () => {
       const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt))).orderBy(asc(projects.name));
       const os = await db.select({ id: objectives.id, title: objectives.title, priority: objectives.priority }).from(objectives).where(and(eq(objectives.companyId, scope.companyId), eq(objectives.status, "active")));
@@ -217,7 +217,10 @@ export function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, s
         .orderBy(asc(tickets.createdAt))
         .limit(300);
       const ref = await refsOf(db, scope.companyId);
-      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as.map(withReviews), openTickets: ts.map(ref) }));
+      // BOS-2262: past 300 open tickets the newest drop off; say so rather than cut silently.
+      const [{ n: openTotal } = { n: 0 }] = ts.length < 300 ? [{ n: ts.length }] : await db.select({ n: sql<number>`count(*)::int` }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), ne(tickets.systemState, "done")));
+      const cutNote = openTotal > ts.length ? { openTicketsNote: `showing the oldest ${ts.length} of ${openTotal} open tickets; use tickets find state=… for the rest` } : {};
+      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as.map(withReviews), openTickets: ts.map(ref), ...cutNote }));
     },
   );
 }
