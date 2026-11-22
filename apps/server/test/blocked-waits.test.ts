@@ -133,6 +133,7 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
     const r = await c.row(none.id);
     expect(r.watchTrigger).toBeNull();
     expect(r.monitorNote).toMatch(/Daily re-read of your watch: a week of real use/);
+    // test-lines-ok: the booking is a day ahead, so a 23 h margin holds on any machine speed
     expect(r.monitorAt!.getTime()).toBeGreaterThan(Date.now() + 23 * 3_600_000);
 
     const ci = await c.ticket();
