@@ -69,8 +69,12 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
               </li>
             ))}
           </ul>
-        ) : (
+        ) : grants.data ? (
           <p className="muted">Not granted to any company. Grant it above, under the company's variables.</p>
+        ) : grants.error ? (
+          <LoadError what="who gets this secret" message={grants.error.message} onRetry={grants.reload} />
+        ) : (
+          <Loader label="Loading who gets this secret" size={16} />
         )}
       </div>
       <form onSubmit={rotate} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
@@ -125,8 +129,12 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
               </tbody>
             </table>
           </div>
-        ) : (
+        ) : log.data ? (
           <p className="muted">No run has been given it yet.</p>
+        ) : log.error ? (
+          <LoadError what="the recent use" message={log.error.message} onRetry={log.reload} />
+        ) : (
+          <Loader label="Loading the recent use" size={16} />
         )}
       </div>
     </div>
