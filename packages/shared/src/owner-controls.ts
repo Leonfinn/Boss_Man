@@ -134,6 +134,7 @@ export const OWNER_CONTROLS = {
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Creating", "Back to the list", "Unlink",
     "Link to …", "Done: mark processed", "Back to unprocessed", "Archive", "Delete", "Copy", "New link", "Remove",
     "Feedback portal", "Search", "Anonymous …", "Save times",
+    "Download CSV", "Preparing",
   ],
   "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote"],
   Agents: [
