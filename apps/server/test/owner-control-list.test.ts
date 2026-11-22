@@ -138,6 +138,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Rules.tsx": "Permissions",
   "pages/Run.tsx": "Run",
   "pages/Runs.tsx": "Runs",
+  // The Engagements list's "Show" filter (BOS-2260); its Show older button comes from ShowOlder.
+  "pages/Engagements.tsx": "Engagements",
   // No buttons of its own, but it shows ScrumMasterLog's.
   "pages/ScrumMaster.tsx": "Scrum Master",
   "pages/Secrets.tsx": "Secrets",
