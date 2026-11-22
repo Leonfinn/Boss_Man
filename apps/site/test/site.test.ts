@@ -101,7 +101,9 @@ describe("build", () => {
     for (const f of htmlFiles()) {
       const html = read(f);
       const ips = [...html.matchAll(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g)].map((m) => m[0]);
-      expect(ips.filter((ip) => ip !== "192.168.1.20" && ip !== "0.0.0.0"), f).toEqual([]); // 0.0.0.0 only appears in "never 0.0.0.0"
+      // 0.0.0.0 is the "listen everywhere" setting; 127.0.0.1 is loopback (Paperclip's built-in database in the
+      // Paperclip guide), so neither can be an owner's address.
+      expect(ips.filter((ip) => ip !== "192.168.1.20" && ip !== "0.0.0.0" && ip !== "127.0.0.1"), f).toEqual([]);
       expect(html, f).not.toMatch(/\/home\/(?!you\b)[a-z]|\/mnt\/|\/Users\//);
       for (const m of html.matchAll(/([\w<>-]+)\.ts\.net/g)) expect(m[1], f).toMatch(/<tailnet>|&lt;tailnet&gt;|^tailnet$/);
     }
