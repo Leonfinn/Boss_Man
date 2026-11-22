@@ -1237,10 +1237,10 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "tickets",
     {
       description:
-        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
-      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional() },
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state, optional assignee: an agent's name, exact, any case) lists matches, 40 a page, newest activity first, with their ids and references; when more than one page matches, a line after the list gives the total and \"continue with tickets find offset=N\" (pass offset for the next page); read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
+      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional(), assignee: z.string().max(100).optional() },
     },
-    async ({ action, q, state, ticketId: given, path, offset, jobId }) => {
+    async ({ action, q, state, ticketId: given, path, offset, jobId, assignee }) => {
       const asRef = given ? REF.exec(given) : null;
       const ref = await refsOf(db, scope.companyId);
       const idStartsWith = (p: string) => sql`${tickets.id}::text like ${`${p.toLowerCase()}%`}`;
@@ -1280,14 +1280,24 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         const byRef = q ? REF.exec(q.trim()) : null;
         const byPrefix = q && ID_PREFIX.test(q.trim()) ? q.trim() : null;
         const like = q?.trim() && !byRef ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
+        // BOS-2262: an assignee name filters exactly (any case); the page is 40 and the answer says when more exist.
+        const who = assignee?.trim();
+        const where = and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, who ? sql`lower(${agents.name}) = ${who.toLowerCase()}` : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined);
+        const start = offset ?? 0;
         const rows = await db
           .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-          .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined))
+          .where(where)
           .orderBy(desc(tickets.lastActivityAt))
-          .limit(40);
-        return text(JSON.stringify(rows.map((r) => withNote(ref(r)))));
+          .limit(40)
+          .offset(start);
+        const json = JSON.stringify(rows.map((r) => withNote(ref(r))));
+        // A full page, or a page past the start, is the only time the total matters; a short first page is the whole answer.
+        if (start === 0 && rows.length < 40) return text(json);
+        const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(where);
+        const end = start + rows.length;
+        return text(`${json}\n\nShowing ${rows.length ? `${start + 1} to ${end}` : "none"} of ${total} matching tickets (newest activity first).${end < total ? ` More exist: continue with tickets find offset=${end} (same q, state and assignee).` : ""}`);
       }
       if (!ticketId) return fail("Give the ticketId to read.");
       const [row] = await db
