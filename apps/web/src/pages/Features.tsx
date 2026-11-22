@@ -669,7 +669,10 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           <section className="card features-toolbar">
             <AddFeature companyId={company.id} areas={areas} onAdded={(id) => go(`features/${company.id}/${id}`)} />
             <div className="features-toolbar-tools">
-              <input type="search" className="mini" placeholder="Search features" aria-label="Search features" value={query} onChange={(e) => setQuery(e.target.value)} />
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                Search features
+                <input type="search" className="mini" placeholder="Title or description" value={query} onChange={(e) => setQuery(e.target.value)} />
+              </label>
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 Sort by
                 <select className="mini" value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
