@@ -60,9 +60,11 @@ describe("tickets find paging and assignee (BOS-2262)", () => {
     expect(new Set([...first.rows, ...second.rows].map((r) => r.title)).size).toBe(43);
 
     // A short first page is the plain list, as before.
-    expect(JSON.parse(await call({ q: "Mine" }))).toHaveLength(1);
+    const short = split(await call({ q: "Mine" }));
+    expect(short.rows).toHaveLength(1);
+    expect(short.note).toBe("Showing 1 to 1 of 1 matching tickets (newest activity first).");
     expect(split(await call({ assignee: "engineer" })).rows.map((r) => r.title)).toEqual(["Mine"]);
-    expect(split(await call({ assignee: "Nobody" })).rows).toEqual([]);
+    expect(await call({ assignee: "Nobody" })).toContain('No agent called "Nobody"');
     await client.close();
   });
 
