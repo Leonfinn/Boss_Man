@@ -59,6 +59,7 @@ describe("check log facts, edge cases (BOS-1317)", () => {
     expect(checkLogFacts("FAIL  typecheck\r\nFAIL  test/a.test.ts > suite > first\r\n")).toEqual({
       steps: ["typecheck"],
       test: "test/a.test.ts > suite > first",
+      files: ["test/a.test.ts"],
     });
   });
 
