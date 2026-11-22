@@ -128,7 +128,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     try {
       // DR-007 row 3: check the guard can be made at all before taking the old one away. Without the
       // image the old guard stays, and so do the rules it loaded.
-      if (!(await docker.imageId(guardImageOf(cfg)))) throw new GuardUnavailable(false, `The network guard image ${guardImageOf(cfg)} is missing on this host; run the runner update to build it.`);
+      if (!(await docker.imageId(guardImageOf(cfg)))) throw new GuardUnavailable(false, `The network guard image ${guardImageOf(cfg)} is missing on this host; ${cfg.netguardImage ? "run `docker compose --env-file images.env --profile images pull` to download it (docs/35-install-from-images.md)" : "run the runner update to build it"}.`);
       const old = await guardOf(slug);
       if (old) await removeSettled(docker, old.Id);
       mkdirSync(netguardDir(cfg, slug), { recursive: true, mode: 0o755 });

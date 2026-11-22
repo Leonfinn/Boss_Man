@@ -2,9 +2,14 @@ name: Install test
 
 # BOS-974: installs Boss Man the way the guide says (docs/35-install-from-images.md) on a real x86 runner and a real arm64 runner:
 # pull by digest, setup twice, start, answer /api/health, start a runner from the published image.
-# Run it by hand after a release: Actions > Install test > Run workflow, type the version (like 0.1.0-beta.1).
+# It starts by itself when the Release workflow finishes successfully (nobody has to remember), and tests that release.
+# A red run means the release can't be installed: it is reported like any failed workflow. It can also be started by hand:
+# Actions > Install test > Run workflow, type the version (like 0.1.0-beta.1).
 # It only reads a published release; it changes nothing in the repository or the registries.
 on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
@@ -29,10 +34,19 @@ jobs:
     name: install (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # After a Release run, only a successful one has a release to test.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ inputs.version }}
     steps:
+      - name: Find the version (the newest release, when started by the Release workflow)
+        if: ${{ github.event_name == 'workflow_run' }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName')"
+          [ -n "$tag" ] || { echo "No release found to test."; exit 1; }
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
       - uses: sigstore/cosign-installer@v3
         with:

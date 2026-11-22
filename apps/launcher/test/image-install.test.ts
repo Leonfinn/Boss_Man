@@ -24,7 +24,7 @@ describe("setup", () => {
     const dir = tmp();
     const dbDir = tmp();
     const owner: string[] = [];
-    const chown = (f: string, uid: number, gid: number) => owner.push(`${path.basename(f)} ${uid}:${gid}`);
+    const chown = (f: string, uid: number, gid: number) => owner.push(`${path.basename(f).replace(/\.tmp$/, "")} ${uid}:${gid}`);
     expect(runSetup(dir, dbDir, chown)).toEqual({ created: ["master.key", "db_password"], kept: [] });
     const key = readFileSync(path.join(dir, "master.key"), "utf8");
     const pw = readFileSync(path.join(dbDir, "db_password"), "utf8");
@@ -46,6 +46,26 @@ describe("setup", () => {
     writeFileSync(path.join(dir, "master.key"), "mine\n");
     expect(runSetup(dir, tmp(), () => {})).toEqual({ created: ["db_password"], kept: ["master.key"] });
     expect(readFileSync(path.join(dir, "master.key"), "utf8")).toBe("mine\n");
+  });
+  it("makes again a key file left empty by a crashed run, and clears a stray temp file", () => {
+    const dir = tmp();
+    const dbDir = tmp();
+    writeFileSync(path.join(dir, "master.key"), "");
+    writeFileSync(path.join(dbDir, "db_password.tmp"), "half");
+    expect(runSetup(dir, dbDir, () => {})).toEqual({ created: ["master.key", "db_password"], kept: [] });
+    expect(readFileSync(path.join(dir, "master.key"), "utf8").trim()).not.toBe("");
+    expect(existsSync(path.join(dbDir, "db_password.tmp"))).toBe(false);
+  });
+  it("leaves no half-made file under the real name when the owner change fails", () => {
+    const dir = tmp();
+    const dbDir = tmp();
+    expect(() =>
+      runSetup(dir, dbDir, () => {
+        throw new Error("EPERM");
+      }),
+    ).toThrow(/EPERM/);
+    expect(existsSync(path.join(dir, "master.key"))).toBe(false);
+    expect(existsSync(path.join(dir, "master.key.tmp"))).toBe(false);
   });
   it("refuses a folder that is not there", () => {
     expect(() => runSetup(path.join(tmp(), "nope"), tmp())).toThrow(/not a folder/);

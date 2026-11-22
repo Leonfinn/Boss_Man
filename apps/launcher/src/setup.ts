@@ -1,6 +1,6 @@
 // `docker compose run --rm setup` (BOS-974): makes the secrets a pull-only install needs, inside a volume, with nothing on the host.
 // Safe to run twice: a file that exists is never touched, because a new master key would make every stored secret unreadable.
-import { chownSync, closeSync, constants, existsSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
+import { chownSync, closeSync, constants, existsSync, linkSync, openSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { socketModeProblem } from "./startup.js";
@@ -15,22 +15,42 @@ const DB_GID = 999;
 
 type Chown = (f: string, uid: number, gid: number) => void;
 
-/** Writes `body` to `file` only if it doesn't exist. O_EXCL means two setups at once can't both win. */
+/**
+ * Writes `body` to `file` only if it doesn't exist (or is empty, the mark of a crashed earlier run).
+ * The file is made complete under a temporary name (O_EXCL, so two setups at once can't both win the temp file), given its owner,
+ * then moved into place with a link that fails if `file` appeared meanwhile. A crash or full disk therefore never leaves a
+ * half-made key under the real name: at worst a stray `.tmp` file, which the next run removes.
+ */
 function writeOnce(file: string, body: string, chown: Chown, mode: number, gid: number): boolean {
-  if (existsSync(file)) return false;
+  if (existsSync(file)) {
+    if (statSync(file).size > 0) return false;
+    unlinkSync(file); // empty = never finished; a key that was never used can be made again
+  }
+  const tmp = `${file}.tmp`;
+  rmSync(tmp, { force: true });
   let fd: number;
   try {
-    fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, mode);
+    fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, mode);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw err;
   }
   try {
-    writeSync(fd, body);
+    try {
+      writeSync(fd, body);
+    } finally {
+      closeSync(fd);
+    }
+    chown(tmp, SERVER_UID, gid);
+    try {
+      linkSync(tmp, file); // never replaces an existing file
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw err;
+    }
   } finally {
-    closeSync(fd);
+    rmSync(tmp, { force: true });
   }
-  chown(file, SERVER_UID, gid);
   return true;
 }
 

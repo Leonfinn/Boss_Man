@@ -1,4 +1,4 @@
-# 26 — Install from ready-made images
+# 35 — Install from ready-made images
 
 This is the install that only needs Docker. Nothing is built on your machine, and nothing is needed on the host except Docker with the Compose plugin: no `openssl`, no `git`, no `sudo`, no `chown`, no source code. The images were built and signed by the Boss Man project and are pulled by their exact digest.
 
@@ -84,6 +84,31 @@ Run these in the folder with the two files.
 
 Company data (workspaces, agent sessions) lives in Docker volumes created by Boss Man's launcher, not in a folder you choose. List them with `docker volume ls`.
 
+### Updating to a new release
+
+Nothing updates by itself. Do this once for each release you choose to take (there is no need to take every one), in the folder with your two files:
+
+1. Download the new `docker-compose.images.yml` and `images.env` from the release page and put them over the old ones. If you added settings of your own to `images.env` (section "Settings" below), copy those lines into the new file first; the new file replaces the digests and nothing else.
+2. Download the new images, including the runner images:
+
+   ```
+   docker compose --env-file images.env --profile images pull
+   ```
+
+3. Start the new version. Your data and keys stay, because they are in volumes:
+
+   ```
+   docker compose --env-file images.env up -d
+   ```
+
+Do not run `setup` again; it is only for the first install (running it again is harmless, it keeps what exists). Runners that are already running keep the old image until the launcher starts them again; the launcher marks a runner that is not on the newest image as not current. (Not yet confirmed on a real install: whether Boss Man's own runner update button recreates runners from the pulled image. Until that is confirmed, `docker compose --env-file images.env --profile images pull` followed by `up -d` is the supported route.)
+
+The **Build and update runners** button in Settings builds images from source on the machine. It does not apply to this install, because there is no source here: use the pull in step 2 instead.
+
+### Back up two volumes
+
+Back up `config` (the master key) and `db-secret` (the database password) after the first install, and keep the copies somewhere other than this machine. They are small. Keep them together with the database volume's backup: if you lose only `db-secret`, `setup` would make a new password, which the existing database refuses, and the server could not start. If that happens, restore `db-secret` from your backup. Without a backup the database password cannot be recovered, and the database volume would have to be recreated, which loses its data.
+
 ### Settings
 
 Add any of these to `images.env`, then run step 3 again.
@@ -131,4 +156,4 @@ Only Docker objects: containers, networks and volumes whose names start with `bo
 
 ## How the install is tested
 
-`scripts/install-images.test.sh` reads the compose file and checks that every Boss Man image is named by digest, nothing is built, and the Docker socket is the only host path. With `INSTALL_RELEASE_JSON` set it does the real install on a machine with Docker. The *Install test* workflow (Actions → Install test → Run workflow, with the version) runs it on x86 and arm64 after a release. Details of how images are published and signed: [docs/25-published-images.md](25-published-images.md).
+`scripts/install-images.test.sh` reads the compose file and checks that every Boss Man image is named by digest, nothing is built, and the Docker socket is the only host path. With `INSTALL_RELEASE_JSON` set it does the real install on a machine with Docker. On every change, the CI `images` job (x86 and arm64 runners) builds the images, puts them in a local registry and runs the real install from them. The *Install test* workflow runs it again on x86 and arm64 against the published release files when a release finishes; it can also be started by hand (Actions → Install test → Run workflow, with the version). Details of how images are published and signed: [docs/25-published-images.md](25-published-images.md).

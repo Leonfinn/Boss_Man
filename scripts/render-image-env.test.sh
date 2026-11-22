@@ -36,6 +36,15 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   "$S" "$t/all.json" > "$t/images.env"
   img="$(docker compose --env-file "$t/images.env" -f docker-compose.images.yml config --format json 2>&1 | jq -r '.services.server.image')"
   [ "$img" = "ghcr.io/me/boss-man-server@$(dg 6)" ] && ok "compose reads images.env" || bad "compose image: $img"
+  # Criterion 2: with Docker Hub picked, every Boss Man image (and the launcher's runner and guard images) names docker.io/me and the same digest.
+  "$S" "$t/all.json" docker.io/me > "$t/hub.env"
+  cfg="$(docker compose --env-file "$t/hub.env" --profile images -f docker-compose.images.yml config --format json 2>&1)"
+  for pair in "server:server:6" "launcher:launcher:8" "runner-image:runner:6" "netguard:netguard:8"; do
+    IFS=: read -r svc nm len <<<"$pair"
+    got="$(echo "$cfg" | jq -r ".services[\"$svc\"].image // \"missing\"")"
+    [ "$got" = "docker.io/me/boss-man-$nm@$(dg "$len")" ] && ok "Docker Hub: $svc image" || bad "Docker Hub: $svc image: $got"
+  done
+  echo "$cfg" | jq -r '.services.launcher.environment.BOSSMAN_RUNNER_IMAGE, .services.launcher.environment.BOSSMAN_NETGUARD_IMAGE' | grep -c '^docker.io/me/boss-man-.*@sha256:' | grep -qx 2 && ok "Docker Hub: launcher's runner and guard images" || bad "Docker Hub: launcher's BOSSMAN_*_IMAGE"
   if docker compose -f docker-compose.images.yml config -q 2>"$t/err"; then bad "compose refused no images.env"; else grep -q 'images.env' "$t/err" && ok "compose names images.env when it is missing" || bad "compose message: $(cat "$t/err")"; fi
 else
   echo "skip compose checks (no docker compose)"
