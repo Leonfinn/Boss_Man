@@ -102,6 +102,10 @@ describe("GitHub CI names every failing test (BOS-1721)", () => {
     const step = (wf.jobs["web-browser"]?.steps ?? []).find((s) => /--outputFile\.json="\$RUNNER_TEMP\/web-tests\.json"/.test(s.run ?? ""));
     const script = /node -e '\n([\s\S]*?)\n\s*' "\$RUNNER_TEMP\/web-tests\.json"/.exec(step?.run ?? "")?.[1];
     expect(script).toBeTruthy();
+    // The script sits in a bash single-quoted string: a ' inside it (a "can't" in a comment, as in review) ends the quote
+    // early and the step dies before writing any note. Node alone never sees that, so bash parses the whole step too.
+    expect(script).not.toContain("'");
+    expect(() => execFileSync("bash", ["-n"], { input: step!.run!, stdio: ["pipe", "pipe", "pipe"] })).not.toThrow();
     const ws = mkdtempSync(join(tmpdir(), "ci-web-notes-"));
     try {
       const report = join(ws, "web-tests.json");
