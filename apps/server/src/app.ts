@@ -396,6 +396,8 @@ export async function buildApp(opts: AppOptions) {
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
   let checkHold: ReturnType<typeof checkHoldService> | undefined;
+  // BOS-2284: set where the GitHub-CI pre-flight is built (below); the check that ended starts or drops the run that waited for it.
+  let ciPreflightLate: { onQuickEnded: (job: { kind: string; ticketId: string }) => Promise<void> } | undefined;
   // BOS-1093: a set private-details list that can't be read says so once, in the log and to the owner, and the scan runs its secret rules only.
   const scanListWarning: ScanListWarning = {
     log: (m) => app.log.warn(m),
@@ -421,7 +423,10 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     can: (id) => runners.can(id, "check-jobs"),
     wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
-    onEnded: (job) => checkHold?.onEnded(job),
+    onEnded: async (job) => {
+      await ciPreflightLate?.onQuickEnded(job).catch(() => undefined);
+      return checkHold?.onEnded(job);
+    },
     workers: checkWorkersSvc,
     bundles: {
       store: bundleStore,
@@ -1415,6 +1420,7 @@ export async function buildApp(opts: AppOptions) {
       };
     },
   });
+  ciPreflightLate = ciPreflight;
   const checkRequests = checkRequestService(db, { preflight: ciPreflight, command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
   // A restart loses the in-memory GitHub-CI pre-flight runs; start those again once runners have had time to reconnect.
   // Runners may come back later than 60 s after an update, so tickets skipped for want of one are retried every 2 minutes for 30 minutes.
