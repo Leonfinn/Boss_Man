@@ -126,7 +126,7 @@ export const OWNER_CONTROLS = {
     "Show older versions", "Compare", "Close compare", "Show", "Restore this version",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
-    "Deleted pages", "Restore", "Restoring",
+    "Deleted pages", "Restore", "Restoring", "Download",
     // A page's "Copy link", "Copied" for a moment after a copy (BOS-2259).
     "Copy link", "Copied",
   ],
@@ -134,7 +134,7 @@ export const OWNER_CONTROLS = {
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
     "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all", "Save reason",
     "Tasks", "Less", "How the portal works", "Adding",
-    "Download CSV",
+    "Download CSV", "Clear",
     // A feature's own page: "Copy link" in the header, "Copied" for a moment after a copy (BOS-2259).
     "Copy link", "Copied",
   ],
@@ -294,7 +294,7 @@ export const OWNER_FIELDS = {
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
-    "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
+    "New feature", "Area", "Search features", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Not shown yet",

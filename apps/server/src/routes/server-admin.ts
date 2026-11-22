@@ -120,8 +120,8 @@ export function serverAdminRoutes(
   owner.get("/api/self-deploy", async () => selfDeploy.overview());
   // The panel's Recent updates (BOS-1238): the newest answered update cards. Owner login only (this is the owner scope).
   owner.get("/api/self-deploy/history", async (req) => {
-    const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(20).default(5) }).parse(req.query ?? {});
-    return selfDeploy.history(limit);
+    const { limit, before } = z.object({ limit: z.coerce.number().int().min(1).max(20).default(5), before: z.string().uuid().optional() }).parse(req.query ?? {});
+    return selfDeploy.history(limit, before);
   });
   owner.post("/api/self-deploy/deploy-latest", async (_req, reply) => {
     const r = await selfDeploy.deployLatest();

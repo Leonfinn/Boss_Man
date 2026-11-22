@@ -209,6 +209,22 @@ export type Services = {
 const SCRUM_MASTER_TOOLS: ReadonlySet<string> = new Set(["tickets", "wiki", "whats_new", "list_my_work", "board", "ticket_reply", "open_attachment", "watchdog"]);
 
 /** Registers only the named tools on this server; the wiki among them is read-only. */
+const FEATURE_PAGE = 60;
+
+/** One page of the agents' feature list: non-declined, best priority first, narrowed by q, with the total and range so a cut is never silent. */
+function pageFeatures<T extends { status: string; priority: number; title: string; description?: string | null }>(rows: T[], q: string | undefined, offset: number | undefined) {
+  const needle = q?.trim().toLowerCase();
+  const matching = rows
+    .filter((f) => f.status !== "declined")
+    .filter((f) => !needle || f.title.toLowerCase().includes(needle) || (f.description ?? "").toLowerCase().includes(needle))
+    .sort((a, b) => b.priority - a.priority);
+  const start = Math.max(0, offset ?? 0);
+  const page = matching.slice(start, start + FEATURE_PAGE);
+  const to = start + page.length;
+  const range = { total: matching.length, from: page.length ? start + 1 : 0, to, ...(to < matching.length ? { more: `continue with offset=${to}` } : {}) };
+  return { page, range };
+}
+
 function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   const register = server.registerTool.bind(server);
   server.registerTool = ((name: string, config: never, cb: (input: { action?: string }, extra: never) => Promise<unknown>) => {
@@ -945,9 +961,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO and product managers also triage (a product manager gives a reason, kept in the activity log): link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. portalVisible is the one switch that publishes a feature (the feedback portal and its public roadmap); showPublicly is retired and is only accepted as another name for portalVisible. Write the publicSummary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand, priority and whether it is on the portal, kept off it or has a public summary; 60 a page, the answer gives total, from, to and a more note: pass q to search title and description, offset to continue), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO and product managers also triage (a product manager gives a reason, kept in the activity log): link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. portalVisible is the one switch that publishes a feature (the feedback portal and its public roadmap); showPublicly is retired and is only accepted as another name for portalVisible. Write the publicSummary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
       inputSchema: {
         action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size", "update_feature"]),
+        q: z.string().trim().max(200).optional(),
+        offset: z.number().int().min(0).optional(),
         effort: z.number().int().min(1).max(5).optional(),
         rank: z.number().int().min(1).max(5).nullable().optional(),
         horizon: z.enum(HORIZONS).nullable().optional(),
@@ -997,12 +1015,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }
         if (input.action === "features") {
           const all = await feedback.scored(scope.companyId);
-          const list = all.features
-            .filter((f) => f.status !== "declined")
-            .sort((a, b) => b.priority - a.priority)
-            .slice(0, 60)
-            .map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, objectiveId: f.objectiveId, milestoneId: f.milestoneId, rank: f.rank, horizon: f.horizon, demand: f.demand, people: f.customerCount, effort: f.effort, scores: Object.fromEntries(all.drivers.map((d) => [d.name, f.driverScores[d.id] ?? null])), value: f.value, priority: f.priority, tickets: f.tickets }));
-          return text(JSON.stringify({ criteria: all.drivers.map((d) => ({ name: d.name, weight: d.weight })), features: list }));
+          const { page, range } = pageFeatures(all.features, input.q, input.offset);
+          const list = page.map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, objectiveId: f.objectiveId, milestoneId: f.milestoneId, rank: f.rank, horizon: f.horizon, demand: f.demand, people: f.customerCount, effort: f.effort, scores: Object.fromEntries(all.drivers.map((d) => [d.name, f.driverScores[d.id] ?? null])), value: f.value, priority: f.priority, portalVisible: f.portalVisible, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim(), tickets: f.tickets }));
+          return text(JSON.stringify({ ...range, criteria: all.drivers.map((d) => ({ name: d.name, weight: d.weight })), features: list }));
         }
         if (input.action === "update_feature") {
           const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
@@ -1237,10 +1252,10 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "tickets",
     {
       description:
-        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
-      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional() },
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state, optional assignee: an agent's name, exact, any case) lists matches, 40 a page, newest activity first, with their ids and references; a line after the list gives the total and, when more exist, \"continue with tickets find offset=N\" (pass offset for the next page); read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) without a jobId lists the ticket's failed checks (job id, kind, time, first failing line); with a jobId it reads that job's whole redacted log, kept 14 days.",
+      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional(), assignee: z.string().max(100).optional() },
     },
-    async ({ action, q, state, ticketId: given, path, offset, jobId }) => {
+    async ({ action, q, state, ticketId: given, path, offset, jobId, assignee }) => {
       const asRef = given ? REF.exec(given) : null;
       const ref = await refsOf(db, scope.companyId);
       const idStartsWith = (p: string) => sql`${tickets.id}::text like ${`${p.toLowerCase()}%`}`;
@@ -1280,14 +1295,26 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         const byRef = q ? REF.exec(q.trim()) : null;
         const byPrefix = q && ID_PREFIX.test(q.trim()) ? q.trim() : null;
         const like = q?.trim() && !byRef ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
+        // BOS-2262: an assignee name filters exactly (any case); the page is 40 and the answer says when more exist.
+        const who = assignee?.trim();
+        const where = and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, who ? sql`lower(${agents.name}) = ${who.toLowerCase()}` : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined);
+        if (who) {
+          const named = await db.select({ name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = ${who.toLowerCase()}`));
+          if (!named.length) return fail(`No agent called "${who}" in your company. Give the name exactly as the board shows it (any case).`);
+        }
+        const start = offset ?? 0;
         const rows = await db
           .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-          .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined))
+          .where(where)
           .orderBy(desc(tickets.lastActivityAt))
-          .limit(40);
-        return text(JSON.stringify(rows.map((r) => withNote(ref(r)))));
+          .limit(40)
+          .offset(start);
+        const json = JSON.stringify(rows.map((r) => withNote(ref(r))));
+        const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(where);
+        const end = start + rows.length;
+        return text(`${json}\n\nShowing ${rows.length ? `${start + 1} to ${end}` : "none"} of ${total} matching tickets (newest activity first).${end < total ? ` More exist: continue with tickets find offset=${end} (same q, state and assignee).` : ""}`);
       }
       if (!ticketId) return fail("Give the ticketId to read.");
       const [row] = await db
@@ -1607,10 +1634,11 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
 
   server.registerTool(
     "features",
-    { description: "The company's feature requests, highest priority first: id, title, status, rank, column, demand and priority. Pass featureId to create_ticket to deliver one.", inputSchema: {} },
-    async () => {
+    { description: "The company's feature requests, highest priority first: id, title, status, rank, column, demand and priority. 60 a page: the answer gives total, from, to and \"more\"; pass q to search title and description and offset to continue. Pass featureId to create_ticket to deliver one.", inputSchema: { q: z.string().trim().max(200).optional(), offset: z.number().int().min(0).optional() } },
+    async ({ q, offset }) => {
       const all = await feedback.scored(scope.companyId);
-      return text(JSON.stringify(all.features.filter((f) => f.status !== "declined").sort((a, b) => b.priority - a.priority).slice(0, 60).map((f) => ({ id: f.id, title: f.title, status: f.status, rank: f.rank, horizon: f.horizon, demand: f.demand, priority: f.priority, link: `#/features/${scope.companyId}/${f.id}` }))));
+      const { page, range } = pageFeatures(all.features, q, offset);
+      return text(JSON.stringify({ ...range, features: page.map((f) => ({ id: f.id, title: f.title, status: f.status, rank: f.rank, horizon: f.horizon, demand: f.demand, priority: f.priority, link: `#/features/${scope.companyId}/${f.id}` })) }));
     },
   );
 

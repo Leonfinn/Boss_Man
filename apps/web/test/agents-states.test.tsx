@@ -88,3 +88,57 @@ describe("Undo, picture and Refresh guards (BOS-2103)", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false));
   });
 });
+
+describe("History and CEO notes: loading and failed loads (BOS-2279)", () => {
+  // Each test has its own agent id: the api layer shares an unfinished GET by path.
+  const ceo = (id: string) => ({ ...base, id, role: "ceo", name: "Chief" });
+  const never = () => new Promise<Response>(() => {});
+
+  it("shows loaders, not the empty words, while history and notes have not answered", async () => {
+    stub((url) => (url.includes("/history") || url.includes("/notes") ? (never() as unknown as Response) : (undefined as never)), [ceo("a-slow")]);
+    const { container } = render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Chief" }));
+    await screen.findByText("History");
+    expect(screen.getByText("CEO notes")).toBeTruthy();
+    expect(container.querySelectorAll(".loader").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("No changes yet.")).toBeNull();
+    expect(screen.queryByText("No notes yet.")).toBeNull();
+    // The words appear after the Loader's one-second delay; the deadline only bounds the wait.
+    expect(await screen.findByText(/Loading history/, {}, { timeout: 5000 })).toBeTruthy();
+    expect(await screen.findByText(/Loading CEO notes/, {}, { timeout: 5000 })).toBeTruthy();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
+    expect(screen.queryByText("No notes yet.")).toBeNull();
+  });
+
+  it("still says No changes yet. and No notes yet. when both loaded empty", async () => {
+    stub((url) => (url.includes("/history") ? json([]) : (undefined as never)), [ceo("a-empty")]);
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Chief" }));
+    expect(await screen.findByText("No changes yet.")).toBeTruthy();
+    expect(await screen.findByText("No notes yet.")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load the/)).toBeNull();
+  });
+
+  it("shows a load error with Retry for each; Retry brings back the history and the (empty) notes", async () => {
+    let fail = true;
+    stub((url) => {
+      if (fail && url.includes("/history")) return json({ error: "History down" }, 500);
+      if (fail && url.includes("/notes")) return json({ error: "Notes down" }, 500);
+      return undefined as never;
+    }, [ceo("a-fail")]);
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Chief" }));
+    expect(await screen.findByText(/Couldn't load the history: History down/)).toBeTruthy();
+    expect(await screen.findByText(/Couldn't load the CEO notes: Notes down/)).toBeTruthy();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
+    expect(screen.queryByText("No notes yet.")).toBeNull();
+    fail = false;
+    for (const b of screen.getAllByRole("button", { name: "Retry" })) fireEvent.click(b);
+    // Retry brings the history back: the stub's one change, with its Undo.
+    expect(await screen.findByRole("button", { name: "Undo" })).toBeTruthy();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
+    await screen.findByText(/CEO notes \(0 of 20\)/);
+    expect(screen.getByText("No notes yet.")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load the/)).toBeNull();
+  });
+});

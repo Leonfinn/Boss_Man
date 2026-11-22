@@ -105,7 +105,7 @@ export type PublishDeps = {
    */
   flakeRetry?: (s: CiStatus, stop: CiStop) => Promise<FlakeAnswer>;
   /** Says in the ticket's activity that GitHub was asked to re-run the failed jobs, or refused. */
-  announceFlakeRetry?: (answer: { files: string[]; slow?: SlowJob[] }, accepted: boolean) => Promise<void>;
+  announceFlakeRetry?: (answer: { files: string[]; slow?: SlowJob[] }, accepted: boolean, refused?: string) => Promise<void>;
 };
 
 /** BOS-1733: the token couldn't re-run the failed jobs. */
@@ -147,10 +147,15 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
         if (stop.stopped) return { kind: "stopped" };
         if (!a.retry) return { kind: "failed", status: s, why: a.why, ...(a.gateOutput ? { gateOutput: a.gateOutput } : {}) };
         const runIds = [...new Set(s.failed.map((r) => r.runId).filter((id): id is number => !!id))];
-        let accepted = runIds.length > 0;
-        for (const id of runIds) if (!(await deps.hosts.rerunFailedJobs(deps.target.cfg, deps.target.token, id))) accepted = false;
-        await deps.announceFlakeRetry?.({ files: a.files, ...(a.slow ? { slow: a.slow } : {}) }, accepted);
-        if (!accepted) return { kind: "failed", status: s, why: RERUN_REFUSED };
+        // BOS-2082: GitHub's own answer is kept, so a refusal says whether it was the token's permission or something else.
+        let refused: string | null = runIds.length ? null : "GitHub named no workflow run to re-run";
+        for (const id of runIds) {
+          const r = await deps.hosts.rerunFailedJobs(deps.target.cfg, deps.target.token, id);
+          if (!r.ok) refused ??= r.why;
+        }
+        const accepted = refused === null;
+        await deps.announceFlakeRetry?.({ files: a.files, ...(a.slow ? { slow: a.slow } : {}) }, accepted, refused ?? undefined);
+        if (!accepted) return { kind: "failed", status: s, why: refused ?? RERUN_REFUSED };
         flaky = a.files;
         slow = a.slow;
         flakeAt = Date.now();

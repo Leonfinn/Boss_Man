@@ -3,7 +3,8 @@ import { api, apiOnce, type Company, type Notice, type NoticeCounts, type Notice
 import { raisedAgo } from "../age";
 import { defaultLinkAddress, type LinkAddress } from "../link-address";
 import type { HostFactsView } from "../host-facts-display";
-import { usePoll } from "../hooks";
+import { useOlder, usePoll } from "../hooks";
+import { ShowOlder } from "../components/ShowOlder";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
@@ -643,6 +644,8 @@ const TYPE_TITLE: Record<NotifyLevel, string> = {
   note: "Notes stay in this list.",
 };
 const LEGEND_ID = "nf-legend";
+/** The server's default page, and the size "Show older" asks for. */
+const NOTICE_PAGE = 50;
 
 /** A chip's number: hidden at 0 or while the counts are unknown, "99+" above 99. */
 function Count({ n, amber }: { n: number | undefined; amber?: boolean }) {
@@ -746,7 +749,22 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
   const last = useRef<Notice[]>([]);
   const loaded = active ? filtered.data?.items : feed?.items;
   if (loaded) last.current = loaded;
-  const items = loaded ?? (active ? last.current : []);
+  const firstPage = loaded ?? (active ? last.current : []);
+  // "Show older" (BOS-2276): the server pages by date, so look up the oldest shown row's time; a new filter starts again.
+  const dates = useRef(new Map<string, string>());
+  const older = useOlder(
+    firstPage,
+    NOTICE_PAGE,
+    (id) => {
+      const q = new URLSearchParams(qs);
+      q.set("limit", String(NOTICE_PAGE));
+      q.set("before", dates.current.get(id) ?? "");
+      return api<NoticeFeed>(`/api/notifications?${q.toString()}`).then((r) => r.items);
+    },
+    qs,
+  );
+  const items = older.rows ?? firstPage;
+  for (const n of items) dates.current.set(n.id, n.createdAt);
   const updating = active && !filtered.data && !filtered.error;
 
   const reload = () => {
@@ -757,7 +775,7 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
   const unreadShown = items.filter((n) => !n.readAt);
   const clear = () => setFilters(NO_FILTERS);
 
-  const summary = updating ? "Updating…" : `${items.length >= 50 ? "Latest " : ""}${items.length} shown`;
+  const summary = updating ? "Updating…" : `${older.canMore ? "Latest " : ""}${items.length} shown`;
   const neverAny = !active && feed && !items.length;
 
   return (
@@ -825,6 +843,7 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
           ))}
         </ul>
       )}
+      {!updating && <ShowOlder older={older} />}
       <SettingsForm />
       <AlertDestinations />
       <WeeklySummaryForm companies={companies} />

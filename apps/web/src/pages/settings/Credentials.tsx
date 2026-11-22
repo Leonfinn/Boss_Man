@@ -9,7 +9,7 @@ import { Section, useAction } from "./shared";
 /** What each kind of credential is called inside an agent's environment by default. */
 const CREDENTIALS = [
   { kind: "claude_oauth_token", label: "Claude setup-token", env: "CLAUDE_CODE_OAUTH_TOKEN", help: "Run `claude setup-token` on your own computer and paste the token it prints." },
-  { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents, Pull requests and Workflows read and write, plus Actions read-only (so Boss Man can read CI runs). Gitea: a token with the write:repository scope." },
+  { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents, Pull requests and Workflows read and write, plus Actions read and write (so Boss Man can read CI runs, and run again a job that failed by chance). Gitea: a token with the write:repository scope." },
   { kind: "generic", label: "Git token for the merge gate (second account)", env: "GIT_CI_TOKEN", help: "Optional. A token from a second GitHub account with Contents read and write on the company's repo. Boss Man pushes its merge-check branches (bossman-ci/...) with it, so GitHub's failed-run emails go to that account, not yours." },
   { kind: "anthropic_api_key", label: "Anthropic API key", env: "ANTHROPIC_API_KEY", help: "From the Anthropic Console. Runs on it are billed to your API credit." },
   { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },

@@ -4,6 +4,7 @@ import { useAction } from "./settings/shared";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 
 type Tokens = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 type Spend = { costCheck?: { outOfBand: number; checked: number; skipped: { model: string; reason: string; runs: number }[] }; tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
@@ -48,7 +49,7 @@ export function ProjectBudget({ project }: { project: Project }) {
   const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend`, { signal }), 30_000, `spend-${project.id}`);
   const s = spend.data;
   const plan = s?.plan ?? [];
-  if (spend.error && !away(spend.error)) return <p className="error" role="alert">{spend.error.message}</p>;
+  if (spend.error && !away(spend.error)) return <LoadError what="the budget" message={spend.error.message} onRetry={spend.reload} />;
   if (!s) return <Loader label="Loading the budget" />;
   return (
     <>

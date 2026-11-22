@@ -146,11 +146,17 @@ export const pictureType = (b: Uint8Array) => {
 const SCRIPT = /(^|\/)scripts?\/|\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|ps1|bat|cmd|exe|bin)$/i;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** One line per problem (at most 20, then a count), so the owner fixes everything in one go. */
+function problemLines(where: string, issues: Array<{ path: PropertyKey[]; message: string }>): string[] {
+  const lines = issues.slice(0, 20).map((i) => `${where}: ${i.path.join(".") || "the file"} — ${i.message}`);
+  if (issues.length > 20) lines.push(`…and ${issues.length - 20} more problems.`);
+  return lines;
+}
+
 function parse<T>(schema: z.ZodType<T>, value: unknown, where: string): T {
   const r = schema.safeParse(value);
   if (!r.success) {
-    const i = r.error.issues[0]!;
-    throw new ImportError(400, `${where}: ${i.path.join(".") || "the file"} — ${i.message}`);
+    throw new ImportError(400, problemLines(where, r.error.issues).join("\n"));
   }
   return r.data;
 }
@@ -268,14 +274,22 @@ export function readPackage(zip: Uint8Array): Package {
       return { ...parse(WikiMeta, meta, p), body: m[2]! };
     });
   const lines = (text("tickets.jsonl") ?? "").split("\n").filter((l) => l.trim());
-  const pkgTickets = lines.map((l, i) => {
+  // Every bad line is reported together (up to 20 problems), not just the first.
+  const ticketProblems: string[] = [];
+  const pkgTickets: Array<z.infer<typeof Ticket>> = [];
+  lines.forEach((l, i) => {
+    let value: unknown;
     try {
-      return parse(Ticket, JSON.parse(l), `tickets.jsonl line ${i + 1}`);
-    } catch (err) {
-      if (err instanceof ImportError) throw err;
-      throw new ImportError(400, `tickets.jsonl line ${i + 1} isn't valid JSON.`);
+      value = JSON.parse(l);
+    } catch {
+      ticketProblems.push(`tickets.jsonl line ${i + 1} isn't valid JSON.`);
+      return;
     }
+    const r = Ticket.safeParse(value);
+    if (r.success) pkgTickets.push(r.data);
+    else ticketProblems.push(...problemLines(`tickets.jsonl line ${i + 1}`, r.error.issues));
   });
+  if (ticketProblems.length) throw new ImportError(400, ticketProblems.slice(0, 20).join("\n") + (ticketProblems.length > 20 ? `\n…and ${ticketProblems.length - 20} more problems.` : ""));
 
   // A setting the package holds in a shape Boss Man can't use is left out, and said, rather than failing the import.
   const rawSettings = json("settings.json");

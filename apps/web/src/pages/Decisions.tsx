@@ -20,6 +20,7 @@ import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 
 // A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
@@ -1659,9 +1660,7 @@ export function AnsweredList({ companyId }: { companyId?: string | null }) {
       <div style={{ marginTop: 8 }}>
         <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />
         {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
+          <LoadError what="answered cards" message={error} onRetry={() => void load(null, text)} />
         )}
         {done && items.length === 0 && !error && <p className="muted">{text.trim() ? "No answered card matches that." : "No card has been answered yet."}</p>}
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
