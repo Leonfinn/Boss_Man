@@ -325,11 +325,12 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
     },
 
     /** Newest first, one page at a time (BOS-2165): the page polls it and the MCP list puts it in an agent's context. */
-    async list(companyId?: string, page: Page = {}) {
+    async list(companyId?: string, page: Page & { status?: Engagement["status"] | "open" } = {}) {
+      const statusFilter = !page.status ? undefined : page.status === "open" ? inArray(engagements.status, OPEN) : eq(engagements.status, page.status);
       const rows = await db
         .select()
         .from(engagements)
-        .where(and(companyId ? or(eq(engagements.requesterCompanyId, companyId), eq(engagements.providerCompanyId, companyId)) : undefined, page.before ? olderThan(engagements, engagements, page.before) : undefined))
+        .where(and(statusFilter, companyId ? or(eq(engagements.requesterCompanyId, companyId), eq(engagements.providerCompanyId, companyId)) : undefined, page.before ? olderThan(engagements, engagements, page.before) : undefined))
         .orderBy(desc(engagements.createdAt), desc(engagements.id))
         .limit(pageLimit(page.limit));
       const ids = [...new Set(rows.flatMap((r) => [r.requesterCompanyId, r.providerCompanyId]))];

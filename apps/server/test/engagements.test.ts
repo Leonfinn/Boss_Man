@@ -265,6 +265,23 @@ describe("engagement list paging", () => {
     expect((await ctx.req("GET", "/api/engagements?limit=abc")).statusCode).toBe(400);
   });
 
+  it("filters by one status or by open, pages under the filter, and refuses an unknown status (BOS-2260)", async () => {
+    ctx = await setup();
+    const t0 = Date.parse("2026-11-01T00:00:00Z");
+    const mk = (i: number, status: "requested" | "signed_off" | "rejected" | "delivered") => ({ requesterCompanyId: ctx.appCo.company.id, providerCompanyId: ctx.homelab.company.id, title: `${status}${i}`, scope: "s", status, createdAt: new Date(t0 + i * 1000) });
+    await ctx.db.insert(engagements).values([mk(0, "requested"), mk(1, "signed_off"), mk(2, "rejected"), mk(3, "delivered"), mk(4, "signed_off"), mk(5, "requested")]);
+    const get = async (q: string) => (await ctx.req("GET", `/api/engagements${q}`)).json() as Array<{ title: string; status: string }>;
+    expect((await get("?status=open")).map((r) => r.title)).toEqual(["requested5", "delivered3", "requested0"]);
+    expect((await get("?status=signed_off")).map((r) => r.title)).toEqual(["signed_off4", "signed_off1"]);
+    expect((await get("?status=rejected")).map((r) => r.title)).toEqual(["rejected2"]);
+    expect(await get("")).toHaveLength(6);
+    const p1 = await get("?status=open&limit=2");
+    expect(p1.map((r) => r.title)).toEqual(["requested5", "delivered3"]);
+    const all = (await ctx.req("GET", "/api/engagements?status=open&limit=2")).json() as Array<{ id: string }>;
+    expect((await get(`?status=open&limit=2&before=${all[1]!.id}`)).map((r) => r.title)).toEqual(["requested0"]);
+    expect((await ctx.req("GET", "/api/engagements?status=bogus")).statusCode).toBe(400);
+  });
+
   it("gives an agent 50 with a note on how to see older ones", async () => {
     ctx = await setup();
     await seed(ctx);

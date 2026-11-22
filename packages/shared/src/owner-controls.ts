@@ -105,6 +105,8 @@ export const OWNER_CONTROLS = {
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
   Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
+  // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
+  Engagements: [],
   Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
@@ -123,12 +125,16 @@ export const OWNER_CONTROLS = {
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
     "Deleted pages", "Restore", "Restoring",
+    // A page's "Copy link", "Copied" for a moment after a copy (BOS-2259).
+    "Copy link", "Copied",
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
     "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all", "Save reason",
     "Tasks", "Less", "How the portal works", "Adding",
     "Download CSV",
+    // A feature's own page: "Copy link" in the header, "Copied" for a moment after a copy (BOS-2259).
+    "Copy link", "Copied",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Creating", "Back to the list", "Unlink",
@@ -222,6 +228,8 @@ export type OwnerScreen = keyof typeof OWNER_CONTROLS;
 export const OWNER_FIELDS = {
   "Any screen": ["New company name"],
   "Log in": ["Username", "Password"],
+  // The Engagements list's status filter (BOS-2260).
+  Engagements: ["Show"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
@@ -279,6 +287,8 @@ export const OWNER_FIELDS = {
     "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words",
     "Also search your past answers by meaning", "Also search tickets and the CEO's earlier advice by meaning", "Provider address",
     "Model (768 dimensions)", "API key", "Search", "From",
+    // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2259).
+    "Page address",
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
@@ -286,6 +296,8 @@ export const OWNER_FIELDS = {
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Not shown yet",
+    // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2259).
+    "Page address",
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
