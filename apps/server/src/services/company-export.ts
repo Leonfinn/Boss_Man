@@ -1,5 +1,5 @@
 // Company export (docs/11, step 1): the company as one zip, format "bossman-company/1". It holds
-// the set-up (agents, skills, projects, plan, tool servers, secret names and grants) and, when
+// the set-up (agents, skills, projects, plan, tool servers, secret names and grants, the company's own settings) and, when
 // asked, the wiki and tickets. Never in it: secret values or hints, owner login, runs, costs.
 import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { strToU8, zipSync } from "fflate";
@@ -8,6 +8,7 @@ import type { Db } from "../db/client.js";
 import { liveTagOf, type TargetRules } from "./deploys.js";
 import { agentAvatars, agentSkills, agents, companies, deployTargets, policyRules, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { liveWikiPage, slugify } from "./wiki.js";
+import { exportSettings } from "./company-settings-package.js";
 
 export const EXPORT_FORMAT = "bossman-company/1";
 export type ExportOptions = { wiki: boolean; tickets: "none" | "open" | "all" };
@@ -143,6 +144,10 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
       return { name: r.name, trigger: r.trigger, condition: { ...rest, ...(Array.isArray(agentIds) ? { agents: agentIds.map((id) => agentName.get(id) ?? "(unknown agent)") } : {}) }, outcome: r.outcome, position: r.position };
     }),
   );
+
+  // The company's own choices kept in the settings table (BOS-2242): agent approvals, git templates, the retro agent and
+  // the second opinion. The second opinion's key travels by its secret's name only.
+  files["settings.json"] = json(await exportSettings(db, companyId, agentSlug));
 
   if (opts.wiki) {
     const pages = await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage)).orderBy(asc(wikiPages.slug));

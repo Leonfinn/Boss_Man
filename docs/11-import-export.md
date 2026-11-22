@@ -39,6 +39,17 @@ On import (BOS-2169), deploy targets and rules are created in the new company, a
 - Secrets granted to a target are listed like company-wide ones ("Add the secret X and grant it as ENV to deploy target T"): no secret is created, and values are entered again.
 - A package made before this change has neither file and imports as before.
 
+The company's own settings (BOS-2242) travel in `settings.json` (always written; it holds only what the owner set, so an empty `{}` means "defaults"). The list of per-company settings keys lives in `apps/server/src/services/company-settings-package.ts`, each one either carried or left out with its reason. A test fails when the server gains a per-company key that is on neither list.
+
+| Setting | In the package | On import |
+|---|---|---|
+| Who approves agent changes | `agentApprovals` | The stricter of the package's value and the default ("hires"): a package can ask for more approvals, never fewer. The checklist says when it was raised |
+| Commit and PR message templates | `gitTemplates` (`commit`, `pr`) | As in the package, with the same length limits as the form |
+| Who runs workflow retros | `retroAgent`: the agent's folder name, like `reportsTo` | Pointed at the new agent; if that agent isn't in the package the default runs them, and the checklist says so |
+| Second opinion on permission cards | `secondOpinion`: address, model and the key's secret **name** (never its value or id) | Always **switched off**, with the address and model filled in, since it can allow cards; the checklist says to check it and switch it on in Settings → Permissions → Second opinion. The key is picked when a secret with that name exists on this server; otherwise the checklist says to add it |
+
+The preview lists one line per setting. A setting the package holds in a shape Boss Man can't use is left out with a warning, and the default is used. Left out on purpose: the weekly summary's email address (personal data; the mail server is set up per server), the model lists the runner observed, and alert and once-only marker keys.
+
 Never exported: secret values, owner login and sessions, runs and transcripts, costs and quota samples, funding-source credentials, run tokens, and the activity log.
 
 ## Import

@@ -16,6 +16,7 @@ import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type
 import { allowsPrivate, gitHostAddress, reachesStack, sendableAddress } from "./launcher.js";
 import { normalizeStandingRules, standingRulesError } from "./standing-rules.js";
 import { addTicketDependency } from "./ticket-links.js";
+import { applySettings, PackageSettings, screenSettings } from "./company-settings-package.js";
 
 export class ImportError extends Error {
   constructor(
@@ -126,6 +127,8 @@ export type Package = {
   /** BOS-2169: absent in packages made before it. */
   deployTargets: Array<z.infer<typeof DeployTarget>>;
   permissionRules: Array<z.infer<typeof PermissionRule>>;
+  /** BOS-2242: the company's own settings; empty in packages made before it. */
+  settings: PackageSettings;
   wiki: Array<z.infer<typeof WikiMeta> & { body: string }>;
   tickets: Array<z.infer<typeof Ticket>>;
   /** What an adapter changed or left out on the way in. */
@@ -274,8 +277,18 @@ export function readPackage(zip: Uint8Array): Package {
     }
   });
 
+  // A setting the package holds in a shape Boss Man can't use is left out, and said, rather than failing the import.
+  const rawSettings = json("settings.json");
+  const pkgSettings = PackageSettings.parse(rawSettings);
+  if (rawSettings && typeof rawSettings === "object" && !Array.isArray(rawSettings)) {
+    const labels: Record<string, string> = { agentApprovals: "who approves agent changes", gitTemplates: "the commit and PR message templates", retroAgent: "who runs the retro", secondOpinion: "the second opinion" };
+    for (const [k, label] of Object.entries(labels))
+      if ((rawSettings as Record<string, unknown>)[k] != null && (pkgSettings as Record<string, unknown>)[k] === undefined) notes.push(`The package's setting for ${label} couldn't be read and was left out; the default is used.`);
+  }
+
   return {
     company,
+    settings: pkgSettings,
     agents: pkgAgents,
     skills: pkgSkills,
     projects: pkgProjects,
@@ -374,7 +387,9 @@ export async function previewPackage(db: Db, pkg: Package, name = pkg.company.na
   if (!pkg.agents.some((a) => a.role === "ceo")) warnings.push("The package has no CEO; hire one after importing.");
   const extras = screenExtras(pkg);
   warnings.push(...extras.lines.filter((l) => !l.startsWith("Add the secret")));
+  const companySettings = await screenSettings(db, pkg.settings, pkg.agents);
   return {
+    settings: [...companySettings.lines, ...companySettings.todo],
     company: { name, nameTaken: !!taken },
     counts: { agents: pkg.agents.length, skills: pkg.skills.length, projects: pkg.projects.length, objectives: pkg.plan.objectives.length, features: pkg.plan.features.length, toolServers: pkg.toolServers.length, wikiPages: pkg.wiki.length, tickets: pkg.tickets.length, deployTargets: extras.targets.length, permissionRules: extras.rules.length },
     agents: pkg.agents.map((a) => ({ name: a.name, role: a.role, title: a.title ?? null, agentKind: a.agentKind, model: a.model ?? null, instructions: a.instructions ?? null })),
@@ -439,6 +454,8 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
   const gitTrust = await Promise.all(pkg.projects.map(async (p, i) => ticked && gitFlags[i] === true && !!p.repoUrl && (await allowsPrivate(p.repoUrl))));
   if (opts.fundingSourceId && !(await db.select({ id: fundingSources.id }).from(fundingSources).where(eq(fundingSources.id, opts.fundingSourceId))).length) throw new ImportError(400, "No such funding source.");
   if ((await db.select({ id: companies.id }).from(companies).where(eq(companies.name, name))).length) throw new ImportError(409, `There's already a company called ${name}. Pick another name.`);
+  // BOS-2242: the company's own settings, screened the same way as for the preview.
+  const companySettings = await screenSettings(db, pkg.settings, pkg.agents);
 
   return db.transaction(async (tx) => {
     // Source ids and folder names → new ids. lost on restart, harmless because they live only for this one import call.
@@ -554,6 +571,8 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
         extras.rules.map((r, i) => ({ companyId, name: r.name, trigger: "permission", condition: { ...r.match, ...(r.agentNames ? { agentIds: r.agentNames.map((n) => agentByName.get(n)!) } : {}) }, outcome: r.outcome, position: i, createdAt: new Date(), createdBy: "import" })),
       );
 
+    await applySettings(tx as unknown as Db, companyId, companySettings, (slug) => agentId.get(slug));
+
     for (const t of pkg.tickets) {
       const project = projectId.get(t.project);
       if (!project) throw new ImportError(400, `Ticket "${t.title}" is in project "${t.project}", which isn't in the package.`);
@@ -612,6 +631,8 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       ...(pkg.company.standingRules ? [`Standing rules came in as plain notes every run reads (they grant no permissions). Read them in Settings and change what doesn't fit:\n${pkg.company.standingRules}`] : []),
       ...pkg.secrets.map((s) => `Add the secret "${s.name}" and grant it as ${s.envName}${s.agents.length ? ` to ${s.agents.map(slugName).join(", ")}` : ""}.`),
       ...extras.lines,
+      ...companySettings.lines,
+      ...companySettings.todo,
       ...(opts.fundingSourceId ? [] : ["Give each agent a funding source."]),
       ...pkg.skills.filter((s) => s.files.some((f) => SCRIPT.test(f.path))).map((s) => `Read the scripts in the skill ${s.name} before agents use it.`),
       "Every imported agent is paused: check its model and instructions, then unpause it.",
