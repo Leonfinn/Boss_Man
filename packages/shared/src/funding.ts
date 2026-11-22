@@ -10,7 +10,10 @@ export const HARNESSES = [
   { value: "opencode", label: "OpenCode" },
 ] as const;
 export type Harness = (typeof HARNESSES)[number]["value"];
-export const harnessLabel = (value: string) => HARNESSES.find((h) => h.value === value)?.label ?? value;
+/** The harnesses that load an agent's skills: Claude Code and OpenCode (BOS-2264). Codex doesn't, so a skill given to a Codex agent does nothing. */
+export const SKILL_HARNESSES: readonly string[] = ["claude", "opencode"];
+export const harnessLoadsSkills = (value: string) => SKILL_HARNESSES.includes(value);
+export const harnessLabel =(value: string) => HARNESSES.find((h) => h.value === value)?.label ?? value;
 
 /** The providers a funding source can pay, with the names the Agents page and Settings show. */
 export const PROVIDER_LABELS: Record<FundingProvider, string> = {

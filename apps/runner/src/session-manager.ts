@@ -250,7 +250,7 @@ export function infiniteProviderConfig(existing: Record<string, unknown> | undef
   };
 }
 
-export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny", infinite = false): NodeJS.ProcessEnv {
+export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny", infinite = false, skillsFolder?: string): NodeJS.ProcessEnv {
   let existing: Record<string, unknown> = {};
   try {
     existing = granted ? (JSON.parse(granted) as Record<string, unknown>) : {};
@@ -265,6 +265,9 @@ export function opencodeEnv(granted: string | undefined, verdict: "ask" | "deny"
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
       ...existing,
       ...(infinite ? { provider: infiniteProviderConfig(existing.provider as Record<string, unknown> | undefined) } : {}),
+      // The run's skills folder (BOS-2264): OpenCode reads skills from `skills.paths`. Its own reading of ~/.claude stays off (below),
+      // so this folder is the only place the run's skills come from. Paths the owner already granted are kept.
+      ...(skillsFolder ? { skills: { ...(existing.skills as object | undefined), paths: [...(((existing.skills as { paths?: string[] } | undefined)?.paths) ?? []), skillsFolder] } } : {}),
       autoupdate: false,
       share: "disabled",
       permission,
@@ -1125,9 +1128,11 @@ export class SessionManager {
     // Skills (R71) go in a folder of their own, passed to Claude as an extra directory, so its
     // .claude/skills are loaded without touching the repo's worktree or the shared home.
     let skillsDir: string | null = null;
-    if (cmd.skills?.length && cmd.agentKind === "claude") {
+    if (cmd.skills?.length && (cmd.agentKind === "claude" || cmd.agentKind === "opencode")) {
       try {
         skillsDir = writeSkills(path.join(this.opts.skillsRoot ?? path.join(tmpdir(), "bossman-skills"), cmd.runId), cmd.skills);
+        // OpenCode takes the folder through its config, the same files Claude gets (BOS-2264).
+        if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(env.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask", isInfiniteModel(cmd.model), path.join(skillsDir, ".claude", "skills")));
       } catch (err) {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't set up the agent's skills: ${String((err as Error)?.message ?? err)}` });
         return;

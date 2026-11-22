@@ -1,6 +1,6 @@
 // Skills (R71): the company's library of Agent Skills, and who has each. A skill is added from
 // a GitHub link (pinned to a commit), written here, or uploaded as a folder, files or a zip.
-import { RUNNER_ADDONS } from "@boss-man/shared";
+import { harnessLabel, harnessLoadsSkills, RUNNER_ADDONS } from "@boss-man/shared";
 import { NoCompany } from "../components/NoCompany";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
@@ -334,6 +334,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
               <input type="checkbox" checked={chosen.includes(a.id)} onChange={(e) => setHolders(e.target.checked ? [...chosen, a.id] : chosen.filter((x) => x !== a.id))} />
               {a.name}
               {a.role === "ceo" && <span className="muted"> (CEO)</span>}
+              {!harnessLoadsSkills(a.agentKind) && <span className="tag red" title={`${harnessLabel(a.agentKind)} can't load skills, so giving it this one does nothing.`}>{harnessLabel(a.agentKind)} can't load skills</span>}
             </label>
           ))}
         </div>
@@ -341,7 +342,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
           <SaveButton dirty={!!holders} saved={savedHolders} style={{ marginTop: 10 }} onClick={() => void run(async () => (await api(`/api/companies/${company.id}/skills/${id}/agents`, { method: "PUT", body: { agentIds: holders } }), setHolders(null), setSavedHolders(true), "Saved. Agents get it from their next run."))} />
         )}
         <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
-          The CEO can also give and take skills; you're told when it does. Skills load for Claude agents.
+          The CEO can also give and take skills; you're told when it does. Skills load for agents on Claude Code and OpenCode; Codex agents can't load them.
         </p>
       </fieldset>
 
@@ -526,6 +527,7 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
                   onChange={(e) => setHolders(e.target.checked ? [...chosen, a.id] : chosen.filter((x) => x !== a.id))}
                 />
                 {a.name}
+                {!harnessLoadsSkills(a.agentKind) && <span className="tag red" title={`${harnessLabel(a.agentKind)} can't load skills, so giving it these does nothing.`}>{harnessLabel(a.agentKind)} can't load skills</span>}
                 {holders === null && n > 0 && n < rows.length && <span className="muted"> ({n} of {rows.length})</span>}
               </label>
             );
@@ -615,7 +617,7 @@ export function Skills({ company }: { company: Company | undefined }) {
           <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>
         ) : null}
         <small>
-          {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
+          {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => (company.agents.find((c) => c.id === a.id) && !harnessLoadsSkills(company.agents.find((c) => c.id === a.id)!.agentKind) ? `${a.name} (can't load skills)` : a.name)).join(", ") : "nobody yet"}
         </small>
       </a>
     </li>
