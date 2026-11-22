@@ -4,6 +4,7 @@ import { api, type Agent, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { LoadError } from "../components/LoadError";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
 type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; reservedTmpRemoval?: boolean; destructive?: boolean; pushing?: boolean };
@@ -299,7 +300,9 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         <h2 id="rules-h" style={{ fontSize: 17, fontWeight: 600 }}>
           {company ? `${company.name}'s rules` : "Rules for every company"}
         </h2>
-        <RuleRows
+        {!list.data && !list.error && <p className="muted" role="status">Loading…</p>}
+        {!list.data && list.error && <LoadError what="the rules" message={list.error.message} onRetry={list.reload} />}
+        {list.data && <RuleRows
           rules={rules}
           agents={allAgents}
           shadowed={list.data?.shadowedIds ?? []}
@@ -314,9 +317,10 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           onMove={move}
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}
           onDelete={(r) => window.confirm(`Delete "${r.name}"?`) && void act(() => api(`/api/policy-rules/${r.id}`, { method: "DELETE" }))}
-        />
+        />}
       </section>
 
+      {list.data && <>
       <section className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600 }}>
           <input
@@ -390,6 +394,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         </form>
         </details>
       </section>
+      </>}
 
       {companies.length > 0 && (
         <form className="card" onSubmit={test} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end" }}>
