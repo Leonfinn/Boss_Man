@@ -39,6 +39,17 @@ describe("Plan and Engagements first load", () => {
     expect(f.mock.calls.length).toBeGreaterThan(before);
   });
 
+  it("a failed Plan load shows the error and Retry, which loads again (BOS-2275)", async () => {
+    const f = vi.fn(() => Promise.resolve(new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } })));
+    vi.stubGlobal("fetch", f);
+    const { container, getByText } = render(<Plan companies={[company]} companyId="c1" go={() => {}} />);
+    await settle();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Couldn't load the plan");
+    const before = f.mock.calls.length;
+    await act(async () => { fireEvent.click(getByText("Retry")); await vi.advanceTimersByTimeAsync(50); });
+    expect(f.mock.calls.length).toBeGreaterThan(before);
+  });
+
   it("Engagements asks the server for open ones by default, remembers a changed choice, and words the empty result (BOS-2260)", async () => {
     localStorage.removeItem("bm.engagements.show");
     const f = vi.fn((_url: string) => Promise.resolve(new Response("[]", { status: 200, headers: { "content-type": "application/json" } })));
