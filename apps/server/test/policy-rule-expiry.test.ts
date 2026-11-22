@@ -144,8 +144,10 @@ describe("Allow from a permission card with a duration (BOS-2188)", () => {
     expect((await ctx.answer(card!.id, ALWAYS, { alwaysTtl: "hour" })).statusCode).toBe(200);
     const [rule] = await ctx.rules();
     const end = rule!.expiresAt!.getTime();
+    const after = Date.now();
+    const latest = after + HOUR;
     expect(end).toBeGreaterThanOrEqual(before + HOUR);
-    expect(end).toBeLessThanOrEqual(Date.now() + HOUR);
+    expect(end).toBeLessThanOrEqual(latest);
     // Allowed while it runs; asks again after the end (the card comes back, never a silent allow).
     expect(await ctx.ask(ctx.dev.id, MD)).toBeNull();
     await ctx.db.update(policyRules).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(policyRules.id, rule!.id));
@@ -156,8 +158,10 @@ describe("Allow from a permission card with a duration (BOS-2188)", () => {
     const card = await ctx.ask(ctx.dev.id, MD);
     expect((await ctx.answer(card!.id, ALWAYS, { alwaysTtl: "midnight" })).statusCode).toBe(200);
     const end = (await ctx.rules())[0]!.expiresAt!.getTime();
-    expect(end).toBeGreaterThan(Date.now());
-    expect(end).toBeLessThanOrEqual(Date.now() + 26 * HOUR);
+    const now = Date.now();
+    const latest = now + 26 * HOUR;
+    expect(end).toBeGreaterThan(now);
+    expect(end).toBeLessThanOrEqual(latest);
   });
 
   it("refuses a duration it doesn't know, and saves nothing", async () => {
