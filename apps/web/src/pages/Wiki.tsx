@@ -13,6 +13,7 @@ import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { DeletedNotice, DeletedPages } from "../components/DeletedPages";
 import { WikiCompare } from "../components/WikiCompare";
 import { download } from "../csv";
@@ -220,7 +221,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
     }
   };
 
-  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} /> : away(page.error) ? null : <p className="error" role="alert">{page.error.message}</p>;
+  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} /> : away(page.error) ? null : <LoadError what="the page" message={page.error.message} onRetry={page.reload} />;
   if (!p) return <Loader label="Loading the page" />;
   if ("deleted" in p) return <DeletedNotice companyId={companyId} slug={slug} stub={p as never} onRestored={() => (onChanged(), page.reload())} />;
   if (editing) return <Editor draftKey={`wiki/${companyId}/${slug}`} initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
@@ -451,7 +452,7 @@ function SemanticSettings({ companyId }: { companyId: string }) {
 
 function BriefView({ companyId }: { companyId: string }) {
   const brief = usePoll((signal) => api<{ markdown: string }>(`/api/companies/${companyId}/brief`, { signal }), 30_000, companyId);
-  if (brief.error && !away(brief.error)) return <p className="error" role="alert">{brief.error.message}</p>;
+  if (brief.error && !away(brief.error)) return <LoadError what="the company brief" message={brief.error.message} onRetry={brief.reload} />;
   if (!brief.data) return <Loader label="Loading the company brief" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -682,7 +683,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
                 </li>
               </ul>
             )}
-            {list.error && !away(list.error) && <p className="error" role="alert">Couldn't load the page list: {list.error.message}</p>}
+            {list.error && !away(list.error) && <LoadError what="the page list" message={list.error.message} onRetry={list.reload} />}
             {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "Only the company brief so far."}</p>}
             <SemanticSettings companyId={company.id} />
             {!q.trim() && <RecentlyChanged pages={pages} companyId={company.id} current={creating === null ? pageSlug : undefined} onPick={() => (setCreating(null), closeDrawer())} />}
