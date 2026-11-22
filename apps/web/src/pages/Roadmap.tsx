@@ -3,6 +3,7 @@ import { NoCompany } from "../components/NoCompany";
 import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type MilestoneStatus, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
 import { usePoll } from "../hooks";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { STATUS_TONE } from "./Features";
 import { dayOf, short } from "../short-date";
 
@@ -637,8 +638,8 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
           {TABS.find((t) => t.id === tab)!.help}
           {tab === "timeline" && " At risk means due within two weeks with blocked tasks or less than half done. Late means the date has passed with work left."}
         </p>
-        {data.error && <p className="error">{data.error.message}</p>}
-        {tab === "features" && board.error && <p className="error">{board.error.message}</p>}
+        {tab === "timeline" && data.error && <LoadError what="the timeline" message={data.error.message} onRetry={data.reload} />}
+        {tab === "features" && board.error && <LoadError what="the features" message={board.error.message} onRetry={board.reload} />}
         {tab === "timeline" && !data.data && !data.error && <Loader label="Loading the timeline" />}
         {tab === "features" && !board.data && !board.error && <Loader label="Loading the features" />}
         {tab === "timeline" ? (

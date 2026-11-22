@@ -89,6 +89,36 @@ describe("Roadmap page (BOS-206)", () => {
     expect(within(released).getByRole("link", { name: "Sign-in" })).toBeTruthy();
   });
 
+  it("says what couldn't load on the Features tab, keeps the timeline's error off it, and Retry reloads", async () => {
+    let featuresFail = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/api/roadmap/features")) return featuresFail ? new Response(JSON.stringify({ error: "features down" }), { status: 500, headers: { "content-type": "application/json" } }) : json(board);
+        if (String(url).includes("/api/roadmap")) return new Response(JSON.stringify({ error: "timeline down" }), { status: 500, headers: { "content-type": "application/json" } });
+        return json([]);
+      }),
+    );
+    render(<Roadmap companies={[company]} tab="features" go={() => {}} />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't load the features");
+    expect(screen.queryByText(/Couldn't load the timeline/)).toBeNull();
+    featuresFail = false;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("link", { name: "Dark mode" })).toBeTruthy();
+  });
+
+  it("says what couldn't load on the Timeline tab", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => (String(url).includes("/api/roadmap/features") ? json(board) : new Response(JSON.stringify({ error: "timeline down" }), { status: 500, headers: { "content-type": "application/json" } }))),
+    );
+    render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't load the timeline");
+    expect(within(alert).getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
   it("unfolds a feature's milestones and their target dates", async () => {
     stub();
     render(<Roadmap companies={[company]} tab="features" go={() => {}} />);
