@@ -4,7 +4,7 @@ import { openPglite } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { checkQueue } from "../src/services/check-queue.js";
 import { DEPLOY_WAIT_KEY } from "../src/services/deploy-wait-hold.js";
-import { checkIdleService, idleLine, IDLE_CEO_AFTER_MS, IDLE_OWNER_AFTER_MS } from "../src/services/check-idle.js";
+import { checkIdleService, idleLine, idleView, IDLE_CEO_AFTER_MS, IDLE_OWNER_AFTER_MS } from "../src/services/check-idle.js";
 import type { IdleSlot } from "../src/services/check-dispatcher.js";
 
 const shared = openPglite();
@@ -220,5 +220,32 @@ describe("idle check slot alarm", () => {
     expect(idleLine({ machine: "the company runner", text: "the last free slot is kept for a quick check", minutes: 7, ref: "the queued merge check" })).toBe(
       "the company runner has a free slot and is not taking the queued merge check because the last free slot is kept for a quick check (7 min).",
     );
+  });
+
+  describe("idleView: what the Checks panel shows", () => {
+    const view = (over: Partial<IdleSlot> = {}) => idleView(slot(over));
+
+    it("maps every field and names the queued check", () => {
+      expect(view()).toEqual({
+        machine: 'check worker "box"',
+        jobId: "job1",
+        ticketId: "t1",
+        why: "its slot rules do not allow it yet",
+        code: "slot_rules",
+        expected: false,
+        minutes: 0,
+        line: 'check worker "box" has a free slot and is not taking the queued quick check because its slot rules do not allow it yet (0 min).',
+      });
+    });
+
+    it("names a merge job a merge check even when its scope says quick, and keeps an expected reason", () => {
+      const v = view({ kind: "merge", scope: "quick", expected: true, code: "update_hold", text: "the update pause", minutes: 12 });
+      expect(v.line).toBe('check worker "box" has a free slot and is not taking the queued merge check because the update pause (12 min).');
+      expect(v).toMatchObject({ why: "the update pause", code: "update_hold", expected: true, minutes: 12 });
+    });
+
+    it("names the scope of a full pre-review check", () => {
+      expect(view({ scope: "full" }).line).toBe('check worker "box" has a free slot and is not taking the queued full check because its slot rules do not allow it yet (0 min).');
+    });
   });
 });

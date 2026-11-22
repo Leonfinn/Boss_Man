@@ -7,7 +7,7 @@ import { openPglite } from "../src/db/client.js";
 import type { Db } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, projects, runs, settings, tickets } from "../src/db/schema.js";
 import { runnerBusy, runsByCompany, serverWaitChecks } from "../src/services/runner-busy.js";
-import { activeWaits, blocksClass, describeWait, drainEndsAt, LANDING_END_MS, landingsThatCount, ruleProblems, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
+import { activeWaits, blocksClass, describeWait, drainEndsAt, LANDING_END_MS, landingsThatCount, ruleProblems, runnerHoldWait, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
 import { duringUpdate, PASSES_UPDATE_HOLD, WAKE_CLASS } from "../src/services/wake-classes.js";
 
 // 20 Nov 11:44: a merge whose check had passed and which was only waiting for GitHub CI on its merge copy (phase "merging",
@@ -191,5 +191,18 @@ describe("what an update counts as running work (runner-busy.ts updateWaitCounts
     expect(await runsByCompany(db, true)).toEqual(new Map([[c!.id, 1]]));
     expect(await runsByCompany(db, false)).toEqual(new Map([[c!.id, 4]]));
     expect((await runnerBusy(db, true)).runsTotal).toBe(1);
+  });
+});
+
+describe("runnerHoldWait: the wait a runner hold is (BOS-2108)", () => {
+  it("is the plain drain when the owner did not force it", () => {
+    expect(runnerHoldWait({})).toBe("runner-drain");
+    expect(runnerHoldWait({ force: false, ignoreChecks: false })).toBe("runner-drain");
+  });
+
+  it("is the owner's stop-and-update choice when force or ignoreChecks is set", () => {
+    expect(runnerHoldWait({ force: true })).toBe("owner-force");
+    expect(runnerHoldWait({ ignoreChecks: true })).toBe("owner-force");
+    expect(runnerHoldWait({ force: true, ignoreChecks: true })).toBe("owner-force");
   });
 });
