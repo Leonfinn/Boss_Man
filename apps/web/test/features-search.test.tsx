@@ -64,6 +64,21 @@ describe("Features search", () => {
     expect(screen.queryByRole("combobox", { name: "Status of Gift cards" })).toBeNull();
   });
 
+  it("Download CSV exports only the features shown", async () => {
+    open();
+    let saved: Blob | null = null;
+    URL.createObjectURL = ((b: Blob) => ((saved = b), "blob:x")) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = () => {};
+    await screen.findByRole("combobox", { name: "Status of Gift cards" });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search features" }), { target: { value: "alp" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search features" }), { target: { value: "dark" } });
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    const csv = await (saved as unknown as Blob).text();
+    expect(csv).toContain("Dark mode");
+    expect(csv).toContain("Night schedule");
+    expect(csv).not.toContain("Gift cards");
+  });
+
   it("says nothing matches and Clear brings the list back", async () => {
     open();
     await screen.findByRole("combobox", { name: "Status of Gift cards" });
