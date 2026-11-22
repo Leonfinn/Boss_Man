@@ -1099,6 +1099,14 @@ backup_database() {
 # that service existed would never start it: every swap and rollback starts it here, right after its own backup. A no-op
 # when it already runs; a failure (an older Compose file without the service, a Docker hiccup) never stops the swap.
 ensure_daily_backup() {
+  # The service sees only a `daily` folder inside the backup folder. Make it here, with the backup folder's owner, so the
+  # files in it stay readable by the host user; Docker would make it root-owned. Best effort: never stops a swap.
+  local bdir="${BOSSMAN_BACKUP_DIR:-$D/..}"
+  if mkdir -p "$bdir/daily" 2>>"$LOG"; then
+    chown --reference="$bdir" "$bdir/daily" 2>/dev/null || true
+  else
+    log "Note: could not make the daily backup folder $bdir/daily."
+  fi
   compose up -d --no-deps backup >>"$LOG" 2>&1 || log "Note: the daily backup service did not start (docker compose up -d backup); the swap goes on."
   return 0
 }
