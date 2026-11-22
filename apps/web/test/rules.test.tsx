@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { Rules } from "../src/pages/Rules";
+import { Rules, expiryOf } from "../src/pages/Rules";
 
 afterEach(() => {
   cleanup();
@@ -121,6 +121,50 @@ describe("decision rules", () => {
       expect(screen.queryByRole("button", { name: "Edit First" })).not.toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       expect(screen.getAllByText(/Made by Kit/).length).toBe(2);
+    });
+  });
+
+  // BOS-2188: timed rules.
+  describe("timed rules", () => {
+    const at = new Date("2026-11-22T10:00:00");
+    it("words the end time: minutes, today, another day, expired", () => {
+      expect(expiryOf(null, at)).toEqual({ expired: false, text: "" });
+      expect(expiryOf(new Date("2026-11-22T10:45:00").toISOString(), at)).toEqual({ expired: false, text: "Expires in 45 min" });
+      expect(expiryOf(new Date("2026-11-22T23:59:00").toISOString(), at)).toEqual({ expired: false, text: "Expires today at 23:59" });
+      expect(expiryOf(new Date("2026-11-24T08:05:00").toISOString(), at).text).toBe("Expires on 24 Nov at 08:05");
+      expect(expiryOf(new Date("2026-11-22T09:42:00").toISOString(), at)).toEqual({ expired: true, text: "Expired at 09:42" });
+      // The very moment it ends it is already over.
+      expect(expiryOf(at.toISOString(), at).expired).toBe(true);
+    });
+
+    it("shows an ended rule greyed with Delete and no Edit, and a running one with its end", async () => {
+      const row = (id: string, name: string, expiresAt: string | null) => ({ id, companyId: "c1", name, match: { commandPattern: "^docker" }, outcome: "allow", position: 0, createdBy: "Kit", expiresAt });
+      const soon = new Date(Date.now() + 30 * 60_000).toISOString();
+      const past = new Date(Date.now() - 60 * 60_000).toISOString();
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ company: [row("r1", "Running", soon), row("r2", "Ended", past), row("r3", "Forever", null)], global: [], defaults: [] }), { status: 200 })));
+      render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+      await screen.findByText("Running");
+      expect(screen.getByText(/Expires in \d+ min/)).toBeTruthy();
+      expect(screen.getByText(/Expired (at|on) /).textContent).toContain("no longer matches");
+      expect(screen.queryByRole("button", { name: "Edit Ended" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Edit Running" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Edit Forever" })).toBeTruthy();
+      expect(screen.getAllByRole("button", { name: "Delete" })).toHaveLength(3);
+    });
+
+    it("Try a command can include the rule being typed, and sends it as a draft without saving", async () => {
+      const fetch = vi.fn(async (url: string, _init?: RequestInit) => new Response(JSON.stringify(url.includes("/test") ? { outcome: "allow", rule: "Your draft rule" } : { company: [], global: [], defaults: [] }), { status: 200 }));
+      vi.stubGlobal("fetch", fetch);
+      render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+      expect(screen.queryByLabelText(/Try it with the rule I'm typing/)).toBeNull();
+      fireEvent.change(screen.getByLabelText("Command matches (regex)"), { target: { value: "^docker\\s+restart" } });
+      fireEvent.click(screen.getByLabelText(/Try it with the rule I'm typing/));
+      fireEvent.change(screen.getByLabelText("wants to run"), { target: { value: "docker restart web" } });
+      fireEvent.click(screen.getByRole("button", { name: "Check" }));
+      await screen.findByText(/decided by "Your draft rule"/);
+      const call = fetch.mock.calls.find((c) => (c[0] as string).includes("/test")) as unknown as [string, { body: string }];
+      expect(JSON.parse(call[1].body)).toMatchObject({ command: "docker restart web", draft: { match: { commandPattern: "^docker\\s+restart" }, outcome: "owner" } });
+      expect(fetch.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === "POST" && c[0] === "/api/policy-rules")).toBe(false);
     });
   });
 

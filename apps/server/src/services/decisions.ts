@@ -44,6 +44,9 @@ import {
   type OptionVerdicts,
   type AlwaysChoice,
   type AlwaysScope,
+  type AlwaysTtl,
+  nextMidnightIn,
+  timeZoneOr,
   type PermissionExplanation,
   type PermissionInfo,
   type PolicyMatch,
@@ -77,7 +80,7 @@ import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { applyPortalAnswer } from "./feature-portal.js";
 import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from "./retro.js";
-import { ADD_RULE, policyRulesService } from "./policy-rules.js";
+import { ADD_RULE, notExpired, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
@@ -834,6 +837,8 @@ export type AnswerExtra = {
   custom?: boolean;
   /** With an "always" answer: whose requests the saved rule covers. Defaults to the asking agent only (BOS-294). */
   alwaysScope?: AlwaysScope;
+  /** With an "always" answer: how long the saved rule lasts. Defaults to "always" (never expires) (BOS-2188). */
+  alwaysTtl?: AlwaysTtl;
   /** Who answered: "ceo" when the CEO settled it ("handled" advice), else the owner's username (logged with a skill override). */
   by?: string;
   /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
@@ -1457,7 +1462,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     const rows = await db
       .select()
       .from(policyRules)
-      .where(and(eq(policyRules.trigger, "permission"), or(eq(policyRules.companyId, companyId), isNull(policyRules.companyId))))
+      // A timed rule past its end never matches (BOS-2188); the filter is in the query so no caller can forget it.
+      .where(and(eq(policyRules.trigger, "permission"), or(eq(policyRules.companyId, companyId), isNull(policyRules.companyId)), notExpired(now())))
       .orderBy(asc(policyRules.position), asc(policyRules.name));
     rows.sort((a, b) => Number(b.companyId !== null) - Number(a.companyId !== null) || a.position - b.position);
     return rows.map((r) => ({ name: r.name, match: r.condition as PolicyRuleSpec["match"], outcome: r.outcome }));
@@ -3255,13 +3261,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (!always.match.commandPattern && !always.match.titlePattern && always.match.kinds?.some((k) => k === "read" || k === "edit" || k === "fetch")) throw new AnswerError("That rule is no longer offered: it would cover files or web addresses Boss Man can't check. Use Allow once.");
         // Same for a server-wide tool choice (it would cover destructive tools and ones added later): only an exact-tool title ending in $ is saved.
         if (always.match.titlePattern?.startsWith("^mcp__") && !always.match.titlePattern.endsWith("$")) throw new AnswerError("That rule is no longer offered: it would cover every tool on the server. Use Allow once.");
+        const ttl: AlwaysTtl = extra.alwaysTtl ?? "always";
+        if (ttl !== "always" && ttl !== "hour" && ttl !== "midnight") throw new AnswerError("How long must be 1 hour, until midnight or always.");
+        // Midnight is the server's local one, computed once here and stored as an absolute time (BOS-2188).
+        const at = now();
+        const expiresAt = ttl === "hour" ? new Date(at.getTime() + 3_600_000) : ttl === "midnight" ? nextMidnightIn(at, timeZoneOr(process.env.TZ)) : null;
         const condition: PolicyMatch = { ...always.match, safeOnly: true, ...(scope === "agent" ? { agentIds: [asker!.id] } : {}) };
         const problems = ruleProblems(condition);
         if (problems.length) throw new AnswerError(`That rule can't be saved: ${problems.join(" ")}`);
         saveRule = async (h) => {
         const [last] = await h.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
         const on = formatDate("en-GB", now(), { day: "numeric", month: "short" });
-        await h.insert(policyRules).values({ companyId: d.companyId, name: `${always.name}${scope === "agent" ? ` for ${asker!.name}` : ""} (from a request on ${on})`, trigger: "permission", condition, outcome: "allow", position: (last?.position ?? -1) + 1, createdAt: now(), createdBy: extra.by ?? "the owner", sourceDecisionId: d.id });
+        await h.insert(policyRules).values({ companyId: d.companyId, name: `${always.name}${scope === "agent" ? ` for ${asker!.name}` : ""} (from a request on ${on})`, trigger: "permission", condition, outcome: "allow", position: (last?.position ?? -1) + 1, createdAt: now(), createdBy: extra.by ?? "the owner", sourceDecisionId: d.id, expiresAt });
         };
         answer = ALLOW;
       }

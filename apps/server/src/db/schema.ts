@@ -1011,6 +1011,8 @@ export const policyRules = pgTable("policy_rules", {
   createdAt: timestamp("created_at", { withTimezone: true }),
   createdBy: text("created_by"),
   sourceDecisionId: uuid("source_decision_id").references(() => decisions.id, { onDelete: "set null" }),
+  /** BOS-2188: when a timed allow stops matching. Null = never expires (every rule made before this existed). */
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
 });
 
 // ---------- Loop guards (R49, R50) ----------
