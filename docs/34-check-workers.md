@@ -53,6 +53,8 @@ These are lines already in the file; change them in place. None has a host-speci
 
 - `BOSSMAN_CHECK_SLOTS`: checks at once. Boss Man's per-worker setting can lower it, never raise it.
 - `mem_limit` and `memswap_limit`: memory for the container. Each check peaks near 5 GB (measured 3.8 to 4.7 GB), plus 2 GB for the machine itself: **8g for 1 check, 12g for 2 checks**, 17g for 3. The file Add a check worker gives you is already sized for the checks at once you chose. Keep the two lines equal.
+- **Changing the memory on any Docker host (BOS-2269):** size `mem_limit` as **checks at once × about 5 GB, plus about 2 GB of headroom**, never more than the host really has free. If checks are being stopped part-way (the worker's container log or the host shows out-of-memory kills), the limit is too low for the checks at once: raise `mem_limit` and `memswap_limit` together (swap below memory is refused by Docker), then redeploy, rather than dropping to fewer checks when the CPU can carry them. Then set **Memory per check** for that worker in Settings to the limit divided by the checks at once, so the memory warning below stays quiet and the per-check guard can act. Check the result from the host with `docker inspect --format '{{.HostConfig.Memory}}' <container name>` (bytes: 12g reads 12884901888). Undo: put the old value back in both lines and redeploy.
+- **Does the edit survive updates?** Yes. Boss Man never rewrites a worker's file after you paste it: a runner update changes nothing there, and Redeploy only rebuilds from the file you hold. The one way to lose it is pasting a fresh file from Add a check worker over it: that file is sized by the rule above for the checks at once you choose (a higher value you set by hand is not remembered), so re-apply your edit then.
 - `cpuset` (pin to CPU threads, such as `"8-15"`) or `cpus` (a hard cap): remove the `#` in front. A cpuset is preferred, because test tools then size themselves to those threads.
 - **Test threads per check** and **Memory per check, in GB** are set per worker in the Add a check worker form, not in the file. Both are optional; left empty, the machine decides.
 
@@ -99,6 +101,14 @@ Create a **custom app** from YAML and paste the copied file; no shell is needed.
 | `cpuset` | `"8-15"` (cores 4 to 7, both threads each) |
 | `mem_limit` and `memswap_limit` | `12g` for 2 checks (never more than the box really has free) |
 | Repos | the named volume, with Docker's storage on an SSD pool if the box has one (confirm on the TrueNAS Storage page) |
+
+**Raising the memory of a worker that Arcane manages (an example for that one box, not a general step):** an Arcane project is a stored compose file, and Arcane's Redeploy applies what is stored.
+
+1. In Arcane, open the project for the worker, open its compose file, and change **both** `mem_limit` and `memswap_limit` from `8g` to `14g` (2 checks × 7 GB). Leave `BOSSMAN_CHECK_SLOTS` and `cpuset` as they are. You should see `mem_limit: 8g` before the edit and `mem_limit: 14g` after.
+2. Save and Redeploy the project. The worker's container restarts and any check running there goes back in line on its own.
+3. In Boss Man: Settings → Server and runner → Limits and checks → Checks → Check workers, press Change on the worker and set **Memory per check** to 7.
+4. From the TrueNAS shell: `docker inspect --format '{{.HostConfig.Memory}}' <the worker's container name>` should print 15032385536 (14g). The worker's card in Settings then shows its memory with no red warning.
+5. Undo: set both lines back to `8g`, Redeploy, and set Memory per check back to 4 (or empty).
 
 Expect each check to run about 40% slower than on the main server when the box is busy, and 35 to 45% extra load on the NAS while checks are queued.
 
