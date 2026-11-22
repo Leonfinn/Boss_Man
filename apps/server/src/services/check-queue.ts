@@ -65,7 +65,13 @@ export type EnqueueInput = {
   priority?: number;
   fixesMain?: boolean;
   requestedBy?: string | null;
+  /** BOS-2218: a retry after an out-of-memory loss: not on this machine (MACHINE_RUNNER or a worker id) while another is up; keeps `placeAt` as its queue time. */
+  avoidMachine?: string;
+  placeAt?: Date;
 };
+
+/** BOS-2218: `avoidMachine` / `othersUp` key for the company runner; a check worker's key is its id. */
+export const MACHINE_RUNNER = "runner";
 
 export type EnqueueResult = { job: CheckJob; reused: "passed" | "live" | null };
 
@@ -287,7 +293,8 @@ export function checkQueue(db: Db) {
         priority: input.priority ?? 1,
         fixesMain: input.fixesMain ?? false,
         requestedBy: input.requestedBy ?? null,
-        ...(inheritedAt ? { queuedAt: inheritedAt } : {}),
+        ...(input.avoidMachine ? { avoidMachine: input.avoidMachine } : {}),
+        ...(input.placeAt ? { queuedAt: input.placeAt } : inheritedAt ? { queuedAt: inheritedAt } : {}),
         ...(inheritedFront ? { frontAt: inheritedFront.at, frontBy: inheritedFront.by } : {}),
       })
       .returning();
@@ -462,14 +469,14 @@ export function checkQueue(db: Db) {
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean } = {}): Promise<CheckJob[]> {
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean; othersUp?: boolean } = {}): Promise<CheckJob[]> {
     return (await claimNextWhy(runnerId, now, companyId, runnerSlots, opts)).jobs;
   }
 
   /** `claimNext` with the reason a free runner slot took nothing (R46). */
-  async function claimNextWhy(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean } = {}): Promise<ClaimResult> {
+  async function claimNextWhy(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean; othersUp?: boolean } = {}): Promise<ClaimResult> {
     // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
-    return claimOnWhy(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId, undefined, { policy: await runnerPolicy(), dedicatedOnly: opts.dedicatedOnly });
+    return claimOnWhy(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId, undefined, { policy: await runnerPolicy(), dedicatedOnly: opts.dedicatedOnly, othersUp: opts.othersUp });
   }
 
   /** Running jobs on one machine by kind (see `admits`). */
@@ -496,7 +503,7 @@ export function checkQueue(db: Db) {
     now = new Date(),
     companyId?: string,
     skip?: (jobId: string) => boolean,
-    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean } = {},
+    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; othersUp?: boolean } = {},
   ): Promise<CheckJob[]> {
     return (await claimOnWhy(machine, limit, now, companyId, skip, opts)).jobs;
   }
@@ -512,7 +519,7 @@ export function checkQueue(db: Db) {
     now = new Date(),
     companyId?: string,
     skip?: (jobId: string) => boolean,
-    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; quickOnly?: boolean } = {},
+    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean; quickOnly?: boolean; othersUp?: boolean } = {},
   ): Promise<ClaimResult> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
     // BOS-1748: the hold parks the company runner and every merge check, but a separate check worker still takes quick
@@ -529,7 +536,11 @@ export function checkQueue(db: Db) {
     // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
     // BOS-2108: `quickOnly` is the runner drain's rule for a worker (the dispatcher reads it from WAIT_RULES): quick checks only.
     const longHeld = held || !!opts.quickOnly;
-    const candidates = ofCompany.filter((j) => !skip?.(j.id)).filter((j) => !longHeld || !isLong(j));
+    // BOS-2218: an out-of-memory retry stays off the machine that lost its test process, but only while another machine is up;
+    // with none, it runs here again rather than wait for ever.
+    const thisKey = worker ?? MACHINE_RUNNER;
+    const avoided = (j: CheckJob) => !!opts.othersUp && j.avoidMachine === thisKey;
+    const candidates = ofCompany.filter((j) => !skip?.(j.id) && !avoided(j)).filter((j) => !longHeld || !isLong(j));
     if (candidates.length === 0) {
       const heldLong = longHeld ? ofCompany.find((j) => isLong(j) && !skip?.(j.id)) : undefined;
       if (heldLong) return no(declineOf(heldLong, "update_hold", `merge and full checks are paused for a ${held ? "server" : "runner"} update`, true));

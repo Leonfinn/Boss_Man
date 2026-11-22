@@ -6,7 +6,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { ownerApprovedFiles } from "@boss-man/shared";
 import { checkFailureFacts, fullLogPointer, deepChecks, renderTemplate, RISK_TIERS, riskOf, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
-import { checkJobs, checkResults, runners, ticketMessages, tickets } from "../db/schema.js";
+import { checkJobs, checkResults, checkWorkers, runners, ticketMessages, tickets } from "../db/schema.js";
 import { RunnerGone } from "./runners.js";
 import { DIFFERENT_APPROACH } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig } from "./git-hosts.js";
@@ -336,7 +336,13 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
     }
     const never: InfraCause | null = (v as { noAnswer?: boolean }).noAnswer ? "no_answer" : checkNeverFinished(v);
     if (never) {
-      const reason = INFRA_CAUSE_TEXT[never](v.ms);
+      // BOS-2218: the card names the machine the check ran on, so "out of memory on X" points at the machine, not the code.
+      let where = "";
+      if (v.keptLog?.jobId) {
+        const [j] = await db.select({ workerId: checkJobs.workerId, started: checkJobs.startedAt }).from(checkJobs).where(eq(checkJobs.id, v.keptLog.jobId));
+        if (j?.started) where = ` on ${j.workerId ? `the check worker "${(await db.select({ name: checkWorkers.name }).from(checkWorkers).where(eq(checkWorkers.id, j.workerId)))[0]?.name ?? "a check worker"}"` : "the company runner"}`;
+      }
+      const reason = `${INFRA_CAUSE_TEXT[never](v.ms)}${where}${never === "out_of_memory" ? " (a test process was killed for lack of memory; the check itself ran, so this is the machine, not the code)" : ""}`;
       await checkStuck(t, command, reason, v.output);
       return { outcome: "check_stuck", delivered: null, detail: v };
     }

@@ -1213,6 +1213,8 @@ export const checkJobs = pgTable(
     stages: text("stages"),
     /** BOS-1923: true once the full check (check-all) ran after the quick one; null when the machine didn't say. */
     ranFull: boolean("ran_full"),
+    /** BOS-2218: the machine an out-of-memory retry must not start on while another machine is up: "runner" or a check worker's id. Null for every other job. */
+    avoidMachine: text("avoid_machine"),
     queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     lastOutputAt: timestamp("last_output_at", { withTimezone: true }),

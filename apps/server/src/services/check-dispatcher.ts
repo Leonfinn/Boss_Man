@@ -253,7 +253,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
         // limit is also capped by the slots it reported in hello.
         if (runnerUp) {
-          const r = await queue.claimNextWhy(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly });
+          const r = await queue.claimNextWhy(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly, othersUp: workers.length > 0 });
           if (!dedicatedOnly) declined.set(`runner:${runner!.id}`, { machine: "the company runner", why: r.declined });
           for (const job of r.jobs) {
             const sent = deps.send(runner!.id, runCommand(job, list));
@@ -265,7 +265,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
         // never holds up the line); a job this worker couldn't get the code for is left to the others.
         for (const w of workers) {
-          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly, quickOnly: workerQuickOnly });
+          const r = await queue.claimOnWhy({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly, quickOnly: workerQuickOnly, othersUp: runnerUp || workers.length > 1 });
           if (!dedicatedOnly) declined.set(`worker:${w.id}`, { machine: `check worker "${w.name}"`, why: r.declined });
           for (const job of r.jobs) track(codeFor(job, w, list, packer!, false));
         }

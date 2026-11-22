@@ -39,6 +39,9 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
   const tail = v.output.slice(-4000);
   if (v.timedOut) return "timed_out";
   if (/JavaScript heap out of memory|out of memory|ENOMEM|Cannot allocate memory/i.test(tail)) return "out_of_memory";
+  // BOS-2218: a test process that vitest lost to SIGKILL (the check itself ran to the end and failed one step) is the kernel's
+  // out-of-memory kill; nothing in a test's own code sends SIGKILL to its worker. Seven such checks on 20 to 22 Nov.
+  if (/Worker exited unexpectedly[^\n]*\bSIGKILL\b|\bSIGKILL\b[^\n]*Worker exited unexpectedly/i.test(tail)) return "out_of_memory";
   if (v.exitCode === 137 || v.exitCode === 143 || v.exitCode === null || /\bSIGKILL\b|\bKilled\b|Worker exited unexpectedly/i.test(tail)) return "killed";
   return null;
 }

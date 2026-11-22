@@ -523,6 +523,10 @@ describe("server-owned check queue (BOS-316)", () => {
     expect(checkNeverFinished(v({ exitCode: null }))).toBe("killed");
     expect(checkNeverFinished(v({ output: "FATAL ERROR: JavaScript heap out of memory" }))).toBe("out_of_memory");
     expect(checkNeverFinished(v({ output: "Error: Worker exited unexpectedly" }))).toBe("killed");
+    // BOS-2218: a test process lost to SIGKILL is the kernel's out-of-memory kill, whatever step it was in.
+    expect(checkNeverFinished(v({ output: "Error: Worker exited unexpectedly with signal SIGKILL" }))).toBe("out_of_memory");
+    expect(checkNeverFinished(v({ output: "check-all: ran out of memory: the machine killed 2 processes for lack of memory" }))).toBe("out_of_memory");
+    expect(checkNeverFinished(v({ output: "check-all: memory: limit 7.0 GB, memory-limit kills (oom_kill) during this check: 0" }))).toBeNull();
     expect(checkNeverFinished(v({ output: "FAIL limit.test.ts\n expected 1000 got 100" }))).toBeNull();
     expect(landingText({ outcome: "check_stuck" }, { branch: "main", assignee: null })).toContain("a merge card is open in Decisions");
   });
