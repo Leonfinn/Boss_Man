@@ -16,7 +16,8 @@ import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, ty
 export const MAIN_CI_SWITCH = "main_ci_watch";
 const STATE_KEY = (projectId: string) => `main_ci:${projectId}`;
 /** Only these run events are about main itself; a pull request's run is the gate's business. */
-const EVENTS = new Set(["push", "schedule", "workflow_dispatch"]);
+/** "workflow_run" (BOS-2299): a workflow that follows main's CI, such as Publish images, is main's business too. */
+const EVENTS = new Set(["push", "schedule", "workflow_dispatch", "workflow_run"]);
 const BAD = new Set(["failure", "timed_out", "startup_failure"]);
 /** How many older runs are read to find the first one that broke. */
 const LOOK_BACK = 10;
