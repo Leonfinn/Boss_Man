@@ -5,6 +5,7 @@ import {
   DEFAULT_WATCHDOG,
   parkedOnPurpose,
   readWatchdogSettings,
+  watchdogLimitRule,
   WATCHDOG_NON_CAPPED_KINDS,
   WATCHDOG_NUDGE_KINDS,
   WATCHDOG_RECORD_KINDS,
@@ -79,6 +80,24 @@ describe("parkedOnPurpose", () => {
   it("is false with no note and no time", () => {
     expect(parkedOnPurpose({}, now)).toBe(false);
     expect(parkedOnPurpose({ stateNote: null, blockedUntil: null }, now)).toBe(false);
+  });
+});
+
+describe("watchdogLimitRule", () => {
+  it("reads a whole-number limit's range from the schema", () => {
+    expect(watchdogLimitRule("unassignedMinutes")).toEqual({ min: 1, max: 24 * 60, whole: true });
+    expect(watchdogLimitRule("maxNudgesPerHour")).toEqual({ min: 1, max: 100, whole: true });
+  });
+
+  it("reads a fractional limit's range, including a minimum of zero", () => {
+    expect(watchdogLimitRule("inProgressHours")).toEqual({ min: 0.25, max: 24 * 14, whole: false });
+    expect(watchdogLimitRule("blockedUntilGraceHours")).toEqual({ min: 0, max: 24 * 7, whole: false });
+  });
+
+  it("returns null for a switch that has no numeric range", () => {
+    expect(watchdogLimitRule("enabled")).toBeNull();
+    expect(watchdogLimitRule("recordOnly")).toBeNull();
+    expect(watchdogLimitRule("progressContract")).toBeNull();
   });
 });
 
