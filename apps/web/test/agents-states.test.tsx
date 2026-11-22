@@ -110,6 +110,15 @@ describe("History and CEO notes: loading and failed loads (BOS-2279)", () => {
     expect(screen.queryByText("No notes yet.")).toBeNull();
   });
 
+  it("still says No changes yet. and No notes yet. when both loaded empty", async () => {
+    stub((url) => (url.includes("/history") ? json([]) : (undefined as never)), [ceo("a-empty")]);
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Chief" }));
+    expect(await screen.findByText("No changes yet.")).toBeTruthy();
+    expect(await screen.findByText("No notes yet.")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load the/)).toBeNull();
+  });
+
   it("shows a load error with Retry for each; Retry brings back the history and the (empty) notes", async () => {
     let fail = true;
     stub((url) => {
