@@ -8,8 +8,9 @@ import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { HORIZONS, dateIn } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, objectives } from "../db/schema.js";
+import { companies, keyResults, objectives } from "../db/schema.js";
 import type { feedbackService } from "../services/feedback.js";
+import { WorkError } from "../services/ticket-links.js";
 import { OBJECTIVE_STATUSES, type planningService } from "../services/planning.js";
 import type { workService } from "../services/work.js";
 
@@ -28,6 +29,12 @@ export const DateStr = z
     const t = new Date(`${d}T00:00:00Z`); // month 13 gives an Invalid Date, and toISOString would throw
     return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d;
   }, "That date doesn't exist. Use YYYY-MM-DD.");
+
+/** True when a company with this id exists; the GET addresses for one company answer 404 when it doesn't (BOS-2253). */
+export async function companyExists(db: Db, id: string): Promise<boolean> {
+  const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+  return !!c;
+}
 
 /** Creating objectives, key results and milestones, and the tree the Plan page reads. */
 export function objectiveRoutes(
@@ -55,6 +62,43 @@ export function objectiveRoutes(
     return reply.code(201).send(await work.addKeyResult(id, body));
   });
 
+  /** The company and title of a key result's objective, for the note the CEO reads (BOS-2250). */
+  const keyResultContext = async (id: string) => {
+    const [k] = await db
+      .select({ title: keyResults.title, companyId: objectives.companyId, objective: objectives.title })
+      .from(keyResults)
+      .innerJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+      .where(eq(keyResults.id, id));
+    if (!k) throw new WorkError(404, "No such key result.");
+    return k;
+  };
+
+  // Same limits as create. current and target can be cleared with null.
+  owner.patch("/api/key-results/:id", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    const body = z
+      .object({ title: z.string().trim().min(1).max(200), target: z.number().nullable(), current: z.number().nullable(), unit: z.string().max(20).nullable() })
+      .partial()
+      .parse(req.body);
+    const before = await keyResultContext(id);
+    if (Object.keys(body).length === 0) {
+      const [same] = await db.select().from(keyResults).where(eq(keyResults.id, id));
+      return same!;
+    }
+    const [k] = await db.update(keyResults).set(body).where(eq(keyResults.id, id)).returning();
+    if (!k) throw new WorkError(404, "No such key result.");
+    await teamCheck(before.companyId, `changed the key result "${before.title}" under the objective "${before.objective}"`);
+    return k;
+  });
+
+  owner.delete("/api/key-results/:id", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const before = await keyResultContext(id);
+    await db.delete(keyResults).where(eq(keyResults.id, id));
+    await teamCheck(before.companyId, `removed the key result "${before.title}" from the objective "${before.objective}"`);
+    return reply.code(204).send();
+  });
+
   owner.post("/api/objectives/:id/milestones", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const body = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.optional(), horizon: z.enum(HORIZONS).optional() }).parse(req.body);
@@ -64,7 +108,11 @@ export function objectiveRoutes(
     return reply.code(201).send(m);
   });
 
-  owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
+  owner.get("/api/companies/:id/objectives", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
+    return work.objectivesTree(id);
+  });
 }
 
 /** The roadmap, plan, milestone and ticket-link views (v1.1). */
@@ -103,8 +151,16 @@ export function roadmapRoutes(
     await planning.deleteMilestone(IdParam.parse(req.params).id);
     return reply.code(204).send();
   });
-  owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
-  owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
+  owner.get("/api/companies/:id/plan", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
+    return planning.plan(id);
+  });
+  owner.get("/api/companies/:id/open-tickets", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
+    return planning.openTickets(id);
+  });
   owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
   owner.get("/api/tickets/:id/related", async (req) => planning.relatedTickets(IdParam.parse(req.params).id));
   owner.delete("/api/dependencies/:id", async (req, reply) => {

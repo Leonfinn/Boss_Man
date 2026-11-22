@@ -18,7 +18,7 @@ async function setup() {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST" | "PUT" | "DELETE", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
@@ -48,6 +48,32 @@ describe("tool servers (MCP)", () => {
     expect((await c.req("DELETE", `/api/mcp-servers/${added.json().id}`)).statusCode).toBe(404);
     expect(await lines()).toHaveLength(2);
     for (const l of all) expect(l).not.toMatch(/SCRAPLING_MCP_TOKEN|sekret|pw@/);
+  });
+
+  it("changes a tool server in place: validated like an add, name fixed, logged without secrets (BOS-2255)", async () => {
+    const c = (ctx = await setup());
+    const url = `/api/companies/${c.company.id}/mcp-servers`;
+    const made = (await c.req("POST", url, good)).json() as { id: string };
+    const patch = (body: unknown, id = made.id) => c.req("PATCH",`/api/mcp-servers/${id}`, body);
+    const ok = await patch({ url: "http://user:pw@192.168.1.60:9000/mcp?key=sekret", transport: "sse" });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({ name: "scrapling", transport: "sse", secretEnv: "SCRAPLING_MCP_TOKEN", allowPrivate: true });
+    // Public name: not trusted for private addresses, recomputed on the new url.
+    expect((await patch({ url: "http://example.com:8000/mcp" })).json().allowPrivate).toBe(false);
+    expect((await patch({ secretEnv: null, headerValue: "x" })).statusCode).toBe(200);
+    for (const bad of [{ name: "other" }, { url: "ftp://h/mcp" }, { transport: "ws" }, { secretEnv: "GIT_TOKEN" }, { secretEnv: "A_TOKEN", headerValue: "literal" }, { headerName: "Bad Header" }]) {
+      expect((await patch(bad)).statusCode, JSON.stringify(bad)).toBe(400);
+    }
+    expect((await patch({ url: "http://192.168.1.50:1/mcp" }, "00000000-0000-4000-8000-000000000000")).statusCode).toBe(404);
+    // No owner session: refused.
+    expect((await c.app.inject({ method: "PATCH", url: `/api/mcp-servers/${made.id}`, payload: { transport: "http" } })).statusCode).toBe(401);
+    // A row saved before this change (legacy secret already refused) is untouched by an empty patch.
+    const before = (await c.req("GET", url)).json();
+    expect((await patch({})).statusCode).toBe(200);
+    expect((await c.req("GET", url)).json()).toEqual(before);
+    const lines = (await c.db.select().from(activity).where(eq(activity.kind, "settings"))).map((a) => a.summary).filter((s) => s.includes("changed"));
+    expect(lines).toEqual(["Owner changed tool server scrapling (http://192.168.1.60:9000/mcp)", "Owner changed tool server scrapling (http://example.com:8000/mcp)", "Owner changed tool server scrapling (http://example.com:8000/mcp)"]);
+    for (const l of lines) expect(l).not.toMatch(/SCRAPLING_MCP_TOKEN|sekret|pw@/);
   });
 
   it("refuses bad input", async () => {

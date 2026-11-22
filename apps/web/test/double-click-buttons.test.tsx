@@ -133,7 +133,8 @@ describe("Feature page: Priority 1 switch (BOS-2091)", () => {
     expect(puts).toHaveLength(1);
     expect(puts[0]!.body).toBe(JSON.stringify({ on: true }));
     await act(async () => gate.release(json({ ok: true, priorityOne: true, tickets: 2 })));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Priority 1 on: 2 tasks marked to go first."));
+    // The header's Copy link button has its own (empty) status line too (BOS-2259), so look among them all.
+    await waitFor(() => expect(screen.getAllByRole("status").map((s) => s.textContent)).toContain("Priority 1 on: 2 tasks marked to go first."));
     expect(box.disabled).toBe(false);
   });
 
@@ -148,7 +149,7 @@ describe("Feature page: Priority 1 switch (BOS-2091)", () => {
       expect(confirm).not.toHaveBeenCalled();
       expect(puts[0]!.body).toBe(JSON.stringify({ on: false }));
       await act(async () => gate.release(json({ ok: true, priorityOne: false, tickets: 2 })));
-      await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Priority 1 off: 2 tasks back to normal order."));
+      await waitFor(() => expect(screen.getAllByRole("status").map((s) => s.textContent)).toContain("Priority 1 off: 2 tasks back to normal order."));
     } finally {
       row.priorityOne = false;
     }

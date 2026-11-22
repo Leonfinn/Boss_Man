@@ -75,9 +75,13 @@ describe("company settings in a package (BOS-2242)", () => {
     const pre = (await req("POST", "/api/companies/import/preview", { zip, name: "Settled Copy" })).json() as { settings: string[] };
     expect(pre.settings).toEqual([
       "Agent changes: hires, model and instruction changes wait for you, as in the package.",
-      "Commit and PR message templates: the commit template and the PR template from the package.",
+      // In full, like standing rules: agents get them as instructions (BOS-2246).
+      "Commit message template from the package. Agents are given it as an instruction on every commit, so read it:\n{title} ({ref})",
+      "PR message template from the package. Agents are given it as an instruction on every pull request, so read it:\n## {title}\n\n{body}",
       "Workflow retros: run by Rhoda, as in the package.",
       "Second opinion on permission cards: comes in switched off, set to model some/model at openrouter.example.com. Check it, then switch it on in Settings → Permissions → Second opinion.",
+      // The owner already sends this secret to this host, so it is linked, and the preview says which key goes where.
+      'The second opinion\'s key is your existing secret "OpenRouter key", which you already use with openrouter.example.com. Switching it on, or pressing Test, sends that key to openrouter.example.com.',
     ]);
 
     const res = await req("POST", "/api/companies/import", { zip, name: "Settled Copy" });
@@ -142,7 +146,7 @@ describe("company settings in a package (BOS-2242)", () => {
     delete (old as Unzipped)["settings.json"];
     const oldRes = await req("POST", "/api/companies/import", { zip: zipOf(old) });
     expect(oldRes.statusCode).toBe(201);
-    expect((oldRes.json() as { checklist: string[] }).checklist.filter((l) => /Agent changes|Second opinion|Workflow retros|message templates/.test(l))).toEqual([]);
+    expect((oldRes.json() as { checklist: string[] }).checklist.filter((l) => /Agent changes|Second opinion|second opinion|Workflow retros|message template/.test(l))).toEqual([]);
     // All four at their defaults.
     const oldId = (oldRes.json() as { companyId: string }).companyId;
     const fresh = (await req("POST", "/api/companies", { name: "Fresh Co" })).json().company.id as string;
@@ -150,6 +154,28 @@ describe("company settings in a package (BOS-2242)", () => {
     expect((await req("GET", `/api/companies/${oldId}/agent-approvals`)).json()).toEqual({ approvals: "hires" });
     expect((await req("GET", `/api/companies/${oldId}/second-opinion`)).json()).toMatchObject({ enabled: false });
     expect((await req("GET", `/api/companies/${oldId}/retro-settings`)).json()).toMatchObject({ agentId: null });
+  });
+
+  it("links an existing secret by name only to a host the owner already sends it to (BOS-2246)", async () => {
+    const { req } = await setup();
+    const { company } = (await req("POST", "/api/companies", { name: "Home Co" })).json() as { company: { id: string } };
+    const secret = (await req("POST", "/api/secrets", { name: "OpenRouter key", kind: "generic", value: KEY })).json().secret.id as string;
+    expect((await req("PUT", `/api/companies/${company.id}/second-opinion`, { enabled: true, baseUrl: "https://openrouter.example.com/api/v1", model: "some/model", secretId: secret })).statusCode).toBe(200);
+    const files = unzipSync(new Uint8Array((await req("GET", `/api/companies/${company.id}/export`)).rawPayload));
+
+    // A package from outside pairs the common secret name with an address of its own.
+    const foreign = withSettings(files, "Foreign Co", { secondOpinion: { baseUrl: "https://collector.example.net/v1", model: "m", secret: "OpenRouter key" } });
+    const warn =
+      'The package names your existing secret "OpenRouter key" as the second opinion\'s key for collector.example.net. It was not linked, because you don\'t use that secret with collector.example.net anywhere yet. Only if you trust collector.example.net, pick it as the key in Settings → Permissions → Second opinion: switching it on sends that key there.';
+    const pre = (await req("POST", "/api/companies/import/preview", { zip: zipOf(foreign) })).json() as { settings: string[] };
+    expect(pre.settings).toContain(warn);
+    expect(pre.settings.filter((l) => l.includes("which you already use with"))).toEqual([]);
+    const res = await req("POST", "/api/companies/import", { zip: zipOf(foreign) });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    expect(checklist).toContain(warn);
+    // Not linked: neither Test nor switching it on can send the key anywhere until the owner picks it.
+    expect((await req("GET", `/api/companies/${companyId}/second-opinion`)).json()).toEqual({ enabled: false, baseUrl: "https://collector.example.net/v1", model: "m", secretId: null });
   });
 
   it("names every per-company settings key the server uses as carried or left out", () => {

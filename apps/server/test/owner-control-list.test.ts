@@ -102,6 +102,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/CopyLinkButton.tsx": "Ticket",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
+  // The health line's Retry (BOS-2249): shown on the board and on the Scrum Master page, so it takes its screens from where it is rendered.
+  "components/WatchdogHealth.tsx": "Any screen",
   // The weekly email switch on Settings → Notifications (BOS-2195).
   "components/WeeklySummaryForm.tsx": "Notifications",
   "components/TicketActivity.tsx": "Ticket",

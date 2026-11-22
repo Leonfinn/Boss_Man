@@ -8,7 +8,7 @@ import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions } from "../src/db/schema.js";
-import { ENGAGED_MS, leftBehind, liveNotice, markOwnerOpened, newerNotice, NOTICE_MS, recentClosedNotices, switchedBackNotice } from "../src/services/closed-notice.js";
+import { ENGAGED_MS, leftBehind, liveNotice, markOwnerOpened, newerNotice, NOTICE_MS, reachedOwner, recentClosedNotices, switchedBackNotice, systemClosedNotice } from "../src/services/closed-notice.js";
 
 // BOS-739: an owner hand-apply card Boss Man closes by itself leaves a notice where it was.
 const A = "a".repeat(40);
@@ -133,6 +133,64 @@ describe("leaveClosedNotice and the opened beacon (BOS-739)", () => {
     const c = (ctx = await setup());
     const [d] = await c.db.insert(decisions).values({ companyId: c.co.id, kind: "approval", tier: "owner", question: "Closed", options: ["Done"], recommendedOption: "Done", status: "answered", answeredAt: new Date(), context: { type: "self_deploy", target: "server", commit: B, fromCommit: A, handSteps: ["a"] } as never }).returning();
     expect(await markOwnerOpened(c.db, d!.id)).toBe(false);
+  });
+});
+
+describe("systemClosedNotice (BOS-1691)", () => {
+  const now = new Date("2026-11-22T10:00:00Z");
+  const staysForAnHour = (n: { at: string; until: string }) => expect(Date.parse(n.until) - Date.parse(n.at)).toBe(NOTICE_MS);
+
+  it("says why Boss Man closed the card, trimming the trailing full stop and spaces the close recorded", () => {
+    const n = systemClosedNotice({ note: "its ticket BOS-42 finished.  ", now });
+    expect(n.why).toBe("closed");
+    expect(n.newer).toBeUndefined();
+    expect(n.text).toBe("Closed by Boss Man because its ticket BOS-42 finished. It needs nothing from you any more.");
+    expect(n.at).toBe(now.toISOString());
+    staysForAnHour(n);
+  });
+
+  it("points at the newer card, its author and its label", () => {
+    const id = randomUUID();
+    const n = systemClosedNotice({ note: "a newer card covers it", newer: { id, author: "Florence", label: "Run it again" }, now });
+    expect(n.why).toBe("newer");
+    expect(n.newer).toEqual({ decisionId: id, label: "Run it again" });
+    expect(n.text).toBe('Replaced by a newer card from Florence: "Run it again". Answer that one instead; this one needs nothing from you.');
+    staysForAnHour(n);
+  });
+
+  it("leaves the author out when the newer card has none, and still names its label", () => {
+    const id = randomUUID();
+    const n = systemClosedNotice({ note: "a newer card covers it", newer: { id, author: null, label: "Run it again" }, now });
+    expect(n.newer).toEqual({ decisionId: id, label: "Run it again" });
+    expect(n.text).toBe('Replaced by a newer card: "Run it again". Answer that one instead; this one needs nothing from you.');
+  });
+
+  it("calls it \"the newer card\" when no label was given", () => {
+    const withAuthor = systemClosedNotice({ note: "a newer card covers it", newer: { id: randomUUID(), author: "Florence" }, now });
+    expect(withAuthor.newer?.label).toBe("the newer card");
+    expect(withAuthor.text).toBe("Replaced by a newer card from Florence. Answer that one instead; this one needs nothing from you.");
+    const bare = systemClosedNotice({ note: "a newer card covers it", newer: { id: randomUUID(), author: null }, now });
+    expect(bare.newer?.label).toBe("the newer card");
+    expect(bare.text).toBe("Replaced by a newer card. Answer that one instead; this one needs nothing from you.");
+  });
+});
+
+describe("reachedOwner (DR-058 A)", () => {
+  it("reaches an owner card with no ladder, or with its ladder at the owner rung", () => {
+    expect(reachedOwner({ tier: "owner", context: null })).toBe(true);
+    expect(reachedOwner({ tier: "owner", context: {} })).toBe(true);
+    expect(reachedOwner({ tier: "owner", context: { ladder: { rung: "owner" } } })).toBe(true);
+  });
+
+  it("does not reach an owner card still with the CEO or an agent in its handover", () => {
+    expect(reachedOwner({ tier: "owner", context: { ladder: { rung: "ceo" } } })).toBe(false);
+    expect(reachedOwner({ tier: "owner", context: { ladder: { rung: "author" } } })).toBe(false);
+  });
+
+  it("never reaches a card that is not owner-tier, whatever its ladder says", () => {
+    expect(reachedOwner({ tier: "agent", context: null })).toBe(false);
+    expect(reachedOwner({ tier: "agent", context: { ladder: { rung: "owner" } } })).toBe(false);
+    expect(reachedOwner({ tier: null, context: { ladder: { rung: "owner" } } })).toBe(false);
   });
 });
 

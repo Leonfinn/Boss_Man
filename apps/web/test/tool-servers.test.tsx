@@ -55,6 +55,18 @@ describe("tool servers", () => {
     });
   });
 
+  it("changes a server: the form fills with its values and Save sends only what changed (BOS-2255)", async () => {
+    const calls = stub([{ ...row, headerName: "Authorization", headerValue: "Bearer {secret}" }]);
+    render(<ToolServers company={company} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Change tool server scrapling" }));
+    expect((screen.getByLabelText("Server URL") as HTMLInputElement).value).toBe(row.url);
+    expect((screen.getByLabelText("Server name") as HTMLInputElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "http://192.168.1.60:9000/mcp" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await vi.waitFor(() => expect(calls.find((c) => c.method === "PATCH")).toBeTruthy());
+    expect(calls.find((c) => c.method === "PATCH")).toEqual({ method: "PATCH", url: "/api/mcp-servers/m1", body: { url: "http://192.168.1.60:9000/mcp" } });
+  });
+
   it("removes a server after confirming", async () => {
     const calls = stub();
     vi.stubGlobal("confirm", () => true);

@@ -7,6 +7,7 @@ import { DraftTextarea } from "../../components/DraftTextarea";
 import { ReadOnlyText } from "../../components/ReadOnlyText";
 import { Section, useAction } from "./shared";
 import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 import { SaveButton } from "../../components/SaveButton";
 
 type Chapter = {
@@ -487,6 +488,7 @@ export function Chapters({ company }: { company: Company }) {
       ) : (
         list.data && <p>No chapter yet. The first starts the next time the CEO is woken.</p>
       )}
+      {!list.data && list.error && <LoadError what="the CEO's chapters" message={list.error.message} onRetry={list.reload} />}
       {past.length > 0 && (
         <div>
           <p className="label">Earlier chapters</p>

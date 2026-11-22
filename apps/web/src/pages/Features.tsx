@@ -26,6 +26,8 @@ import { when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
+import { CopyLinkButton } from "../components/CopyLinkButton";
+import { buildCsv, download } from "../csv";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
@@ -567,6 +569,28 @@ function FeatureCard({ f, drivers, sub, hasSubfeatures, open, onToggle, onPatch 
   );
 }
 
+/** The features shown as a spreadsheet (BOS-2248): one row each in the list's order, sub-features under their parent with the
+ * parent's title in a column, one column per criterion, numbers as numbers (blank where unscored). */
+export function featuresToCsv(rows: Array<{ f: Feature; area: string }>, drivers: Driver[], all: Feature[]): string {
+  return buildCsv(
+    ["area", "feature", "parent", "portal", "status", "demand", ...drivers.map((x) => x.name), "effort", "value", "priority", "tasks_done", "tasks"],
+    rows.map(({ f, area }) => [
+      area,
+      f.title,
+      all.find((p) => p.id === f.parentId)?.title ?? "",
+      f.portalVisible ? "yes" : "no",
+      FEATURE_STATUS_LABEL[f.status],
+      f.demand,
+      ...drivers.map((x) => f.driverScores[x.id] ?? ""),
+      f.effort ?? "",
+      f.value.toFixed(1),
+      f.priority.toFixed(1),
+      f.tickets.done,
+      f.tickets.total,
+    ]),
+  );
+}
+
 export function Features({ companies, companyId, featureId, go }: { companies: Company[]; companyId: string | undefined; featureId: string | undefined; go: (to: string) => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   if (company && featureId) return <FeaturePage key={featureId} id={featureId} companyId={company.id} go={go} />;
@@ -660,6 +684,20 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
               <a href={`#/feedback/${company.id}`} style={{ marginLeft: "auto" }}>
                 Feedback inbox
               </a>
+              <button
+                type="button"
+                className="btn small"
+                disabled={!d || !shown.length}
+                onClick={() => {
+                  if (!d) return;
+                  const rows = groups.flatMap((g) =>
+                    g.features.flatMap((f) => [f, ...shown.filter((s) => s.parentId === f.id).sort(order)]).map((f) => ({ f, area: g.name })),
+                  );
+                  download(`features-${company.name.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "company"}-${new Date().toISOString().slice(0, 10)}.csv`, featuresToCsv(rows, d.drivers, d.features));
+                }}
+              >
+                Download CSV
+              </button>
               <button type="button" className="btn small" aria-expanded={showSettings} onClick={() => setShowSettings(!showSettings)}>
                 Criteria and areas
               </button>
@@ -914,6 +952,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             {f.releasedAt && <span>Released {when(f.releasedAt)}</span>}
           </p>
         </div>
+        <CopyLinkButton />
       </header>
 
       {f.goalCheckAnswer ? (

@@ -109,7 +109,7 @@ export const OWNER_CONTROLS = {
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
-  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones"],
+  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change"],
   Plan: [
     "Refresh",
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
@@ -123,16 +123,22 @@ export const OWNER_CONTROLS = {
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
     "Deleted pages", "Restore", "Restoring", "Download",
+    // A page's "Copy link", "Copied" for a moment after a copy (BOS-2259).
+    "Copy link", "Copied",
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
     "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all", "Save reason",
     "Tasks", "Less", "How the portal works", "Adding",
+    "Download CSV",
+    // A feature's own page: "Copy link" in the header, "Copied" for a moment after a copy (BOS-2259).
+    "Copy link", "Copied",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Creating", "Back to the list", "Unlink",
     "Link to …", "Done: mark processed", "Back to unprocessed", "Archive", "Delete", "Copy", "New link", "Remove",
     "Feedback portal", "Search", "Anonymous …", "Save times",
+    "Download CSV", "Preparing",
   ],
   "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote"],
   Agents: [
@@ -182,6 +188,8 @@ export const OWNER_CONTROLS = {
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": [
     "Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel",
+    // Change a tool server in place (BOS-2255).
+    "Change", "Save changes",
     // The Penpot form (BOS-1582).
     "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
     // Removing a deploy target that has past deploys (BOS-2158).
@@ -270,11 +278,13 @@ export const OWNER_FIELDS = {
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
     "Security alerts (this project owns the repo's alerts)",
   ],
-  Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work"],
+  Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit", "Objective"],
   Wiki: [
     "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words",
     "Also search your past answers by meaning", "Also search tickets and the CEO's earlier advice by meaning", "Provider address",
     "Model (768 dimensions)", "API key", "Search", "From",
+    // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2259).
+    "Page address",
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
@@ -282,6 +292,8 @@ export const OWNER_FIELDS = {
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Not shown yet",
+    // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2259).
+    "Page address",
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
