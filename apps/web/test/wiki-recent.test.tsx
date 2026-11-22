@@ -43,10 +43,10 @@ describe("wiki Recently changed", () => {
     await waitFor(() => expect(block()).not.toBeNull());
     const links = [...block()!.querySelectorAll("li a")];
     expect(links).toHaveLength(10);
-    expect(links[0].textContent).toContain("Page 11");
-    expect(links[0].textContent).toContain("Research");
-    expect(links[0].textContent).toContain("by Ada");
-    expect(links[9].textContent).toContain("Page 2");
+    expect(links[0]!.textContent).toContain("Page 11");
+    expect(links[0]!.textContent).toContain("Research");
+    expect(links[0]!.textContent).toContain("by Ada");
+    expect(links[9]!.textContent).toContain("Page 2");
   });
 
   it("remembers a collapse, and is hidden while searching", async () => {
