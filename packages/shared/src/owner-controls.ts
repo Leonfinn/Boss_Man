@@ -109,7 +109,7 @@ export const OWNER_CONTROLS = {
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
-  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones"],
+  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change"],
   Plan: [
     "Refresh",
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
@@ -271,7 +271,7 @@ export const OWNER_FIELDS = {
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
     "Security alerts (this project owns the repo's alerts)",
   ],
-  Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work"],
+  Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit"],
   Wiki: [
     "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words",
     "Also search your past answers by meaning", "Also search tickets and the CEO's earlier advice by meaning", "Provider address",

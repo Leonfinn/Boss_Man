@@ -8,8 +8,9 @@ import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { HORIZONS, dateIn } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, objectives } from "../db/schema.js";
+import { companies, keyResults, objectives } from "../db/schema.js";
 import type { feedbackService } from "../services/feedback.js";
+import { WorkError } from "../services/ticket-links.js";
 import { OBJECTIVE_STATUSES, type planningService } from "../services/planning.js";
 import type { workService } from "../services/work.js";
 
@@ -59,6 +60,43 @@ export function objectiveRoutes(
     const { id } = IdParam.parse(req.params);
     const body = z.object({ title: z.string().trim().min(1).max(200), target: z.number().optional(), current: z.number().optional(), unit: z.string().max(20).optional(), method: z.enum(["manual", "agent", "check"]).optional() }).parse(req.body);
     return reply.code(201).send(await work.addKeyResult(id, body));
+  });
+
+  /** The company and title of a key result's objective, for the note the CEO reads (BOS-2250). */
+  const keyResultContext = async (id: string) => {
+    const [k] = await db
+      .select({ title: keyResults.title, companyId: objectives.companyId, objective: objectives.title })
+      .from(keyResults)
+      .innerJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+      .where(eq(keyResults.id, id));
+    if (!k) throw new WorkError(404, "No such key result.");
+    return k;
+  };
+
+  // Same limits as create. current and target can be cleared with null.
+  owner.patch("/api/key-results/:id", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    const body = z
+      .object({ title: z.string().trim().min(1).max(200), target: z.number().nullable(), current: z.number().nullable(), unit: z.string().max(20).nullable() })
+      .partial()
+      .parse(req.body);
+    const before = await keyResultContext(id);
+    if (Object.keys(body).length === 0) {
+      const [same] = await db.select().from(keyResults).where(eq(keyResults.id, id));
+      return same!;
+    }
+    const [k] = await db.update(keyResults).set(body).where(eq(keyResults.id, id)).returning();
+    if (!k) throw new WorkError(404, "No such key result.");
+    await teamCheck(before.companyId, `changed the key result "${before.title}" under the objective "${before.objective}"`);
+    return k;
+  });
+
+  owner.delete("/api/key-results/:id", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const before = await keyResultContext(id);
+    await db.delete(keyResults).where(eq(keyResults.id, id));
+    await teamCheck(before.companyId, `removed the key result "${before.title}" from the objective "${before.objective}"`);
+    return reply.code(204).send();
   });
 
   owner.post("/api/objectives/:id/milestones", async (req, reply) => {

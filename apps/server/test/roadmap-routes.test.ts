@@ -12,6 +12,8 @@ const ID = "00000000-0000-4000-8000-000000000001";
 const ROUTES: Array<["GET" | "POST" | "PATCH" | "DELETE", string]> = [
   ["POST", `/api/companies/${ID}/objectives`],
   ["POST", `/api/objectives/${ID}/key-results`],
+  ["PATCH", `/api/key-results/${ID}`],
+  ["DELETE", `/api/key-results/${ID}`],
   ["POST", `/api/objectives/${ID}/milestones`],
   ["GET", `/api/companies/${ID}/objectives`],
   ["GET", "/api/roadmap"],
