@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { settings } from "../src/db/schema.js";
 import { AGENT_APPROVALS } from "../src/services/agents.js";
 import { APPROVALS_STRICTNESS, CARRIED_SETTING_KEYS, LEFT_OUT_SETTING_KEYS } from "../src/services/company-settings-package.js";
 
@@ -27,7 +28,7 @@ async function setup() {
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
-  return { req };
+  return { req, db };
 }
 
 type Unzipped = Record<string, Uint8Array>;
@@ -40,9 +41,16 @@ const withSettings = (files: Unzipped, name: string, settings: unknown) => ({
 
 describe("company settings in a package (BOS-2242)", () => {
   it("carries approvals, templates, the retro agent and the second opinion, with its key by name only", async () => {
-    const { req } = await setup();
+    const { req, db } = await setup();
     const { company } = (await req("POST", "/api/companies", { name: "Settled Co" })).json() as { company: { id: string } };
     const cid = company.id;
+    // Per-company keys that must stay home: the weekly summary's address, the runner's observed models, alert markers.
+    await db.insert(settings).values([
+      { key: `weekly_summary:${cid}`, value: { enabled: true, to: "owner-private@example.com", lastSentAt: null } },
+      { key: `models:${cid}:claude`, value: ["observed-model-zq7"] },
+      { key: `merge_jam:${cid}`, value: { since: "2026-11-01T00:00:00Z" } },
+      { key: `spend_rate_alerted:${cid}`, value: true },
+    ]);
     const eng = (await req("POST", `/api/companies/${cid}/agents`, { name: "Rhoda", template: "engineer" })).json() as { id: string };
     expect((await req("PUT", `/api/companies/${cid}/agent-approvals`, { approvals: "hires_and_edits" })).statusCode).toBe(200);
     expect((await req("PUT", `/api/companies/${cid}/git-templates`, { commit: "{title} ({ref})", pr: "## {title}\n\n{body}" })).statusCode).toBe(200);
@@ -61,6 +69,7 @@ describe("company settings in a package (BOS-2242)", () => {
     const all = Object.values(files).map((b) => strFromU8(b)).join("\n");
     expect(all).not.toContain(KEY);
     expect(strFromU8(files["settings.json"]!)).not.toContain(secret);
+    for (const left of ["owner-private@example.com", "observed-model-zq7", "weekly_summary", "merge_jam", "spend_rate_alerted", "2026-11-01T00:00:00Z"]) expect(all).not.toContain(left);
 
     const zip = zipOf(files);
     const pre = (await req("POST", "/api/companies/import/preview", { zip, name: "Settled Copy" })).json() as { settings: string[] };
@@ -134,6 +143,13 @@ describe("company settings in a package (BOS-2242)", () => {
     const oldRes = await req("POST", "/api/companies/import", { zip: zipOf(old) });
     expect(oldRes.statusCode).toBe(201);
     expect((oldRes.json() as { checklist: string[] }).checklist.filter((l) => /Agent changes|Second opinion|Workflow retros|message templates/.test(l))).toEqual([]);
+    // All four at their defaults.
+    const oldId = (oldRes.json() as { companyId: string }).companyId;
+    const fresh = (await req("POST", "/api/companies", { name: "Fresh Co" })).json().company.id as string;
+    for (const path of ["agent-approvals", "git-templates", "second-opinion"]) expect((await req("GET", `/api/companies/${oldId}/${path}`)).json()).toEqual((await req("GET", `/api/companies/${fresh}/${path}`)).json());
+    expect((await req("GET", `/api/companies/${oldId}/agent-approvals`)).json()).toEqual({ approvals: "hires" });
+    expect((await req("GET", `/api/companies/${oldId}/second-opinion`)).json()).toMatchObject({ enabled: false });
+    expect((await req("GET", `/api/companies/${oldId}/retro-settings`)).json()).toMatchObject({ agentId: null });
   });
 
   it("names every per-company settings key the server uses as carried or left out", () => {
