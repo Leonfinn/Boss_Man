@@ -140,7 +140,9 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               <strong>The company's own settings.</strong> These come in with it:
               <ul>
                 {(preview.settings ?? []).map((s) => (
-                  <li key={s}>{s}</li>
+                  <li key={s} style={{ whiteSpace: "pre-wrap" }}>
+                    {s}
+                  </li>
                 ))}
               </ul>
             </div>
@@ -241,7 +243,9 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
           <p>{done.name} was imported. What's left (also on the Decisions page):</p>
           <ul>
             {done.checklist.map((x) => (
-              <li key={x}>{x}</li>
+              <li key={x} style={{ whiteSpace: "pre-wrap" }}>
+                {x}
+              </li>
             ))}
           </ul>
           <button type="button" className="btn" onClick={() => go(`settings/${done.companyId}/runner`)}>

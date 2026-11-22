@@ -2,10 +2,10 @@
 // company package carries them: settings.json in the export, screened and applied on import. Every per-company key
 // Boss Man writes is named here, either carried or left out with its reason; a test reads the server's source and fails
 // on a new key that is on neither list, so the next owner choice can't be dropped from the package without anyone deciding.
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, like } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import { secrets, settings } from "../db/schema.js";
+import { secrets, settings, wikiSemanticSettings } from "../db/schema.js";
 import type { AgentApprovals } from "./agents.js";
 import { SecondOpinionSettings } from "./second-opinion.js";
 
@@ -116,6 +116,18 @@ const host = (u: string) => {
   }
 };
 
+/** The hosts this server already sends a secret to: any company's second opinion or semantic wiki search set up with it. */
+async function sentTo(db: Db, secretId: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const so = await db.select({ value: settings.value }).from(settings).where(like(settings.key, `${CARRIED_SETTING_KEYS.secondOpinion}:%`));
+  for (const r of so) {
+    const v = SecondOpinionSettings.safeParse(r.value);
+    if (v.success && v.data.secretId === secretId && v.data.baseUrl) out.add(host(v.data.baseUrl));
+  }
+  for (const w of await db.select({ baseUrl: wikiSemanticSettings.baseUrl }).from(wikiSemanticSettings).where(eq(wikiSemanticSettings.secretId, secretId))) out.add(host(w.baseUrl));
+  return out;
+}
+
 /**
  * What of the package's settings an import applies, and a plain line for each. Pure apart from looking up the
  * second opinion's secret by name on this server, so the preview and the apply agree.
@@ -136,7 +148,9 @@ export async function screenSettings(db: Db, s: PackageSettings, agentSlugs: Arr
   }
 
   const templates = s.gitTemplates && Object.keys(s.gitTemplates).length ? s.gitTemplates : null;
-  if (templates) lines.push(`Commit and PR message templates: ${[templates.commit ? "the commit template" : null, templates.pr ? "the PR template" : null].filter(Boolean).join(" and ")} from the package.`);
+  // Agents get these as instructions on every commit and PR, so the owner reads them word for word, like standing rules (BOS-2246).
+  if (templates?.commit) lines.push(`Commit message template from the package. Agents are given it as an instruction on every commit, so read it:\n${templates.commit}`);
+  if (templates?.pr) lines.push(`PR message template from the package. Agents are given it as an instruction on every pull request, so read it:\n${templates.pr}`);
 
   let retroSlug: string | null = null;
   if (s.retroAgent) {
@@ -151,11 +165,21 @@ export async function screenSettings(db: Db, s: PackageSettings, agentSlugs: Arr
   if (s.secondOpinion) {
     const { baseUrl, model, secret } = s.secondOpinion;
     const [found] = secret ? await db.select({ id: secrets.id }).from(secrets).where(eq(secrets.name, secret)) : [];
-    secondOpinion = { baseUrl, model, secretId: found?.id ?? null };
+    // Secrets are server-wide and the package picks both the name and the address, so a package from outside could pair a
+    // common name with an address of its choosing (BOS-2246). The existing key is linked only when the owner already sends
+    // it to that same host; otherwise it stays unlinked and the owner is told which secret and which host the package named.
+    const to = baseUrl ? host(baseUrl) : "";
+    const linked = !!found && !!to && (await sentTo(db, found.id)).has(to);
+    secondOpinion = { baseUrl, model, secretId: linked ? found!.id : null };
     // It can allow permission cards, so it never comes in on: the owner looks at the address and model first.
-    const what = [model ? `model ${model}` : null, baseUrl ? `at ${host(baseUrl)}` : null].filter(Boolean).join(" ");
+    const what = [model ? `model ${model}` : null, to ? `at ${to}` : null].filter(Boolean).join(" ");
     lines.push(`Second opinion on permission cards: comes in switched off${what ? `, set to ${what}` : ""}. Check it, then switch it on in Settings → Permissions → Second opinion.`);
-    if (secret && !found) todo.push(`Add the secret "${secret}" and pick it as the second opinion's key in Settings → Permissions → Second opinion.`);
+    if (linked) lines.push(`The second opinion's key is your existing secret "${secret}", which you already use with ${to}. Switching it on, or pressing Test, sends that key to ${to}.`);
+    else if (found)
+      todo.push(
+        `The package names your existing secret "${secret}" as the second opinion's key${to ? ` for ${to}` : ""}. It was not linked, because you don't use that secret with ${to || "that address"} anywhere yet. Only if you trust ${to || "the address"}, pick it as the key in Settings → Permissions → Second opinion: switching it on sends that key there.`,
+      );
+    else if (secret) todo.push(`Add the secret "${secret}" and pick it as the second opinion's key in Settings → Permissions → Second opinion.`);
   }
   return { approvals, templates, retroSlug, secondOpinion, lines, todo };
 }
