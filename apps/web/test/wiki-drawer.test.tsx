@@ -80,7 +80,8 @@ describe("wiki page list drawer", () => {
   it("keeps the list as it is, with no menu button, on a desktop width", async () => {
     setup(1400);
     render(<Wiki companies={[company]} companyId="c1" slug="research/one" go={() => {}} />);
-    await screen.findByRole("link", { name: /Top/ });
+    // "Top" is in both the Recently changed list and the folder tree.
+    await screen.findAllByRole("link", { name: /Top/ });
     expect(screen.queryByRole("button", { name: "Show pages" })).toBeNull();
     expect(screen.getByLabelText("Pages").className).not.toContain("wiki-drawer");
   });
