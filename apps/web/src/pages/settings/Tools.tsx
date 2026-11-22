@@ -3,6 +3,12 @@ import { api, ApiError, type Company, type Project } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
+import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
+
+/** Plain words for the codes the server stores. The tables and the add forms both read these, so they can't drift apart. */
+const TRANSPORT_LABEL = { http: "Streamable HTTP", sse: "SSE" } as const;
+const KIND_LABEL = { ssh: "SSH host", docker: "Docker endpoint", git: "Git remote" } as const;
 
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean; secretRefused?: boolean };
 
@@ -35,7 +41,9 @@ export function ToolServers({ company }: { company: Company }) {
       <p className="muted" style={{ fontSize: 14 }}>
         Servers apply from the next run. An agent only gets a server if it has been given the server's token secret.
       </p>
-      {servers.data?.length ? (
+      {!servers.data ? (
+        servers.error ? <LoadError what="the tool servers" message={servers.error.message} onRetry={servers.reload} /> : <Loader label="Loading the tool servers" />
+      ) : servers.data.length ? (
         <div className="table-wrap">
           <table>
             <thead>
@@ -54,7 +62,7 @@ export function ToolServers({ company }: { company: Company }) {
                 <tr key={m.id}>
                   <td className="mono">{m.name}</td>
                   <td className="mono">{m.url}</td>
-                  <td>{m.transport}</td>
+                  <td>{TRANSPORT_LABEL[m.transport] ?? m.transport}</td>
                   <td>
                     <span className="mono">{m.secretEnv ?? "none"}</span>
                     {m.secretRefused && <span className="tag red" style={{ marginLeft: 6 }}>Left out of every run: {m.secretEnv} is the git login, which agents may never hold. Give this server its own token.</span>}
@@ -85,8 +93,11 @@ export function ToolServers({ company }: { company: Company }) {
         <div className="field">
           <label htmlFor="mcp-transport">Transport</label>
           <select id="mcp-transport" value={form.transport} onChange={set("transport")}>
-            <option value="http">Streamable HTTP</option>
-            <option value="sse">SSE</option>
+            {(Object.keys(TRANSPORT_LABEL) as (keyof typeof TRANSPORT_LABEL)[]).map((k) => (
+              <option key={k} value={k}>
+                {TRANSPORT_LABEL[k]}
+              </option>
+            ))}
           </select>
         </div>
         <div className="field">
@@ -162,7 +173,13 @@ export function PenpotSettings({ company }: { company: Company }) {
   const act = useAction();
   const [edit, setEdit] = useState<{ url: string; token: string; email: string; password: string; agentIds: string[]; exportAgentIds: string[] } | null>(null);
   const v = q.data;
-  if (!v) return null;
+  if (!v) {
+    return (
+      <Section id="penpot-h" title="Penpot">
+        {q.error ? <LoadError what="the Penpot setting" message={q.error.message} onRetry={q.reload} /> : <Loader label="Loading the Penpot setting" />}
+      </Section>
+    );
+  }
   const start = () => setEdit({ url: v.url ?? "", token: "", email: "", password: "", agentIds: v.agentIds, exportAgentIds: v.exportAgentIds });
   const f = edit;
   const set = (k: "url" | "token" | "email" | "password") => (e: { target: { value: string } }) => f && setEdit({ ...f, [k]: e.target.value });
@@ -369,7 +386,9 @@ export function DeployTargets({ company }: { company: Company }) {
       <p className="muted" style={{ fontSize: 14 }}>
         Where agents ship work. A deploy to a production target, or to one that requires approval, waits for you in Decisions. Only the run carrying out an approved deploy gets the target's secrets (grant them on the Secrets page, "only for deploys to …").
       </p>
-      {targets.data?.length ? (
+      {!targets.data ? (
+        targets.error ? <LoadError what="the deploy targets" message={targets.error.message} onRetry={targets.reload} /> : <Loader label="Loading the deploy targets" />
+      ) : targets.data.length ? (
         <div className="table-wrap">
           <table>
             <thead>
@@ -392,7 +411,7 @@ export function DeployTargets({ company }: { company: Company }) {
                     {t.isProduction && <span className="tag amber" style={{ marginLeft: 6 }}>production</span>}
                   </td>
                   <td>
-                    <span className="muted">{t.kind}</span> <span className="mono">{t.endpoint}</span>
+                    <span className="muted">{KIND_LABEL[t.kind] ?? t.kind}</span> <span className="mono">{t.endpoint}</span>
                   </td>
                   <td>{t.isProduction || t.rules.requiresApproval ? "You approve each deploy" : "Starts straight away"}</td>
                   <td>
@@ -436,7 +455,7 @@ export function DeployTargets({ company }: { company: Company }) {
           </table>
         </div>
       ) : (
-        targets.data && <p className="muted" style={{ fontSize: 14 }}>No deploy targets yet: agents can't deploy until you add one.</p>
+        <p className="muted" style={{ fontSize: 14 }}>No deploy targets yet: agents can't deploy until you add one.</p>
       )}
       <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 10 }} aria-labelledby="deploy-target-form-h">
         <h3 id="deploy-target-form-h" style={{ fontSize: 15, fontWeight: 600 }}>
@@ -450,9 +469,11 @@ export function DeployTargets({ company }: { company: Company }) {
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             Kind
             <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as DeployTargetRow["kind"] })}>
-              <option value="ssh">SSH host</option>
-              <option value="docker">Docker endpoint</option>
-              <option value="git">Git remote</option>
+              {(Object.keys(KIND_LABEL) as DeployTargetRow["kind"][]).map((k) => (
+                <option key={k} value={k}>
+                  {KIND_LABEL[k]}
+                </option>
+              ))}
             </select>
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: "1 1 260px" }}>
