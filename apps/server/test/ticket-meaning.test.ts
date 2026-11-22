@@ -10,7 +10,7 @@ import { buildApp } from "../src/app.js";
 import { issueRunToken } from "../src/mcp.js";
 import { openPglite } from "../src/db/client.js";
 import { meaningEmbeddings, ownerChatMessages, ticketMessages, tickets } from "../src/db/schema.js";
-import { embedMissingMeaning, meaningBriefLines, ticketMeaningSearch } from "../src/services/ticket-meaning.js";
+import { describeMeaningTicket, embedMissingMeaning, meaningBriefLines, ticketMeaningSearch, type MeaningTicket } from "../src/services/ticket-meaning.js";
 import type { Embedder } from "../src/services/wiki-semantic.js";
 
 const DIMS = 768;
@@ -219,5 +219,32 @@ describe("create_ticket with meaning search switched on (BOS-2116)", () => {
     // A different ask is unaffected, and the reason path still works.
     expect((await c.create({ title: "Invoice billing payments", body: "x" })).error).toBe(false);
     expect((await c.create({ title: "Show a Waiting for check label on cards", notDuplicateReason: "It is the card label, not the section" })).error).toBe(false);
+  });
+});
+
+describe("describeMeaningTicket: one line for a create_ticket refusal", () => {
+  const ticket = (over: Partial<MeaningTicket> = {}): MeaningTicket => ({
+    id: "11111111-1111-4111-8111-111111111111",
+    ref: "EXA-12",
+    title: "Add a waiting badge",
+    state: "in_progress",
+    merged: false,
+    live: false,
+    score: 0.7123,
+    ...over,
+  });
+
+  it("writes the ref, title, state and a rounded percentage", () => {
+    expect(describeMeaningTicket(ticket())).toBe('- EXA-12 "Add a waiting badge" (in_progress); same idea in other words, 71% match by meaning');
+  });
+
+  it("falls back to the id with no ref, adds merged and live words, and rounds up at the edge", () => {
+    expect(describeMeaningTicket(ticket({ ref: null, state: "done", merged: true, live: true, score: 0.995 }))).toBe(
+      '- 11111111-1111-4111-8111-111111111111 "Add a waiting badge" (done, merged, live); same idea in other words, 100% match by meaning',
+    );
+  });
+
+  it("leaves out a blank state word and shows zero as 0%", () => {
+    expect(describeMeaningTicket(ticket({ state: "", score: 0 }))).toBe('- EXA-12 "Add a waiting badge" (); same idea in other words, 0% match by meaning');
   });
 });

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { companies, costEvents, fundingSources, runs } from "../src/db/schema.js";
-import { backInBandReason, BACK_IN_BAND_RUNS, checkEndedRun, raiseCostAlert, summarizeCostChecks } from "../src/services/cost-check.js";
+import { backInBandReason, BACK_IN_BAND_RUNS, checkEndedRun, costCheckKey, raiseCostAlert, summarizeCostChecks } from "../src/services/cost-check.js";
 import { clearWhenOf } from "../src/services/alert-clearing.js";
 
 let db: Awaited<ReturnType<typeof openPglite>>["db"];
@@ -91,5 +91,17 @@ describe("the CEO alert", () => {
       if (i < BACK_IN_BAND_RUNS - 1) expect(await backInBandReason(db, companyId, cardAt)).toBeNull();
     }
     expect(await backInBandReason(db, companyId, cardAt)).toMatch(/in line/);
+  });
+});
+
+describe("costCheckKey: one alert key per company", () => {
+  it("names the company in the key", () => {
+    expect(costCheckKey("8a5f1c2e-0000-4000-8000-000000000001")).toBe("cost-out-of-band:8a5f1c2e-0000-4000-8000-000000000001");
+  });
+
+  it("keeps the id exactly as given, so two companies never share a key", () => {
+    expect(costCheckKey("example-co")).toBe("cost-out-of-band:example-co");
+    expect(costCheckKey("")).toBe("cost-out-of-band:");
+    expect(costCheckKey("example-co")).not.toBe(costCheckKey("example-co-2"));
   });
 });
