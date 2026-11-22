@@ -14,6 +14,7 @@ import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
 import { Loader } from "./Loader";
+import { LoadError } from "./LoadError";
 import { stopRun } from "../stop-run";
 
 type Message = {
@@ -314,6 +315,20 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
               </p>
             )}
           </div>
+        )}
+        {!convo.data && !convo.error && <Loader label="Loading the conversation" />}
+        {!convo.data && convo.error && (
+          <LoadError
+            what="the conversation"
+            message={convo.error.message}
+            onRetry={() => {
+              convo.reload();
+              runs.reload();
+            }}
+          />
+        )}
+        {convo.data && !runs.data && runs.error && (
+          <LoadError what="the runs" message={runs.error.message} onRetry={runs.reload} />
         )}
         {feed.length === 0 && convo.data && <p className="muted">No activity yet. When an agent works on this task, you'll see what it's doing here, and you can talk to it below.</p>}
         {feed.map(({ key, m, r, mark }) =>
