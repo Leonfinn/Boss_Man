@@ -88,6 +88,37 @@ describe("the CEO sees the whole Decisions queue (BOS-149)", () => {
     expect(list).toContain("Steps for the owner:");
     expect(list).toContain("Pin the approved commit with this command / Apply it with this command");
   });
+
+  it("read by id shows a card's steps and what was tried first, like the list (BOS-2211)", async () => {
+    const c = (ctx = await setup());
+    const ceo = await c.mcp(c.ceo.id);
+    const [hand] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "approval", question: "Main has moved to b07c5beb.", options: ["Approve", "Not now"], recommendedOption: "Approve", tier: "owner", context: { type: "self_deploy", target: "server", commit: "b".repeat(40), infra: true, steps: ["Old plain step"], handSteps: ["Pin the approved commit with this command", "Apply it with this command"] } })
+      .returning();
+    const read = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "read", id: hand!.id } }));
+    // handSteps win over steps, inside the untrusted wrapper.
+    expect(read).toMatch(/Steps for the owner: <untrusted[^>]*>[\s\S]*Pin the approved commit with this command \/ Apply it with this command/);
+    expect(read).not.toContain("Old plain step");
+
+    const [plain] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Add the key?", options: ["Done", "Not now"], recommendedOption: "Done", tier: "owner", context: { triedFirst: "Looked for it in the vault.", steps: ["Open Settings", "Paste the key"] } })
+      .returning();
+    const read2 = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "read", id: plain!.id } }));
+    expect(read2).toContain("What was tried first:");
+    expect(read2).toContain("Looked for it in the vault.");
+    expect(read2).toContain("Steps for the owner:");
+    expect(read2).toContain("Open Settings / Paste the key");
+
+    const [bare] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Which colour?", options: ["Red", "Blue"], recommendedOption: "Red", tier: "owner", context: {} })
+      .returning();
+    const read3 = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "read", id: bare!.id } }));
+    expect(read3).not.toContain("Steps for the owner:");
+    expect(read3).not.toContain("What was tried first:");
+  });
 });
 
 describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
