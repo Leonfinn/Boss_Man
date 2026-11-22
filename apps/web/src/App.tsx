@@ -13,6 +13,7 @@ import { lazyPage, PageSuspense } from "./lazy-page";
 import { settingsRedirect } from "./pages/settings-redirect";
 import { atTime, drainTiming, waitingFor, wrapUpBannerText, type RunnerCheckView } from "./pages/settings/updates";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
+import { SearchPalette } from "./components/SearchPalette";
 
 // BOS-1843: every page below loads when it is first opened. Login, the shell and the banners stay in the entry file.
 const Board = lazyPage(() => import("./pages/Board"), "Board");
@@ -398,6 +399,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
+      <SearchPalette companyId={companyId} go={go} />
       <main>
         <UpdateBanner m={maintenance.data} />
         <HoldBanner />
@@ -408,7 +410,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         {redirect ? null : page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
-          <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
+          <ChatPage companies={list} companyId={companyId} agentId={route[2]} messageId={route[3]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "agents" ? (

@@ -38,6 +38,8 @@ export const OWNER_CONTROLS = {
     "Resuming",
     // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
     "More about this",
+    // The search box (Ctrl+K) and its sidebar button (BOS-2192).
+    "Search", "Close",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
