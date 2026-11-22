@@ -73,6 +73,37 @@ describe("changing an objective on the Roadmap (BOS-2254)", () => {
     expect(calls).toEqual([]);
   });
 
+  it("Mark done, Remove and Reopen still send only the status", async () => {
+    const calls = stub();
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
+    await screen.findByText("Lanch the beta");
+    const card = () => screen.getByText("Grow sales").closest("article")!;
+    fireEvent.click(within(card()).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(within(card()).getByRole("button", { name: "Reopen" })).toBeTruthy());
+    fireEvent.click(within(card()).getByRole("button", { name: "Reopen" }));
+    await waitFor(() => expect(within(card()).getByRole("button", { name: "Mark done" })).toBeTruthy());
+    fireEvent.click(within(card()).getByRole("button", { name: "Mark done" }));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls.map((c) => c.body)).toEqual([{ status: "dropped" }, { status: "active" }, { status: "done" }]);
+    expect(calls.every((c) => c.url === "/api/objectives/o2")).toBe(true);
+  });
+
+  it("an empty title can't be saved", async () => {
+    const calls = stub();
+    render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);
+    await screen.findByText("Lanch the beta");
+    fireEvent.click(screen.getByRole("button", { name: "Change the objective Lanch the beta" }));
+    const form = screen.getByLabelText("Objective").closest("form")!;
+    expect((within(form).getByLabelText("Objective") as HTMLInputElement).required).toBe(true);
+    fireEvent.change(within(form).getByLabelText("Objective"), { target: { value: "   " } });
+    fireEvent.submit(form);
+
+    expect(within(form).getByText("Give the objective a name.")).toBeTruthy();
+    expect(headings()).toEqual(["P1 Lanch the beta", "P2 Grow sales"]);
+    expect(calls).toEqual([]);
+  });
+
   it("a server error shows beside the form and keeps it open", async () => {
     stub(() => json({ error: "That objective was deleted" }, 404));
     render(<Roadmap companies={[company]} tab="timeline" go={() => {}} />);

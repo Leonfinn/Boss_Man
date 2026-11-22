@@ -286,6 +286,8 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
   const open = () => (setTitle(o.title), setPriority(o.priority), setError(null), setEditing(true));
   const save = (e: FormEvent) => {
     e.preventDefault();
+    // `required` lets a title of only spaces through; it would trim to "" on the server.
+    if (!title.trim()) return setError("Give the objective a name.");
     void api(`/api/objectives/${o.id}`, { method: "PATCH", body: { title: title.trim(), priority } }).then(
       () => (setEditing(false), onChanged()),
       (err: Error) => setError(err.message),
