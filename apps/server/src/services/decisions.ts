@@ -24,6 +24,7 @@ import {
   recommendedVerdict,
   isJudgeable,
   judgePermission,
+  selfSetVariableRefusal,
   commandOf,
   type JudgeReading,
   type PermissionJudgeMode,
@@ -1822,6 +1823,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) {
           record(null, "allow", `Same tool call as decision ${earlier}, already allowed`);
           return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+        }
+      }
+      // BOS-2244 (R58): a command that is unreadable only because it runs a program through a variable it set itself in the same
+      // command (`G="git -C $R"; $G grep x`) is refused at once, with the rewrite, and raises no card: nobody approves these.
+      // Anything else about the command (another risk, `read`, `$(...)`, a variable set twice) keeps its card.
+      if (outcome !== "allow" && outcome !== "deny" && event.kind === "execute") {
+        const shell = (event.rawInput as Record<string, unknown> | null)?.["command"];
+        const refusal = typeof shell === "string" ? selfSetVariableRefusal(shell) : null;
+        if (refusal) {
+          // The text goes first, so the agent picks it up as its next turn, as with a plan that wasn't approved.
+          send(runner.id, { type: "run.message", runId: event.runId, text: refusal, interrupt: false });
+          const ruleName = "A command that runs a program through a variable it set itself is refused";
+          record(null, "deny", ruleName);
+          if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "deny" })) return { outcome: "deny" as const, rule: ruleName, decisionId: null };
+          // The runner dropped off: carry on to the usual card, so the verdict is not lost.
         }
       }
       // BOS-376: the same tool call can come back as a new request (a harness retry, or a second run of the
