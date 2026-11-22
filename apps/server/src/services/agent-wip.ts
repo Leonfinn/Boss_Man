@@ -170,11 +170,14 @@ export function setStartHoldCounts(fn: StartHoldCounts | null): void {
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * BOS-2196: what passes the owner-wait hold (and only that one; the merge and check limits keep their urgent-only rule):
- * an urgent ticket, one that fixes a live problem (`fixesLive`, as in BOS-2088), or one assigned to the CEO. Work already
- * started (review fixes, owner replies) never reaches a start hold at all (`wasStarted`).
+ * What passes every start limit of queueStartHold: merges waiting, quick checks queued and cards that need the owner
+ * (BOS-2196, BOS-2201: one rule for all three, so they can't drift apart; don't add a per-limit exemption beside it).
+ * An urgent ticket, one that fixes a live problem (`fixesLive`, as in BOS-2088: it must reach the next deploy, not wait
+ * behind a merge jam), or one assigned to the CEO (mostly no-code trackers such as the merge shepherd, which add no
+ * merges and are needed most when the line is jammed). Work already started (review fixes, owner replies) never reaches
+ * a start hold at all (`wasStarted`).
  */
-async function ownerHoldExempt(db: Db, t: Pick<typeof tickets.$inferSelect, "urgent" | "fixesLive" | "assigneeAgentId">): Promise<boolean> {
+export async function startHoldExempt(db: Db, t: Pick<typeof tickets.$inferSelect, "urgent" | "fixesLive" | "assigneeAgentId">): Promise<boolean> {
   if (t.urgent || !!t.fixesLive?.trim()) return true;
   if (!t.assigneeAgentId) return false;
   const [a] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, t.assigneeAgentId));
@@ -189,12 +192,10 @@ async function ownerHoldExempt(db: Db, t: Pick<typeof tickets.$inferSelect, "urg
 export async function queueStartHold(db: Db, t: Pick<typeof tickets.$inferSelect, "companyId" | "urgent" | "fixesLive" | "assigneeAgentId">): Promise<WipHold | null> {
   if (!startHoldCounts) return null;
   const [c] = await db.select({ merges: companies.holdStartsMergesWaiting, checks: companies.holdStartsQuickChecksQueued, owner: companies.holdStartsOwnerWaiting }).from(companies).where(eq(companies.id, t.companyId));
-  if (!c) return null;
-  // An urgent ticket carries on over the merge and check limits (BOS-1489); the owner limit has its own wider rule.
-  const merges = t.urgent ? null : c.merges;
-  const checks = t.urgent ? null : c.checks;
-  const owner = c.owner != null && !(await ownerHoldExempt(db, t)) ? c.owner : null;
-  if (merges == null && checks == null && owner == null) return null;
+  if (!c || (c.merges == null && c.checks == null && c.owner == null)) return null;
+  // One exemption for all three limits (BOS-2201), read only when a limit is on.
+  if (await startHoldExempt(db, t)) return null;
+  const { merges, checks, owner } = c;
   const counts = await startHoldCounts(t.companyId, { owner: owner != null });
   const parts: string[] = [];
   let limit = 0;
@@ -237,7 +238,7 @@ export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect, opts:
   if (hold && t.urgent) return { hold: null, urgentOver: true };
   // The queue hold (BOS-1489) is checked first and named first: a long merge line is why nothing starts, whatever the agent's own room.
   // An urgent ticket carries on, as it does over a WIP limit; work already started never reaches here (wasStarted above).
-  // BOS-2196: queueStartHold applies each limit's own exemptions (urgent for merges and checks; urgent, live-fix and CEO for the owner's).
+  // BOS-2201: queueStartHold lets urgent, live-fix and CEO tickets past all three of its limits (startHoldExempt).
   const queue = await queueStartHold(db, t);
   if (queue) return { hold: queue, urgentOver: false };
   // BOS-1908: the agent is running another ticket, so a start for it waits as its Next up. A limit's own hold above wins; an urgent

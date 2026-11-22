@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
-import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, parseRepoUrl, ticketRef, type MergeResult, type WorkspaceDiff } from "@boss-man/shared";
+import { BULK_TICKET_MAX, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, parseRepoUrl, ticketRef, type MergeResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { OWNER_MESSAGE_MAX, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
@@ -2397,6 +2397,14 @@ export async function buildApp(opts: AppOptions) {
       return { ok: true, priorityOne: on, tickets: changed.length };
     });
 
+    // What follows an owner's hand move, for the single route and the bulk one (BOS-2193).
+    const afterOwnerMove = async (id: string, state: string, label: string, moved: { assigneeAgentId: string | null }) => {
+      // Nobody should start work on a ticket the owner has parked or closed.
+      if (state === "done" || state === "backlog" || state === "blocked")
+        await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
+      if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
+    };
+
     // The owner moves a ticket by hand (e.g. to unstick it). Done skips the merge: it is the owner's call.
     owner.post("/api/tickets/:id/state", async (req) => {
       const { id } = IdParam.parse(req.params);
@@ -2408,11 +2416,47 @@ export async function buildApp(opts: AppOptions) {
       const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
       // One move, one history line, and a review round only on a real move into review (DR-010, DR-047): moveTicket does all three.
       const moved = await work.updateTicket(id, { state, moveReason: `Owner moved it to ${label}`, reviewRound: "new", ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
-      // Nobody should start work on a ticket the owner has parked or closed.
-      if (state === "done" || state === "backlog" || state === "blocked")
-        await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
-      if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
+      await afterOwnerMove(id, state, label, moved);
       return moved;
+    });
+
+    // BOS-2193: the owner's Board "Select" bar applies one action to up to 100 tickets. Each ticket goes through the same code as the
+    // single-ticket routes, one after another, so anything one ticket refuses is refused for that ticket only. Moves to In progress,
+    // Review or Done are not offered here: those need the agent's own checks.
+    owner.post("/api/tickets/bulk", async (req) => {
+      const body = z.object({
+        ids: z.array(Uuid).min(1).max(BULK_TICKET_MAX),
+        action: z.discriminatedUnion("type", [
+          z.object({ type: z.literal("move"), state: z.enum(["backlog", "ready", "blocked"]) }),
+          z.object({ type: z.literal("assign"), assigneeAgentId: Uuid.nullable() }),
+          z.object({ type: z.literal("priority"), on: z.boolean() }),
+        ]),
+      }).parse(req.body);
+      const done: { id: string; ref: string | null }[] = [];
+      const refused: { id: string; ref: string | null; reason: string }[] = [];
+      for (const id of [...new Set(body.ids)]) {
+        const [row] = await db.select({ number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, id));
+        const ref = row ? ticketRef(row.prefix, row.number) : null;
+        try {
+          if (!row) throw new WorkError(404, "No such ticket.");
+          const a = body.action;
+          if (a.type === "move") {
+            const label = ({ backlog: "Backlog", ready: "Ready", blocked: "Blocked" } as Record<string, string>)[a.state]!;
+            const moved = await work.updateTicket(id, { state: a.state, moveReason: `Owner moved it to ${label}`, reviewRound: "new", ...(a.state === "blocked" ? { blockedUntil: null, blockedUntilReason: null } : {}) });
+            await afterOwnerMove(id, a.state, label, moved);
+          } else if (a.type === "assign") {
+            await work.updateTicket(id, { assigneeAgentId: a.assigneeAgentId });
+          } else {
+            const updated = await work.updateTicket(id, { urgent: a.on, urgentByOwner: a.on });
+            if (a.on) retierWaiting(updated.projectId, id, 0);
+          }
+          done.push({ id, ref });
+        } catch (err) {
+          if (!(err instanceof WorkError)) throw err;
+          refused.push({ id, ref, reason: err.message });
+        }
+      }
+      return { done, refused };
     });
 
     // A watcher agent that reports the ticket's progress every so often (R80); agentId null turns it off.

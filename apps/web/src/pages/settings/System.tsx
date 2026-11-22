@@ -633,7 +633,7 @@ function HoldStarts({ v, onChange }: { v: { merges: string; checks: string; owne
         <label htmlFor="hold-merges">Hold new starts while this many merges are waiting (leave empty for off)</label>
         <input id="hold-merges" type="number" min={1} max={1000} placeholder="Off" value={v.merges} onChange={(e) => setEdit({ ...v, merges: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>
-          Off by default. While at least this many approved tickets wait in the merge line (the figure on the Merge queue page), a Ready ticket is not started: it shows "Held: 31 merges waiting (limit 20)" and starts by itself when the line is shorter. Work already in progress, reviews, sent-back work, merges, after-merge checks and urgent tickets carry on.
+          Off by default. While at least this many approved tickets wait in the merge line (the figure on the Merge queue page), a Ready ticket is not started: it shows "Held: 31 merges waiting (limit 20)" and starts by itself when the line is shorter. Work already in progress, reviews, sent-back work, merges, after-merge checks, urgent and live-fix tickets, and the CEO's own tickets carry on.
         </p>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>

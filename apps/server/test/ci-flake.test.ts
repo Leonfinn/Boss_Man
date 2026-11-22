@@ -8,6 +8,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   CANT_RERUN_EXIT,
+  describeSlow,
   flakeDecision,
   gateRerunCommand,
   GATE_RERUN_MARK,
@@ -17,12 +18,14 @@ import {
   repoRelative,
   RETRIES_PER_WEEK,
   retryCounts,
+  retryRowFiles,
   SAFE_TEST_PATH,
   SLOW_RETRIES_PER_WEEK,
   slowJobs,
   slowRetryCounts,
   type FlakeFacts,
   type SlowEvidence,
+  type SlowJob,
 } from "../src/services/ci-flake.js";
 import { GATE_RERUN_COLOURED, JSON_PASSED, OLD_PASS_GREP } from "./fixtures/vitest-gate-output.js";
 
@@ -158,6 +161,55 @@ describe("BOS-2082: a slow GitHub machine gets one retry, whatever the file coun
     const rows = ["slow machine: web-browser", "slow machine: web-browser\nslow machine: check", "apps/server/test/a.test.ts", null];
     expect([...slowRetryCounts(rows).entries()].sort()).toEqual([["check", 1], ["web-browser", 2]]);
     expect([...retryCounts(rows).entries()]).toEqual([["apps/server/test/a.test.ts", 1]]);
+  });
+});
+
+describe("describeSlow", () => {
+  it("says nothing when no job is slow", () => {
+    expect(describeSlow([])).toBe("");
+  });
+
+  it("gives one line per slow job: its step, how long it took, the usual time and how many runs that came from", () => {
+    expect(describeSlow([{ job: "web-browser", step: "Web tests in a real browser", seconds: 698, median: 268, runs: 8 }])).toBe(
+      `web-browser's "Web tests in a real browser" step took 698 s against a usual 268 s (median of 8 green runs)`,
+    );
+  });
+
+  it("joins several slow jobs with a semicolon and a space, in the order given", () => {
+    const jobs: SlowJob[] = [
+      { job: "check", step: "Tests", seconds: 2400, median: 900, runs: 3 },
+      { job: "web-browser", step: "Web tests in a real browser", seconds: 698, median: 268, runs: 8 },
+    ];
+    expect(describeSlow(jobs)).toBe(
+      `check's "Tests" step took 2400 s against a usual 900 s (median of 3 green runs); ` +
+        `web-browser's "Web tests in a real browser" step took 698 s against a usual 268 s (median of 8 green runs)`,
+    );
+  });
+
+  it("leaves a job or step name's own quotes and punctuation as they are", () => {
+    expect(describeSlow([{ job: "check (arm64)", step: `a "quoted" step, really`, seconds: 0, median: 0, runs: 3 }])).toBe(
+      `check (arm64)'s "a "quoted" step, really" step took 0 s against a usual 0 s (median of 3 green runs)`,
+    );
+  });
+});
+
+describe("retryRowFiles", () => {
+  it("reads nothing from a missing, empty or blank detail line", () => {
+    expect(retryRowFiles(null)).toEqual([]);
+    expect(retryRowFiles("")).toEqual([]);
+    expect(retryRowFiles("\n\n")).toEqual([]);
+  });
+
+  it("reads one path, and several paths in the order the row has them", () => {
+    expect(retryRowFiles("apps/server/test/a.test.ts")).toEqual(["apps/server/test/a.test.ts"]);
+    expect(retryRowFiles("apps/server/test/b.spec.tsx\npackages/@scope/x.test.mjs")).toEqual(["apps/server/test/b.spec.tsx", "packages/@scope/x.test.mjs"]);
+  });
+
+  it("drops blank and unsafe lines, and keeps duplicates (retryCounts is what counts each file once per row)", () => {
+    expect(retryRowFiles("apps/server/test/a.test.ts\n\n$(id).test.ts\n../x.test.ts\napps/server/test/a.test.ts")).toEqual([
+      "apps/server/test/a.test.ts",
+      "apps/server/test/a.test.ts",
+    ]);
   });
 });
 

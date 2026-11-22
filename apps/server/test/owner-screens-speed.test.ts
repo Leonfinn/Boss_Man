@@ -99,15 +99,24 @@ describe("fieldMentions speed (BOS-2124)", () => {
     const small = text(10);
     const big = text(40);
     // A different text each time, so no run reuses work from another (the step lint remembers whole steps).
+    // BOS-2212: this counts the process's CPU time, not the wall clock. On 22 Nov a GitHub run, with other test files
+    // running beside this one, gave 2.7 ms and 23.1 ms (ratio 8.6) from the best of 5; under a shared CPU the long run
+    // always loses a time slice that the short one fits between, so wall time grows faster than the work. CPU time
+    // leaves out the time spent waiting for a CPU. Warm-up first (JIT), then the best of many alternating runs.
     const time = (s: string, i: number) => {
       const fresh = `${s}\n${i}`;
-      const t = performance.now();
+      const t = process.cpuUsage();
       fieldMentions(fresh);
-      return performance.now() - t;
+      const d = process.cpuUsage(t);
+      return (d.user + d.system) / 1000;
     };
+    for (let i = 0; i < 3; i++) {
+      time(small, -1 - i);
+      time(big, -1 - i);
+    }
     let smallMs = Infinity;
     let bigMs = Infinity;
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 25; i++) {
       smallMs = Math.min(smallMs, time(small, i));
       bigMs = Math.min(bigMs, time(big, i));
     }

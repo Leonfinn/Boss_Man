@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { companies } from "../src/db/schema.js";
 import { mergeJamService } from "../src/services/merge-jam.js";
-import { heldText, mergeLineHealth, pausedText, slowText, type HealthInput } from "../src/services/merge-line-health.js";
+import { fixText, heldText, mergeLineHealth, pausedText, slowText, type HealthInput } from "../src/services/merge-line-health.js";
 
 // BOS-1594: the one verdict on the merge line. Stuck (nothing landing, or a fault) pages; over capacity (landing, slowly) never does.
 
@@ -184,5 +184,35 @@ describe("mergeLineHealth: a deliberate pause (R44)", () => {
     expect(sent).toHaveLength(0);
     expect(co).toBeTruthy();
     await close();
+  });
+});
+
+// fixText words a held fix and its state. The problem kinds (check_too_long, gate_fault, empty_seat, no_landing,
+// fix_stalled) are worded in mergeLineHealth's own title/reason above, not here, so they have no fixText case.
+describe("fixText", () => {
+  const fix = (extra: Record<string, unknown> = {}) => ({ ticketId: "f", ref: "X-9", title: "Fix main", stateText: "in review", ownerUpdate: false, stalled: null, ...extra }) as never;
+
+  it("names the fix by its ref and words its state", () => {
+    expect(fixText(fix())).toBe("X-9 (in review)");
+    for (const [stateText, expected] of [
+      ["merged, waiting for the CEO to mark it live", "X-9 (merged, waiting for the CEO to mark it live)"],
+      ["merge check running, 12 min", "X-9 (merge check running, 12 min)"],
+      ["waiting for GitHub CI, 20 min", "X-9 (waiting for GitHub CI, 20 min)"],
+      ["approved, waiting to land, 5 min", "X-9 (approved, waiting to land, 5 min)"],
+      ["sent back for changes", "X-9 (sent back for changes)"],
+      ["being fixed", "X-9 (being fixed)"],
+      ["blocked", "X-9 (blocked)"],
+      ["not started", "X-9 (not started)"],
+      ["merged", "X-9 (merged)"],
+    ] as const)
+      expect(fixText(fix({ stateText }))).toBe(expected);
+  });
+
+  it("falls back to the quoted title while there is no ref", () => {
+    expect(fixText(fix({ ref: null, title: "Fix main after the gate broke" }))).toBe('"Fix main after the gate broke" (in review)');
+  });
+
+  it("passes an unknown state through as given, so a new one is never swallowed", () => {
+    expect(fixText(fix({ ref: null, title: "Fix", stateText: "parked for a new round" }))).toBe('"Fix" (parked for a new round)');
   });
 });

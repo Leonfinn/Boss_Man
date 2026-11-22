@@ -10,6 +10,7 @@ import { when } from "./Runs";
 import { atTime } from "./settings/updates";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -104,6 +105,62 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
           ? "Swapping the runners now, back in a moment. New messages are saved and answered when it is done."
           : `Update pending${m.expectedFinishAt ? `: expected to finish about ${atTime(m.expectedFinishAt)}` : m.overdue ? ": taking longer than expected" : ""}. New messages are saved and answered when it is done.`}
     </p>
+  );
+}
+
+/** "Remember this" on the owner's own message (BOS-2184): adds the text as a new line of the standing rules, with Undo. */
+export function RememberThis({ companyId, text }: { companyId: string; text: string }) {
+  const [step, setStep] = useState<"idle" | "editing" | "added">("idle");
+  const [draft, setDraft] = useState(text);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const url = `/api/companies/${companyId}/standing-rules`;
+  const call = (path: string, body: unknown, done: () => void) => {
+    setBusy(true);
+    setError(null);
+    void api(`${url}/${path}`, { method: "POST", body }).then(
+      () => {
+        setBusy(false);
+        done();
+      },
+      (err: Error) => {
+        setBusy(false);
+        setError(err.message);
+      },
+    );
+  };
+  if (step === "added")
+    return (
+      <p className="remember-note muted" role="status">
+        Added to standing rules.{" "}
+        <button type="button" className="linkish" disabled={busy} onClick={() => call("undo", undefined, () => setStep("idle"))}>
+          Undo
+        </button>
+        {error && <span className="error"> {error}</span>}
+      </p>
+    );
+  if (step === "idle")
+    return (
+      <button type="button" className="linkish remember-btn" onClick={() => { setDraft(text); setError(null); setStep("editing"); }}>
+        Remember this
+      </button>
+    );
+  return (
+    <div className="remember-box">
+      <label>
+        <span className="muted">Add this to the standing rules every agent reads:</span>
+        <DraftTextarea draftKey={null} noDraft="a short edit of a message that is already in the chat, which stays there" value={draft} onChange={setDraft} rows={3} />
+      </label>
+      <div className="remember-actions">
+        <button type="button" className="btn primary" disabled={busy || !draft.trim()} onClick={() => call("append", { text: draft }, () => setStep("added"))}>
+          Add to standing rules
+        </button>
+        <button type="button" className="btn" disabled={busy} onClick={() => setStep("idle")}>
+          Cancel
+        </button>
+      </div>
+      {error && <p className="error" role="alert">{error}</p>}
+    </div>
   );
 }
 
@@ -344,6 +401,7 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                       <small>
                         {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
                       </small>
+                      {m.role === "owner" && <RememberThis companyId={company.id} text={m.text} />}
                     </div>
                   );
                 })}

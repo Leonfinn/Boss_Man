@@ -127,6 +127,40 @@ describe("merges waiting", () => {
     const urgent = await c.ticket("ready", { urgent: true });
     expect((await c.start(urgent.id)).ticket.systemState).toBe("in_progress");
   });
+
+  // BOS-2201: a live fix must reach the next deploy, not wait behind a merge jam; the CEO's trackers add no merges.
+  it("lets a live fix and the CEO's ticket start at the limit, and still holds a plain ticket", async () => {
+    const c = (ctx = await setup());
+    await c.set({ holdStartsMergesWaiting: 2 });
+    await c.approved(3);
+    const liveFix = await c.ticket("ready", { fixesLive: "server freezes as memory climbs" });
+    const r1 = await c.start(liveFix.id);
+    expect(r1.held).toBeNull();
+    expect(r1.ticket.systemState).toBe("in_progress");
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, liveFix.id));
+    const ceos = await c.ticket("ready", { assigneeAgentId: c.ceo.id });
+    const r2 = await c.start(ceos.id);
+    expect(r2.held).toBeNull();
+    expect(r2.ticket.systemState).toBe("in_progress");
+    // A blank "fixes live" is not a live fix.
+    const blank = await c.ticket("ready", { fixesLive: "   " });
+    expect((await c.start(blank.id)).held).toBe("Held: 3 merges waiting (limit 2). It starts by itself when the line is shorter.");
+    const plain = await c.ticket("ready");
+    expect((await c.start(plain.id)).held).toBe("Held: 3 merges waiting (limit 2). It starts by itself when the line is shorter.");
+    expect((await c.row(plain.id)).systemState).toBe("ready");
+  });
+
+  it("a held live fix is started by the wake with nobody pressing anything", async () => {
+    const c = (ctx = await setup());
+    await c.set({ holdStartsMergesWaiting: 1 });
+    await c.approved(4);
+    const t = await c.ticket("ready", { fixesLive: "server freezes as memory climbs" });
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: t.id, reason: "assigned", note: "Please start." });
+    await c.scheduler.tick();
+    const after = await c.row(t.id);
+    expect(after.systemState).toBe("in_progress");
+    expect(after.wipHeldAt).toBeNull();
+  });
 });
 
 describe("quick checks queued", () => {
@@ -153,10 +187,25 @@ describe("quick checks queued", () => {
     const t = await c.ticket("ready");
     expect((await c.start(t.id)).held).toBeNull();
   });
+
+  it("lets an urgent ticket, a live fix and the CEO's ticket start at the limit, and still holds a plain ticket (BOS-2201)", async () => {
+    const c = (ctx = await setup());
+    await c.set({ holdStartsQuickChecksQueued: 2 });
+    await c.queuedQuick(2);
+    for (const patch of [{ urgent: true }, { fixesLive: "deploys fail on the new host" }, { assigneeAgentId: c.ceo.id }]) {
+      const t = await c.ticket("ready", patch);
+      const r = await c.start(t.id);
+      expect(r.held).toBeNull();
+      expect(r.ticket.systemState).toBe("in_progress");
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    }
+    const plain = await c.ticket("ready");
+    expect((await c.start(plain.id)).held).toBe("Held: 2 quick checks queued (limit 2). It starts by itself when the line is shorter.");
+  });
 });
 
-// BOS-2196: the third limit, cards that need the owner (the Dashboard's Needs you figure). Its own exemptions: urgent,
-// live-fix and CEO tickets pass it; the merge and check limits keep their urgent-only rule.
+// BOS-2196: the third limit, cards that need the owner (the Dashboard's Needs you figure). Urgent, live-fix and CEO tickets
+// pass it, as they pass the merge and check limits (BOS-2201, one shared rule).
 describe("cards that need you", () => {
   it("is off by default: a long Needs you queue holds nothing", async () => {
     const c = (ctx = await setup());
@@ -281,18 +330,20 @@ describe("cards that need you", () => {
     expect((await c.start(plain.id)).held).toMatch(/^Held: 3 need you \(limit 1\)/);
   });
 
-  it("leaves the merge limit as it was: a live fix and the CEO's ticket are still held by merges waiting", async () => {
+  // BOS-2201 replaced BOS-2196's "live fix and CEO ticket are still held by merges waiting": all three limits now share one rule.
+  it("with every limit at once, a live fix and the CEO's ticket start and a plain ticket names all three", async () => {
     const c = (ctx = await setup());
-    await c.set({ holdStartsMergesWaiting: 1, holdStartsOwnerWaiting: 1 });
+    await c.set({ holdStartsMergesWaiting: 1, holdStartsQuickChecksQueued: 1, holdStartsOwnerWaiting: 1 });
     await c.approved(1);
+    await c.queuedQuick(1);
     await c.ownerCards(1);
     const liveFix = await c.ticket("ready", { fixesLive: "server freezes as memory climbs" });
-    expect((await c.start(liveFix.id)).held).toBe("Held: 1 merge waiting (limit 1). It starts by itself when the line is shorter.");
+    expect((await c.start(liveFix.id)).held).toBeNull();
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, liveFix.id));
     const ceos = await c.ticket("ready", { assigneeAgentId: c.ceo.id });
-    expect((await c.start(ceos.id)).held).toBe("Held: 1 merge waiting (limit 1). It starts by itself when the line is shorter.");
-    // A plain ticket names both limits.
+    expect((await c.start(ceos.id)).held).toBeNull();
     const plain = await c.ticket("ready");
-    expect((await c.start(plain.id)).held).toBe("Held: 1 merge waiting (limit 1); 1 needs you (limit 1). It starts by itself when the line is shorter.");
+    expect((await c.start(plain.id)).held).toBe("Held: 1 merge waiting (limit 1); 1 quick check queued (limit 1); 1 needs you (limit 1). It starts by itself when the line is shorter.");
   });
 
   it("is saved through the company route, null turns it off, and each change is on the activity log", async () => {
