@@ -275,7 +275,7 @@ export const OWNER_FIELDS = {
   Wiki: [
     "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words",
     "Also search your past answers by meaning", "Also search tickets and the CEO's earlier advice by meaning", "Provider address",
-    "Model (768 dimensions)", "API key", "Search", "From",
+    "Model (768 dimensions)", "API key", "Search", "From", "Recently changed",
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",

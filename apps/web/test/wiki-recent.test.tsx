@@ -49,6 +49,20 @@ describe("wiki Recently changed", () => {
     expect(links[9]!.textContent).toContain("Page 2");
   });
 
+  it("isn't shown when there are no pages", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/wiki-semantic")) return new Response(JSON.stringify({ enabled: false, baseUrl: "", model: "", dims: 768, secretId: null }), { status: 200 });
+        if (url.includes("/wiki/p5")) return new Response(JSON.stringify({ id: "w5", slug: "p5", folder: "", title: "Page 5", body: "Hello", updatedAt: new Date().toISOString(), updatedBy: null, revisions: [], tickets: [] }), { status: 200 });
+        return new Response("[]", { status: 200 });
+      }),
+    );
+    render(<Wiki companies={[company]} companyId="c1" slug="p5" go={() => {}} />);
+    await screen.findByText("Only the company brief so far.");
+    expect(block()).toBeNull();
+  });
+
   it("remembers a collapse, and is hidden while searching", async () => {
     render(<Wiki companies={[company]} companyId="c1" slug="p5" go={() => {}} />);
     await waitFor(() => expect(block()).not.toBeNull());
