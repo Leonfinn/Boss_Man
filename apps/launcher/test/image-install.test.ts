@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkSocket, runSetup } from "../src/setup.js";
+import { checkSocket, prepareLauncherKeyDir, runSetup } from "../src/setup.js";
 import { containerSpec, netguardSpec, parseImageRef, type LauncherConfig } from "../src/spec.js";
 import { dropToUnprivileged, hostPathOfMount, noteSocketGroup } from "../src/startup.js";
 
@@ -81,6 +81,19 @@ describe("setup", () => {
   it("refuses a folder that is not there", () => {
     expect(() => runSetup(path.join(tmp(), "nope"), tmp())).toThrow(/not a folder/);
     expect(() => runSetup(tmp(), path.join(tmp(), "nope"))).toThrow(/not a folder/);
+  });
+});
+
+describe("launcher key folder", () => {
+  it("is given to uid 1000 when it belongs to someone else, and skipped when not mounted", () => {
+    const d = tmp();
+    const calls: string[] = [];
+    // A test run is not uid 1000 in general, so the owner differs unless it happens to be; either way assert on the call made.
+    const owned = statSync(d).uid === 1000 && statSync(d).gid === 1000;
+    expect(prepareLauncherKeyDir(d, (f, u, g) => calls.push(`${u}:${g}`))).toBe(true);
+    expect(calls).toEqual(owned ? [] : ["1000:1000"]);
+    expect(prepareLauncherKeyDir(path.join(d, "nope"), () => calls.push("x"))).toBe(false);
+    expect(calls).not.toContain("x");
   });
 });
 

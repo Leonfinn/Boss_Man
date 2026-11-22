@@ -45,7 +45,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     [ "$got" = "docker.io/me/boss-man-$nm@$(dg "$len")" ] && ok "Docker Hub: $svc image" || bad "Docker Hub: $svc image: $got"
   done
   echo "$cfg" | jq -r '.services.launcher.environment.BOSSMAN_RUNNER_IMAGE, .services.launcher.environment.BOSSMAN_NETGUARD_IMAGE' | grep -c '^docker.io/me/boss-man-.*@sha256:' | grep -qx 2 && ok "Docker Hub: launcher's runner and guard images" || bad "Docker Hub: launcher's BOSSMAN_*_IMAGE"
-  if docker compose -f docker-compose.images.yml config -q 2>"$t/err"; then bad "compose refused no images.env"; else grep -q 'images.env' "$t/err" && ok "compose names images.env when it is missing" || bad "compose message: $(cat "$t/err")"; fi
+  if docker compose -f docker-compose.images.yml config -q 2>"$t/err"; then bad "compose refused no images.env"; else grep -q 'images.env\|BOSSMAN_REGISTRY' "$t/err" && ok "compose names the missing setting (images.env or BOSSMAN_REGISTRY; newer Compose drops our hint text)" || bad "compose message: $(cat "$t/err")"; fi
 else
   echo "skip compose checks (no docker compose)"
 fi

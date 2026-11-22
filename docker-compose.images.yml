@@ -34,6 +34,8 @@ services:
     volumes:
       - config:/config
       - db-secret:/db-secret
+      # Only to give the folder to the launcher's user before the server's read-only mount makes it root-owned.
+      - launcher-key:/launcher-key
 
   db:
     # Third-party image from Docker Hub (not published by Boss Man). Pinned by tag, like docker-compose.yml.

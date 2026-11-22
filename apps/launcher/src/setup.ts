@@ -85,6 +85,19 @@ export function runSetup(dir: string, dbDir: string, chown: Chown = chownSync, r
 }
 
 /**
+ * The launcher key folder: the launcher (uid 1000) writes its key there on first start. Whichever container mounts a new volume
+ * first decides its owner, and the server mounts it too (read-only, from an image with no such folder), so it can come out
+ * root-owned and the launcher then cannot write its key (EACCES, seen on the arm64 CI runner). Give the folder to uid 1000 here.
+ * Skipped when the volume is not mounted. Safe to repeat.
+ */
+export function prepareLauncherKeyDir(dir: string, chown: Chown = chownSync): boolean {
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return false;
+  const st = statSync(dir);
+  if (st.uid !== SERVER_UID || st.gid !== SERVER_UID) chown(dir, SERVER_UID, SERVER_UID);
+  return true;
+}
+
+/**
  * Optional: if the Docker socket is mounted into setup at `socket` (it is not, by default: root in this container should not get it),
  * say now whether its group can read and write it, rather than at the launcher's first start. Returns the problem, or null.
  */
@@ -98,6 +111,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const problem = checkSocket(process.env.BOSSMAN_SETUP_SOCKET);
     if (problem) throw new Error(problem);
     const r = runSetup(process.env.BOSSMAN_CONFIG_DIR ?? "/config", process.env.BOSSMAN_DB_SECRET_DIR ?? "/db-secret");
+    prepareLauncherKeyDir(process.env.BOSSMAN_LAUNCHER_KEY_DIR ?? "/launcher-key");
     for (const f of r.created) console.log(`Created ${f}`);
     for (const f of r.kept) console.log(`Kept ${f} (already there; not changed)`);
     console.log("Setup is done. Back up the config volume: without master.key, stored secrets cannot be read.");
