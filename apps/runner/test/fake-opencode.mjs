@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 // A stand-in for `opencode acp`: records its argv, the config it was given and the model it was told to use.
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
 const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
-const dump = { argv: process.argv.slice(2), config: JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? "null"), autoupdateOff: process.env.OPENCODE_DISABLE_AUTOUPDATE, browserArgs: process.env.AGENT_BROWSER_ARGS ?? null, runnerOnly: process.env.SOME_RUNNER_ONLY_SETTING ?? null, model: null, effort: null, mcpServers: null };
+const dump = { argv: process.argv.slice(2), config: JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? "null"), autoupdateOff: process.env.OPENCODE_DISABLE_AUTOUPDATE, browserArgs: process.env.AGENT_BROWSER_ARGS ?? null, runnerOnly: process.env.SOME_RUNNER_ONLY_SETTING ?? null, model: null, effort: null, mcpServers: null, skillText: null };
+// BOS-2264: what a real OpenCode would find in the config's skills.paths: the named skill's SKILL.md, read while the run is live.
+try {
+  const folder = dump.config?.skills?.paths?.[0];
+  if (folder && process.env.FAKE_SKILL) dump.skillText = readFileSync(path.join(folder, process.env.FAKE_SKILL, "SKILL.md"), "utf8");
+} catch {
+  dump.skillText = "unreadable";
+}
 // Like OpenCode, the effort option lists the current model's variants.
 const options = [
   { id: "model", name: "Model", category: "model", currentValue: "a/one", options: [{ value: "a/one", name: "One" }, { value: "b/two", name: "Two" }, ...(process.env.FAKE_MODELS ? JSON.parse(process.env.FAKE_MODELS).map((v) => ({ value: v, name: v })) : [])] },

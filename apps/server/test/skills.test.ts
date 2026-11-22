@@ -209,6 +209,34 @@ describe("skills library (R71)", () => {
     expect(Buffer.from(start.skills![0]!.files[0]!.content, "base64").toString()).toContain("description: \"How we write: short sentences, UK spelling.\"");
   });
 
+  it("sends skills to an OpenCode agent's run, and says plainly when a Codex agent's can't load them (BOS-2264)", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const [s] = (await c.req("POST", base, { from: "written", name: "house-style", description: "UK spelling.", body: "Use UK spelling." })).json();
+    await c.req("PUT", `${base}/${s.id}/agents`, { agentIds: [c.worker.id] });
+    // OpenCode (the Synthetic infinite-mode harness) gets the same skill files Claude does.
+    await c.db.update(agents).set({ agentKind: "opencode" }).where(eq(agents.id, c.worker.id));
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "On OpenCode", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const oc = c.starts().filter((x) => x.agentId === c.worker.id).at(-1)!;
+    expect(oc.agentKind).toBe("opencode");
+    expect(oc.skills?.map((k) => k.name)).toEqual(["house-style"]);
+    expect(oc.prompt).not.toContain("NOT loaded");
+    c.emit({ type: "run.ended", runId: oc.runId, stopReason: "end_turn", error: null });
+    // Codex can't: no skills are sent, the run is told so, and the CEO's give carries a warning.
+    await c.db.update(agents).set({ agentKind: "codex" }).where(eq(agents.id, c.worker.id));
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "On Codex", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const cx = c.starts().filter((x) => x.agentId === c.worker.id).at(-1)!;
+    expect(cx.agentKind).toBe("codex");
+    expect(cx.skills).toBeUndefined();
+    expect(cx.prompt).toContain("can't load skills");
+    const asCeo = await c.mcp(cx.runId, c.ceo.id);
+    await asCeo.callTool({ name: "skills", arguments: { action: "take", skill: "house-style", agent: "Engineer" } });
+    expect(textOf(await asCeo.callTool({ name: "skills", arguments: { action: "give", skill: "house-style", agent: "Engineer" } }))).toContain("Warning: Engineer runs on Codex, which can't load skills");
+    await asCeo.close();
+  });
+
   it("holds back a skill whose runner add-on isn't working, and tells the owner once (docs/12)", async () => {
     const c = (ctx = await setup());
     const base = `/api/companies/${c.company.id}/skills`;
