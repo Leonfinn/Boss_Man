@@ -7,6 +7,7 @@ import { unzipSync } from "fflate";
 import { api, ApiError, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { useOlder, usePoll } from "../hooks";
 import { ShowOlder } from "../components/ShowOlder";
 import { away } from "../server-watch";
@@ -223,7 +224,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   const editKey = `skill-edit/${id}`;
   const [editing, setEditing] = useState<{ name: string; description: string; body: string } | null>(null);
   const s = skill.data;
-  if (skill.error && !away(skill.error)) return <p className="error" role="alert">{skill.error.message}</p>;
+  if (skill.error && !away(skill.error)) return <LoadError what="the skill" message={skill.error.message} onRetry={skill.reload} />;
   if (!s) return <Loader label="Loading the skill" size={16} />;
   const chosen = holders ?? s.agents.map((a) => a.id);
   const run = async (f: () => Promise<string>) => {

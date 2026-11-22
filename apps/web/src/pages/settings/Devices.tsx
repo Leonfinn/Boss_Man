@@ -3,6 +3,8 @@ import { tallestReading } from "@boss-man/shared";
 import { api, type DeviceProfile } from "../../api";
 import { usePoll } from "../../hooks";
 import { collect } from "../../devices";
+import { Loader } from "../../components/Loader";
+import { LoadError } from "../../components/LoadError";
 import { Section, useAction } from "./shared";
 
 export function Devices() {
@@ -41,8 +43,11 @@ export function Devices() {
         {act.busy ? "Measuring…" : "Record this device"}
       </button>
       {act.view}
-      {list.error ? <p className="error" style={{ fontSize: 14 }}>{list.error.message}</p> : null}
-      {rows.length === 0 ? (
+      {!list.data && list.error ? (
+        <LoadError what="your devices" message={list.error.message} onRetry={list.reload} />
+      ) : !list.data ? (
+        <Loader label="Loading devices" />
+      ) : rows.length === 0 ? (
         <p className="muted" style={{ fontSize: 14 }}>No devices recorded yet. Record this one, then the others you use.</p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
