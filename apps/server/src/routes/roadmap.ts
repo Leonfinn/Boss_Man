@@ -29,6 +29,12 @@ export const DateStr = z
     return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d;
   }, "That date doesn't exist. Use YYYY-MM-DD.");
 
+/** True when a company with this id exists; the GET addresses for one company answer 404 when it doesn't (BOS-2253). */
+export async function companyExists(db: Db, id: string): Promise<boolean> {
+  const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+  return !!c;
+}
+
 /** Creating objectives, key results and milestones, and the tree the Plan page reads. */
 export function objectiveRoutes(
   owner: FastifyInstance,
@@ -64,7 +70,11 @@ export function objectiveRoutes(
     return reply.code(201).send(m);
   });
 
-  owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
+  owner.get("/api/companies/:id/objectives", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
+    return work.objectivesTree(id);
+  });
 }
 
 /** The roadmap, plan, milestone and ticket-link views (v1.1). */
@@ -103,8 +113,16 @@ export function roadmapRoutes(
     await planning.deleteMilestone(IdParam.parse(req.params).id);
     return reply.code(204).send();
   });
-  owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
-  owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
+  owner.get("/api/companies/:id/plan", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
+    return planning.plan(id);
+  });
+  owner.get("/api/companies/:id/open-tickets", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    if (!(await companyExists(db, id))) return reply.code(404).send({ error: "not_found" });
+    return planning.openTickets(id);
+  });
   owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
   owner.get("/api/tickets/:id/related", async (req) => planning.relatedTickets(IdParam.parse(req.params).id));
   owner.delete("/api/dependencies/:id", async (req, reply) => {
