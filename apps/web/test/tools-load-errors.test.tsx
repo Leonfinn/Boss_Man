@@ -47,9 +47,12 @@ describe("Settings → Tools plain labels", () => {
         reply(
           200,
           url.endsWith("/mcp-servers")
-            ? [{ id: "m1", name: "scrapling", url: "http://192.0.2.10/mcp", transport: "http", secretEnv: null, secretGranted: true }]
+            ? [
+                { id: "m1", name: "scrapling", url: "http://192.0.2.10/mcp", transport: "http", secretEnv: null, secretGranted: true },
+                { id: "m2", name: "crawler", url: "http://192.0.2.11/sse", transport: "sse", secretEnv: null, secretGranted: true },
+              ]
             : url.endsWith("/deploy-targets")
-              ? [{ id: "t1", name: "Staging", kind: "docker", endpoint: "tcp://proxy:2375", isProduction: false, rules: {}, lastDeploy: null }]
+              ? (["ssh", "docker", "git"] as const).map((kind, i) => ({ id: `t${i}`, name: `Target ${kind}`, kind, endpoint: "example.com", isProduction: false, rules: {}, lastDeploy: null }))
               : [],
         ),
       ),
@@ -63,7 +66,10 @@ describe("Settings → Tools plain labels", () => {
     // The form's <option> shows the same words at once; wait for the table cells from the load.
     await screen.findByText("scrapling");
     expect(screen.getAllByText("Streamable HTTP").some((c) => c.tagName === "TD")).toBe(true);
-    await screen.findByText("Staging");
-    expect(screen.getAllByText("Docker endpoint").some((c) => c.tagName === "SPAN")).toBe(true);
+    expect(screen.getAllByText("SSE").some((c) => c.tagName === "TD")).toBe(true);
+    await screen.findByText("Target git");
+    for (const label of ["SSH host", "Docker endpoint", "Git remote"]) {
+      expect(screen.getAllByText(label).some((c) => c.tagName === "SPAN")).toBe(true);
+    }
   });
 });
