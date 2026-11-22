@@ -8,7 +8,7 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, notifications, runners, settings, skills } from "../src/db/schema.js";
-import { cleanPath, normalise, parseGitHub, parseSkillMd, skillInstructions, skillMarkdown, skillName } from "../src/services/skills.js";
+import { cleanPath, normalise, parseGitHub, parseSkillMd, skillInstructions, skillMarkdown, skillName, skillNameOf } from "../src/services/skills.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -100,6 +100,19 @@ describe("skill files (R71)", () => {
     expect(parseSkillMd(files["skills/triage/SKILL.md"]!).description).toBe("Sorts bug reports by severity.");
     expect(parseSkillMd("# Title\n\nNo frontmatter here.")).toMatchObject({ name: null, description: "No frontmatter here." });
     expect(skillName("My Great Skill!")).toBe("my-great-skill");
+  });
+
+  it("names a fetched skill from its frontmatter, slugged, or its folder when there is no name", () => {
+    const skill = (folder: string, files: Record<string, string>) => ({ folder, files: Object.entries(files).map(([path, text]) => ({ path, content: b64(text) })) });
+    // The frontmatter name wins over the folder, and is slugged as a written or uploaded name is.
+    expect(skillNameOf(skill("from-folder", { "SKILL.md": "---\nname: Release Notes\ndescription: Writes them.\n---\nBody." }))).toBe("release-notes");
+    expect(skillNameOf(skill("from-folder", { "SKILL.md": '---\nname: "My Great Skill!"\n---\nBody.' }))).toBe("my-great-skill");
+    // No name in the frontmatter (no match): the folder is the name, slugged too.
+    expect(skillNameOf(skill("My Skill Folder", { "SKILL.md": "---\ndescription: No name here.\n---\nBody." }))).toBe("my-skill-folder");
+    // No frontmatter at all: still the folder.
+    expect(skillNameOf(skill("plain-skill", { "SKILL.md": "# Title\n\nNo frontmatter." }))).toBe("plain-skill");
+    // Only SKILL.md's name is read, among supporting files and a README.
+    expect(skillNameOf(skill("notes", { "README.md": "---\nname: not-this\n---", "SKILL.md": "---\nname: real\n---\nBody.", "assets/x.md": "x" }))).toBe("real");
   });
 
   it("builds a SKILL.md from the form: the name slugged, the description quoted, the body trimmed", () => {
