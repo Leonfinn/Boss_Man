@@ -1049,6 +1049,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .seg.empty { height: 2px; background: var(--line); }
 .seg.green, .swatch.green { background: #2f9e6b; } .seg.red, .swatch.red { background: #d14343; } .seg.grey, .swatch.grey { background: #9aa4b2; }
 .seg.amber, .swatch.amber { background: #d99a1e; } .seg.blue, .swatch.blue { background: var(--accent); } .seg.purple, .swatch.purple { background: #7c5cc4; }
+.seg.teal, .swatch.teal { background: #2a9bb5; }
 .axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
 .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }

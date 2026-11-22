@@ -33,6 +33,7 @@ const Workflow = lazyPage(() => import("./pages/Workflow"), "Workflow");
 const Plan = lazyPage(() => import("./pages/Plan"), "Plan");
 const ChatPage = lazyPage(() => import("./pages/Chat"), "ChatPage");
 const Dashboard = lazyPage(() => import("./pages/Dashboard"), "Dashboard");
+const SpendReport = lazyPage(() => import("./pages/SpendReport"), "SpendReport");
 const Skills = lazyPage(() => import("./pages/Skills"), "Skills");
 const Agents = lazyPage(() => import("./pages/Agents"), "Agents");
 const Features = lazyPage(() => import("./pages/Features"), "Features");
@@ -74,7 +75,7 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 }
 
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
-const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects"]);
+const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects", "spend"]);
 const CHOSEN = "bm-company";
 const SIDE_COLLAPSED = "bm-side-collapsed";
 function remember(id: string, set: (id: string) => void) {
@@ -434,6 +435,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Workflow company={current} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} browserPermission={permission} onEnableBrowser={() => void Notification.requestPermission().then(setPermission)} />
+        ) : page === "spend" ? (
+          <SpendReport company={current} />
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
