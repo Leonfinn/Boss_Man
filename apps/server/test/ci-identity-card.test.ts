@@ -19,7 +19,7 @@ describe("ensureCiIdentityCard", () => {
       expect(open[0]!.tier).toBe("owner");
       expect(open[0]!.dedupeKey).toBe(ciIdentityKey(co!.id));
       const steps = (open[0]!.context as { steps: string[] }).steps.join("\n");
-      expect(steps).toContain("Settings → Money and access → Secrets");
+      expect(steps).toContain("Settings → Secrets");
       expect(JSON.stringify(open[0])).not.toMatch(/ghp_|github_pat_/);
 
       expect(await ensureCiIdentityCard(db, co!.id, "made-up-token")).toBe("cleared");

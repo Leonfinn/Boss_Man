@@ -122,6 +122,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
   "src/services/agents.ts": { counts: { insert: 6 }, why: "kind approval: hire, model_change, instructions, team_plan, rename, standing_rules (CEO rules change)" },
   "src/services/alert-ladder.ts": { counts: { insert: 1 }, why: "tier ceo with a ladder key" },
+  "src/services/ci-identity-card.ts": { counts: { todo: 1 }, why: "the second-account token card (BOS-2285): an owner to-do (type owner_todo, steps, ownerMustDo, no raising agent), once per company" },
   "src/services/decisions.ts": {
     counts: { insert: 14, question: 10, todo: 2 },
     why: "owner hand-back (kind question, tier ceo, no raising agent: a CEO card, closes with ticket or reply), merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), owner setup (type owner_setup, ticketId, no agent, one option), owner setup fix (DR-052: tier ceo, no agent, one option), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
