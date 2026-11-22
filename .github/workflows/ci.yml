@@ -308,6 +308,26 @@ jobs:
           sudo apt-get install -y shellcheck >/dev/null
           scripts/check-shell.sh
           scripts/test-shell.sh
+      - name: Install from the images this branch just built, by digest, through a throwaway local registry (BOS-974, docs/33-install-from-images.md)
+        run: |
+          set -euo pipefail
+          # The registry lives only on this runner for this step. Nothing leaves the machine (the runner image holds Claude Code, DR-050).
+          docker run -d --name bm-local-registry -p 127.0.0.1:5000:5000 registry:2.8.3
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break; sleep 1; done
+          reg=localhost:5000/ci
+          images='[]'
+          for pair in server:boss-man-server:ci launcher:boss-man-launcher:current netguard:boss-man-netguard:current runner:boss-man-runner:ci; do
+            short="${pair%%:*}"; local_tag="${pair#*:}"
+            docker tag "$local_tag" "$reg/boss-man-$short:ci"
+            docker push -q "$reg/boss-man-$short:ci" >/dev/null
+            digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$reg/boss-man-$short:ci" | sed 's/.*@//')"
+            images="$(jq -c --arg n "boss-man-$short" --arg d "$digest" '. + [{name: $n, digest: $d}]' <<<"$images")"
+            # Remove the local tags so the install must pull the digest from the registry, like a real install.
+            docker rmi "$reg/boss-man-$short:ci" >/dev/null
+          done
+          jq -n --argjson images "$images" --arg reg "$reg" '{schema: 1, version: "ci", registries: [$reg], images: $images}' > "$RUNNER_TEMP/release.json"
+          cat "$RUNNER_TEMP/release.json"
+          INSTALL_RELEASE_JSON="$RUNNER_TEMP/release.json" scripts/install-images.test.sh
       - name: Save the images for the join job (a one-day build file inside this repo's CI, never published; the runner image is left out because it holds Claude Code, DR-050)
         run: |
           mkdir -p "$RUNNER_TEMP/img"
