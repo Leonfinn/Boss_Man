@@ -47,8 +47,14 @@ export type CiOutcome =
   | { kind: "cancelled"; runs: string[]; rerunTried: boolean };
 /** Outcomes that end a merge attempt without merging: the other side (the gate's own check) need not finish. */
 export const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout" || o.kind === "superseded" || o.kind === "cancelled";
-/** Shared by the gate's own check and the CI wait running beside it: set by whichever ends the attempt first. */
-export type CiStop = { stopped: boolean };
+/**
+ * Shared by the gate's own check and the CI wait running beside it: `stopped` is set by whichever ends the attempt first.
+ * BOS-2301: `undecided` is set by the CI wait from its first sight of a failure until the wait ends (the gate's re-run of
+ * the failed tests and GitHub's one retry included), so the gate's own side doesn't rebuild the merge on a newer main and
+ * push a fresh copy meanwhile: on 21 Nov that swallowed two of BOS-2196's failures and gave three red runs for one fault.
+ * `why` (set with `stopped` by the side that stopped) says in a few words why, for the ticket.
+ */
+export type CiStop = { stopped: boolean; undecided?: boolean; why?: string };
 
 /** The runner answered the publish with something other than "published". */
 export class CiPublishError extends Error {}
@@ -140,6 +146,7 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
       // Right after the retry GitHub may still show the old failed attempt for a moment: read it as pending, as for rerunAt.
       const inGrace = flakeAt !== null && Date.now() - flakeAt < deps.timing.pollMs * 3;
       if (s.state === "failed" && !inGrace) {
+        stop.undecided = true;
         if (flaky) return { kind: "failed", status: s, retried: true };
         if (!deps.flakeRetry || !deps.hosts.rerunFailedJobs) return { kind: "failed", status: s };
         const a = await deps.flakeRetry(s, stop);
@@ -183,6 +190,7 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
       await sleep(deps.timing.pollMs);
     }
   } finally {
+    stop.undecided = false;
     deps.onWait?.(null);
   }
 }

@@ -301,6 +301,42 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     expect(rerunRefusal(0, "fetch failed")).toBe("GitHub refused to re-run the failed jobs (no answer: fetch failed)");
   });
 
+  it("cancels only a commit's unfinished runs, keeps GitHub's answer when refused, and counts a just-finished one as gone (BOS-2301)", async () => {
+    const SHA = "e".repeat(40);
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = (cancel: (id: number) => number, list: number | Array<Record<string, unknown>>) =>
+      gitHostService({
+        fetch: (async (u: string, init?: RequestInit) => {
+          calls.push({ url: u, method: String(init?.method) });
+          const m = /\/actions\/runs\/(\d+)\/cancel$/.exec(u);
+          if (m) {
+            const status = cancel(Number(m[1]));
+            return json(status, status === 202 ? {} : { message: status === 409 ? "Cannot cancel a workflow run that is completed." : "Resource not accessible by personal access token" });
+          }
+          return typeof list === "number" ? json(list, { message: "Bad credentials" }) : json(200, { total_count: list.length, workflow_runs: list });
+        }) as unknown as typeof fetch,
+      });
+    const runs = [
+      { id: 1, head_sha: SHA, status: "in_progress", conclusion: null },
+      { id: 2, head_sha: SHA, status: "queued", conclusion: null },
+      { id: 3, head_sha: SHA, status: "completed", conclusion: "failure" },
+      { id: 4, head_sha: "f".repeat(40), status: "in_progress", conclusion: null },
+    ];
+    // Runs 1 and 2 are still going and get cancelled; the finished one and another commit's run are never touched.
+    expect(await host(() => 202, runs).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 2, still: 0 });
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual(["https://host/api/repos/leon/site/actions/runs/1/cancel", "https://host/api/repos/leon/site/actions/runs/2/cancel"]);
+    expect(calls[0]!.url).toContain(`/actions/runs?head_sha=${SHA}`);
+    // A run that finished between the read and the cancel (409) is not left going.
+    expect(await host((id) => (id === 1 ? 409 : 202), runs).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 1, still: 0 });
+    // Actions: Read-only: refused, and the refusal names the permission and GitHub's own words.
+    expect(await host(() => 403, runs).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 0, still: 2, refused: "the git token can't cancel GitHub runs (it needs Actions: Read and write); GitHub answered 403: Resource not accessible by personal access token" });
+    // The runs can't be read: unknown, not "nothing to cancel".
+    expect(await host(() => 202, 401).cancelRuns(cfg("github"), "t", SHA)).toMatchObject({ cancelled: 0, still: null });
+    // Nothing still going: nothing to do.
+    expect(await host(() => 202, [runs[2]!]).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 0, still: 0 });
+    expect((await host(() => 202, runs).cancelRuns(cfg("gitea"), "t", SHA)).cancelled).toBe(0);
+  });
+
   it("the token check probes Actions runs and names only Actions: Read-only (and Metadata), never Checks", async () => {
     const urls: string[] = [];
     const access = (actions: number) =>

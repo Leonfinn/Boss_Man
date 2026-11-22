@@ -84,6 +84,15 @@ export function rerunRefusal(status: number, message: string): string {
     return `the git token can't re-run GitHub jobs (it needs Actions: Read and write); GitHub answered ${status}: ${said}`;
   return `GitHub refused to re-run the failed jobs (${status ? `HTTP ${status}` : "no answer"}: ${said})`;
 }
+/** BOS-2301: what cancelling a commit's unfinished runs did. `still` null: the runs couldn't be read, so it isn't known. */
+export type CancelAnswer = { cancelled: number; still: number | null; refused?: string };
+/** BOS-2301: a refused cancel in plain words, with GitHub's own status and message (redacted, cut). */
+export function cancelRefusal(status: number, message: string): string {
+  const said = redactForModel(message).replace(/\s+/g, " ").slice(0, 200);
+  if (status === 401 || status === 403 || /not accessible by|must have admin|permission/i.test(message))
+    return `the git token can't cancel GitHub runs (it needs Actions: Read and write); GitHub answered ${status}: ${said}`;
+  return `GitHub refused to cancel the run (${status ? `HTTP ${status}` : "no answer"}: ${said})`;
+}
 /** Seconds between two GitHub timestamps, or null when either is missing or they make no sense. */
 export function stepSeconds(start: unknown, end: unknown): number | null {
   if (typeof start !== "string" || typeof end !== "string") return null;
@@ -353,6 +362,32 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       if (cfg.kind !== "github") return false;
       const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun`).catch(() => null);
       return !!res?.ok;
+    },
+
+    /**
+     * BOS-2301: cancels every Actions run on a commit that hasn't finished, for a merge copy the gate stopped waiting for
+     * (needs Actions: Read and write). `still`: runs left going, with `refused` saying why in GitHub's own words (status and
+     * message) when a cancel was refused. A failed read of the runs counts as unknown (`still` null). GitHub only.
+     */
+    async cancelRuns(cfg: GitHostConfig, token: string, sha: string): Promise<CancelAnswer> {
+      if (cfg.kind !== "github") return { cancelled: 0, still: null, refused: "only GitHub's runs can be cancelled" };
+      const res = await call(cfg, token, "GET", `/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`).catch(() => null);
+      const all = (res?.json && !Array.isArray(res.json) ? res.json.workflow_runs : null) as Array<Record<string, unknown>> | null;
+      if (!res?.ok || !Array.isArray(all)) return { cancelled: 0, still: null, refused: `couldn't read the runs on ${sha.slice(0, 8)} (${res ? `HTTP ${res.status}` : "no answer"})` };
+      const open = all.filter((r) => (r.head_sha === undefined || r.head_sha === sha) && r.status !== "completed" && Number(r.id) > 0);
+      let cancelled = 0;
+      let still = 0;
+      let refused: string | undefined;
+      for (const r of open) {
+        const c = await call(cfg, token, "POST", `/actions/runs/${Number(r.id)}/cancel`).catch((e: unknown) => ({ status: 0, ok: false, json: { message: String((e as Error)?.message ?? e) } }));
+        if (c.ok) cancelled++;
+        // 409: GitHub can't cancel it because it has just finished, so nothing of it is left going.
+        else if (c.status !== 409) {
+          still++;
+          refused ??= cancelRefusal(c.status, messageOf(c.json, c.status));
+        }
+      }
+      return refused ? { cancelled, still, refused } : { cancelled, still };
     },
 
     /**

@@ -89,6 +89,7 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
         const red = got.kind === "failed" && !got.status.billing ? await knownRed(got.status) : null;
         const o: CiOutcome = red ? { kind: "known_red", ...red } : got;
         await endCiWait(o.kind);
+        if (o.kind === "stopped") await cancelAbandoned(prep.commit, stop.why);
         // BOS-1749: the branch has done its job on every ending except a pass (the merge deletes it after landing) and a
         // replacement by a newer push (that push owns the branch now). Best effort; the periodic sweep catches a miss.
         if (o.kind !== "passed" && o.kind !== "superseded") await dropCiBranch();
@@ -102,6 +103,28 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     );
   };
   let ciPushed = false; // a refusal before the push leaves nothing to delete
+  /**
+   * BOS-2301: the gate stopped waiting for GitHub on a copy it pushed (its own check failed, the ticket left review, main
+   * moved and the merge was rebuilt, ...). Its run would otherwise go on with nobody waiting, go red and email the owner
+   * about a merge Boss Man had already dropped (run 4231, BOS-2285, 22 Nov). Cancel what is still going; when GitHub
+   * refuses (the token needs Actions: Read and write), say on the ticket that the run goes on and that its result doesn't
+   * count. A copy that handed over leaves the runs alone: the server now in charge may be waiting on the same commit.
+   */
+  const cancelAbandoned = async (commit: string, why: string | undefined) => {
+    if (!ciPushed || !deps.gitHosts?.cancelRuns) return;
+    if (deps.isLeader && !deps.isLeader()) return;
+    const because = why ? ` (${why})` : "";
+    const got = await deps.gitHosts.cancelRuns(ci!.cfg, ci!.token, commit).catch((err: Error) => ({ cancelled: 0, still: null, refused: err.message.slice(0, 200) }));
+    if (!got.cancelled && got.still === 0) return;
+    const sha = commit.slice(0, 12);
+    // Activity summaries are cut at 300 characters: what the reader needs comes first, GitHub's own answer last.
+    const going = got.still === null ? "Its GitHub run may still be going" : got.still > 1 ? `${got.still} GitHub runs on it are still going` : "Its GitHub run is still going";
+    const summary =
+      got.still === 0
+        ? `Stopped waiting for GitHub CI on ${sha}${because} and cancelled its GitHub run${got.cancelled > 1 ? "s" : ""}, so no result comes for a merge copy Boss Man dropped. Nothing to do.`
+        : `Stopped waiting for GitHub CI on ${sha}${because}. ${going} and no longer counts: ignore a GitHub email about ${sha}. Couldn't cancel: ${got.refused ?? "no reason given"}`;
+    await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary });
+  };
   const dropCiBranch = () => !ciPushed ? Promise.resolve() : ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "unpublish", phase: "unpublish" }), MERGE_WAIT_MS).then(() => undefined, () => undefined);
   // Other tickets in this project that waited on an open CI card: CI can be read again, so start them.
   const startCiWaiters = () => {
@@ -390,6 +413,29 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
       }
     }
   };
+  /** BOS-2301: why the gate's own side ended the attempt, in a few words for the ticket (cancelAbandoned). */
+  const stopWhy = (r: object): string => {
+    switch ((r as { status?: string }).status) {
+      case "refreshed":
+        return "main changed, so the merge was rebuilt on it";
+      case "left_review":
+        return "the ticket left review";
+      case "check_failed":
+        return "Boss Man's own merge check failed";
+      case "early":
+        return "Boss Man's own check ended the merge attempt";
+      case "job_stuck":
+        return "Boss Man's own merge check couldn't finish";
+      case "job_superseded":
+        return "a newer check of this ticket replaced it";
+      case "branch_moved":
+        return "the branch got a new commit";
+      case "handed_over":
+        return "another copy of the server took over";
+      default:
+        return "the merge attempt ended";
+    }
+  };
   // The gate's own check and the CI wait side by side. Whichever ends the attempt first (a failure) stops the other;
   // its later result is dropped, so the ticket is never sent back twice.
   const alongsideCi = async <O extends object>(prep: { commit: string; tree: string; targetSha: string }, own: (stop: CiStop) => Promise<O | null>): Promise<O | Early | null> => {
@@ -397,12 +443,16 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     const stop: CiStop = { stopped: false };
     const ownP = own(stop).then(
       (r) => {
-        if (r) stop.stopped = true;
+        if (r) {
+          stop.why ??= stopWhy(r);
+          stop.stopped = true;
+        }
         return r;
       },
       (e: unknown) => {
         // The gate's own check threw (the runner went away): stop the CI poll too, or it holds this landing for up to
         // the CI ceiling before the error reaches the retry.
+        stop.why ??= `the merge attempt stopped: ${String((e as Error)?.message ?? e).slice(0, 120)}`;
         stop.stopped = true;
         throw e;
       },
