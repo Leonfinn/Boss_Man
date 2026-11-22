@@ -2713,7 +2713,9 @@ export async function buildApp(opts: AppOptions) {
       if (err instanceof EngagementError) return reply.code(err.status).send({ error: "engagement", message: err.message });
       throw err;
     };
-    owner.get("/api/engagements", async (req) => engagementsSvc.list(undefined, PageQuery.parse(req.query)));
+    // ?status= is one engagement status or "open" (not yet signed off or declined); anything else is a 400.
+    const EngagementListQuery = PageQuery.extend({ status: z.enum(["open", "requested", "countered", "accepted", "rejected", "in_progress", "delivered", "signed_off"]).optional() });
+    owner.get("/api/engagements", async (req) => engagementsSvc.list(undefined, EngagementListQuery.parse(req.query)));
     owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id, undefined, true).catch(engagementErrors(reply)));
     owner.post("/api/engagements", async (req, reply) => {
       const b = z
