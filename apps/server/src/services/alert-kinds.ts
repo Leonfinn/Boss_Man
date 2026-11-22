@@ -33,6 +33,8 @@ export type ClearWhen =
   | { kind: "costBackInBand"; companyId: string }
   /** The idle-slots alert (BOS-1881): free slots no longer outnumber the startable Ready tickets, or nobody is idle. */
   | { kind: "idleSlotsGone"; companyId: string }
+  /** The daily-backup alert (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
+  | { kind: "backupFresh" }
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
   | { kind: "sweepStepOk"; step: string };
 
@@ -244,6 +246,12 @@ export const ALERT_KINDS = {
   // minutes. Stops at the CEO, never the owner; one card per company, closes by itself (idleSlotsGone).
   idle_slots: {
     topRung: "ceo",
+  },
+  // daily-backup.ts (BOS-2176): the newest automatic database backup is over 36 hours old. Only the owner can start the
+  // backup service or free the disk on the host, so it starts with them: one card, closed by itself (backupFresh).
+  daily_backup_stale: {
+    topRung: "owner",
+    clearWhen: () => [{ kind: "backupFresh" }],
   },
   // sweep-step-guard.ts (BOS-2160): a background safety step failed in 3 sweeps in a row. Only the owner can fix or
   // restart the server; one card per step, closes by itself (sweepStepOk) after the step's next success.
