@@ -580,12 +580,31 @@ export function notesToCsv(rows: NoteSummary[]): string {
 
 const fileSafe = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "company";
 
+const EXPORT_PAGE = 200;
+
+/** The list shows only the newest 50; the export pages back (limit 200, before=oldest seen) so it holds every note of the tab and search. */
+export async function fetchAllNotes(companyId: string, tab: string, search: string): Promise<NoteSummary[]> {
+  const all: NoteSummary[] = [];
+  const seen = new Set<string>();
+  let before: string | null = null;
+  for (let page = 0; page < 500; page++) {
+    const url: string = `/api/companies/${companyId}/feedback?state=${tab}&limit=${EXPORT_PAGE}${search ? `&q=${encodeURIComponent(search)}` : ""}${before ? `&before=${encodeURIComponent(before)}` : ""}`;
+    const rows: NoteSummary[] = await api<NoteSummary[]>(url);
+    for (const r of rows) if (!seen.has(r.id)) (seen.add(r.id), all.push(r));
+    if (rows.length < EXPORT_PAGE) break;
+    before = rows[rows.length - 1]!.createdAt;
+  }
+  return all;
+}
+
 export function Feedback({ companies, companyId, noteId, go }: { companies: Company[]; companyId: string | undefined; noteId: string | undefined; go: (to: string) => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const [tab, setTab] = useState<State>("unprocessed");
   const [q, setQ] = useState("");
   const [search, setSearch] = useState("");
   const [portal, setPortal] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const list = usePoll(
     (signal) => (company ? api<NoteSummary[]>(`/api/companies/${company.id}/feedback?state=${tab}${search ? `&q=${encodeURIComponent(search)}` : ""}`, { signal }) : Promise.resolve([])),
     30_000,
@@ -644,12 +663,24 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                 <button
                   type="button"
                   className="btn small"
-                  disabled={!list.data?.length}
-                  onClick={() => list.data && download(`feedback-${fileSafe(company.name)}-${tab}-${new Date().toISOString().slice(0, 10)}.csv`, notesToCsv(list.data))}
+                  disabled={!list.data?.length || exporting}
+                  onClick={async () => {
+                    setExporting(true);
+                    setExportError(null);
+                    try {
+                      const rows = await fetchAllNotes(company.id, tab, search);
+                      download(`feedback-${fileSafe(company.name)}-${tab}-${new Date().toISOString().slice(0, 10)}.csv`, notesToCsv(rows));
+                    } catch {
+                      setExportError("Could not fetch every note. Try again.");
+                    } finally {
+                      setExporting(false);
+                    }
+                  }}
                 >
-                  Download CSV
+                  {exporting ? "Preparing…" : "Download CSV"}
                 </button>
               </form>
+              {exportError && <p role="alert" className="muted">{exportError}</p>}
               {list.data && !list.data.length && <p className="muted">{search ? "Nothing matches." : tab === "unprocessed" ? "Nothing waiting. Add feedback above." : "Nothing here."}</p>}
               <ul className="note-list">
                 {(list.data ?? []).map((n) => (

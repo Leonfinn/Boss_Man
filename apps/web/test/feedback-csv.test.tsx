@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 // BOS-2251: the Feedback inbox's "Download CSV" exports the notes shown for the current tab and search.
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Company, NoteSummary } from "../src/api";
-import { Feedback, notesToCsv } from "../src/pages/Feedback";
+import { Feedback, fetchAllNotes, notesToCsv } from "../src/pages/Feedback";
 
 beforeEach(() => localStorage.clear());
 afterEach(() => {
@@ -62,6 +62,7 @@ describe("Download CSV button", () => {
       fireEvent.click(screen.getAllByRole("tab").find((t) => /archived/i.test(t.textContent ?? ""))!);
       await screen.findByText("Old one");
       fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+      await waitFor(() => expect(saved).not.toBeNull());
       const text = await (saved as unknown as Blob).text();
       expect(text).toContain("Old one");
       expect(text).not.toContain("Please add export");
@@ -79,7 +80,23 @@ describe("Download CSV button", () => {
     render(<Feedback companies={companies} companyId="co-1" noteId={undefined} go={() => {}} />);
     await screen.findByText("Please add export");
     fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
-    expect(saved).not.toBeNull();
+    await waitFor(() => expect(saved).not.toBeNull());
     expect(await (saved as unknown as Blob).text()).toContain("2026-11-08T12:00:00.000Z,Sam,,Please add export,unprocessed,2");
+  });
+
+  it("pages back past the 50 shown so the file holds every note", async () => {
+    const mk = (i: number) => note({ id: `n${i}`, text: `note ${i}`, createdAt: new Date(Date.UTC(2026, 10, 1) - i * 1000).toISOString() });
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      urls.push(url);
+      const before = /before=([^&]+)/.exec(url);
+      const start = before ? 200 : 0;
+      const count = before ? 20 : 200;
+      return new Response(JSON.stringify(Array.from({ length: count }, (_, k) => mk(start + k))), { status: 200 });
+    }));
+    const rows = await fetchAllNotes("co-1", "archived", "export");
+    expect(rows).toHaveLength(220);
+    expect(urls[0]).toContain("state=archived&limit=200&q=export");
+    expect(urls[1]).toContain("before=");
   });
 });
