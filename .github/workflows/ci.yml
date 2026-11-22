@@ -22,8 +22,12 @@ on:
 
 # A newer push to a pull request, or the gate publishing a ticket's merge again after main moved,
 # makes the older run pointless. Main keeps every run: a later push may skip a job the earlier one needed.
+# A group holds one running and one waiting run, and GitHub cancels the waiting one when a third arrives, even with
+# cancel-in-progress off (BOS-2283: 50 main runs cancelled in 54 hours, each also skipping its Publish images run).
+# So main's group is per commit and event: every main run starts on its own, in parallel when merges land close
+# together. Pull requests and bossman branches keep one group per ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/bossman') }}
 
 # Every job has a time limit (BOS-2097): without one a hung step runs for GitHub's 6-hour default, and the merge gate
