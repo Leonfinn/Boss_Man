@@ -13,7 +13,7 @@ This page is for you if you run a company in Paperclip and want to carry on with
 The import is Boss Man's general company import, so its preview, its checks and its rule that every agent starts paused all apply.
 
 :::note Don't skip step 2
-Paperclip's own company export does **not** contain your issues, their comments or their documents (the documents become your wiki pages). You have to export them yourself with one extra read-only query (step 2), and put that file next to `COMPANY.md` before you zip the folder (step 3).
+Paperclip's own company export does **not** contain your issues, their comments or their documents (the documents become your wiki pages). You have to export them yourself with one extra read-only query (step 2), and put that file next to `COMPANY.md` before you zip the folder (steps 3 and 4).
 
 Without it, the import brings no tickets, no conversations and no wiki pages, and it does not warn you.
 :::
@@ -50,8 +50,6 @@ Where to open the shell:
 - **Proxmox:** inside the VM or LXC container where Docker runs, not on the Proxmox host itself.
 - **TrueNAS SCALE:** System → Shell (or SSH). Work in a folder on one of your pools.
 
-These per-host notes come from the repository doc and are not yet confirmed on a real install.
-
 ## 1. Export the company from Paperclip
 
 Use Paperclip's company export. It gives a folder with `COMPANY.md`, `.paperclip.yaml`, `agents/`, `projects/` and `skills/`.
@@ -66,7 +64,7 @@ Paperclip's built-in database listens on `127.0.0.1:54329` inside the Paperclip 
 
 Instead, you run `psql` from a throwaway Postgres container that joins the Paperclip container's network. It changes nothing in Paperclip: the session is read-only, and the container deletes itself when it ends.
 
-This method is **not yet confirmed on a real install**: it has not been run end to end on an owner's machine. If a step fails, note the error and the step, and [tell us on GitHub](@repo/issues).
+**Confirmed on TrueNAS SCALE, 22 Nov 2026.** An owner ran this method there and got `paperclip-issues.json`. If a step fails on your host, note the error and the step letter, and [tell us on GitHub](@repo/issues).
 
 ### a. Make a working folder
 
@@ -204,9 +202,43 @@ This is a separate database container, such as `paperclip-db`, or its own Postgr
 
 Point `psql` at that database instead. In step d, replace the `postgres://…` address and `PGPASSWORD` with that database's own host, port, user, password and database name, for example `postgres://paperclip@192.168.1.20:5432/paperclip`. If the database is reachable from the host, you can drop `--network container:"$CONTAINER"`.
 
-## 3. Add the file and zip the folder
+## 3. Copy paperclip-issues.json to the computer that holds the export folder
 
-Put `paperclip-issues.json` next to `COMPANY.md` in the company export folder from step 1. Then zip that folder.
+Skip this if it is the same machine as the Docker host.
+
+This step is **not yet confirmed**: it has not yet been run on an owner's machine.
+
+You copy the file with `scp`, run from the computer that holds the export folder (on Windows 10 and later, `scp` works in PowerShell). The Docker host needs SSH turned on. SSH usually refuses a `root` login, so log in as an ordinary user, and first put the file in that user's home folder, owned by them.
+
+On the Docker host, in the working folder, run this. Replace `alex` with that user's login. Leave out `sudo` if you are already root.
+
+```sh Run on the machine that runs Paperclip, with your login in place of alex
+sudo cp paperclip-issues.json ~alex/
+sudo chown alex: ~alex/paperclip-issues.json
+```
+
+Then, on the computer that holds the export folder, go into that folder (the one with `COMPANY.md`) and run this. Replace `alex` with the login and `192.168.1.20` with the Docker host's address:
+
+```sh Run in the export folder, on the computer that holds it
+scp alex@192.168.1.20:paperclip-issues.json .
+```
+
+It asks for that user's password, unless you use an SSH key.
+
+:::worked
+`ls paperclip-issues.json` in the export folder lists the file.
+:::
+
+If something is wrong:
+
+- **`scp` says `Connection refused`.** SSH is off on the Docker host.
+- **`scp` says `Permission denied`.** Check the login and password, and that the file is in that user's home folder.
+
+**Worked example: TrueNAS SCALE.** Turn SSH on in System → Services → SSH. Log in as the admin user `truenas_admin`, not `root`: in the commands above, replace `alex` with `truenas_admin`.
+
+## 4. Add the file and zip the folder
+
+Make sure `paperclip-issues.json` is next to `COMPANY.md` in the company export folder from step 1. Then zip that folder.
 
 This is the step that gets your issues, comments and wiki pages into the zip. If `paperclip-issues.json` is not beside `COMPANY.md`, the import has no tickets and no wiki.
 
@@ -214,17 +246,17 @@ This is the step that gets your issues, comments and wiki pages into the zip. If
 The company export folder lists `COMPANY.md`, `.paperclip.yaml`, `agents/`, `projects/`, `skills/` and `paperclip-issues.json`.
 :::
 
-## 4. Import it into Boss Man
+## 5. Import it into Boss Man
 
 1. In Boss Man, open **Settings → Import and export** and pick the zip.
 2. Read the preview. Its notes say what was left out or renamed.
 3. Choose **Import as a new company**.
 
 :::worked
-The preview gives the number of agents, skills, projects, wiki pages and tickets it will bring in. If it says 0 tickets, `paperclip-issues.json` was missing from the zip or was not next to `COMPANY.md`: go back to step 3.
+The preview gives the number of agents, skills, projects, wiki pages and tickets it will bring in. If it says 0 tickets, `paperclip-issues.json` was missing from the zip or was not next to `COMPANY.md`: go back to step 4.
 :::
 
-## 5. Work through the checklist
+## 6. Work through the checklist
 
 After the import, Boss Man gives you a checklist decision. Work through it in this order:
 
