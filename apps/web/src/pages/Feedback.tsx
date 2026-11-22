@@ -282,7 +282,7 @@ export function NotePane({ id, companyId, features, onChanged, onClose }: { id: 
                       </option>
                     ))}
                   </select>
-                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} disabled={busy} onClick={() => act(() => api(`/api/insights/${i.id}`, { method: "DELETE" }))}>
+                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} disabled={busy} onClick={() => window.confirm(`Unlink this feedback from ${i.feature.title}? Its highlight and importance are removed.`) && act(() => api(`/api/insights/${i.id}`, { method: "DELETE" }))}>
                     Unlink
                   </button>
                 </div>
@@ -337,7 +337,7 @@ export function NotePane({ id, companyId, features, onChanged, onClose }: { id: 
 }
 
 /** The public portal: on or off, its words, and its secret link. */
-function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
+export function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
   const s = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `portal-${companyId}`);
   const [form, setForm] = useState<{ title: string; intro: string } | null>(null);
   // BOS-967: the optional way back to the owner's website, saved on its own so a bad address
@@ -432,7 +432,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
               <input type="file" accept=".png,.jpg,.jpeg,.webp" hidden aria-label="Logo file" onChange={(e) => (pickLogo(e.currentTarget.files?.[0]), (e.currentTarget.value = ""))} />
             </label>
             {d.hasLogo && (
-              <button type="button" className="btn small" onClick={() => run(api(logoUrl, { method: "DELETE" }), "Logo removed.")}>
+              <button type="button" className="btn small" onClick={() => window.confirm("Remove the portal logo? Visitors will see the default.") && run(api(logoUrl, { method: "DELETE" }), "Logo removed.")}>
                 Remove
               </button>
             )}
