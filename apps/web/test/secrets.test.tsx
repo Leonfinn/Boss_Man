@@ -110,7 +110,8 @@ describe("secrets page", () => {
     render(<Secrets companies={[company]} companyId="c1" />);
     fireEvent.click(await screen.findByRole("button", { name: /Stored one/ }));
     expect(await screen.findByText(/Couldn't load who gets this secret/)).toBeTruthy();
-    expect(await screen.findByText(/Loading the recent use/)).toBeTruthy();
+    // The Loader prints its words only after LOADER_DELAY_MS (1 s), so wait past that, with a deadline.
+    expect(await screen.findByText(/Loading the recent use/, undefined, { timeout: 5000 })).toBeTruthy();
     expect(screen.queryByText(/Not granted to any company/)).toBeNull();
     expect(screen.queryByText(/No run has been given it yet/)).toBeNull();
     failGrants = false;
