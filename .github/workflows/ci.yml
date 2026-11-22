@@ -134,6 +134,14 @@ jobs:
               const bad = r.testResults.flatMap((f) => f.assertionResults.filter((t) => t.status === "failed").map((t) => `${f.name.split("/").pop()}: ${t.title}: ${(t.failureMessages[0] || "").split("\n")[0]}`));
               const lost = r.testResults.filter((f) => f.status === "failed" && !f.assertionResults.length).map((f) => `${f.name.split("/").pop()}: ${(f.message || "").split("\n")[0]}`);
               console.log(`::error title=web tests failed::${[...bad, ...lost].slice(0, 12).join(" | ").replace(/[\r\n%]/g, " ").slice(0, 1500)}`);
+              // BOS-2082: one note per failed file, on its repo path, so the merge gate can re-run that file when it
+              // failed by chance; the summary above names only base names, which the gate can't run.
+              const rel = (p) => require("path").relative(process.env.GITHUB_WORKSPACE || process.cwd(), p);
+              for (const f of r.testResults.filter((x) => x.status === "failed").slice(0, 12)) {
+                const t = f.assertionResults.find((x) => x.status === "failed");
+                const msg = (t ? `${t.title}: ${(t.failureMessages[0] || "").split("\n")[0]}` : (f.message || "").split("\n")[0]).replace(/[\r\n%]/g, " ").slice(0, 300);
+                console.log(`::error file=${rel(f.name).replace(/[%,:\r\n]/g, "_")},title=web test failed::${msg}`);
+              }
             ' "$RUNNER_TEMP/web-tests.json"
             exit "$rc"
           fi
