@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { Setup } from "../src/pages/Setup";
+import { Setup, SetupChecklist } from "../src/pages/Setup";
 
 afterEach(() => {
   cleanup();
@@ -242,5 +242,27 @@ describe("setup wizard refresh", () => {
     await screen.findByRole("option", { name: "Max" });
     fireEvent.change(await screen.findByLabelText("The CEO runs on"), { target: { value: "f1" } });
     expect(await screen.findByText("Next")).toBeTruthy();
+  });
+});
+
+describe("the Finish setting up card and the first merge", () => {
+  const ids = ["company", "project", "runner", "credential", "git", "checks", "funding", "ticket"];
+  const show = (merged: boolean) => {
+    const items = [...ids.map((id) => ({ id, label: id, done: true })), { id: "merged", label: merged ? "First ticket merged: BOS-12, 2 h 40 min after setup started" : "First ticket merged", done: merged }];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url === "/api/setup-progress" ? { dismissed: false, step: 0, companyId: "c1", firstMerge: null } : items), { status: 200 })));
+    render(<SetupChecklist companyId="c1" go={() => {}} />);
+  };
+
+  it("stays while only the merge is left", async () => {
+    show(false);
+    expect(await screen.findByText(/First ticket merged/)).toBeTruthy();
+    expect(screen.getByText("Finish setting up")).toBeTruthy();
+  });
+
+  it("stays once the merge is done, showing how long it took", async () => {
+    show(true);
+    expect(await screen.findByText(/First ticket merged: BOS-12, 2 h 40 min after setup started/)).toBeTruthy();
+    expect(screen.getByText("Setup finished")).toBeTruthy();
+    expect(screen.getByText("Dismiss")).toBeTruthy();
   });
 });

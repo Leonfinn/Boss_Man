@@ -1592,7 +1592,93 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
         </section>
       )}
       <ClosedGroup notices={shownNotices} advised={advised} />
+      <AnsweredList companyId={filter} />
     </>
+  );
+}
+
+type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null };
+
+const answeredBy = (i: AnsweredItem) => (i.by === "owner" ? "You" : i.by === "ceo" ? i.byName ?? "The CEO" : i.by === "auto" ? "Automatically" : "Withdrawn by the team");
+const answeredWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+/**
+ * (BOS-2187) Past answers, newest first, 50 at a time. Read when the owner opens it, so the page costs nothing until then.
+ * A search box narrows it to questions containing the text.
+ */
+export function AnsweredList({ companyId }: { companyId?: string | null }) {
+  const [opened, setOpened] = useState(false);
+  const [items, setItems] = useState<AnsweredItem[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const [done, setDone] = useState(false);
+  const load = async (cursor: string | null, q: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      if (q.trim()) params.set("q", q.trim());
+      if (companyId) params.set("companyId", companyId);
+      const r = await api<{ items: AnsweredItem[]; next: string | null }>(`/api/decisions/answered?${params.toString()}`);
+      setItems((prev) => (cursor ? [...prev, ...r.items] : r.items));
+      setNext(r.next);
+      setDone(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the answered cards.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!opened) return;
+    const t = setTimeout(() => void load(null, text), text ? 300 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, text, companyId]);
+  return (
+    <details data-testid="answered-list" style={{ marginTop: 16 }} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary style={{ fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Answered</summary>
+      <div style={{ marginTop: 8 }}>
+        <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {done && items.length === 0 && !error && <p className="muted">{text.trim() ? "No answered card matches that." : "No card has been answered yet."}</p>}
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+          {items.map((i) => (
+            <li key={i.id} className="strip stack-narrow strip-cols" style={{ fontSize: 14 }}>
+              <RolledTitle text={i.question} />
+              <div>
+                {i.status === "answered" ? (
+                  <>
+                    <strong>{i.answer ?? "Answered"}</strong> · {answeredBy(i)}
+                  </>
+                ) : (
+                  <span className="muted">{answeredBy(i)}</span>
+                )}{" "}
+                <span className="muted">· {answeredWhen(i.at)}</span>
+              </div>
+              {i.ticket && (
+                <a href={`#/tickets/${i.ticket.id}`} title={i.ticket.title}>
+                  {i.ticket.ref ? <strong>{i.ticket.ref}</strong> : null} {i.ticket.title}
+                </a>
+              )}
+            </li>
+          ))}
+        </ul>
+        {busy && <Loader label="Loading answered cards" size={16} />}
+        {next && !busy && (
+          <button type="button" className="btn" onClick={() => void load(next, text)}>
+            Show older
+          </button>
+        )}
+      </div>
+    </details>
   );
 }
 

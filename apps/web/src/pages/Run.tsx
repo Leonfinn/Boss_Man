@@ -8,6 +8,8 @@ import { useDraft } from "../drafts";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
+import { usePoll } from "../hooks";
+import { permissionAnsweredBy, permissionOutcome, permissionRule, type PermissionRow } from "../permissions-in-run";
 import { failureReason, outcomeTag, usage, when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
@@ -95,6 +97,50 @@ function Steer({ runId, companyId, ticketId }: { runId: string; companyId: strin
         </p>
       )}
     </form>
+  );
+}
+
+/** What each permission rule decided in this run (BOS-2185), kept 60 days. */
+function PermissionsInRun({ runId, live }: { runId: string; live: boolean }) {
+  const res = usePoll((signal) => api<{ entries: PermissionRow[]; truncated?: boolean }>(`/api/runs/${runId}/permissions`, { signal }), live ? 10_000 : 60_000, `perm:${runId}`);
+  const entries = Array.isArray(res.data?.entries) ? res.data!.entries : null;
+  return (
+    <section aria-label="Permissions in this run" style={{ marginTop: 16 }}>
+      <h2>Permissions in this run</h2>
+      {res.error && !entries ? (
+        <p className="muted">Couldn't load the permission checks.</p>
+      ) : !entries ? (
+        <Loader label="Loading permission checks" />
+      ) : entries.length === 0 ? (
+        <p className="muted">No permission checks in this run.</p>
+      ) : (
+        <>
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Tool</th>
+                <th>Rule matched</th>
+                <th>Outcome</th>
+                <th>Answered by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id}>
+                  <td className="mono">{new Date(e.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td>
+                  <td style={{ overflowWrap: "anywhere" }}>{e.title ?? e.kind ?? "A tool"}</td>
+                  <td>{permissionRule(e)}</td>
+                  <td>{permissionOutcome(e)}</td>
+                  <td>{permissionAnsweredBy(e)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {res.data?.truncated && <p className="muted" style={{ fontSize: 13 }}>Showing the first {entries.length} checks of this run.</p>}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -201,6 +247,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
           </div>
         )}
       </div>
+      <PermissionsInRun runId={runId} live={!!run && !run.endedAt} />
     </>
   );
 }

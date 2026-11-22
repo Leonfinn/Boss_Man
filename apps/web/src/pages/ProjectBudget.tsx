@@ -59,7 +59,7 @@ export function ProjectBudget({ project }: { project: Project }) {
             <div><dt className="muted">This month</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.monthMicros)}</dd></div>
             <div><dt className="muted">All time</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.totalMicros)}</dd></div>
           </dl>
-          <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>Estimates at list prices, from the accounts you pay per use (such as OpenRouter or Ollama credit).</p>
+          <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>Estimates at list prices, from the accounts you pay per use (such as OpenRouter or Ollama credit). <a href={`#/spend/${project.companyId}`}>See spend by day, agent and feature</a>.</p>
         </section>
         <section aria-label="On your subscriptions" style={{ flex: "1 1 280px" }}>
           <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>On your subscriptions</h2>

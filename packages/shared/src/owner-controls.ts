@@ -38,6 +38,8 @@ export const OWNER_CONTROLS = {
     "Resuming",
     // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
     "More about this",
+    // The search box (Ctrl+K) and its sidebar button (BOS-2192).
+    "Search", "Close",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -55,10 +57,12 @@ export const OWNER_CONTROLS = {
     "Send my answer", "Ask the CEO for advice",
     // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
     "Show fewer",
+    // The Answered list's button for the next 50 older cards (BOS-2187).
+    "Show older",
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -195,6 +199,8 @@ export const OWNER_CONTROLS = {
   Secrets: ["Revoke", "Rotate", "Delete", "Check with Claude", "Check", "Remove"],
   // The "What this shows" card's button when there is too little data (BOS-1937).
   Workflow: ["Show the last …"],
+  // The Spend page (BOS-2194). Its period and split choices are built from lists, so only the CSV button is listed.
+  Spend: ["Download CSV"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type OwnerScreen = keyof typeof OWNER_CONTROLS;
@@ -227,7 +233,7 @@ export const OWNER_FIELDS = {
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
-    "Offer an Approve button on simple agent questions", "My phone",
+    "Offer an Approve button on simple agent questions", "My phone", "Weekly summary by email", "Send it to",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
@@ -297,6 +303,7 @@ export const OWNER_FIELDS = {
     // Settings → Server and runner → Tickets in progress: the start hold (BOS-1489).
     "Hold new starts while this many merges are waiting (leave empty for off)",
     "Hold new starts while this many quick checks are queued (leave empty for off)",
+    "Hold new starts when this many need you (leave empty for off)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Each agent runs its own", "Boss Man runs them", "Checks at once (1 to",
     // Settings → Checks: hold each merge until GitHub CI passes on it (BOS-1070).

@@ -13,7 +13,7 @@ import { Funding } from "./settings/Funding";
 import { ProjectRow } from "./settings/Projects";
 import { ClaudeStep, RunnerStep } from "./SetupClaude";
 
-type Progress = { dismissed: boolean; step: number; companyId: string | null };
+type Progress = { dismissed: boolean; step: number; companyId: string | null; firstMerge?: { ref: string; minutes: number } | null };
 export type ChecklistItem = { id: string; label: string; done: boolean };
 
 const STEPS = [
@@ -291,26 +291,30 @@ export function SetupChecklist({ companyId, go, folded = false }: { companyId: s
   const list = usePoll((signal) => (companyId ? api<ChecklistItem[]>(`/api/companies/${companyId}/setup-checklist`, { signal }) : Promise.resolve([])), 30_000, `setup-checklist-${companyId ?? "none"}`);
   const items = list.data ?? [];
   const act = useAction();
-  if (!companyId || !progress.data || progress.data.dismissed || !items.length || items.every((i) => i.done)) return null;
+  if (!companyId || !progress.data || progress.data.dismissed || !items.length) return null;
   const doneCount = items.filter((i) => i.done).length;
+  // Once everything is ticked (the first merge is the last item) the card stays, with the merge time, until dismissed.
+  const allDone = doneCount === items.length;
   const Wrap = folded ? "details" : "section";
   return (
     <Wrap className="card" aria-labelledby={folded ? undefined : "finish-setup-h"} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {folded && (
         <summary style={{ fontSize: 16, fontWeight: 600, cursor: "pointer" }}>
-          Finish setting up: {doneCount} of {items.length} done
+          {allDone ? "Setup finished" : "Finish setting up"}: {doneCount} of {items.length} done
         </summary>
       )}
       <div style={{ display: "flex", justifyContent: folded ? "flex-end" : "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {!folded && (
           <h2 id="finish-setup-h" style={{ fontSize: 16, fontWeight: 600 }}>
-            Finish setting up
+            {allDone ? "Setup finished" : "Finish setting up"}
           </h2>
         )}
         <span style={{ display: "flex", gap: 8 }}>
-          <button type="button" className="btn primary" onClick={() => go("setup")}>
-            Continue
-          </button>
+          {!allDone && (
+            <button type="button" className="btn primary" onClick={() => go("setup")}>
+              Continue
+            </button>
+          )}
           <button
             type="button"
             className="btn"

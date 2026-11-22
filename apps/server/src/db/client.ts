@@ -11,6 +11,54 @@ export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const migrationsFolder = [path.resolve(here, "../../drizzle"), path.resolve(here, "../drizzle")].find((d) => existsSync(path.join(d, "meta"))) ?? path.resolve(here, "../../drizzle");
 
+export type DbPoolLimits = { max: number; connectTimeoutMs: number; idleTimeoutMs: number; statementTimeoutMs: number };
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return raw !== undefined && raw.trim() !== "" && Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * BOS-2181: pool limits, each with an environment override. Generous defaults so a normally slow query never trips them:
+ * 20 connections, 30 s to get one, 30 s idle, 120 s per statement. A bad override falls back to the default.
+ */
+export function dbPoolLimits(env: Record<string, string | undefined>): DbPoolLimits {
+  return {
+    max: positiveInt(env.BOSSMAN_DB_POOL_MAX, 20),
+    connectTimeoutMs: positiveInt(env.BOSSMAN_DB_CONNECT_TIMEOUT_MS, 30_000),
+    idleTimeoutMs: positiveInt(env.BOSSMAN_DB_IDLE_TIMEOUT_MS, 30_000),
+    statementTimeoutMs: positiveInt(env.BOSSMAN_DB_STATEMENT_TIMEOUT_MS, 120_000),
+  };
+}
+
+/** Logs each kind of limit hit once per process (not per query), naming which one. Takes any error; ignores the rest. */
+export function makeLimitWatcher(limits: DbPoolLimits, log: (msg: string) => void = (m) => console.error(m)): (err: unknown) => void {
+  const seen = new Set<string>(); // lost on restart, harmless because it only limits repeat log lines to one per kind per process
+  return (err) => {
+    const e = err as { code?: string; message?: string } | null;
+    const message = e?.message ?? "";
+    let kind: string | undefined;
+    if (e?.code === "57014" && /statement timeout/i.test(message)) {
+      kind = "statement";
+      if (!seen.has(kind)) log(`[db] a query was cancelled after ${limits.statementTimeoutMs} ms (statement timeout, BOSSMAN_DB_STATEMENT_TIMEOUT_MS). Further ones are not logged.`);
+    } else if (/timeout exceeded when trying to connect/i.test(message)) {
+      kind = "connect";
+      if (!seen.has(kind)) log(`[db] no database connection free within ${limits.connectTimeoutMs} ms (pool of ${limits.max}, BOSSMAN_DB_POOL_MAX / BOSSMAN_DB_CONNECT_TIMEOUT_MS). Further ones are not logged.`);
+    }
+    if (kind) seen.add(kind);
+  };
+}
+
+// Wrap query() so a rejected promise is reported to the watcher, passing the result through untouched.
+function watchQueries(target: { query: (...a: never[]) => unknown }, watch: (err: unknown) => void): void {
+  const original = target.query.bind(target) as (...a: unknown[]) => unknown;
+  (target as unknown as { query: (...a: unknown[]) => unknown }).query = (...args: unknown[]) => {
+    const r = original(...args);
+    if (r && typeof (r as Promise<unknown>).then === "function") (r as Promise<unknown>).then(undefined, (e) => watch(e));
+    return r;
+  };
+}
+
 /** Production: node-postgres. Migrated on start unless `migrate: false` (a separate migrate step ran), in which case the database must already be current. */
 export async function openPostgres(url: string, opts: { migrate?: boolean } = {}): Promise<{ db: Db; close: () => Promise<void> }> {
   const { Pool } = await import("pg");
@@ -18,12 +66,32 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
   const { runMigrations, assertMigrated } = await import("./migrate-lib.js");
   if (opts.migrate === false) await assertMigrated(url, migrationsFolder);
   else await runMigrations(url, { folder: migrationsFolder });
-  const pool = new Pool({ connectionString: url });
+  // BOS-2181: migrations above ran on their own connection (runMigrations(url)), so the statement timeout below never cuts them.
+  const limits = dbPoolLimits(process.env);
+  const pool = new Pool({
+    connectionString: url,
+    max: limits.max,
+    connectionTimeoutMillis: limits.connectTimeoutMs,
+    idleTimeoutMillis: limits.idleTimeoutMs,
+    // Server-side: Postgres cancels the statement itself, so a hung query frees its connection.
+    statement_timeout: limits.statementTimeoutMs,
+  });
   // A database restart drops idle connections; pg reports that as an error event, and with no listener Node exits.
   // Log it and carry on: the pool discards the dead client and the next query connects again.
   const onError = (err: Error) => console.error("[db] connection error (will reconnect on next query):", err.message);
   pool.on("error", onError);
-  pool.on("connect", (client) => client.on("error", onError));
+  const watch = makeLimitWatcher(limits);
+  pool.on("connect", (client) => {
+    client.on("error", onError);
+    watchQueries(client, watch);
+  });
+  // pool.query() gets its connection through pool.connect(), so this also sees an acquire timeout from pool.query().
+  const poolConnect = pool.connect.bind(pool) as (...a: unknown[]) => unknown;
+  (pool as unknown as { connect: (...a: unknown[]) => unknown }).connect = (...args: unknown[]) => {
+    const r = poolConnect(...args);
+    if (r && typeof (r as Promise<unknown>).catch === "function") (r as Promise<unknown>).catch((e) => watch(e));
+    return r;
+  };
   const db = drizzle(pool, { schema });
   return { db: db as unknown as Db, close: () => pool.end() };
 }

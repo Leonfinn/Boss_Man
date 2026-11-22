@@ -24,6 +24,7 @@ const ROUTES: Array<["GET" | "POST" | "PUT" | "PATCH" | "DELETE", string]> = [
   ["POST", `/api/runs/${ID}/message`],
   ["GET", "/api/runs/recent"],
   ["GET", `/api/runs/${ID}/transcript`],
+  ["GET", `/api/runs/${ID}/permissions`],
   ["POST", "/api/runs/cancel-all"],
   ["POST", `/api/runs/${ID}/cancel`],
 ];

@@ -67,7 +67,6 @@ sections:
   - Agents
   - Dashboard
   - Decisions
-  - Finish setting up
   - Left your list recently
   - Needs you Checking…
   - Needs you …
@@ -78,6 +77,7 @@ reads:
   - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
+  - /api/decisions/answered
   - /api/decisions/tally
   - /api/funding-sources
   - /api/runs/:id/transcript
@@ -135,7 +135,9 @@ sections:
   - How you're told
   - Notifications
   - Set up your phone
+  - Weekly summary
 reads: 
+  - /api/companies/:id/weekly-summary
   - /api/host-facts
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
@@ -168,10 +170,12 @@ reads:
 ## #/runs
 sections: 
   - Finished
+  - Permissions in this run
   - Running now
   - Runs
 reads: 
   - /api/runs
+  - /api/runs/:id/permissions
   - /api/runs/:id/transcript
 
 ## #/scrum-master
@@ -384,6 +388,12 @@ reads:
   - /api/companies/:id/skills
   - /api/companies/:id/skills/:id
   - /api/companies/:id/skills/elsewhere
+
+## #/spend
+sections: 
+  - Spend
+reads: 
+  - /api/companies/:id/spend-report
 
 ## #/tickets
 sections: 

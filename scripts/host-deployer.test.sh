@@ -468,6 +468,18 @@ rm -f "$D/outbox/status.json"
 printf '{"id":"11111111-1111-1111-1111-111111111114","target":"server","commit":"%s\0",%s}\n' "$c3" "$good" >"$D/inbox/request.json"; host
 has "$D/outbox/status.json" "expected format"
 [[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a hostile request ran something"
+
+# 7c. (BOS-2213) The refusal names which check failed, and for an empty id or a short commit (the two ways the
+# original BOS-1817 flake could have looked: status.json then also shows id "" and to_commit "") it says so.
+rm -f "$D/outbox/status.json"; : >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "the file is empty"
+rm -f "$D/outbox/status.json"
+printf '{"id":"","target":"server","commit":"%s",%s}\n' "$c3" "$good" >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "expected format (the id is not"
+rm -f "$D/outbox/status.json"
+printf '{"id":"11111111-1111-1111-1111-111111111114","target":"server","commit":"abc123",%s}\n' "$good" >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "(the commit is not one 40-character hash)"
+[[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a hostile request ran something"
 # 7c. A pretty-printed request (other writers, other spacing) is still read.
 rm -f "$D/outbox/status.json"
 printf '{\n  "id": "11111111-1111-1111-1111-111111111116",\n  "target": "server",\n  "commit": "%s",\n  %s\n}\n' "$c3" "${good/,/,$'\n  '}" >"$D/inbox/request.json"; host
@@ -1236,7 +1248,7 @@ has "$D/outbox/status.json" "whole-stack check found"; live_is blue
 cat >"$T/w/scripts/deploy-staging.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "deploy-staging.sh $* production_dirs=${BOSSMAN_PRODUCTION_DIRS:-}" >>"$STUB_LOG"
-[[ -z ${STUB_STAGING_RC:-} ]] || { echo "build step failed: image pull denied"; echo "login with password=hunter2 rejected"; exit "$STUB_STAGING_RC"; }
+[[ -z ${STUB_STAGING_RC:-} ]] || { echo "build step failed: image pull denied"; echo "login with password=hunter2 rejected"; echo "curl -H Authorization: Bearer faketoken123 failed"; echo "retry Authorization: Basic dXNlcjpwYXNz failed"; echo "sent bearer standalone55 once"; exit "$STUB_STAGING_RC"; }
 git checkout --quiet "$1"
 STUB
 cat >"$T/w/scripts/smoke-staging.sh" <<'STUB'
@@ -1344,6 +1356,10 @@ hasnt "$STUB_LOG" "smoke-staging.sh"
 has "$D/outbox/staging-status.json" "image pull denied"
 has "$D/outbox/staging-status.json" "password=[redacted]"
 hasnt "$D/outbox/staging-status.json" "hunter2"
+# The whole credential after Bearer or Basic goes, not just the scheme word (BOS-2209).
+hasnt "$D/outbox/staging-status.json" "faketoken123"
+hasnt "$D/outbox/staging-status.json" "dXNlcjpwYXNz"
+hasnt "$D/outbox/staging-status.json" "standalone55"
 
 # A staging deploy cut off by a restart leaves "running" behind: the next tick marks it failed, so the lane isn't wedged (review).
 cut="$(node -e 'console.log(crypto.randomUUID())')"

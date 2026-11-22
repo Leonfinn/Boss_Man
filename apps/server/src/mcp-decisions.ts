@@ -133,6 +133,8 @@ export function registerDecisionTools(
             `${card.id}: [${card.kind}] ${card.status}${settled}`,
             `Question: ${untrusted("decision card", card.question)}`,
             `Options: ${card.options.join(" | ") || "none"} (recommended: ${card.recommended || "none"})`,
+            // The same steps lines as the list (BOS-2211), so reading one card by id doesn't hide them.
+            ...cardStepLines((card.context ?? {}) as { triedFirst?: string; steps?: string[]; handSteps?: string[] }),
             card.answer ? `Answer: ${untrusted("decision card answer", card.answer)}${note}` : "Answer: not answered yet.",
             `Raised by: ${card.raisedBy}${ticketsLine}`,
             ...(card.tickets.length ? ["The owner's answer and note are also on each ticket's conversation."] : []),
@@ -184,6 +186,8 @@ export function registerDecisionTools(
                     output?: string;
                     triedFirst?: string;
                     steps?: string[];
+                    /** A hand-apply update card keeps its steps here, not in `steps` (BOS-2208). */
+                    handSteps?: string[];
                     lastFailure?: { note: string };
                     lint?: CardLint;
                     conflictsBecause?: string;
@@ -208,8 +212,7 @@ export function registerDecisionTools(
                     ...(ctx.explain?.command ? [`Command: ${untrusted("decision card command", ctx.explain.command)}`] : []),
                     ...(ctx.planText ? ["Plan:", untrusted("decision card plan", ctx.planText.slice(0, 1500))] : []),
                     ...(ctx.output ? ["Last output:", untrusted("decision card check output", ctx.output.slice(0, 1500))] : []),
-                    ...(ctx.triedFirst ? ["What was tried first:", untrusted("decision card", ctx.triedFirst)] : []),
-                    ...(ctx.steps?.length ? [`Steps for the owner: ${untrusted("decision card steps", ctx.steps.join(" / "))}`] : []),
+                    ...cardStepLines(ctx),
                     ...(ctx.lastFailure ? [`Last failure: ${ctx.lastFailure.note}`] : []),
                     ...(ctx.conflictsBecause ? [`Merge line: ${ctx.conflictsBecause}`] : []),
                     // Findings quote the agent's own step text, so they are untrusted like the steps (BOS-417).
@@ -506,6 +509,19 @@ export function usabilityGateBlock(t: { featureId?: string | null; ownerSetup?: 
 }
 
 /** The reviewer's checklist, split so only the before-merge criteria can hold the review up (DR-024 #5). */
+/**
+ * "What was tried first" and "Steps for the owner" lines, shared by the CEO's list and read so the two
+ * can't drift (BOS-2211: read once hid a hand-apply card's steps). A hand-apply update card keeps its
+ * steps in handSteps, not steps (BOS-2208), so handSteps win.
+ */
+function cardStepLines(ctx: { triedFirst?: string; steps?: string[]; handSteps?: string[] }): string[] {
+  const steps = ctx.handSteps?.length ? ctx.handSteps : ctx.steps;
+  return [
+    ...(ctx.triedFirst ? ["What was tried first:", untrusted("decision card", ctx.triedFirst)] : []),
+    ...(steps?.length ? [`Steps for the owner: ${untrusted("decision card steps", steps.join(" / "))}`] : []),
+  ];
+}
+
 function criteriaChecklist(criteria: readonly Criterion[], note: string | null): string {
   if (!criteria.length) return "";
   const lines = criterionLines(criteria, note);
