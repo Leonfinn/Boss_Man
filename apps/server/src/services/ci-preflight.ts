@@ -5,7 +5,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { MergeResult, WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { checkResults, tickets } from "../db/schema.js";
+import { checkJobs, checkResults, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { CI_TIMING, CiPublishError, needsEarlyGithubRun, publishAndWait, touchesGithubOnlyJobs, touchesWorkflows, type CiOutcome, type CiTarget, type CiTiming } from "./ci-publish.js";
 import type { gitHostService } from "./git-hosts.js";
@@ -15,6 +15,10 @@ export const PREFLIGHT_NA_KIND = "ci_preflight_na";
 /** A run was started for this sha (detail: the agent to wake); with no PREFLIGHT_KIND row after it, a restart lost the run. */
 export const PREFLIGHT_STARTED_KIND = "ci_preflight_started";
 export const PREFLIGHT_ACTIVITY = "ci_preflight";
+/** BOS-2284: GitHub's run for this sha waits for the local quick check on it to pass (detail: the agent to wake). */
+export const PREFLIGHT_WAITING_KIND = "ci_preflight_waiting";
+/** BOS-2284: the quick check on this sha did not pass, so GitHub's run was never started (kept so the skip is recorded once). */
+export const PREFLIGHT_SKIPPED_KIND = "ci_preflight_skipped";
 
 /** What the service needs from the project's host and runner; null: GitHub CI can't be used here, so nothing is asked or refused. */
 export type PreflightContext = {
@@ -128,7 +132,65 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     running.set(t.id, { head, done });
   }
 
+  /**
+   * BOS-2284: the ticket's quick-check jobs for one commit, newest first. The queue reuses a pass by tree (any ticket in the
+   * project), so a job on the same tree stands in for the commit; `tree` adds that case. The waiting row keeps the tree as
+   * "<agent>|<tree>" in its detail (older rows hold the agent only).
+   */
+  const quickJobs = async (t: { id: string; projectId: string }, sha: string, tree?: string | null) => {
+    const own = db.select({ state: checkJobs.state, reason: checkJobs.reason }).from(checkJobs).where(and(eq(checkJobs.ticketId, t.id), eq(checkJobs.kind, "pre_review"), eq(checkJobs.commit, sha))).orderBy(desc(checkJobs.queuedAt));
+    const rows = await own;
+    if (!tree) return rows;
+    const same = await db
+      .select({ state: checkJobs.state, reason: checkJobs.reason, ticketId: checkJobs.ticketId })
+      .from(checkJobs)
+      .where(and(eq(checkJobs.projectId, t.projectId), eq(checkJobs.tree, tree), eq(checkJobs.kind, "pre_review")))
+      .orderBy(desc(checkJobs.queuedAt));
+    // A pass anywhere on the tree counts; a failure or live job counts only when it is this ticket's own.
+    return [...rows, ...same.filter((j) => j.state === "passed" || j.ticketId === t.id)];
+  };
+  const parseWaiting = (detail: string) => {
+    const [agentId = "", tree = ""] = detail.split("|");
+    return { agentId, tree: tree || null };
+  };
+
+  /**
+   * BOS-2284: a run waiting for its commit's quick check. Passed: start it now. Failed, stuck or cancelled: don't start it, and say
+   * so on the ticket (once). Still queued or running: keep waiting. Safe to call any number of times.
+   */
+  async function settleWaiting(ticketId: string): Promise<"started" | "skipped" | "waiting" | "none"> {
+    const w = await latest(ticketId, PREFLIGHT_WAITING_KIND);
+    if (!w?.sha || !w.detail) return "none";
+    for (const k of [PREFLIGHT_STARTED_KIND, PREFLIGHT_KIND, PREFLIGHT_NA_KIND, PREFLIGHT_SKIPPED_KIND]) {
+      const r = await latest(ticketId, k, w.sha);
+      if (r && r.at >= w.at) return "none"; // already dealt with
+    }
+    const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+    if (!t || (t.systemState !== "in_progress" && t.systemState !== "review")) return "none";
+    const { agentId, tree } = parseWaiting(w.detail);
+    const jobs = await quickJobs(t, w.sha, tree);
+    if (jobs.some((j) => j.state === "passed")) {
+      if (running.get(ticketId)?.head === w.sha) return "none";
+      const ctx = await deps.context(t).catch(() => null);
+      if (!ctx) return "waiting"; // no runner yet: the recovery sweep tries again
+      launch(t, agentId, w.sha, ctx);
+      await record(db, { companyId: t.companyId, ticketId, kind: PREFLIGHT_ACTIVITY, summary: `The quick check passed on ${short(w.sha)}, so GitHub's CI jobs were started for it.` }).catch(() => undefined);
+      return "started";
+    }
+    const last = jobs[0];
+    if (!last || last.state === "queued" || last.state === "running") return "waiting";
+    await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: w.sha, kind: PREFLIGHT_SKIPPED_KIND, passed: false, detail: `quick check ${last.state}` });
+    await record(db, { companyId: t.companyId, ticketId, kind: PREFLIGHT_ACTIVITY, summary: `GitHub's CI jobs before review were NOT started for ${short(w.sha)}: the quick check on that commit ${last.state === "failed" ? "failed" : `did not pass (${last.state})`}. Fix it and commit; GitHub's run starts once the quick check passes on the new commit (ask again with request_check).` }).catch(() => undefined);
+    return "skipped";
+  }
+
   return {
+    /** BOS-2284: a pre-review check job ended: start or drop the GitHub run that waited for it. */
+    async onQuickEnded(job: { kind: string; ticketId: string }): Promise<void> {
+      if (job.kind !== "pre_review") return;
+      await settleWaiting(job.ticketId);
+    },
+
     /**
      * After a server restart: a run that started (row) but has no result (row) lost its in-memory run, and the author was told
      * to wait for a wake that would never come. Start those again. Safe to call twice: a run in memory is skipped.
@@ -157,6 +219,12 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         }
         launch(t, s.detail, s.sha, ctx);
         n++;
+      }
+      // BOS-2284: runs that waited for a quick check whose end this process never saw (a restart in between).
+      const waiting = await db.select({ ticketId: checkResults.ticketId }).from(checkResults).where(eq(checkResults.kind, PREFLIGHT_WAITING_KIND)).orderBy(desc(checkResults.at)).limit(200);
+      for (const id of new Set(waiting.map((x) => x.ticketId))) {
+        const r = await settleWaiting(id).catch(() => "none" as const);
+        if (r === "started") n++;
       }
       deps.log?.(`GitHub CI pre-check recovery: ${n} relaunched, ${skipped} skipped (no runner connected yet)`);
       return { launched: n, skipped, skippedIds };
@@ -201,7 +269,7 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
      * Called by request_check with the branch's diff. Returns a sentence to add to the answer, or null when the branch changes
      * nothing GitHub-only (or GitHub CI can't be used for this project). `notApplicable` is the author's reason for skipping it.
      */
-    async start(t: { id: string; companyId: string; projectId: string }, agentId: string, d: Pick<WorkspaceDiff, "head" | "files">, notApplicable?: string): Promise<string | null> {
+    async start(t: { id: string; companyId: string; projectId: string }, agentId: string, d: Pick<WorkspaceDiff, "head" | "tree" | "files">, notApplicable?: string): Promise<string | null> {
       const paths = d.files.map((f) => f.path);
       if (!touchesGithubOnlyJobs(paths)) return null;
       if (touchesWorkflows(paths)) return "This branch edits GitHub workflow files. Those are not pushed to GitHub before review (GitHub would run an unreviewed workflow with its own token); they run once, at the merge gate, after the reviews. Nothing is held for them.";
@@ -216,6 +284,13 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       if (running.get(t.id)?.head === d.head) return "GitHub's CI jobs for this commit are already running; you will be woken with the result.";
       const done = await latest(t.id, PREFLIGHT_KIND, d.head);
       if (done?.passed) return `GitHub's CI jobs already passed on this commit, so none were started.`;
+      // BOS-2284: GitHub's run starts only once the local quick check has passed on this exact commit.
+      const tree = d.tree;
+      if (!(await quickJobs(t, d.head, tree)).some((j) => j.state === "passed")) {
+        const w = await latest(t.id, PREFLIGHT_WAITING_KIND, d.head);
+        if (!w) await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: d.head, kind: PREFLIGHT_WAITING_KIND, passed: false, detail: tree ? `${agentId}|${tree}` : agentId });
+        return "This branch changes CI or image files, so GitHub's own CI jobs run on it too, but only after your quick check passes on this exact commit (a red GitHub run on unfinished work only sends the owner a failure notice). If the quick check fails, GitHub's run is skipped and the ticket says so. The ticket can't move to review until both pass. You will be woken with each result; do not poll. If GitHub's jobs truly don't apply, ask again with ciNotApplicable and a reason.";
+      }
       launch(t, agentId, d.head, ctx);
       return "This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well (this can take a while). The ticket can't move to review until they pass. You will be woken with the result; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.";
     },
@@ -238,6 +313,13 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       const r = await latest(t.id, PREFLIGHT_KIND, d.head);
       if (r?.passed) return null;
       if (running.get(t.id)?.head === d.head) return "GitHub's CI jobs are still running on this branch. Wait for the result (you are woken), then move it to review.";
+      const w = await latest(t.id, PREFLIGHT_WAITING_KIND, d.head);
+      if (w && !r) {
+        const skipped = await latest(t.id, PREFLIGHT_SKIPPED_KIND, d.head);
+        return skipped
+          ? "GitHub's CI jobs were not started because the quick check on this commit did not pass. Fix it, commit, and run request_check again."
+          : "GitHub's CI jobs start as soon as the quick check passes on this commit. Wait to be woken, then move it to review.";
+      }
       return r
         ? `GitHub's CI jobs did not pass on this commit: ${r.detail ?? "see the ticket"}. Fix it, commit, and run request_check again.`
         : "This branch changes CI or image files, so GitHub's own CI jobs must pass before review. Commit, then run request_check (it starts them and wakes you with the result). If they truly don't apply, run request_check with ciNotApplicable and a reason.";

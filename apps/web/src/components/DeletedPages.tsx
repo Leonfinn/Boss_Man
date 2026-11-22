@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { usePoll } from "../hooks";
+import { LoadError } from "./LoadError";
 import { when } from "../pages/Runs";
 
 type DeletedRow = { slug: string; folder: string; title: string; deletedAt: string; deletedBy: string | null; purgeOn: string };
@@ -43,7 +44,7 @@ export function DeletedPages({ companyId, go, onChanged }: { companyId: string; 
       </button>
       {open && (
         <div id="wiki-deleted-list">
-          {list.error && <p className="error" role="alert">Couldn't load the deleted pages: {list.error.message}</p>}
+          {list.error && <LoadError what="the deleted pages" message={list.error.message} onRetry={list.reload} />}
           {error && <p className="error" role="alert">{error}</p>}
           {list.data && rows.length === 0 && <p className="muted">No deleted pages. A page you delete waits here for 30 days.</p>}
           <ul>

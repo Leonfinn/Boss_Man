@@ -51,6 +51,27 @@ describe("Devices settings", () => {
     expect(collect).toHaveBeenCalledOnce();
   });
 
+  it("does not say none recorded while loading", async () => {
+    // Resolved at the end, so the shared in-flight request does not leak into the next test.
+    let release: (r: Response) => void = () => {};
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((res) => (release = res))));
+    render(<Devices />);
+    expect(screen.queryByText(/No devices recorded yet/)).toBeNull();
+    expect(screen.getByRole("status")).toBeTruthy(); // the shared Loader, which shows its words after 1 s
+    release(json([profile]));
+    expect(await screen.findByText(/100dvh 780/)).toBeTruthy();
+  });
+
+  it("after a failed load shows Retry, not 'none recorded', and Retry shows the devices", async () => {
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => (n++ === 0 ? new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } }) : json([profile]))));
+    render(<Devices />);
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(screen.queryByText(/No devices recorded yet/)).toBeNull();
+    fireEvent.click(retry);
+    expect(await screen.findByText(/100dvh 780/)).toBeTruthy();
+  });
+
   it("explains there are none yet when the list is empty", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json([])));
     render(<Devices />);

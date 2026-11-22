@@ -90,6 +90,7 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
         const o: CiOutcome = red ? { kind: "known_red", ...red } : got;
         await endCiWait(o.kind);
         if (o.kind === "stopped") await cancelAbandoned(prep.commit, stop.why);
+        if (o.kind === "failed") await ctx.wakeCiWatchers(t, o.kind);
         // BOS-1749: the branch has done its job on every ending except a pass (the merge deletes it after landing) and a
         // replacement by a newer push (that push owns the branch now). Best effort; the periodic sweep catches a miss.
         if (o.kind !== "passed" && o.kind !== "superseded") await dropCiBranch();

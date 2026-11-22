@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { tickets } from "../src/db/schema.js";
+import { features, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { registerBoard } from "../src/mcp-board.js";
 
@@ -65,6 +65,40 @@ describe("tickets find paging and assignee (BOS-2262)", () => {
     expect(short.note).toBe("Showing 1 to 1 of 1 matching tickets (newest activity first).");
     expect(split(await call({ assignee: "engineer" })).rows.map((r) => r.title)).toEqual(["Mine"]);
     expect(await call({ assignee: "Nobody" })).toContain('No agent called "Nobody"');
+    await client.close();
+  });
+
+  it("filters by since and noFeature, and shows createdAt and the feature (BOS-2280)", async () => {
+    const c = (ctx = await setup());
+    const [feat] = await c.db.insert(features).values({ companyId: c.company.id, title: "Search" }).returning({ id: features.id });
+    const old = new Date("2026-01-01T00:00:00Z");
+    const mk = async (title: string, extra: Partial<typeof tickets.$inferInsert>, n: number) => {
+      await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, number: 5000 + n, title, ...extra });
+    };
+    await mk("OldPlain", { createdAt: old }, 1);
+    await mk("OldFeatured", { createdAt: old, featureId: feat!.id }, 2);
+    await mk("OldMerged", { createdAt: old, systemState: "done", mergedAt: new Date("2026-11-21T00:00:00Z"), lastActivityAt: new Date("2026-11-21T00:00:00Z") }, 3);
+    await mk("OldDoneBefore", { createdAt: old, systemState: "done", mergedAt: old, lastActivityAt: old }, 4);
+    await mk("NewPlain", { createdAt: new Date("2026-11-22T00:00:00Z") }, 5);
+    const client = await c.mcp();
+    const call = async (args: Record<string, unknown>) => textOf(await client.callTool({ name: "tickets", arguments: { action: "find", ...args } }));
+    type Row = { title: string; createdAt: string; feature: { id: string; title: string } | null; since?: string[] };
+    const rows = (t: string) => (split(t).rows as unknown as Row[]);
+
+    const since = rows(await call({ since: "2026-11-20T00:00:00Z" }));
+    expect(since.map((r) => r.title).sort()).toEqual(["NewPlain", "OldMerged"]);
+    expect(since.find((r) => r.title === "NewPlain")!.since).toEqual(["created"]);
+    expect(since.find((r) => r.title === "OldMerged")!.since).toEqual(["finished"]);
+
+    const noFeat = rows(await call({ noFeature: true, q: "Old" }));
+    expect(noFeat.map((r) => r.title).sort()).toEqual(["OldDoneBefore", "OldMerged", "OldPlain"]);
+    expect(noFeat[0]!.feature).toBeNull();
+    expect(rows(await call({ noFeature: true, since: "2026-11-20T00:00:00Z" })).map((r) => r.title).sort()).toEqual(["NewPlain", "OldMerged"]);
+
+    const featured = rows(await call({ q: "OldFeatured" }));
+    expect(featured[0]!.feature).toEqual({ id: feat!.id, title: "Search" });
+    expect(featured[0]!.createdAt).toContain("2026-01-01");
+    expect(await call({ since: "nonsense" })).toContain("is not a time");
     await client.close();
   });
 

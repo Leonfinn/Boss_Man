@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { figureText } from "@boss-man/shared";
 import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
 import { copyMessage, copyText } from "../clipboard";
@@ -228,7 +229,7 @@ export function NotePane({ id, companyId, features, onChanged, onClose }: { id: 
         setBusy(false);
       });
   };
-  if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Note not found" backHref="#/feedback" backLabel="Back to Feedback">This note doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
+  if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Note not found" backHref="#/feedback" backLabel="Back to Feedback">This note doesn't exist any more, or the link is wrong.</NotFoundBlock> : <LoadError what="the note" message={data.error.message} onRetry={data.reload} />;
   const d = data.data;
   if (!d) return <Loader label="Loading the note" />;
   const n = d.note;

@@ -21,6 +21,7 @@ import { checkGate } from "./check-gate.js";
 import { checkQueue } from "./check-queue.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { record } from "./activity.js";
+import { wakeWatchers, type WatchNotify } from "./watch-triggers.js";
 import { leftLineSince, lineEvent, type HoldReason } from "./merge-line.js";
 import { priorityGroup } from "./priority-group.js";
 import { createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold } from "./review-holds.js";
@@ -464,6 +465,12 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     });
   }
 
+  /** BOS-2288: wakes the tickets watching for "a gate CI wait failed" (any ticket's). Never stops the merge. */
+  async function wakeCiWatchers(t: { id: string; title: string }, outcome: string) {
+    if (!state.wake) return;
+    await wakeWatchers(db, state.wake as WatchNotify, "gate_ci_failed", `${t.title}: GitHub CI wait ended as ${outcome}`, { exceptTicketId: t.id }).catch(() => undefined);
+  }
+
   /** Wakes the company's CEO about a ticket, with a note; nothing when the company has no CEO. */
   async function tellCeo(t: { id: string; companyId: string }, reason: string, note: string) {
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
@@ -676,6 +683,7 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     tellCeoLiveFix,
     pagePriorityMerge,
     tellCeo,
+    wakeCiWatchers,
     mergeStuck,
     checkStuck,
     setGitNote,

@@ -125,7 +125,36 @@ describe("unblocked wakes (R85)", () => {
     await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Adyen" });
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "unblocked"));
     expect(w).toMatchObject({ agentId: ctx.dev.id, ticketId: blocked.id });
-    expect(w!.note).toContain('You asked "Which provider?"; the answer was: Adyen');
+    // BOS-2291: the CEO raised it, not the assignee, so the wake says so at the top.
+    expect(w!.note).toContain('asked "Which provider?"; the answer was: Adyen');
+    expect(w!.note).not.toContain("You asked");
+    expect(w!.note!.startsWith("Not your card:")).toBe(true);
+  });
+
+  it("say 'You asked' with no 'not your card' line when the assignee raised the card (BOS-2291)", async () => {
+    const blocked = await ctx.ticket("Add checkout", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+    const [d] = await ctx.db
+      .insert(decisions)
+      .values({ companyId: ctx.co.company.id, kind: "question", question: "Which provider?", options: ["Stripe", "Adyen"], recommendedOption: "Stripe", raisedByAgentId: ctx.dev.id })
+      .returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: blocked.id, blockerDecisionId: d!.id });
+    await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Adyen" });
+    const ws = await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, blocked.id), eq(wakes.agentId, ctx.dev.id)));
+    expect(ws.some((w) => w.note?.includes("Not your card"))).toBe(false);
+    expect(ws.some((w) => w.note?.includes("answered your question"))).toBe(true);
+  });
+
+  it("name Boss Man when it raised the card the assignee was waiting on (BOS-2291)", async () => {
+    const blocked = await ctx.ticket("Add checkout", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+    const [d] = await ctx.db
+      .insert(decisions)
+      .values({ companyId: ctx.co.company.id, kind: "question", question: "Which provider?", options: ["Stripe", "Adyen"], recommendedOption: "Stripe", raisedByAgentId: null })
+      .returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: blocked.id, blockerDecisionId: d!.id });
+    await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Adyen" });
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "unblocked"));
+    expect(w).toMatchObject({ agentId: ctx.dev.id, ticketId: blocked.id });
+    expect(w!.note).toContain('Boss Man asked "Which provider?"; the answer was: Adyen');
   });
 
   describe("the owner's answer reaches the ticket it blocked (BOS-951)", () => {
@@ -156,7 +185,8 @@ describe("unblocked wakes (R85)", () => {
       expect(w!.note).toContain("the answer was: Works");
       expect(w!.note!.length).toBeLessThanOrEqual(800 + 1 + "The whole answer and note are on this ticket's conversation.".length);
       expect(w!.note!.indexOf(question)).toBe(-1);
-      expect(w!.note!.length).toBeLessThanOrEqual(320);
+      // 320 plus the BOS-2291 "Not your card" line (the CEO raised this card): still far below the uncut question.
+      expect(w!.note!.length).toBeLessThanOrEqual(400);
     });
 
     it("keeps a long answer whole in the wake, cutting the question instead", async () => {
