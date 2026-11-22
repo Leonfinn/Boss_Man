@@ -7,7 +7,7 @@ import { ticketRef, type MergeResult, type VerifyResult, VERIFY_ASK_TIMEOUT_MS }
 import { agents, checkJobs, checkResults, companies, projects, ticketMessages, tickets } from "../db/schema.js";
 import { RunnerGone } from "./runners.js";
 import { DIFFERENT_APPROACH } from "./loop-guards.js";
-import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop, type FlakeAnswer } from "./ci-publish.js";
+import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, RERUN_REFUSED, type CiOutcome, type CiStop, type FlakeAnswer } from "./ci-publish.js";
 import { BASELINE_RUNS, CANT_RERUN_EXIT, describeSlow, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts, SLOW_RETRIES_PER_WEEK, SLOW_ROW_PREFIX, slowJobs, slowRetryCounts, type SlowEvidence, type SlowJob } from "./ci-flake.js";
 import type { CiRun, CiStatus, GitHostConfig } from "./git-hosts.js";
 import { CHECK_AGAIN } from "./decisions.js";
@@ -79,7 +79,7 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
         },
         touch,
         // BOS-1733: only in server check-queue mode, where the gate can queue a job on the exact merge commit.
-        ...(serverChecks && deps.cancelCheck ? { flakeRetry: (s: CiStatus, st: CiStop) => flakeRetry(prep, s, st), announceFlakeRetry: (a: { files: string[]; slow?: SlowJob[] }, accepted: boolean) => announceFlakeRetry(prep, a, accepted) } : {}),
+        ...(serverChecks && deps.cancelCheck ? { flakeRetry: (s: CiStatus, st: CiStop) => flakeRetry(prep, s, st), announceFlakeRetry: (a: { files: string[]; slow?: SlowJob[] }, accepted: boolean, refused?: string) => announceFlakeRetry(prep, a, accepted, refused) } : {}),
       },
       prep,
       stop,
@@ -247,11 +247,13 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     return { retry: false, why: `Boss Man couldn't re-run ${files.length > 1 ? "them" : "it"} at its gate (${(cur.state === "failed" && cur.exitCode === CANT_RERUN_EXIT && said ? said : cur.reason ?? cur.state).slice(0, 200)})` };
   };
   // The one retry is recorded only once GitHub accepted it: the record is what the per-commit and per-week limits count.
-  const announceFlakeRetry = async (prep: { commit: string }, { files, slow }: { files: string[]; slow?: SlowJob[] }, accepted: boolean) => {
+  const announceFlakeRetry = async (prep: { commit: string }, { files, slow }: { files: string[]; slow?: SlowJob[] }, accepted: boolean, refused?: string) => {
+    // BOS-2082: GitHub's own answer, so the activity says why (on 21 Nov it said only "needs Actions: Read and write").
+    const no = `Boss Man couldn't get the retry: ${refused ?? RERUN_REFUSED}`;
     if (slow?.length) {
       const what = `GitHub CI failed with timeouts on a slow GitHub machine: ${describeSlow(slow)}`;
       if (!accepted) {
-        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${what}. GitHub refused to re-run the failed jobs (the git token needs Actions: Read and write), so the ticket goes back as before.` });
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${what}. ${no}, so the ticket goes back as before.` });
         return;
       }
       await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: FLAKE_RETRY_KIND, passed: true, detail: slow.map((j) => `${SLOW_ROW_PREFIX}${j.job}`).join("\n") });
@@ -260,7 +262,7 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
       return;
     }
     if (!accepted) {
-      await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"}, but GitHub refused to re-run the failed jobs (the git token needs Actions: Read and write), so the ticket goes back as before.` });
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"}, but ${no.charAt(0).toLowerCase()}${no.slice(1)}, so the ticket goes back as before.` });
       return;
     }
     await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: FLAKE_RETRY_KIND, passed: true, detail: files.join("\n") });

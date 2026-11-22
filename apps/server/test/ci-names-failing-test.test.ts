@@ -4,7 +4,10 @@
 // annotation of a line only when it starts with "::", and `pnpm -r` puts "apps/<pkg> test: " in front of every line.
 // In BOS-1720's sweep 52 of 52 failed `check` test steps named no test for that reason.
 // The workflow is parsed as YAML and each step's own `run` is checked, so moving or rewording lines can't fool it.
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
@@ -91,5 +94,45 @@ describe("GitHub CI names every failing test (BOS-1721)", () => {
       },
     };
     expect(unnamedTestSteps(fixed)).toEqual([]);
+  });
+
+  // BOS-2082: the web-browser job wrote only a summary with base names (run 44899835927), which the merge gate can't re-run.
+  // The step's own node script is run on a vitest JSON report, so a change to it is tested as GitHub runs it.
+  it("the web-browser job's failure notes name each failed file on its repo path", () => {
+    const step = (wf.jobs["web-browser"]?.steps ?? []).find((s) => /--outputFile\.json="\$RUNNER_TEMP\/web-tests\.json"/.test(s.run ?? ""));
+    const script = /node -e '\n([\s\S]*?)\n\s*' "\$RUNNER_TEMP\/web-tests\.json"/.exec(step?.run ?? "")?.[1];
+    expect(script).toBeTruthy();
+    // The script sits in a bash single-quoted string: a ' inside it (a "can't" in a comment, as in review) ends the quote
+    // early and the step dies before writing any note. Node alone never sees that, so bash parses the whole step too.
+    expect(script).not.toContain("'");
+    expect(() => execFileSync("bash", ["-n"], { input: step!.run!, stdio: ["pipe", "pipe", "pipe"] })).not.toThrow();
+    const ws = mkdtempSync(join(tmpdir(), "ci-web-notes-"));
+    try {
+      const report = join(ws, "web-tests.json");
+      const file = (name: string, status: string, tests: Array<{ title: string; status: string; msg?: string }>, message = "") => ({
+        name: join(ws, name),
+        status,
+        message,
+        assertionResults: tests.map((t) => ({ title: t.title, status: t.status, failureMessages: t.msg ? [t.msg] : [] })),
+      });
+      writeFileSync(
+        report,
+        JSON.stringify({
+          testResults: [
+            file("apps/web/test/page-intro-browser.test.ts", "failed", [{ title: "safari-1550x1611: each place shows its lead", status: "failed", msg: "AssertionError: the lead is on the page\n at x" }, { title: "ok", status: "passed" }]),
+            file("apps/web/test/broken.test.ts", "failed", [], "Failed to load url ./nope"),
+            file("apps/web/test/fine.test.ts", "passed", [{ title: "fine", status: "passed" }]),
+          ],
+        }),
+      );
+      const out = execFileSync("node", ["-e", script!, report], { env: { ...process.env, GITHUB_WORKSPACE: ws }, encoding: "utf8" }).trim().split("\n");
+      expect(out[0]).toMatch(/^::error title=web tests failed::page-intro-browser\.test\.ts: safari-1550x1611: each place shows its lead: AssertionError: the lead is on the page \| broken\.test\.ts: Failed to load url \.\/nope$/);
+      expect(out.slice(1)).toEqual([
+        "::error file=apps/web/test/page-intro-browser.test.ts,title=web test failed::safari-1550x1611: each place shows its lead: AssertionError: the lead is on the page",
+        "::error file=apps/web/test/broken.test.ts,title=web test failed::Failed to load url ./nope",
+      ]);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
   });
 });
