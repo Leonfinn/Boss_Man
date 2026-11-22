@@ -337,7 +337,7 @@ export function NotePane({ id, companyId, features, onChanged, onClose }: { id: 
 }
 
 /** The public portal: on or off, its words, and its secret link. */
-function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
+export function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
   const s = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `portal-${companyId}`);
   const [form, setForm] = useState<{ title: string; intro: string } | null>(null);
   // BOS-967: the optional way back to the owner's website, saved on its own so a bad address
