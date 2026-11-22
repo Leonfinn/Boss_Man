@@ -488,6 +488,26 @@ describe("Allow always", () => {
     const answerCall = fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }];
     expect(JSON.parse(answerCall[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
   });
+  // BOS-2188: how long the rule lasts; "always" stays the default, so an owner who doesn't look gets what they got before.
+  it("sends 'always' by default and the duration picked otherwise", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const always = [{ label: "Always allow crawl4ai's md tool", what: "use crawl4ai's md tool" }];
+    const d = decision({ kind: "permission", options: ["Allow once", always[0]!.label, "Deny"], context: { type: "permission", explain, always, alwaysAgent: { id: "a1", name: "Researcher" } } });
+    const sent = () => JSON.parse((fetchMock.mock.calls.find((c) => (c[0] as string) === "/api/decisions/d1/answer")![1] as { body: string }).body);
+    const { unmount } = render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect((screen.getByLabelText("Always (until you remove it)") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
+    await waitFor(() => expect(screen.getByText(/Saved as a rule for Researcher\./)).toBeTruthy());
+    expect(sent()).toMatchObject({ alwaysScope: "agent", alwaysTtl: "always" });
+    unmount();
+    fetchMock.mockClear();
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByLabelText("For 1 hour"));
+    fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
+    await waitFor(() => expect(screen.getByText(/Saved as a rule for Researcher, for 1 hour\./)).toBeTruthy());
+    expect(sent()).toMatchObject({ alwaysTtl: "hour" });
+  });
   it("no longer explains a button that isn't there (BOS-1236)", () => {
     render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission", explain: { ...explain, alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.queryByText(/doesn't offer 'always'/)).toBeNull();

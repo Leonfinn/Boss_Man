@@ -2651,7 +2651,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope } = z
+      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl } = z
         .object({
           answer: z.string().trim().min(1).max(OWNER_MESSAGE_MAX),
           assigneeAgentId: Uuid.optional(),
@@ -2659,6 +2659,7 @@ export async function buildApp(opts: AppOptions) {
           reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           alwaysScope: z.enum(["agent", "company"]).optional(),
+          alwaysTtl: z.enum(["hour", "midnight", "always"]).optional(),
           picks: z.array(z.number().int().min(0)).max(20).optional(),
           modelConfig: z
             .object({ harness: z.string().trim().min(1).max(40), provider: z.string().trim().min(1).max(40), model: z.string().trim().min(1).max(200), fundingSourceId: Uuid })
@@ -2666,7 +2667,7 @@ export async function buildApp(opts: AppOptions) {
         })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, by: await ownerName(req) });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, alwaysScope, alwaysTtl, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });

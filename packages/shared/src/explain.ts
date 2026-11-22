@@ -60,6 +60,9 @@ export type AlwaysChoice = {
 /** Who a saved "always" rule covers: only the agent that asked (the default) or every agent in the company. */
 export type AlwaysScope = "agent" | "company";
 
+/** How long a saved "always" rule lasts (BOS-2188): one hour, until the server's midnight, or with no end (the default). */
+export type AlwaysTtl = "hour" | "midnight" | "always";
+
 /** Shell grammar, not programs: skipped to find the program that follows. */
 const KEYWORDS = new Set("if then else elif fi for do done while until case esac function { } ! [[ ]] (( ))".split(" "));
 const SHELLS = new Set("bash sh zsh dash python python3 node".split(" "));
