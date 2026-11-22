@@ -138,8 +138,10 @@ import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
 import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
+import { spendReportRoutes } from "./routes/spend-report.js";
 import { featureRoutes } from "./routes/features.js";
 import { DateStr, objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { searchRoutes } from "./routes/search.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { ticketRecordRoutes } from "./routes/ticket-record.js";
@@ -148,7 +150,7 @@ import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
-import { loginLimiter, type LoginLimits } from "./login-limit.js";
+import { DEFAULT_LOGIN_LIMITS, loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
@@ -655,6 +657,8 @@ export async function buildApp(opts: AppOptions) {
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
     mergeTrain: (id) => mergeTrainStatus(db, id),
+    // BOS-2119: read when server_status is asked, after `review` below is built.
+    landingTurns: (id) => review.landingTurnStatus(id),
     idleCheckSlots: async (id) => (await checkIdle.view(id)).map(idleView),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
@@ -1204,12 +1208,13 @@ export async function buildApp(opts: AppOptions) {
   });
   // BOS-1489: the start hold's two counts. Merges: the Merge queue page's own figure. Quick checks: queued jobs that aren't a
   // merge or a full check, through check_jobs_state_queued (state first), counted for the company.
-  setStartHoldCounts(async (companyId) => {
+  // BOS-2196: cards that need the owner, the Dashboard's Needs you figure (queueTally().open), only when that limit is on.
+  setStartHoldCounts(async (companyId, want) => {
     const [q] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(checkJobs)
       .where(and(eq(checkJobs.state, "queued"), eq(checkJobs.companyId, companyId), eq(checkJobs.scope, "quick"), ne(checkJobs.kind, "merge")));
-    return { merges: await mergeQueue.waitingCount(companyId), quickChecks: q?.n ?? 0 };
+    return { merges: await mergeQueue.waitingCount(companyId), quickChecks: q?.n ?? 0, ...(want?.owner ? { ownerWaiting: (await decisionsSvc.queueTally({ companyId })).open } : {}) };
   });
   // BOS-2058: every update wait that is on, for the owner's screens and the CEO's server_status (one list, update-waits.ts).
   const currentUpdateWaits = async () => {
@@ -1486,7 +1491,27 @@ export async function buildApp(opts: AppOptions) {
     return reply.code(201).send({ username: owner!.username });
   });
 
-  const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()));
+  // BOS-2177: the first time sign-in locks, tell the owner once (an alert and one activity line, on the oldest
+  // company, as sign-in belongs to no company). The text carries the address only: never a guessed name or password.
+  const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()), (e) => {
+    const limits = opts.loginLimits ?? DEFAULT_LOGIN_LIMITS;
+    const address = e.ip.replace(/[^0-9a-fA-F.:%]/g, "").slice(0, 64) || "an unknown address";
+    const at = new Date(e.at);
+    void (async () => {
+      const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+      await notes.notify({
+        companyId: null,
+        agentId: null,
+        level: "flag",
+        title: e.byAddress
+          ? `Sign-in was locked after ${limits.maxFailures} wrong passwords from ${address}`
+          : `Sign-in for the owner's username was locked after ${limits.maxFailures} wrong passwords from several addresses, the latest ${address}`,
+        body: "If this wasn't you, change your password in Settings → Account.",
+        link: "#/settings",
+      });
+      if (home) await record(db, { companyId: home.id, kind: "security", summary: `Sign-in locked after ${limits.maxFailures} failed attempts from ${address} at ${at.toISOString()}`, detail: { address, at: at.toISOString(), byAddress: e.byAddress, byUsername: e.byUsername }, at });
+    })().catch((err) => app.log.warn({ err }, "sign-in lockout alert failed"));
+  });
   app.post("/api/login", async (req, reply) => {
     const body = Credentials.parse(req.body);
     const wait = logins.retryAfter(req.ip, body.username);
@@ -1595,7 +1620,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), holdStartsMergesWaiting: z.number().int().min(1).max(1000).nullable(), holdStartsQuickChecksQueued: z.number().int().min(1).max(1000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), holdStartsMergesWaiting: z.number().int().min(1).max(1000).nullable(), holdStartsQuickChecksQueued: z.number().int().min(1).max(1000).nullable(), holdStartsOwnerWaiting: z.number().int().min(1).max(1000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
       if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
@@ -1622,8 +1647,8 @@ export async function buildApp(opts: AppOptions) {
         await record(db, { companyId: id, kind: "settings", summary: diskCapGb === null ? "Owner reset the workspace disk cap to the server default (20 GB)" : `Owner set the workspace disk cap to ${gb(Math.round(diskCapGb * 1024 ** 3))}`, detail: { diskCapGb } });
       }
       // The start hold's limits (BOS-1489) change what starts, so keep a record of who set them and to what.
-      for (const [key, label] of [["holdStartsMergesWaiting", "merges waiting"], ["holdStartsQuickChecksQueued", "quick checks queued"]] as const)
-        if (b[key] !== undefined) await record(db, { companyId: id, kind: "settings", summary: b[key] === null ? `Owner turned off holding new starts on ${label}` : `Owner set new starts to be held while ${b[key]} or more ${label}`, detail: { [key]: b[key] } });
+      for (const [key, label, offLabel] of [["holdStartsMergesWaiting", "merges waiting", "merges waiting"], ["holdStartsQuickChecksQueued", "quick checks queued", "quick checks queued"], ["holdStartsOwnerWaiting", "cards need you", "cards that need you"]] as const)
+        if (b[key] !== undefined) await record(db, { companyId: id, kind: "settings", summary: b[key] === null ? `Owner turned off holding new starts on ${offLabel}` : `Owner set new starts to be held while ${b[key]} or more ${label}`, detail: { [key]: b[key] } });
       // The agent fence, permission-card advice and the run time limit change what agents may do (BOS-2063): record each one the request changed.
       const FENCE_WORDS = { off: "Off", watch: "Watch", enforce: "Enforce" } as const;
       const JUDGE_WORDS = { off: "Off", watch: "Watch", advise: "Advise" } as const;
@@ -2025,6 +2050,9 @@ export async function buildApp(opts: AppOptions) {
     // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
     projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch, now: opts.now });
 
+    // The Spend page's read (BOS-2194): routes/spend-report.ts.
+    spendReportRoutes(owner, db, { now: opts.now });
+
     owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all" }));
 
     owner.post("/api/projects/:id/tickets", async (req, reply) => {
@@ -2132,7 +2160,10 @@ export async function buildApp(opts: AppOptions) {
       if (err instanceof TicketChatError) return reply.code(err.status).send({ error: "ticket_chat", message: err.message });
       throw err;
     };
-    owner.get("/api/tickets/:id/messages", async (req, reply) => ticketChat.list(IdParam.parse(req.params).id).catch(ticketChatErrors(reply)));
+    owner.get("/api/tickets/:id/messages", async (req, reply) => {
+      const { before } = z.object({ before: z.string().max(100).optional() }).parse(req.query);
+      return ticketChat.list(IdParam.parse(req.params).id, { before }).catch(ticketChatErrors(reply));
+    });
     owner.post("/api/tickets/:id/messages", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { text, interrupt, agentId } = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional(), agentId: z.string().uuid().optional() }).parse(req.body);
@@ -2412,6 +2443,8 @@ export async function buildApp(opts: AppOptions) {
 
     // The roadmap and plan views: routes/roadmap.ts, on this owner scope.
     roadmapRoutes(owner, db, { feedback, now: opts.now, planning: planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) }) });
+    // The search box (BOS-2192): routes/search.ts, on this owner scope.
+    searchRoutes(owner, db);
 
     // Agents (R62): hire from a template, and undo any change (the other agent routes are in routes/agents-runs.ts).
     const agentErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -2513,6 +2546,13 @@ export async function buildApp(opts: AppOptions) {
     });
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
     owner.get("/api/decisions/with-team", async () => decisionsSvc.withTeam());
+    // (BOS-2187) Past answers, newest first, 50 at a time: pass the last page's `next` as `cursor`.
+    owner.get("/api/decisions/answered", async (req) => {
+      const q = z
+        .object({ cursor: z.string().max(100).optional(), q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional(), companyId: z.string().uuid().optional() })
+        .parse(req.query ?? {});
+      return decisionsSvc.answeredList({ ...(q.cursor ? { cursor: q.cursor } : {}), ...(q.q ? { q: q.q } : {}), ...(q.limit ? { limit: q.limit } : {}), ...(q.companyId ? { companyId: q.companyId } : {}) });
+    });
 
     // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).
     owner.post("/api/decisions/:id/ask-advice", async (req, reply) => {

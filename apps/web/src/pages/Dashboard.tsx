@@ -212,7 +212,8 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked{s.waitingLiveCheck ? `, ${s.waitingLiveCheck} merged, waiting for a live check` : ""}
           </small>
         </a>
-        <a className="card stat" href="#/funding">
+        {/* The API-money card opens the Spend page (BOS-2194); the subscription-tokens card still opens Funding. */}
+        <a className="card stat" href={s.monthSubscriptionRuns > 0 ? "#/funding" : `#/spend/${company.id}`}>
           {/* Subscription use is tokens, not money (R67); money is only what API use cost. */}
           {s.monthSubscriptionRuns > 0 ? (
             <>
@@ -232,7 +233,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
             <>
               <strong>${(s.monthCostMicros / 1_000_000).toFixed(2)}</strong>
               <span>API spend this month</span>
-              <small className="muted">API credit and pay-as-you-go</small>
+              <small className="muted">API credit and pay-as-you-go · where it went</small>
             </>
           )}
         </a>

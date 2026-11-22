@@ -67,7 +67,6 @@ sections:
   - Agents
   - Dashboard
   - Decisions
-  - Finish setting up
   - Left your list recently
   - Needs you Checking…
   - Needs you …
@@ -78,6 +77,7 @@ reads:
   - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
+  - /api/decisions/answered
   - /api/decisions/tally
   - /api/funding-sources
   - /api/runs/:id/transcript
@@ -384,6 +384,12 @@ reads:
   - /api/companies/:id/skills
   - /api/companies/:id/skills/:id
   - /api/companies/:id/skills/elsewhere
+
+## #/spend
+sections: 
+  - Spend
+reads: 
+  - /api/companies/:id/spend-report
 
 ## #/tickets
 sections: 

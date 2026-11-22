@@ -1,0 +1,96 @@
+import { and, eq, gte, ne, sql } from "drizzle-orm";
+import { dateIn, isTimeZone } from "@boss-man/shared";
+import type { Db } from "../db/client.js";
+import { agents, costEvents, features, fundingSources, projects, runs, tickets } from "../db/schema.js";
+
+export const SPEND_REPORT_PERIODS = [7, 30, 90] as const;
+
+export type SpendReportRow = {
+  /** The owner's local day, YYYY-MM-DD. */
+  date: string;
+  agentId: string | null;
+  agent: string;
+  featureId: string | null;
+  feature: string;
+  projectId: string | null;
+  project: string;
+  tickets: number;
+  micros: number;
+};
+
+export type SpendReport = { timeZone: string; days: string[]; rows: SpendReportRow[]; totalMicros: number };
+
+/** A zone Intl accepts, else UTC (the browser sends its own zone; a bad one must not fail the page). */
+export function validZone(tz: string | undefined): string {
+  return tz && isTimeZone(tz) ? tz : "UTC";
+}
+
+/**
+ * Money a company spent, one row per local day, agent, feature and project over the last `days` days (BOS-2194).
+ * Real spend only: cost events on subscription sources carry a list price but aren't money, so they are left out,
+ * as on the dashboard. A cost with no ticket shows under "No feature"; one with no agent or project likewise.
+ * Days are the owner's local days; the grouping is one pass in code (the zone can't be done in one cheap query, BOS-643).
+ */
+export async function spendReport(db: Db, companyId: string, opts: { days: number; timeZone?: string; now?: Date }): Promise<SpendReport> {
+  const now = opts.now ?? new Date();
+  const timeZone = validZone(opts.timeZone);
+  const [y, m, d] = dateIn(now, timeZone).split("-").map(Number) as [number, number, number];
+  const days = Array.from({ length: opts.days }, (_, i) => new Date(Date.UTC(y, m - 1, d - (opts.days - 1 - i))).toISOString().slice(0, 10));
+  const first = days[0]!;
+  // A day of slack either side of the zone offset; rows outside the listed days are dropped below.
+  const since = new Date(Date.parse(`${first}T00:00:00Z`) - 86_400_000);
+  const events = await db
+    .select({
+      at: costEvents.occurredAt,
+      micros: costEvents.costMicros,
+      agentId: costEvents.agentId,
+      agent: agents.name,
+      ticketId: tickets.id,
+      featureId: tickets.featureId,
+      feature: features.title,
+      projectId: projects.id,
+      project: projects.name,
+    })
+    .from(costEvents)
+    .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
+    .leftJoin(agents, eq(agents.id, costEvents.agentId))
+    .leftJoin(runs, eq(runs.id, costEvents.runId))
+    .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+    .leftJoin(features, eq(features.id, tickets.featureId))
+    // Same project the budget page uses: the charged project of engagement work, else the event's, else the ticket's.
+    .leftJoin(projects, eq(projects.id, sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}, ${tickets.projectId})`))
+    .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, since), ne(fundingSources.kind, "subscription")));
+
+  const daySet = new Set(days);
+  // not state: a local that lives for this one call
+  const groups = new Map<string, SpendReportRow & { ids: Set<string> }>();
+  let totalMicros = 0;
+  for (const e of events) {
+    const date = dateIn(e.at, timeZone);
+    if (!daySet.has(date)) continue;
+    const key = [date, e.agentId ?? "", e.featureId ?? "", e.projectId ?? ""].join("|");
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        date,
+        agentId: e.agentId,
+        agent: e.agent ?? "No agent",
+        featureId: e.featureId,
+        feature: e.feature ?? "No feature",
+        projectId: e.projectId,
+        project: e.project ?? "No project",
+        tickets: 0,
+        micros: 0,
+        ids: new Set(),
+      };
+      groups.set(key, g);
+    }
+    g.micros += e.micros;
+    totalMicros += e.micros;
+    if (e.ticketId) g.ids.add(e.ticketId);
+  }
+  const rows = [...groups.values()]
+    .map(({ ids, ...r }) => ({ ...r, tickets: ids.size }))
+    .sort((a, b) => a.date.localeCompare(b.date) || b.micros - a.micros || a.agent.localeCompare(b.agent));
+  return { timeZone, days, rows, totalMicros };
+}

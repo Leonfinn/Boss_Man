@@ -6,6 +6,7 @@ import type { Company, Decision } from "../api";
 import { useMediaQuery } from "../hooks";
 import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
+import { SearchButton } from "./SearchPalette";
 
 /**
  * R43: a per-company server figure (feedback.toProcess) for the chosen company, the one its own page shows. The
@@ -295,6 +296,8 @@ export function Sidebar(props: {
           <MenuIcon size={20} strokeWidth={1.75} aria-hidden="true" />
           <span className="sr-only">{menu ? "Close menu" : `Menu, ${label}`}</span>
         </button>
+        {/* BOS-2192: opens the search box, for touch screens with no Ctrl+K. */}
+        <SearchButton />
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         <div className="nav-scroll">

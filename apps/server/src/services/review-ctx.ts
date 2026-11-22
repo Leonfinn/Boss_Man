@@ -24,7 +24,7 @@ import { record } from "./activity.js";
 import { leftLineSince, lineEvent, type HoldReason } from "./merge-line.js";
 import { priorityGroup } from "./priority-group.js";
 import { createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold } from "./review-holds.js";
-import { CARRIED_NOTE_PREFIX } from "./merge-queue.js";
+import { CARRIED_NOTE_PREFIX, type TurnWait } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { cardHeld, CHECK_MERGED_KEY, highestRisk, MERGE_CARRY_KEY, MERGE_RETARGET_KEY, MERGE_TURN_DEFAULT_MIN, MERGE_TURN_KEY, MERGE_TURN_MAX_MIN, MERGE_WAIT_MS, raiseCheckStuck, ReviewError, ReviewHeldError, SignoffPendingError, WAIT_FOR_CI_KEY, type CarriedInfo, type GitTemplates, type HoldInput, type LandingStatus, type NotifyHook } from "./review-common.js";
@@ -77,6 +77,10 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
   // BOS-1070: a merge waiting for the git host's CI, beside its own check (so not a phase): since when, and the jobs still running.
   // shortcut: in memory like `landings`, lost on restart, harmless because a restart ends the wait it describes.
   const ciWaits = new Map<string, { since: number; waiting: string[] }>();
+  // BOS-2119 (R43): a merge waiting for another ticket's landing turn, before it re-prepares ("rebuild") or before it pushes
+  // a passed check ("push"). It holds no check slot then, so the Merges tab, mergeState and server_status read this one
+  // marker for their words. shortcut: in memory like `landings`; the turns it describes are in memory too (DR-026).
+  const turnWaits = new Map<string, TurnWait>();
   // Merged trees the git host's CI passed. A merge rebuilt on a moved main with the same tree keeps the pass, as a
   // check-all pass is kept (P11a), so it isn't pushed and waited for again. shortcut: in memory, so a restart waits again.
   const ciPassedTrees = new Set<string>();
@@ -648,6 +652,7 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     landingBeat,
     phases,
     ciWaits,
+    turnWaits,
     ciPassedTrees,
     ciCardWaiting,
     ciTiming,

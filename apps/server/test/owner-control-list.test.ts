@@ -89,6 +89,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // The owner's message box, on five screens (Ticket, Board, Chat, Decisions, Run).
   "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
+  // The Ctrl+K search box and its sidebar button, mounted once in App.tsx (BOS-2192).
+  "components/SearchPalette.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
   // The page-intro fold, on four screens (P7, BOS-1278).
   "components/MoreAbout.tsx": "Any screen",
@@ -151,8 +153,10 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Setup.tsx": "Setup",
   "pages/SetupClaude.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
+  "pages/SpendReport.tsx": "Spend",
   "pages/Ticket.tsx": "Ticket",
   "pages/Wiki.tsx": "Wiki",
+  "components/WikiCompare.tsx": "Wiki",
   "pages/Workflow.tsx": "Workflow",
 };
 

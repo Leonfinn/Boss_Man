@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { figureText, OWNER_FIGURES, type OwnerFigureName } from "../src/owner-figures.js";
+import { figureText, OWNER_FIGURES, slowLineCounts, type OwnerFigureName } from "../src/owner-figures.js";
 
 // R43 (BOS-1716): the 17 Nov badge said 31 and the banner "21 merge checks waiting": two figures, one word.
 const names = Object.keys(OWNER_FIGURES) as OwnerFigureName[];
@@ -36,5 +36,46 @@ describe("owner-visible figures: one name, one label each (R43)", () => {
 
   it("the plain word 'waiting' names no count: it is what both 17 Nov figures said", () => {
     for (const name of names) for (const l of labels(name)) expect(l, name).not.toMatch(/\bwaiting\b/);
+  });
+});
+
+// slowLineCounts is the merging-slowly line both the server note and the web banner show: the count
+// Boss Man can move (waiting) and, only when the line is longer than that, the whole line's count.
+describe("slowLineCounts: the merging-slowly sentence's figures", () => {
+  it("shows only Boss Man's count when the line is empty or no one is waiting behind", () => {
+    expect(slowLineCounts({ waiting: 0 })).toBe("0 for Boss Man to merge");
+    expect(slowLineCounts({ waiting: 0, inQueue: 0 })).toBe("0 for Boss Man to merge");
+  });
+
+  it("shows only Boss Man's count when every ticket in the line is his to merge", () => {
+    expect(slowLineCounts({ waiting: 5, inQueue: 5 })).toBe("5 for Boss Man to merge");
+    expect(slowLineCounts({ waiting: 1, inQueue: 9 })).toBe(
+      "1 for Boss Man to merge (9 in the merge line; the rest are merging now or with an agent or you)",
+    );
+  });
+
+  it("names both figures and where the rest are when some are not Boss Man's", () => {
+    expect(slowLineCounts({ waiting: 3, inQueue: 8 })).toBe(
+      "3 for Boss Man to merge (8 in the merge line; the rest are merging now or with an agent or you)",
+    );
+  });
+
+  it("names both figures when the whole line is slow and none of it is Boss Man's", () => {
+    expect(slowLineCounts({ waiting: 0, inQueue: 4 })).toBe(
+      "0 for Boss Man to merge (4 in the merge line; the rest are merging now or with an agent or you)",
+    );
+  });
+
+  it("adds the whole-line figure only when it is strictly longer: at the threshold it stays quiet", () => {
+    expect(slowLineCounts({ waiting: 4, inQueue: 4 })).toBe("4 for Boss Man to merge");
+    expect(slowLineCounts({ waiting: 4, inQueue: 5 })).toBe(
+      "4 for Boss Man to merge (5 in the merge line; the rest are merging now or with an agent or you)",
+    );
+    expect(slowLineCounts({ waiting: 4, inQueue: 3 })).toBe("4 for Boss Man to merge");
+  });
+
+  it("writes each figure with its one label, so no count is renamed here", () => {
+    expect(slowLineCounts({ waiting: 21 })).toContain(figureText("mergeQueue.forBossMan", 21));
+    expect(slowLineCounts({ waiting: 21, inQueue: 31 })).toContain(figureText("mergeQueue.inLine", 31));
   });
 });

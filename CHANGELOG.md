@@ -20,6 +20,25 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 21 November 2026
+
+- Pages that are still loading now say "Loading…", and a page that fails to load says so, instead of showing a blank space. This covers the public portal, the Roadmap, the Wiki, the Agents list, Settings → Watchdog and Settings → Funding.
+- A paused company now has a Resume button.
+- Stopping one run from a ticket or the Run page asks you first, and can't be sent twice.
+- Removing a deploy target that still has deploys asks you first, instead of quietly wiping its history.
+- On Permission rules, "Add rule" and "Ask the CEO to draft it" can no longer be clicked twice into two rules or two requests.
+- Settings → Watchdog checks its limit numbers before saving, and says in plain words which box is wrong.
+- The Dashboard's "Runner settings" link now opens the Runner page.
+- Before an agent opens a new ticket, it now sees open and recently finished tickets with similar titles.
+- Finished work that is waiting for its quick check now shows as "Being checked", not In progress.
+- When two open tickets change the same files, both now show a warning.
+- The short freeze that happened about once a minute is fixed.
+- Container logs are now capped in size, so they can no longer slowly fill your server's disk.
+- The Cloudflare tunnel and Tailscale add-ons now show "unhealthy" when their connection is down, instead of "running".
+- A runner update now holds new work from the moment its build starts, and retries a failed swap once.
+- More changes leave a line in the activity log: pausing or resuming a company, switching the watchdog, adding or removing a tool server or deploy target, turning the portal on or off, changing feedback settings, and turning Priority 1 on or off.
+- A new website page, "What can go wrong with AI agent teams", tells 11 real failure stories and what Boss Man does about each.
+
 ## 20 November 2026
 
 - A server update now says what it is waiting on and when it is running late, and your CEO chat keeps answering while it waits, instead of a bare "updating".
