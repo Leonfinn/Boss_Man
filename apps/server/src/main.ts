@@ -5,7 +5,7 @@ import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
 import { parseClientHeader, parseTrustedProxies } from "./portal-ip.js";
-import { failureSignaturesDays, pruneFailureSignatures, prunePermissionDecisions, permissionLogDays, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
+import { failureSignaturesDays, pruneExpiredPolicyRules, pruneFailureSignatures, prunePermissionDecisions, permissionLogDays, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
 import { checkLimitReconciler, readRunnerAgents } from "./services/check-limit.js";
 import { checkQueue } from "./services/check-queue.js";
@@ -37,7 +37,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, webhooks, sweepExpiredSessions, mailer, weeklySummary, mainCi, secretScan, launcher, githubWatch, memory, serverHealth, dailyBackup, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -110,6 +110,8 @@ const bg = createBackground(
     { name: "retro", everyMs: Number(env.BOSSMAN_RETRO_MS ?? 15 * 60_000), run: () => retro.sweep() },
     // Server health (BOS-640): rss against the memory the server may use, and freezes in the last 10 minutes; raises the memory card (CEO) and the freeze card (owner). // leader-only
     { name: "server health", everyMs: Number(env.BOSSMAN_SERVER_HEALTH_MS ?? 60_000), run: async () => { await serverHealth.check(); } },
+    // The daily database backup (BOS-2176): one owner alert when the newest automatic backup is over 36 hours old. // leader-only
+    { name: "daily backup watch", everyMs: Number(env.BOSSMAN_DAILY_BACKUP_WATCH_MS ?? 15 * 60_000), run: async () => { await dailyBackup.check(); } },
     // Boss Man's own alerts that sat on the Scrum Master or the CEO past the time limit move up a rung (BOS-64).
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
     // Main's GitHub CI (BOS-1072): one ticket per distinct failing step, later runs added to it, a note when green again. Quiet where there is no GitHub CI. // leader-only
@@ -144,6 +146,8 @@ const bg = createBackground(
     // Housekeeping (BOS-416): deletes runner events older than BOSSMAN_RUNNER_EVENTS_DAYS (default 60), in small batches. // leader-only
     // First pass 15 min after start (clear of the start-up memory burst), then daily: this server restarts several times a day.
     { name: "permission decisions prune", everyMs: 24 * 3_600_000, firstAfterMs: 20 * 60_000, run: () => prunePermissionDecisions(db, { days: permissionLogDays(env.BOSSMAN_PERMISSION_LOG_DAYS), stop: () => leader.role() !== "leader" }) },
+    // Timed allow rules that ended more than 7 days ago (BOS-2188). // leader-only
+    { name: "expired permission rules prune", everyMs: 24 * 3_600_000, firstAfterMs: 25 * 60_000, run: () => pruneExpiredPolicyRules(db, { stop: () => leader.role() !== "leader" }) },
     { name: "runner events prune", everyMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneRunnerEvents(db, { days: runnerEventsDays(env.BOSSMAN_RUNNER_EVENTS_DAYS), stop: () => leader.role() !== "leader" }) },
     // Failure signatures are only read over the two-hour loop-guard window (loop-guards.ts, BOS-611); the rest go daily, in small batches. // leader-only
     { name: "failure signatures prune", everyMs: Number(env.BOSSMAN_FAILURE_SIGNATURES_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneFailureSignatures(db, { days: failureSignaturesDays(env.BOSSMAN_FAILURE_SIGNATURES_DAYS), stop: () => leader.role() !== "leader" }) },

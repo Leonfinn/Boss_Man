@@ -1011,6 +1011,8 @@ export const policyRules = pgTable("policy_rules", {
   createdAt: timestamp("created_at", { withTimezone: true }),
   createdBy: text("created_by"),
   sourceDecisionId: uuid("source_decision_id").references(() => decisions.id, { onDelete: "set null" }),
+  /** BOS-2188: when a timed allow stops matching. Null = never expires (every rule made before this existed). */
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
 });
 
 // ---------- Loop guards (R49, R50) ----------
@@ -1160,6 +1162,8 @@ export const checkWorkers = pgTable("check_workers", {
   toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
   imageVersion: text("image_version"),
   reportedSlots: integer("reported_slots"),
+  /** BOS-2217: the memory the machine reports it has for checks, in MB (its container limit, or the host's memory when unlimited); null from an older worker. */
+  reportedMemoryMb: integer("reported_memory_mb"),
   features: jsonb("features").$type<string[]>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   createdAt: createdAt(),

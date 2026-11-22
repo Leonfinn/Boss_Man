@@ -7,6 +7,14 @@ import { Section, useAction } from "./shared";
 
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
 type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; commit: string | null; startedAt: string | null };
+/** The daily database backup (BOS-2176): GET /api/daily-backup. */
+type DailyBackup = { lastAt: string | null; failed: { at: string; message: string } | null; stale: boolean };
+/** The "Last automatic backup" line: the time of the newest one, or plainly that there is none yet. */
+export function dailyBackupLine(d: DailyBackup | null | undefined): { text: string; warn: boolean } {
+  if (!d || typeof d !== "object" || !("lastAt" in d)) return { text: "No automatic backup yet", warn: false };
+  const text = d.lastAt ? `Last automatic backup: ${when(d.lastAt)}` : "No automatic backup yet";
+  return { text, warn: !!d.stale };
+}
 type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
 /** The server's role in plain words (BOS-1494); the technical name follows in small boxed text. */
 const ROLE_LABEL = { leader: "In charge", standby: "Standing by: another copy is in charge, so changes here are refused", single: "The only server" };
@@ -284,9 +292,11 @@ export function NetguardAllow() {
 export function ServerPanel() {
   const h = usePoll((signal) => api<Health>("/api/health", { signal }), 10_000, "server-role");
   const bg = usePoll((signal) => api<BlueGreen>("/api/bluegreen", { signal }), 10_000, "bluegreen");
+  const backup = usePoll((signal) => api<DailyBackup>("/api/daily-backup", { signal }), 60_000, "daily-backup");
   if (!h.data) return null;
   const { role, version, commit, startedAt } = h.data;
   const b = bg.data;
+  const bl = dailyBackupLine(backup.data);
   return (
     <Section id="server-h" title="Server">
       <dl className="facts" data-testid="server-role">
@@ -300,6 +310,12 @@ export function ServerPanel() {
         </dd>
         <dt>Running since</dt>
         <dd>{when(startedAt)}</dd>
+        <dt>Backup</dt>
+        <dd data-testid="daily-backup">
+          {bl.text}
+          {bl.warn && <span className="muted"> · over 36 hours ago: check that the backup service is running (an alert is on your list)</span>}
+          {backup.data?.failed && <span className="muted"> · the last attempt failed: {backup.data.failed.message}</span>}
+        </dd>
         {b?.enabled && (
           <>
             <dt>Blue/green</dt>

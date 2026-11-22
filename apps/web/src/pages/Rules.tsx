@@ -7,7 +7,20 @@ import { DraftTextarea } from "../components/DraftTextarea";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
 type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; reservedTmpRemoval?: boolean; destructive?: boolean; pushing?: boolean };
-type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null };
+type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null; expiresAt?: string | null };
+
+/** "Expires in 45 min" / "Expires today at 23:59" / "Expired at 15:42" for a timed rule; nothing for one that never ends (BOS-2188). */
+export function expiryOf(expiresAt: string | null | undefined, now: Date = new Date()): { expired: boolean; text: string } {
+  if (!expiresAt) return { expired: false, text: "" };
+  const end = new Date(expiresAt);
+  const clock = end.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const sameDay = end.toDateString() === now.toDateString();
+  const day = sameDay ? "" : `${end.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} `;
+  if (end <= now) return { expired: true, text: `Expired ${sameDay ? "at" : "on"} ${day}${clock}` };
+  const mins = Math.ceil((end.getTime() - now.getTime()) / 60_000);
+  if (mins < 60) return { expired: false, text: `Expires in ${mins} min` };
+  return { expired: false, text: sameDay ? `Expires today at ${clock}` : `Expires on ${day}at ${clock}` };
+}
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }>; shadowedIds?: string[] };
 
 const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"];
@@ -129,10 +142,16 @@ function RuleRows({ rules, agents, shadowed, editingId, onEdit, onSave, onMove, 
             <RuleEditForm rule={r} onSave={(p) => onSave(r, p)} onCancel={() => onEdit(null)} />
           </li>
         ) : (
-        <li key={r.id}>
+        <li key={r.id} style={expiryOf(r.expiresAt).expired ? { opacity: 0.6 } : undefined}>
           <span className="mono muted">{i + 1}</span>
           <div style={{ minWidth: 0 }}>
             <strong>{r.name}</strong>
+            {r.expiresAt && (
+              <p className={expiryOf(r.expiresAt).expired ? "muted" : "tag amber"} style={{ fontSize: 12.5 }}>
+                {expiryOf(r.expiresAt).text}
+                {expiryOf(r.expiresAt).expired ? ". It no longer matches; Boss Man removes it a week after it ended." : ""}
+              </p>
+            )}
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
               When {describeMatch(r.match, agents)}
             </p>
@@ -157,9 +176,11 @@ function RuleRows({ rules, agents, shadowed, editingId, onEdit, onSave, onMove, 
             <button type="button" className="btn small" aria-label={`Move ${r.name} down`} disabled={i === rules.length - 1} onClick={() => onMove(i, 1)}>
               ↓
             </button>
-            <button type="button" className="btn small" aria-label={`Edit ${r.name}`} onClick={() => onEdit(r.id)}>
-              Edit
-            </button>
+            {!expiryOf(r.expiresAt).expired && (
+              <button type="button" className="btn small" aria-label={`Edit ${r.name}`} onClick={() => onEdit(r.id)}>
+                Edit
+              </button>
+            )}
             <button type="button" className="btn small" onClick={() => onDelete(r)}>
               Delete
             </button>
@@ -185,6 +206,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [probe, setProbe] = useState({ companyId: scopeId ?? companies[0]?.id ?? "", command: "" });
   const [verdict, setVerdict] = useState<{ outcome: Outcome; rule: string } | null>(null);
+  const [useDraft, setUseDraft] = useState(false);
 
   // `submitting` disables the two submit buttons; the ref stops a second click that lands before React re-renders.
   const [submitting, setSubmitting] = useState(false);
@@ -237,9 +259,12 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
       clearDraft(askDraftKey);
     });
   };
+  // The rule being typed in "Add a rule", if it has anything to match on: "Try a command" can test it before it is saved (BOS-2188).
+  const draftMatch: Match | null = form.kinds.length || form.commandPattern || form.titlePattern ? { ...(form.kinds.length ? { kinds: form.kinds } : {}), ...(form.commandPattern ? { commandPattern: form.commandPattern } : {}), ...(form.titlePattern ? { titlePattern: form.titlePattern } : {}) } : null;
   const test = (e: FormEvent) => {
     e.preventDefault();
-    void api<{ outcome: Outcome; rule: string }>("/api/policy-rules/test", { method: "POST", body: { ...probe, companyId: probe.companyId || companies[0]!.id } }).then(setVerdict, (err: Error) => setError(err.message));
+    const draft = useDraft && draftMatch ? { draft: { match: draftMatch, outcome: form.outcome } } : {};
+    void api<{ outcome: Outcome; rule: string }>("/api/policy-rules/test", { method: "POST", body: { ...probe, companyId: probe.companyId || companies[0]!.id, ...draft } }).then((v) => { setVerdict(v); setError(null); }, (err: Error) => setError(err.message));
   };
 
   return (
@@ -383,6 +408,12 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
             <label htmlFor="probe-command">wants to run</label>
             <input id="probe-command" className="mono" required placeholder="docker restart web" value={probe.command} onChange={(e) => setProbe({ ...probe, command: e.target.value })} />
           </div>
+          {draftMatch && (
+            <label style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+              <input type="checkbox" checked={useDraft} onChange={(e) => setUseDraft(e.target.checked)} />
+              Try it with the rule I'm typing under "Add a rule" first (nothing is saved)
+            </label>
+          )}
           <button className="btn" type="submit">
             Check
           </button>

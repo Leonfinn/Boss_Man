@@ -24,6 +24,7 @@ export * from "./host-facts.js";
 export * from "./page-clause.js";
 export * from "./agent-templates.js";
 export * from "./checks.js";
+export * from "./check-memory.js";
 export * from "./check-log.js";
 export * from "./funding.js";
 export * from "./speakers.js";

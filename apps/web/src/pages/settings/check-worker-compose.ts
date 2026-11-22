@@ -1,6 +1,7 @@
 // BOS-1550: the compose file the owner pastes on the worker's machine, filled in with what Boss Man knows (its address,
 // the commit its runner is built from, the worker's slots and the token). The template is a byte-for-byte copy of
 // deploy/check-worker/compose.yaml (the web build has no deploy/ folder); test/check-worker-compose.test.ts keeps them equal.
+import { CHECK_HOST_OVERHEAD_MB, CHECK_PEAK_MB } from "@boss-man/shared";
 import template from "./check-worker-compose.yaml?raw";
 
 const SERVER_PLACEHOLDER = "wss://boss.example.com/api/check-worker/connect";
@@ -92,6 +93,10 @@ export function workerAddressChoices(v: { origin: string; facts?: Record<string,
  */
 export function workerComposeFile(v: { url: string; slots: number; token: string }): string {
   let out = template.split(SERVER_PLACEHOLDER).join(v.url);
-  out = out.replace(/BOSSMAN_CHECK_SLOTS: "\d+"/, `BOSSMAN_CHECK_SLOTS: "${Math.max(1, Math.floor(v.slots))}"`);
+  const slots = Math.max(1, Math.floor(v.slots));
+  out = out.replace(/BOSSMAN_CHECK_SLOTS: "\d+"/, `BOSSMAN_CHECK_SLOTS: "${slots}"`);
+  // BOS-2217: the container's memory follows the checks at once (5 GB each at the real peak, plus 2 GB), never below 8 GB.
+  const memory = `${Math.max(8, Math.ceil((slots * CHECK_PEAK_MB + CHECK_HOST_OVERHEAD_MB) / 1024))}g`;
+  out = out.replace(/mem_limit: \d+g/, `mem_limit: ${memory}`).replace(/memswap_limit: \d+g/, `memswap_limit: ${memory}`);
   return out.split(`content: "${TOKEN_PLACEHOLDER}"`).join(`content: ${JSON.stringify(v.token)}`);
 }
