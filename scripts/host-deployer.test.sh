@@ -468,6 +468,18 @@ rm -f "$D/outbox/status.json"
 printf '{"id":"11111111-1111-1111-1111-111111111114","target":"server","commit":"%s\0",%s}\n' "$c3" "$good" >"$D/inbox/request.json"; host
 has "$D/outbox/status.json" "expected format"
 [[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a hostile request ran something"
+
+# 7c. (BOS-2213) The refusal names which check failed, and for an empty id or a short commit (the two ways the
+# original BOS-1817 flake could have looked: status.json then also shows id "" and to_commit "") it says so.
+rm -f "$D/outbox/status.json"; : >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "the file is empty"
+rm -f "$D/outbox/status.json"
+printf '{"id":"","target":"server","commit":"%s",%s}\n' "$c3" "$good" >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "expected format (the id is not"
+rm -f "$D/outbox/status.json"
+printf '{"id":"11111111-1111-1111-1111-111111111114","target":"server","commit":"abc123",%s}\n' "$good" >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "(the commit is not one 40-character hash)"
+[[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a hostile request ran something"
 # 7c. A pretty-printed request (other writers, other spacing) is still read.
 rm -f "$D/outbox/status.json"
 printf '{\n  "id": "11111111-1111-1111-1111-111111111116",\n  "target": "server",\n  "commit": "%s",\n  %s\n}\n' "$c3" "${good/,/,$'\n  '}" >"$D/inbox/request.json"; host
