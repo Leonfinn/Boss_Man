@@ -257,6 +257,12 @@ p { margin: 0; }
 .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 1fr); gap: 12px; align-items: start; }
 .board-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .board-bar > div, .board-bar label { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* BOS-2193: the Select bar sticks to the bottom of the screen so it stays in reach while the owner ticks cards. */
+.bulk-bar { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding: 10px 14px; margin: 8px 0; background: var(--card); border: 1px solid var(--line-strong); border-radius: 10px; }
+.bulk-bar .bulk-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.bulk-bar select { min-height: 40px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); color: var(--ink); }
+.bulk-bar .bulk-result { flex-basis: 100%; font-size: 13px; }
+.bulk-check { width: 20px; height: 20px; margin: 0; flex: none; }
 .board-bar label, .board-bar p { font-size: 13px; color: var(--muted); }
 .board-bar p { display: inline-flex; align-items: center; gap: 6px; }
 .board-bar select { min-height: 40px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--field); font-size: 13px; }
@@ -601,6 +607,12 @@ details > summary { cursor: pointer; font-size: 14px; }
 .chat-msg p { padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
 .chat-msg small { font-size: 12px; color: var(--muted); padding: 0 4px; }
 .chat-msg.owner { align-self: flex-end; align-items: flex-end; }
+.chat-msg .remember-btn { font-size: 12px; padding: 0 4px; }
+.chat-msg .remember-note { font-size: 13px; margin: 0; padding: 0 4px; }
+.chat-msg .remember-box { width: min(420px, 100%); display: flex; flex-direction: column; gap: 6px; padding: 4px; }
+.chat-msg .remember-box label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.chat-msg .remember-box textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.chat-msg .remember-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .chat-msg.owner p { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
 .chat-msg.owner p a { color: #fff; }
 .chat-msg.assistant p { background: var(--ground); border-bottom-left-radius: 4px; }

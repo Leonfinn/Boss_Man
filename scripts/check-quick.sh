@@ -82,8 +82,30 @@ if [ -n "$tree" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_QUICK_RE
 fi
 
 step() { # step <label> <command...>
-  local label=$1 out rc=0; shift
-  out="$("$@" 2>&1)" || rc=$?
+  local label=$1 out rc=0 f pid began next took n naps=0 every; shift
+  # BOS-2219: a step's output is held until it ends, so the server tests printed nothing for 14 to 16 minutes on a slow check
+  # host, against the queue's 20-minute no-output limit (a slow run looked like a hang). While a step runs, a line every
+  # CHECK_QUICK_PROGRESS_SECONDS (default 180) says it is still going, with the test files vitest has finished so far.
+  # The command runs in the background with its output in a file, and this shell polls it with short sleeps it waits for:
+  # a separate ticker process would outlive the step in its last sleep and keep the check slot's lock fd open.
+  every="${CHECK_QUICK_PROGRESS_SECONDS:-180}"; [[ "$every" =~ ^[1-9][0-9]*$ ]] || every=180
+  if ! f="$(mktemp 2>/dev/null)"; then out="$("$@" 2>&1)" || rc=$?
+  else
+    "$@" >"$f" 2>&1 </dev/null &
+    pid=$! began=$SECONDS next=$every
+    while kill -0 "$pid" 2>/dev/null; do
+      # Quick steps (most of them) end within the first short naps; a long one is looked at once a second.
+      if [ "$naps" -lt 20 ]; then naps=$((naps + 1)); sleep 0.1; else sleep 1; fi
+      took=$((SECONDS - began))
+      [ "$took" -ge "$next" ] || continue
+      next=$((next + every))
+      # vitest prints one " ✓ test/x.test.ts (n tests)" line per finished file (❯ or × when it failed, ↓ when skipped).
+      n=$(grep -cE '^ *(✓|×|❯|↓) [^ ]+\.(test|spec)\.' "$f" 2>/dev/null) || n=0
+      echo "      $label: $([ "$took" -ge 60 ] && echo "$((took / 60))m" || echo "${took}s"), still running$([ "$n" -gt 0 ] && echo " ($n test files done)")"
+    done
+    wait "$pid" || rc=$?
+    out="$(cat "$f")"; rm -f "$f"
+  fi
   if [ "$rc" -eq 0 ]; then echo "PASS  $label"; else echo "FAIL  $label (exit $rc)"; printf '%s\n' "$out" | tail -n 40 | sed 's/^/      /'; failed=1; fi
 }
 has() { grep -Eq "$1" <<<"$changed"; }

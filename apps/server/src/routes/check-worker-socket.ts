@@ -78,7 +78,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
             queue = queue
               .then(async () => {
                 const helloAt = new Date();
-                const row = await workers.touch(worker.id, { imageCommit: msg.imageCommit, toolchain: msg.toolchain, imageVersion: msg.imageVersion, checkSlots: msg.checkSlots, features: msg.features });
+                const row = await workers.touch(worker.id, { imageCommit: msg.imageCommit, toolchain: msg.toolchain, imageVersion: msg.imageVersion, checkSlots: msg.checkSlots, memoryMb: msg.memoryMb, features: msg.features });
                 // Turned off or removed since the upgrade: close, and the redial is refused in preValidation.
                 if (!row?.enabled) {
                   socket.close(WORKER_OFF_CLOSE, "worker off");

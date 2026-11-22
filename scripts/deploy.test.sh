@@ -41,7 +41,7 @@ mkdir "$t/bin"; cat >"$t/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
-  *pg_dump*) echo dump ;; *"config --services"*) echo server ;; *"ps -q"*) echo cid ;; *inspect*) echo "${FAKE_HEALTH:-healthy}" ;;
+  *pg_dump*) echo dump ;; *"config --services"*) printf 'server\nbackup\n' ;; *"ps -q"*) echo cid ;; *inspect*) echo "${FAKE_HEALTH:-healthy}" ;;
   *"logs --no-color"*) echo "Error: EACCES: permission denied, open '/app/x.ts'" ;;
 esac
 FAKE
@@ -53,6 +53,8 @@ PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/nu
 grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: status result"; exit 1; }
 grep -q "\"to_commit\":\"$two\"" "$t/backups/deploy-status.json" || { echo "FAIL: status commit"; exit 1; }
 grep -q "compose up -d" "$FAKE_LOG" || { echo "FAIL: did not restart"; exit 1; }
+# BOS-2176: an update also starts the daily backup service (an older install would never get it otherwise).
+grep -q "compose up -d --no-deps backup" "$FAKE_LOG" || { echo "FAIL: did not ensure the daily backup service"; exit 1; }
 ! grep -E "compose (up|run) " "$FAKE_LOG" | grep -v -- "--no-deps" | grep -q . || { echo "FAIL: a compose up/run without --no-deps"; exit 1; }
 for f in "$t"/backups/bossman-*.sql.gz; do [[ "$(stat -c %a "$f")" == 600 ]] || { echo "FAIL: backup is not mode 600 under umask 022"; exit 1; }; done
 git reset -q --hard "$three"

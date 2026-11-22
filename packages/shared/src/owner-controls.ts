@@ -63,7 +63,7 @@ export const OWNER_CONTROLS = {
     "Copy",
   ],
   Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save"],
-  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Remember this", "Add to standing rules", "Undo", "Cancel"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
@@ -73,6 +73,8 @@ export const OWNER_CONTROLS = {
     // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
     // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
     "Filter", "Clear all", "Clear filters", "Clear search",
+    // Select mode and its bulk bar (BOS-2193).
+    "Select", "Done selecting", "Backlog", "Ready", "Blocked", "Assign", "Priority 1 on", "Priority 1 off", "Clear",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
@@ -228,6 +230,8 @@ export const OWNER_FIELDS = {
     "Every agent in this company",
     "Your one-line reason, or the corrected lesson (needed for Edit)",
   ],
+  // The "Remember this" box under the owner's own message (BOS-2184).
+  Chat: ["Add this to the standing rules every agent reads"],
   Notifications: [
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
@@ -346,6 +350,8 @@ export const OWNER_FIELDS = {
   Permissions: [
     "Rules for", "What should this rule do", "New rule", "Rule name", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",
     "Ask a model for a second opinion", "Provider address", "Model", "API key", "Fence", "Advice",
+    // The "Try a command" box can include the rule being typed (BOS-2188).
+    "Try it with the rule I'm typing under \"Add a rule\" first (nothing is saved)",
   ],
   Account: ["Current password", "New password", "New password again"],
   "Import and export": [

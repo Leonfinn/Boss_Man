@@ -24,6 +24,13 @@ echo "threads=${BOSSMAN_CHECK_THREADS:-} go=${GOMAXPROCS:-} rayon=${RAYON_NUM_TH
 # FAIL_ONCE=<file>: the first matching call fails (and makes the file), later ones pass (BOS-1628).
 if [ -n "${FAIL_ONCE:-}" ] && [[ "$*" == *install* ]] && [ ! -e "$FAIL_ONCE" ]; then : >"$FAIL_ONCE"; echo "${FAIL_MSG:-boom}"; exit 1; fi
 if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "${FAIL_MSG:-boom}"; exit 1; fi
+# SLOW_ON=<text> (BOS-2219): a matching call prints two finished vitest files, then stays running until check-quick's output
+# ($SLOW_OUT) shows a progress line, so the line is proven to appear while the step still runs. No line in 30 s (SLOW_TRIES tenths): it fails.
+if [ -n "${SLOW_ON:-}" ] && [[ "$*" == *"$SLOW_ON"* ]]; then
+  printf ' ✓ test/a.test.ts (2 tests) 5ms\n ✓ test/b.test.ts (1 test) 3ms\n'
+  for _ in $(seq "${SLOW_TRIES:-300}"); do grep -qF "still running (2 test files done)" "$SLOW_OUT" 2>/dev/null && exit 0; sleep 0.1; done
+  echo "no progress line while the step ran"; exit 1
+fi
 S
 cat >"$t/bin/node" <<'S'
 #!/usr/bin/env bash
@@ -75,6 +82,12 @@ logged "pnpm --filter @boss-man/web exec vitest run test/screen-inventory.test.t
 notlogged "test/owner-control-list.test.ts" "guard: owner controls not for a change outside pages and components"
 notlogged "test/wake-classes.test.ts" "guard: wake classes not for a web-only change"
 [ "$(grep -n 'PASS  guard: screen inventory' "$t/out" | cut -d: -f1)" -lt "$(grep -n 'PASS  merge with' "$t/out" | cut -d: -f1)" ] || fail "guards must print before the merge step: $(cat "$t/out")"
+# BOS-2219: a long step says it is still running (with the test files done so far) before it ends, not only when it ends.
+run 0 "slow step prints progress" env SLOW_ON="vitest related" SLOW_OUT="$t/out" CHECK_QUICK_PROGRESS_SECONDS=1
+grep -qE "^      tests related to @boss-man/web changes: [0-9]+s, still running \(2 test files done\)$" "$t/out" || fail "progress line: $(cat "$t/out")"
+[ "$(grep -n 'web changes: .*still running' "$t/out" | head -n 1 | cut -d: -f1)" -lt "$(grep -n 'PASS  tests related to @boss-man/web' "$t/out" | cut -d: -f1)" ] || fail "progress before the PASS line: $(cat "$t/out")"
+run 1 "a quiet step that never prints progress fails the stub" env SLOW_ON="vitest related" SLOW_OUT="$t/out" CHECK_QUICK_PROGRESS_SECONDS=600 SLOW_TRIES=30
+grep -q "no progress line while the step ran" "$t/out" || fail "stub must fail without a progress line: $(cat "$t/out")"
 run 1 "screen inventory guard fails" env FAIL_ON=screen-inventory.test
 grep -q "^FAIL  guard: screen inventory" "$t/out" || fail "guard FAIL line: $(cat "$t/out")"
 grep -qF "screen-inventory.txt is out of date" "$t/out" || fail "guard hint names the file: $(cat "$t/out")"

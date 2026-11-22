@@ -134,7 +134,8 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
   );
 
   // The company's own permission rules, in their order. Global rules (no company) never leave; a rule limited to agents names them, not their ids.
-  const ruleRows = await db.select().from(policyRules).where(eq(policyRules.companyId, companyId)).orderBy(asc(policyRules.position), asc(policyRules.name));
+  // A timed rule is left out: the export has no expiry, so on import it would turn into a rule that never ends (BOS-2188).
+  const ruleRows = await db.select().from(policyRules).where(and(eq(policyRules.companyId, companyId), isNull(policyRules.expiresAt))).orderBy(asc(policyRules.position), asc(policyRules.name));
   const agentName = new Map(team.map((a) => [a.id, a.name]));
   files["permission-rules.json"] = json(
     ruleRows.map((r) => {

@@ -2,7 +2,7 @@
 // to use a tool (by kind, command or title) and says what happens: allow it, deny it, or ask
 // the CEO or the owner. The order is PERMISSION_TABLE in shared/policy.ts (BOS-307): guards, company deny and allow rules, built-in allows, then company routing rules (CEO/owner) only for requests that would ask. Within the company rules, company ones come before
 // rules for every company; the first match in a row decides.
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
 import { DEFAULT_POLICY, PERMISSION_TABLE, decidePermission, ruleProblems, shadowedRoutingRules, type PermissionInfo, type PolicyMatch, type PolicyOutcome, type PolicyRuleSpec } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, policyRules } from "../db/schema.js";
@@ -20,18 +20,24 @@ export class RuleError extends Error {
 }
 
 type Row = typeof policyRules.$inferSelect;
-const view = (r: Row) => ({ id: r.id, companyId: r.companyId, name: r.name, match: r.condition as PolicyMatch, outcome: r.outcome, position: r.position, createdAt: r.createdAt ? r.createdAt.toISOString() : null, createdBy: r.createdBy, sourceDecisionId: r.sourceDecisionId });
+const view = (r: Row) => ({ id: r.id, companyId: r.companyId, name: r.name, match: r.condition as PolicyMatch, outcome: r.outcome, position: r.position, createdAt: r.createdAt ? r.createdAt.toISOString() : null, createdBy: r.createdBy, sourceDecisionId: r.sourceDecisionId, expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null });
 
-export function policyRulesService(db: Db) {
+/** A rule still in force at `at`: no expiry, or one in the future. A rule expiring exactly at `at` is already over (BOS-2188). */
+export const notExpired = (at: Date) => or(isNull(policyRules.expiresAt), gt(policyRules.expiresAt, at));
+
+export function policyRulesService(db: Db, now: () => Date = () => new Date()) {
   const scope = (companyId: string | null) => and(eq(policyRules.trigger, "permission"), companyId ? eq(policyRules.companyId, companyId) : isNull(policyRules.companyId));
 
+  /** Every rule of a scope, expired ones too (the Settings list shows them greyed). */
   async function rowsFor(companyId: string | null) {
     return db.select().from(policyRules).where(scope(companyId)).orderBy(asc(policyRules.position), asc(policyRules.name));
   }
 
-  /** The rules in the order they're checked for a company's agents. */
+  /** The rules in the order they're checked for a company's agents. Expired rules are left out, in the query, so they can never match. */
   async function effective(companyId: string): Promise<PolicyRuleSpec[]> {
-    const rows = [...(await rowsFor(companyId)), ...(await rowsFor(null))];
+    const at = now();
+    const live = (id: string | null) => db.select().from(policyRules).where(and(scope(id), notExpired(at))).orderBy(asc(policyRules.position), asc(policyRules.name));
+    const rows = [...(await live(companyId)), ...(await live(null))];
     return rows.map((r) => ({ name: r.name, match: r.condition as PolicyMatch, outcome: r.outcome }));
   }
 
@@ -127,9 +133,22 @@ export function policyRulesService(db: Db) {
     },
 
     /** What would happen to a request from this company's agents, and which rule decides it. */
-    async test(companyId: string, info: PermissionInfo) {
+    async test(companyId: string, info: PermissionInfo, draft?: { match: PolicyMatch; outcome: PolicyOutcome }) {
       const [c] = await db.select({ on: companies.autoTempCleanup }).from(companies).where(eq(companies.id, companyId));
-      return decidePermission(info, await effective(companyId), { autoTempCleanup: c?.on !== false });
+      // A draft is tried as the first rule and never saved (BOS-2188). An allow draft is safeOnly, as a saved one would be.
+      let rules = await effective(companyId);
+      if (draft) {
+        check(draft.match);
+        rules = [{ name: "Your draft rule", match: draft.outcome === "allow" ? { ...draft.match, safeOnly: true } : draft.match, outcome: draft.outcome }, ...rules];
+      }
+      return decidePermission(info, rules, { autoTempCleanup: c?.on !== false });
+    },
+
+    /** Deletes timed rules that ended more than `days` ago; the Settings list keeps them greyed until then. */
+    async pruneExpired(days = 7) {
+      const cutoff = new Date(now().getTime() - days * 86_400_000);
+      const rows = await db.delete(policyRules).where(and(isNotNull(policyRules.expiresAt), lt(policyRules.expiresAt, cutoff))).returning({ id: policyRules.id });
+      return rows.length;
     },
 
     effective,

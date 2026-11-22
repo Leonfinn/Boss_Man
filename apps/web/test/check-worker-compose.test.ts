@@ -22,10 +22,18 @@ describe("check worker compose file (BOS-1550)", () => {
     expect(out).not.toContain("boss.example.com");
     expect(out).not.toContain("0".repeat(40));
     // The hardening is still there, and the token is never in the environment.
-    for (const line of ["cap_drop: [ALL]", 'security_opt: ["no-new-privileges:true"]', "oom_score_adj: 500", "mem_limit: 8g"]) expect(out).toContain(line);
+    for (const line of ["cap_drop: [ALL]", 'security_opt: ["no-new-privileges:true"]', "oom_score_adj: 500", "mem_limit: 17g"]) expect(out).toContain(line);
     expect(out).not.toMatch(/\n\s+ports:/);
     expect(out).not.toContain("docker.sock");
     expect(out).not.toMatch(/BOSSMAN_CHECK_WORKER_TOKEN:/);
+  });
+
+  it("sizes the container's memory by the checks at once: 8g for 1, 12g for 2 (BOS-2217)", () => {
+    const mem = (slots: number) => workerComposeFile({ url: "wss://x/api/check-worker/connect", slots, token: "t" }).match(/\n\s+mem_limit: (\S+)/)?.[1];
+    expect(mem(1)).toBe("8g");
+    expect(mem(2)).toBe("12g");
+    const two = workerComposeFile({ url: "wss://x/api/check-worker/connect", slots: 2, token: "t" });
+    expect(two).toMatch(/memswap_limit: 12g/);
   });
 
   it("builds the image with a browser and without the agent harness (BOS-1553)", () => {

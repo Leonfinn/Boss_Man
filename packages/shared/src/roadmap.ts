@@ -59,6 +59,22 @@ export function dateIn(now: Date, timeZone: string): string {
   return f.format(now);
 }
 
+/**
+ * The next local midnight after `now` in the zone, as an absolute time (BOS-2188). Found by bisection on the
+ * date changing, so a 23-hour or 25-hour DST day and half-hour zones come out right. `now` itself is never returned.
+ */
+export function nextMidnightIn(now: Date, timeZone: string): Date {
+  const today = dateIn(now, timeZone);
+  let lo = Math.floor(now.getTime() / 1000) * 1000; // whole seconds, so the answer is one; still today
+  let hi = lo + 26 * 3_600_000; // always tomorrow or later
+  while (hi - lo > 1000) {
+    const mid = lo + Math.floor((hi - lo) / 2000) * 1000;
+    if (dateIn(new Date(mid), timeZone) === today) lo = mid;
+    else hi = mid;
+  }
+  return new Date(hi);
+}
+
 /** How many zone spellings dateIn has cached; for tests of the cap. */
 export function dateInCacheSize(): number {
   return dayFormats.size;

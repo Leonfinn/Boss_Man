@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { figureText, HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
+import { figureText, HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type AlwaysTtl, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -10,6 +10,12 @@ import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
+
+const ALWAYS_TTLS: [AlwaysTtl, string][] = [
+  ["always", "Always (until you remove it)"],
+  ["hour", "For 1 hour"],
+  ["midnight", "Until midnight (server time)"],
+];
 import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -592,6 +598,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   }, [linkedId, loaded, decisions.length]);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [alwaysScopes, setAlwaysScopes] = useState<Record<string, "agent" | "company">>({});
+  const [alwaysTtls, setAlwaysTtls] = useState<Record<string, AlwaysTtl>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [endedHere, setEndedHere] = useState<Record<string, boolean>>({});
@@ -785,7 +792,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
     try {
       const note = notes[d.id]?.trim();
       const reasonLink = reasonLinks[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: answerText, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: answerText, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company", alwaysTtl: alwaysTtls[d.id] ?? "always" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       // The card is answered, so its kept note and answer are done with, and the attachments went with it.
       forgetNote(d.id);
@@ -1289,7 +1296,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                       </p>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Permissions.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}${(alwaysTtls[d.id] ?? "always") === "hour" ? ", for 1 hour" : alwaysTtls[d.id] === "midnight" ? ", until midnight (server time)" : ""}. To undo it, remove it under Settings → Permissions.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : checking ? null : (
                       <>
                         {d.context?.hires && (
@@ -1394,7 +1401,15 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                                   </label>
                                 </fieldset>
                               )}
-                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Permissions.</p>
+                              <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+                                <legend style={{ fontWeight: 600, marginBottom: 4 }}>How long the rule lasts</legend>
+                                {ALWAYS_TTLS.map(([value, label]) => (
+                                  <label key={value} style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                    <input type="radio" name={`always-ttl-${d.id}`} checked={(alwaysTtls[d.id] ?? "always") === value} onChange={() => setAlwaysTtls((s) => ({ ...s, [d.id]: value }))} /> {label}
+                                  </label>
+                                ))}
+                              </fieldset>
+                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Permissions, where a timed rule shows when it ends.</p>
                             </div>
                           ) : null}
                           {(() => {

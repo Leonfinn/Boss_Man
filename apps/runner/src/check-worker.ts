@@ -15,6 +15,7 @@ import { RunnerConnection } from "./connection.js";
 import { readToolchain } from "./toolchain.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, sandboxSelfTest } from "./fence.js";
 import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
+import { machineMemoryMb, startupMemoryWarning } from "./machine-memory.js";
 import { safeWorkerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
@@ -66,6 +67,11 @@ export async function startCheckWorker(env: NodeJS.ProcessEnv = process.env) {
   const workspaces = new Workspaces(workspacesRoot, env, coordDir, gateStore, { level: sandbox.level, pnpmStore: storeDir });
   workspaces.fenceCloneGit = sandbox.level !== "unavailable";
   log(`agent fence: ${sandbox.level}; check slots: ${checkSlots}`);
+  // BOS-2217: told to the server in hello, so the Checks panel can warn when the owner's settings need more than this.
+  const memoryMb = machineMemoryMb();
+  log(`memory for checks: ${memoryMb} MB`);
+  const memoryWarning = startupMemoryWarning(checkSlots, memoryMb);
+  if (memoryWarning) log(memoryWarning);
 
   // BOS-1436: the code comes as a git bundle through the server (the worker has no GitHub login). What it holds per
   // project goes in every hello and after each fetch, so the runner's next bundle for it is thin.
@@ -94,7 +100,7 @@ export async function startCheckWorker(env: NodeJS.ProcessEnv = process.env) {
     },
     runningChecks: () => checkJobs.running(),
     onWelcome: () => checkJobs.resend(),
-    checkWorker: { slots: checkSlots, features: WORKER_FEATURES, repos: () => repos },
+    checkWorker: { slots: checkSlots, memoryMb, features: WORKER_FEATURES, repos: () => repos },
   });
   connection.start();
 

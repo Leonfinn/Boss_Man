@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { policyRulesService } from "./policy-rules.js";
 
 /**
  * Deletes runner events older than `days`, a few thousand rows per statement so no transaction
@@ -81,6 +82,13 @@ export async function prunePermissionDecisions(db: Db, opts: { days: number; bat
     if (n < batch) break;
   }
   return total;
+}
+
+/** Deletes timed permission rules that ended more than `days` (default 7) ago (BOS-2188). Never touches a rule with no expiry. */
+export async function pruneExpiredPolicyRules(db: Db, opts: { days?: number; now?: Date; stop?: () => boolean } = {}): Promise<number> {
+  if (opts.stop?.()) return 0;
+  const at = opts.now;
+  return policyRulesService(db, at ? () => at : undefined).pruneExpired(opts.days ?? 7);
 }
 
 /** BOSSMAN_PERMISSION_LOG_DAYS: days to keep stored permission decisions (default 60). */

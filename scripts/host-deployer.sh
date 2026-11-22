@@ -80,7 +80,7 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # docs/09-self-deploy.md lists the same files. scripts/host-deployer.sh stays on the list (BOS-1588, security review): it is
 # what root runs, so a change to it is applied by the owner on the hand-apply card; that hand deploy then refreshes the copy
 # itself with scripts/install-deployer.sh (also on the list, as it runs as root).
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer|daily-backup)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal) and RUNNER_CODE_PATHS in
@@ -1092,6 +1092,15 @@ backup_database() {
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
   old="$(find "$dir" -maxdepth 1 -type f -name 'bossman-*.sql.gz' -printf '%T@ %p\n' | sort -rn | tail -n +15 | cut -d' ' -f2-)"
   [[ -z $old ]] || while IFS= read -r f; do rm -f -- "$f"; done <<<"$old"
+  ensure_daily_backup
+}
+
+# The daily backup service (BOS-2176). Swaps name the services they start and use --no-deps, so an install made before
+# that service existed would never start it: every swap and rollback starts it here, right after its own backup. A no-op
+# when it already runs; a failure (an older Compose file without the service, a Docker hiccup) never stops the swap.
+ensure_daily_backup() {
+  compose up -d --no-deps backup >>"$LOG" 2>&1 || log "Note: the daily backup service did not start (docker compose up -d backup); the swap goes on."
+  return 0
 }
 
 BG_RESULT="" BG_MSG="" BG_BACKUP="" BG_LIVE="" BG_IDLE="" BG_PREV=""

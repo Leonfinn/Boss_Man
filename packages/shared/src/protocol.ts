@@ -473,6 +473,8 @@ export const WorkerMessage = z.discriminatedUnion("type", [
     bootId: z.string().max(100).optional(),
     checkJobs: z.array(Uuid).max(100).optional(),
     checkSlots: z.number().int().min(1).max(64).optional(),
+    /** BOS-2217: the memory this machine really has for its checks, in MB (container limit, or the host's memory when unlimited). Absent from an older worker. */
+    memoryMb: z.number().int().min(1).max(100_000_000).optional(),
     /** BOS-1436: the commits it holds per project, so the next bundle for it is thin. */
     repos: WorkerRepos.optional(),
   }),

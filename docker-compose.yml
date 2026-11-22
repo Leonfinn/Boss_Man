@@ -146,6 +146,38 @@ services:
       timeout: 5s
       retries: 10
 
+  # Daily database backup (BOS-2176, docs/29-tune-and-troubleshoot.md "Backups"): no owner step. The database's own image
+  # (pg_dump always matches it, nothing extra to pull). Every 15 minutes scripts/daily-backup.sh looks at the newest
+  # daily-*.sql.gz in its folder and makes a new one when it is over 24 hours old; it keeps the newest 14 and
+  # touches no other file. The folder is `daily` inside BOSSMAN_BACKUP_DIR (default: the install folder, the one holding this checkout).
+  # The script is read fresh on every pass, so an update that changes it needs no restart of this service.
+  # Stop it with `docker compose stop backup`; it is the only thing here that writes to the backup folder from inside Docker.
+  backup:
+    image: pgvector/pgvector:0.8.7-pg17-bookworm
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: bossman
+      PGDATABASE: bossman
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      BOSSMAN_BACKUP_DIR: /backups
+      BOSSMAN_BACKUP_KEEP: ${BOSSMAN_BACKUP_KEEP:-14}
+    entrypoint: ["sh", "-c", "while :; do bash /opt/bossman-scripts/daily-backup.sh --once; sleep 900; done"]
+    volumes:
+      # Only the `daily` folder inside the backup folder, never the install folder (which holds .env, the master key and the
+      # deployer). deploy.sh makes it as the host user; the script hands each file to the folder's owner.
+      - ${BOSSMAN_BACKUP_DIR:-..}/daily:/backups
+      - ./scripts:/opt/bossman-scripts:ro
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${BOSSMAN_BACKUP_MEMORY:-256m}
+    pids_limit: 64
+
   server:
     logging: *logging
     build:

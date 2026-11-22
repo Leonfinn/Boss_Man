@@ -80,6 +80,22 @@ export function policyRoutes(
       throw err;
     }
   });
+  // "Remember this" from Chat (BOS-2184): adds one new line at the end, never overwriting what is there.
+  owner.post("/api/companies/:id/standing-rules/append", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const b = z.object({ text: z.string() }).parse(req.body);
+    const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    const line = b.text.replace(/\r\n/g, "\n").trim();
+    if (!line) return reply.code(400).send({ error: "invalid_standing_rules", message: "There is no text to add." });
+    const current = (await getStandingRules(db, id)).text.trim();
+    const combined = current ? `${current}\n${line}` : line;
+    const problem = standingRulesError(combined);
+    if (problem) return reply.code(400).send({ error: "invalid_standing_rules", message: `That doesn't fit: the standing rules are capped at ${STANDING_RULES_MAX} characters and this would make them ${combined.length}. Shorten it, or trim the rules in Settings → Team.` });
+    const saved = await setStandingRules(db, id, { text: combined, by: "the owner", byAgentId: await standingRulesCeo(id) });
+    await record(db, { companyId: id, kind: "settings", summary: "Owner added a line to the standing rules from Chat" });
+    return { ...saved, max: STANDING_RULES_MAX };
+  });
   owner.post("/api/companies/:id/standing-rules/undo", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const ceo = await standingRulesCeo(id);
@@ -159,9 +175,14 @@ export function policyRoutes(
     });
     return reply.code(202).send({ ceo });
   });
-  owner.post("/api/policy-rules/test", async (req) => {
-    const b = z.object({ companyId: Uuid, command: z.string().max(5000).optional(), title: z.string().max(500).optional(), kind: z.string().max(40).optional() }).parse(req.body);
-    return rules.test(b.companyId, { title: b.title ?? b.command ?? null, kind: b.kind ?? (b.command ? "execute" : null), rawInput: b.command ? { command: b.command } : null });
+  owner.post("/api/policy-rules/test", async (req, reply) => {
+    // `draft` is a rule not saved yet (BOS-2188): tried first, never stored. A bad pattern is a 422 with the reason.
+    const b = z.object({ companyId: Uuid, command: z.string().max(5000).optional(), title: z.string().max(500).optional(), kind: z.string().max(40).optional(), draft: z.object({ match: Match, outcome: Outcome }).optional() }).parse(req.body);
+    try {
+      return await rules.test(b.companyId, { title: b.title ?? b.command ?? null, kind: b.kind ?? (b.command ? "execute" : null), rawInput: b.command ? { command: b.command } : null }, b.draft);
+    } catch (err) {
+      return ruleErrors(reply)(err);
+    }
   });
 
   owner.delete("/api/grants/:id", async (req, reply) => {
