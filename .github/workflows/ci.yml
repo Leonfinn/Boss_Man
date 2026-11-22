@@ -378,7 +378,7 @@ jobs:
           sudo apt-get install -y shellcheck >/dev/null
           scripts/check-shell.sh
           scripts/test-shell.sh
-      - name: Install from the images this branch just built, by digest, through a throwaway local registry (BOS-974, docs/33-install-from-images.md)
+      - name: Install from the images this branch just built, by digest, through a throwaway local registry (BOS-974, docs/35-install-from-images.md)
         run: |
           set -euo pipefail
           # The registry lives only on this runner for this step. Nothing leaves the machine (the runner image holds Claude Code, DR-050).
@@ -397,7 +397,7 @@ jobs:
           done
           jq -n --argjson images "$images" --arg reg "$reg" '{schema: 1, version: "ci", registries: [$reg], images: $images}' > "$RUNNER_TEMP/release.json"
           cat "$RUNNER_TEMP/release.json"
-          INSTALL_RELEASE_JSON="$RUNNER_TEMP/release.json" scripts/install-images.test.sh
+          INSTALL_RELEASE_JSON="$RUNNER_TEMP/release.json" scripts/test-shell.sh scripts/install-images.test.sh
       - name: Save the images for the join job (a one-day build file inside this repo's CI, never published; the runner image is left out because it holds Claude Code, DR-050)
         run: |
           mkdir -p "$RUNNER_TEMP/img"

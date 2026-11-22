@@ -1,6 +1,6 @@
 name: Install test
 
-# BOS-974: installs Boss Man the way the guide says (docs/33-install-from-images.md) on a real x86 runner and a real arm64 runner:
+# BOS-974: installs Boss Man the way the guide says (docs/35-install-from-images.md) on a real x86 runner and a real arm64 runner:
 # pull by digest, setup twice, start, answer /api/health, start a runner from the published image.
 # Run it by hand after a release: Actions > Install test > Run workflow, type the version (like 0.1.0-beta.1).
 # It only reads a published release; it changes nothing in the repository or the registries.

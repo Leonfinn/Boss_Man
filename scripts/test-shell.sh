@@ -18,6 +18,9 @@ for t in "${tests[@]}"; do
   # CADDY is the one named opt-in: caddy-edge.test.sh skips without it, and CI points it at the caddy binary.
   extra=()
   [ -z "${CADDY:-}" ] || extra+=("CADDY=$CADDY")
+  # The real-install opt-ins of install-images.test.sh (BOS-974): without INSTALL_RELEASE_JSON it only reads the compose file.
+  [ -z "${INSTALL_RELEASE_JSON:-}" ] || extra+=("INSTALL_RELEASE_JSON=$INSTALL_RELEASE_JSON")
+  [ -z "${INSTALL_REGISTRY:-}" ] || extra+=("INSTALL_REGISTRY=$INSTALL_REGISTRY")
   began=$SECONDS; rc=0
   out=$(mktemp)
   env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG=C.UTF-8 "${extra[@]}" "$t" >"$out" 2>&1 || rc=$?

@@ -1,4 +1,4 @@
-# Boss Man from ready-made images (BOS-974, docs/33-install-from-images.md). Nothing is built on your machine and nothing is
+# Boss Man from ready-made images (BOS-974, docs/35-install-from-images.md). Nothing is built on your machine and nothing is
 # needed on the host but Docker: no openssl, no chown, no sudo, no source code.
 #
 # Every Boss Man image is named by digest (the exact bytes), so what you pull is what was published and signed. The digests and the
@@ -20,7 +20,7 @@ name: boss-man
 services:
   # Runs once, on its own, with no network: makes the secrets in the config volume. Safe to run again: it never overwrites a file.
   setup:
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/33-install-from-images.md)}/boss-man-launcher@${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-launcher@${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
     profiles: ["setup"]
     restart: "no"
     command: ["node", "dist/setup.js"]
@@ -57,7 +57,7 @@ services:
       retries: 10
 
   server:
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/33-install-from-images.md)}/boss-man-server@${BOSSMAN_SERVER_DIGEST:?Use --env-file images.env}
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-server@${BOSSMAN_SERVER_DIGEST:?Use --env-file images.env}
     restart: unless-stopped
     depends_on:
       db:
@@ -90,7 +90,7 @@ services:
       - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:${BOSSMAN_PORTAL_HOST_PORT:-3101}:3101"
 
   launcher:
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/33-install-from-images.md)}/boss-man-launcher@${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-launcher@${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
     restart: unless-stopped
     environment:
       # Company data is a named volume. The launcher asks Docker where it is on this host, because Docker starts the runners.
