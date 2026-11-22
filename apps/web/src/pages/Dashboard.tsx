@@ -8,6 +8,7 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { WorkStands } from "../components/WorkStands";
 import { NeedsYou, RightNow, healthLines, type HealthData } from "../components/DashboardPanels";
 import { MergesStuckBanner, brakeOffSummary, pausedSummary, slowSummary, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
@@ -124,7 +125,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
   // The Merges line and the banner share one read of the Merge queue; a failed read leaves the line "couldn't check".
   const merges = usePoll((signal) => (company ? api<MergeHealthView>(`/api/companies/${company.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)), 20_000, `dash-merges-${company?.id ?? "none"}`);
   if (!company) return <NoCompany />;
-  if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
+  if (data.error && !away(data.error)) return <LoadError what="the dashboard" message={data.error.message} onRetry={data.reload} />;
   const d = data.data;
   if (!d) return <Loader label="Loading the dashboard" />;
   const s = d.stats;
