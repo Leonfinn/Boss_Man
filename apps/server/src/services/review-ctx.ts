@@ -36,6 +36,8 @@ export type ReviewDeps = {
     /** Pull requests on the git host (R59), with the company's GIT_TOKEN. */
     gitHosts?: ReturnType<typeof gitHostService>;
     gitToken?: (companyId: string) => Promise<string | undefined>;
+    /** BOS-2285: the company's optional GIT_CI_TOKEN (a second account for the gate's bossman-ci pushes); undefined means ask the owner once. */
+    gitCiToken?: (companyId: string) => Promise<string | undefined>;
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
     /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
     isLeader?: () => boolean;

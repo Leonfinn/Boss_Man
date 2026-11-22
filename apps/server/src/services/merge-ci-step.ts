@@ -11,6 +11,7 @@ import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOut
 import { BASELINE_RUNS, CANT_RERUN_EXIT, describeSlow, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts, SLOW_RETRIES_PER_WEEK, SLOW_ROW_PREFIX, slowJobs, slowRetryCounts, type SlowEvidence, type SlowJob } from "./ci-flake.js";
 import type { CiRun, CiStatus, GitHostConfig } from "./git-hosts.js";
 import { CHECK_AGAIN } from "./decisions.js";
+import { ensureCiIdentityCard } from "./ci-identity-card.js";
 import { record } from "./activity.js";
 import { lineEvent } from "./merge-line.js";
 import { touchesScope } from "./review-holds.js";
@@ -36,6 +37,8 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
       ci = await prTarget(t.companyId, repoUrl, gitHost, gitApiBase).catch((err: Error) => {
         throw new ReviewError(409, `Waiting for GitHub CI is on, but Boss Man can't read GitHub for this project: ${err.message}`);
       });
+      // BOS-2285: the gate's CI pushes email whoever's token pushes them; ask once for a second account's token.
+      await ensureCiIdentityCard(db, t.companyId, await deps.gitCiToken?.(t.companyId).catch(() => undefined));
     }
   }
   // The push and the read live in ci-publish.ts (BOS-1664), where the pre-flight run reuses them.
