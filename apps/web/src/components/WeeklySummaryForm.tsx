@@ -33,6 +33,18 @@ function One({ company }: { company: Company }) {
       setBusy(false);
     }
   };
+  const sendNow = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await api<{ to: string }>(`/api/companies/${company.id}/weekly-summary/send-now`, { method: "POST", body: {} });
+      setMsg(`Sent to ${r.to}. Check your inbox.`);
+    } catch (err) {
+      setMsg((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   if (!w) return msg ? <p role="alert">{msg}</p> : null;
   return (
     <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 10 }} aria-label={`Weekly summary for ${company.name}`}>
@@ -52,6 +64,11 @@ function One({ company }: { company: Company }) {
         <button className="btn" type="submit" disabled={busy}>
           Save
         </button>
+        {w.enabled && w.to && (
+          <button className="btn" type="button" disabled={busy} onClick={() => void sendNow()}>
+            Send one now
+          </button>
+        )}
         {msg && <span role="status">{msg}</span>}
         {w.lastSentAt && <span style={{ fontSize: 13 }}>Last sent {new Date(w.lastSentAt).toLocaleDateString()}</span>}
       </div>
