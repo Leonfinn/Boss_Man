@@ -155,7 +155,8 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
   const history = usePoll((signal) => api<HistoryRow[]>(`/api/self-deploy/history?limit=${HISTORY_FIRST}`, { signal }), 30_000, "self-deploy-history");
   // "Show older" (BOS-2277): 10 more rows each press, after the newest 5.
-  const olderHistory = useOlder(history.data, HISTORY_FIRST, (before) => api<HistoryRow[]>(`/api/self-deploy/history?limit=${HISTORY_MORE}&before=${before}`), "self-deploy-history", HISTORY_MORE);
+  const newestHistory = Array.isArray(history.data) ? history.data : null; // a non-list reply (a stub, an error body) is no rows
+  const olderHistory = useOlder(newestHistory, HISTORY_FIRST, (before) => api<HistoryRow[]>(`/api/self-deploy/history?limit=${HISTORY_MORE}&before=${before}`), "self-deploy-history", HISTORY_MORE);
   const act = useAction();
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
@@ -310,7 +311,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           )}
           <NowRunning v={v} report={report.data} progress={progress} />
         </div>
-        <RecentUpdates rows={olderHistory.rows} liveRows={history.data} older={olderHistory}progress={progress} wait={wait.data} maint={maint.data} queued={!!v?.runnerQueue} />
+        <RecentUpdates rows={olderHistory.rows} liveRows={newestHistory} older={olderHistory} progress={progress} wait={wait.data} maint={maint.data} queued={!!v?.runnerQueue} />
       </div>
       {v && (
         <div className="upd-other" data-testid="other-actions">
