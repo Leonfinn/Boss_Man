@@ -203,7 +203,7 @@ export const OWNER_CONTROLS = {
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
   Secrets: ["Revoke", "Rotate", "Delete", "Check with Claude", "Check", "Remove"],
   // The "What this shows" card's button when there is too little data (BOS-1937).
-  Workflow: ["Show the last …"],
+  Workflow: ["Show the last …", "Download CSV", "Retry"],
   // The Spend page (BOS-2194). Its period and split choices are built from lists, so only the CSV button is listed.
   Spend: ["Download CSV"],
 } as const satisfies Record<string, readonly string[]>;
