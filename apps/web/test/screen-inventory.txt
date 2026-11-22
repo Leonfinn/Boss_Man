@@ -16,6 +16,7 @@ reads:
 ## #/agents
 sections: 
   - Agents
+  - CEO notes
   - Hire an agent
   - History
   - Requests from the team

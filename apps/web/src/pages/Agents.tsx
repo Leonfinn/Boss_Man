@@ -556,8 +556,12 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
             </li>
           ))}
         </ol>
-      ) : (
+      ) : history.data ? (
         <p className="muted">No changes yet.</p>
+      ) : history.error ? (
+        <LoadError what="the history" message={history.error.message} onRetry={history.reload} />
+      ) : (
+        <Loader label="Loading history" size={16} />
       )}
     </div>
   );
@@ -659,7 +663,15 @@ function CeoNotes({ agentId }: { agentId: string }) {
       return false;
     }
   };
-  if (!limits) return null;
+  // Before the first answer the section keeps its heading, with the loader or the error, so a
+  // missing load never reads as "no notes" (BOS-2279). A failed re-poll keeps the last list.
+  if (!limits)
+    return (
+      <div className="agent-notes">
+        <h3 className="section-label">CEO notes</h3>
+        {notes.error ? <LoadError what="the CEO notes" message={notes.error.message} onRetry={notes.reload} /> : <Loader label="Loading CEO notes" size={16} />}
+      </div>
+    );
   return (
     <details className="agent-notes">
       <summary className="section-label">
