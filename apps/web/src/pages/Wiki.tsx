@@ -15,6 +15,7 @@ import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { DeletedNotice, DeletedPages } from "../components/DeletedPages";
 import { WikiCompare } from "../components/WikiCompare";
+import { download } from "../csv";
 import { CopyLinkButton } from "../components/CopyLinkButton";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
@@ -258,6 +259,9 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           </button>
           <button type="button" className="btn" aria-expanded={history} onClick={() => setHistory((h) => !h)}>
             History ({p.revisionCount ?? p.revisions.length})
+          </button>
+          <button type="button" className="btn" onClick={() => download(`${p.slug.replace(/\//g, "-")}.md`, p.body, "text/markdown;charset=utf-8")}>
+            Download
           </button>
           <button type="button" className="btn" onClick={() => void remove()}>
             Delete
