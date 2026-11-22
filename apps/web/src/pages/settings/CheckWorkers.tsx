@@ -65,7 +65,7 @@ function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix, machineMb 
   const slotsNow = Number(draft.slots);
   const typedMb = draft.memoryGb.trim() ? Math.round(Number(draft.memoryGb) * 1024) : null;
   const perCheckMb = typedMb && typedMb > 0 ? typedMb : CHECK_PEAK_MB;
-  const gbText = (mb: number) => `${Math.round((mb / 1024) * 100) / 100} GB`;
+  const gbText = (mb: number) => `${Math.round((mb / 1024) * 10) / 10} GB`; // one decimal, as in checkMemoryWarning, so the two lines agree
   const warning = machineMb && Number.isInteger(slotsNow) && slotsNow >= 1 ? checkMemoryWarning({ slots: slotsNow, perCheckMb: typedMb, machineMb }) : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

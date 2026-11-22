@@ -58,7 +58,7 @@ These are lines already in the file; change them in place. None has a host-speci
 
 ### Changing the memory on any Docker host
 
-**Memory limit per check** does not give the machine more memory. It is the most memory Boss Man lets one check use on that machine, and the figure the memory warning below uses. The machine's own total is set where the worker runs: `mem_limit` and `memswap_limit` in the worker's compose file (TrueNAS custom app, Proxmox VM or LXC, plain Linux alike). To give the machine more memory, raise both lines (keep them equal) and redeploy the worker. Then set the per-check limit to the machine's memory ÷ checks at once. Next to the field the form shows the memory the worker reported, for example "This machine has 8 GB (2 checks × 12.25 GB would need 24.5 GB)"; a worker that has not reported yet shows "Not reported yet: redeploy the worker once to see it".
+**Memory limit per check** does not give the machine more memory. It is the most memory Boss Man lets one check use on that machine, and the figure the memory warning below uses. The machine's own total is set where the worker runs: `mem_limit` and `memswap_limit` in the worker's compose file (TrueNAS custom app, Proxmox VM or LXC, plain Linux alike). To give the machine more memory, raise both lines (keep them equal) and redeploy the worker. Then set the per-check limit to the machine's memory ÷ checks at once. Next to the field the form shows the memory the worker reported, for example "This machine has 8 GB (2 checks × 5 GB would need 10 GB)"; a worker that has not reported yet shows "Not reported yet: redeploy the worker once to see it".
 
 Sizing rule of thumb: a check wants about 4 threads and 5 GB at its peak; leave the host enough to do its own job.
 
