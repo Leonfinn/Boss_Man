@@ -75,6 +75,8 @@ export const OWNER_CONTROLS = {
     "Filter", "Clear all", "Clear filters", "Clear search",
     // Select mode and its bulk bar (BOS-2193).
     "Select", "Done selecting", "Backlog", "Ready", "Blocked", "Assign", "Priority 1 on", "Priority 1 off", "Clear",
+    // The toolbar's CSV of the tickets shown (BOS-2258).
+    "Download CSV",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
