@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpenIssues } from "../src/components/OpenIssues";
 import { actionHeading, actionSummary, ScrumMasterLog, type SmAction } from "../src/components/ScrumMasterLog";
-import { healthLine } from "../src/components/WatchdogHealth";
+import { healthLine, WatchdogHealth } from "../src/components/WatchdogHealth";
 
 afterEach(() => {
   cleanup();
@@ -34,6 +34,35 @@ describe("watchdog health line (BOS-60)", () => {
     const line = healthLine({ ...on, settings: { enabled: true, recordOnly: true } }, now);
     expect(line.text).toBe("Watchdog: record only (not acting) · last check 3 min ago · 2 issues being handled");
     expect(line.tone).toBe("");
+  });
+});
+
+describe("a failed load says so, with Retry (BOS-2249)", () => {
+  const failing = () => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } })));
+
+  it("Open now shows the error and Retry instead of loading for ever", async () => {
+    failing();
+    render(<OpenIssues companyId="c1" />);
+    expect(await screen.findByText(/Couldn't load the open issues/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.queryByText("Loading open issues")).toBeNull();
+  });
+
+  it("the log shows the error and Retry, in full and folded", async () => {
+    failing();
+    render(<ScrumMasterLog companyId="c1" />);
+    expect(await screen.findByText(/Couldn't load the log/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    cleanup();
+    render(<ScrumMasterLog companyId="c1" ticketId="t1" folded />);
+    expect(await screen.findByText(/Couldn't load the log/)).toBeTruthy();
+  });
+
+  it("the health line shows the error and Retry instead of vanishing", async () => {
+    failing();
+    render(<WatchdogHealth companyId="c1" />);
+    expect(await screen.findByText(/couldn't load its state/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 });
 
