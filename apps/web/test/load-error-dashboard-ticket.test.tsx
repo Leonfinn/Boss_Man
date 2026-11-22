@@ -26,6 +26,14 @@ describe("BOS-2296: a failed first load says what and offers Retry", () => {
     await vi.waitFor(() => expect(apiMock.mock.calls.length).toBeGreaterThan(before));
   });
 
+  it("Ticket 404 still shows Ticket not found with Back to Tickets", async () => {
+    apiMock.mockRejectedValue(new ApiError(404, "not found"));
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText("Ticket not found")).toBeTruthy();
+    expect(screen.getByText("Back to Tickets")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("Ticket (non-404)", async () => {
     apiMock.mockRejectedValue(new ApiError(500, "boom"));
     render(<Ticket id="t1" companies={[company]} />);
