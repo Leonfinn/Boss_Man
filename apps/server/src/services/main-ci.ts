@@ -9,6 +9,7 @@ import { parseRepoUrl } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, projects, settings, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { wakeWatchers } from "./watch-triggers.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
 import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
@@ -447,6 +448,7 @@ export function mainCiService(
         await writeState(p.id, state);
         await record(db, { companyId: p.companyId, ticketId: t.id, kind: "main_ci_failure", summary: `Opened for a failing step on ${p.defaultBranch}`, at: now() });
         if (who.agentId && deps.notify) await deps.notify(who.agentId, { ticketId: t.id, reason: "main CI failed", note: `Main's CI failed at ${f.job} → ${f.step}. ${NEVER_WEAKEN}`, priority: 2 }).catch(() => undefined);
+        await wakeWatchers(db, deps.notify, "github_main_failed", `${f.job} → ${f.step} on ${p.defaultBranch}, ticket ${t.id}`, { exceptTicketId: t.id }).catch(() => undefined);
       }
       state.seen[workflow] = seenKey;
       }
