@@ -67,9 +67,25 @@ describe("project reviews", () => {
     fireEvent.change(choice, { target: { value: "custom" } });
     expect(await screen.findByLabelText("Medium: code reviewed by")).toBeTruthy();
     expect(calls.find((c) => c.method === "PUT")).toMatchObject({ url: "/api/projects/p1/review-policy", body: DEFAULTS });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.change(choice, { target: { value: "company" } });
     await waitFor(() => expect(screen.queryByLabelText("Medium: code reviewed by")).toBeNull());
+    expect(confirm).toHaveBeenCalledWith("Use the company's reviews for this project? Its own review table will be deleted.");
     expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/projects/p1/review-policy")).toBe(true);
+    confirm.mockRestore();
+  });
+
+  it("keeps the project's own table and sends nothing when the owner says no to going back", async () => {
+    const calls = stub({ policy: { ...DEFAULTS, low: { ...DEFAULTS.low, reviewer: "a1" } } });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ProjectReviews projectId="p1" companyId="c1" agents={AGENTS} />);
+    const choice = (await screen.findByLabelText("Reviews for this project")) as HTMLSelectElement;
+    fireEvent.change(choice, { target: { value: "company" } });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(choice.value).toBe("custom");
+    expect(screen.getByLabelText("Low: code reviewed by")).toBeTruthy();
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    confirm.mockRestore();
   });
 
   it("opens already customised when the project has its own", async () => {
