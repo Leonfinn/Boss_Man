@@ -26,6 +26,7 @@ const POLICY_ROUTES: Array<[string, string]> = [
   ["DELETE", "/api/projects/:id/review-policy"],
   ["GET", "/api/companies/:id/standing-rules"],
   ["PUT", "/api/companies/:id/standing-rules"],
+  ["POST", "/api/companies/:id/standing-rules/append"],
   ["POST", "/api/companies/:id/standing-rules/undo"],
   ["GET", "/api/policy-rules"],
   ["POST", "/api/policy-rules"],

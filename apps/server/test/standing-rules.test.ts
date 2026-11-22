@@ -6,6 +6,8 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { issueRunToken } from "../src/mcp.js";
 import { buildBrief } from "../src/services/brief.js";
+import { eq } from "drizzle-orm";
+import { activity } from "../src/db/schema.js";
 import { STANDING_RULES_MAX } from "../src/services/standing-rules.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -142,6 +144,34 @@ describe("standing rules (BOS-353)", () => {
     expect((again.json() as { text: string }).text).toBe("");
     const none = await ctx.req("POST", `/api/companies/${ctx.company.id}/standing-rules/undo`);
     expect(none.statusCode).toBe(409);
+  });
+
+  it("append adds a line at the end, shows in the brief, logs, and undoes (BOS-2184)", async () => {
+    const url = `/api/companies/${ctx.company.id}/standing-rules`;
+    await ctx.req("PUT", url, { text: "Be kind." });
+    const added = await ctx.req("POST", `${url}/append`, { text: "  Never force-push.\r\n" });
+    expect(added.statusCode).toBe(200);
+    expect((added.json() as { text: string }).text).toBe("Be kind.\nNever force-push.");
+    expect(await briefFor(ctx.dev.id, "worker")).toContain("Never force-push.");
+    const lines = await ctx.db.select({ summary: activity.summary }).from(activity).where(eq(activity.companyId, ctx.company.id));
+    expect(lines.map((l) => l.summary)).toContain("Owner added a line to the standing rules from Chat");
+    const back = await ctx.req("POST", `${url}/undo`);
+    expect((back.json() as { text: string }).text).toBe("Be kind.");
+  });
+
+  it("append to empty rules starts them, and refuses empty text", async () => {
+    const url = `/api/companies/${ctx.company.id}/standing-rules`;
+    expect(((await ctx.req("POST", `${url}/append`, { text: "First." })).json() as { text: string }).text).toBe("First.");
+    expect((await ctx.req("POST", `${url}/append`, { text: "   " })).statusCode).toBe(400);
+  });
+
+  it("append past the limit adds nothing and says so", async () => {
+    const url = `/api/companies/${ctx.company.id}/standing-rules`;
+    await ctx.req("PUT", url, { text: "x".repeat(STANDING_RULES_MAX - 5) });
+    const r = await ctx.req("POST", `${url}/append`, { text: "too long to fit" });
+    expect(r.statusCode).toBe(400);
+    expect((r.json() as { message: string }).message).toContain("capped at");
+    expect(((await ctx.req("GET", url)).json() as { text: string }).text.length).toBe(STANDING_RULES_MAX - 5);
   });
 
   it("frames the rules as notes to weigh, not as instructions to follow", async () => {
