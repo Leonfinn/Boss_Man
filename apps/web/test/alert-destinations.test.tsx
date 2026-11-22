@@ -70,8 +70,19 @@ describe("Other places to send alerts", () => {
     fireEvent.change(screen.getByLabelText(/New address/), { target: { value: "https://hooks.example.com/new1234" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ kinds: ["decision_waiting", "merge_stuck", "spend_alert"], address: "https://hooks.example.com/new1234" }));
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(confirm).toHaveBeenCalledWith("Remove the alert destination Team channel? Its saved address is deleted and you would need to paste it again.");
     await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/alert-destinations/d1")).toBe(true));
+  });
+
+  it("sends nothing when Remove is cancelled (BOS-2247)", async () => {
+    const calls = stub(() => json({ destinations: [dest()] }));
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    render(<AlertDestinations />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
   it("says when a destination was switched off, and switching it on sends enabled true", async () => {

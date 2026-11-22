@@ -96,7 +96,7 @@ export function TicketLinks({ t, onChanged, bare = false, links: given }: { t: T
                 {w.kind === "decision" ? (
                   <span className="muted">Answer it to release this task.</span>
                 ) : (
-                  <button type="button" className="btn small" aria-label={`Remove wait on ${w.title}`} onClick={() => remove(w.dependencyId)}>
+                  <button type="button" className="btn small" aria-label={`Remove wait on ${w.title}`} onClick={() => window.confirm(`Stop this ticket waiting on ${w.title}? It may start straight away.`) && remove(w.dependencyId)}>
                     Remove
                   </button>
                 )}

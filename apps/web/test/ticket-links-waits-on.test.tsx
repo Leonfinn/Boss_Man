@@ -35,6 +35,20 @@ describe("Ticket page: Waits on", () => {
     expect(screen.queryByText("engagement")).toBeNull();
   });
 
+  it("asks before removing a wait link and sends nothing on Cancel (BOS-2247)", async () => {
+    const methods: Array<string | undefined> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: string, init?: RequestInit) => (methods.push(init?.method), json([]))));
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    render(<TicketLinks t={t} onChanged={() => {}} bare links={links([wait("ticket", "Fix login", 1)])} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove wait on Fix login" }));
+    expect(confirm).toHaveBeenCalledWith("Stop this ticket waiting on Fix login? It may start straight away.");
+    expect(methods).not.toContain("DELETE");
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Remove wait on Fix login" }));
+    await waitFor(() => expect(methods).toContain("DELETE"));
+  });
+
   it("formats the milestone date and sends Add only once on a double click", async () => {
     let posts = 0;
     let release: () => void = () => {};
