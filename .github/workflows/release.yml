@@ -22,8 +22,11 @@ on:
 
 permissions: {}
 
+# Its own group (BOS-2302): it used to share publish-images, where GitHub cancels a waiting run when a third arrives,
+# so a main publish could silently drop the owner's Release press. It needs no publish to be running: the check step
+# below fails loudly, saying what to wait for, when the commit's images are not there yet.
 concurrency:
-  group: publish-images
+  group: release-images
   cancel-in-progress: false
 
 jobs:
@@ -32,7 +35,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     # BOS-2097: no green run yet to time. It builds nothing, only re-tags, signs and uploads (publish.yml's similar
-    # "publish" job: longest 1.3 min), so 15 minutes; a hung step would otherwise hold the publish-images group for 6 hours.
+    # "publish" job: longest 1.3 min), so 15 minutes; a hung step would otherwise hold the release-images group for 6 hours.
     timeout-minutes: 15
     # The Docker Hub secrets live in this environment, which only main may use (see docs/25-published-images.md).
     environment: publish
