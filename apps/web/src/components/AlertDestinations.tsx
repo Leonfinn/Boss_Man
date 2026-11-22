@@ -90,7 +90,10 @@ function Row({ d, onChanged }: { d: Dest; onChanged: () => void }) {
         <button type="button" disabled={busy} onClick={() => setEditing((v) => !v)}>
           {editing ? "Cancel" : "Change"}
         </button>
-        <button type="button" disabled={busy} onClick={() => act(async () => (await apiOnce(`/api/alert-destinations/${d.id}`, { method: "DELETE" }), onChanged()))}>
+        <button type="button" disabled={busy} onClick={() =>
+            window.confirm(`Remove the alert destination ${d.name}? Its saved address is deleted and you would need to paste it again.`) &&
+            act(async () => (await apiOnce(`/api/alert-destinations/${d.id}`, { method: "DELETE" }), onChanged()))
+          }>
           Remove
         </button>
       </div>
