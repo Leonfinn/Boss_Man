@@ -286,6 +286,7 @@ export const OWNER_FIELDS = {
     "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email",
   ],
   Agents: [
+    "Only start", "From", "To", "Time zone",
     "Thinking", "Blank", "Name", "Job title", "Agent", "Model", "Paid from", "Instructions", "Upload a picture", "Title",
     "Note", "Review by (optional)", "Why (what you said)", "What waits for you from the CEO",
   ],

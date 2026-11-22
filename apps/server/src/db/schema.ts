@@ -140,6 +140,8 @@ export const agents = pgTable(
     paused: boolean("paused").notNull().default(false),
     /** Starred agents are linked under Chat in the sidebar. */
     starred: boolean("starred").notNull().default(false),
+    /** BOS-2200: when the agent may be started on new work ({ days 0-6, start/end "HH:MM", timeZone }); null is always. */
+    workingHours: jsonb("working_hours").$type<{ days: number[]; start: string; end: string; timeZone: string }>(),
     /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
     duty: text("duty"),
     /**

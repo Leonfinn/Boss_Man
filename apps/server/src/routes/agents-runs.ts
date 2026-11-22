@@ -67,7 +67,7 @@ export function agentRunsRoutes(
   owner.patch("/api/agents/:id", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const b = z
-      .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean() })
+      .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean(), workingHours: z.object({ days: z.array(z.number().int().min(0).max(6)).min(1).max(7), start: z.string(), end: z.string(), timeZone: z.string().min(1).max(80) }).nullable() })
       .partial()
       .parse(req.body);
     // Who reviews what is set only in Settings > Reviews now (BOS-198); say so rather than drop it quietly.
@@ -81,7 +81,7 @@ export function agentRunsRoutes(
     }
     return agentsSvc.update(id, patch).then((a) => {
       // Unpausing lets its waiting work start now rather than at the next tick.
-      if (b.paused === false && before.paused) void scheduler.tick().catch((err) => log.error({ err }, "tick after unpause failed"));
+      if ((b.paused === false && before.paused) || (b.workingHours !== undefined && JSON.stringify(b.workingHours) !== JSON.stringify(before.workingHours))) void scheduler.tick().catch((err) => log.error({ err }, "tick after unpause failed"));
       return a;
     }, agentErrors(reply));
   });

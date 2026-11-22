@@ -21,6 +21,7 @@ import { cantMoveSql, isWorkingRun, wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, watchdogFlags, workflowColumns } from "../db/schema.js";
 import { looksStuck, type StuckFlag } from "./board-stuck.js";
 import { checkQueue } from "./check-queue.js";
+import { workingHoursNotes } from "./working-hours-note.js";
 import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "./check-wording.js";
 
 export { WorkError };
@@ -465,6 +466,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         : [];
       const heldFor = (t: typeof tickets.$inferSelect) => heldWakes.find((h) => h.ticketId === t.id) ?? (t.assigneeAgentId ? heldWakes.find((h) => h.agentId === t.assigneeAgentId) : undefined);
       const heldByAgent = (t: typeof tickets.$inferSelect) => !heldWakes.some((h) => h.ticketId === t.id) && !!(t.assigneeAgentId && heldWakes.some((h) => h.agentId === t.assigneeAgentId));
+      const hoursNotes = await workingHoursNotes(db, rows.filter((r) => r.t.systemState === "backlog" || r.t.systemState === "ready" || r.t.systemState === "in_progress").map((r) => ({ id: r.t.id, assigneeAgentId: r.t.assigneeAgentId })), now());
       const blocker = (id: string | null) => (id ? byId.get(id) : undefined);
       const doneIds = new Set([...byId.values()].filter((t) => t.systemState === "done").map((t) => t.id));
       const updateCards = rows.some((r) => r.t.goLiveWait && r.t.systemState !== "done") ? await openUpdateCards(db, p.companyId) : { server: null, runner: null };
@@ -512,6 +514,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),
+        // BOS-2200: "Waiting for Dylan's working hours, from 00:00" while the assignee's hours hold its wake.
+        workingHoursNote: t.systemState === "backlog" || t.systemState === "ready" || t.systemState === "in_progress" ? (hoursNotes.get(t.id) ?? null) : null,
         // BOS-1546: a merged ticket that only waits to go live says so, so it doesn't look stuck in Blocked.
         goLiveNote: t.systemState !== "done" ? goLiveNote(t.goLiveWait as GoLiveWait | null, updateCards) : null,
         // BOS-1907: a split-out check ticket joins the "Merged, watching" lane through its parent's merge; the card shows the watch.

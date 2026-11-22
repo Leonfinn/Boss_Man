@@ -14,6 +14,7 @@ export * from "./built-in-rules.js";
 export * from "./loops.js";
 export * from "./risk.js";
 export * from "./notify.js";
+export * from "./workingHours.js";
 export * from "./plan.js";
 export * from "./roadmap.js";
 export * from "./dates.js";
