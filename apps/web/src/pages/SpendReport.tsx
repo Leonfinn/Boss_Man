@@ -6,6 +6,7 @@ import { api, usd, type Company } from "../api";
 import { NoCompany } from "../components/NoCompany";
 import { Loader } from "../components/Loader";
 import { usePoll } from "../hooks";
+import { buildCsv, download } from "../csv";
 import { away } from "../server-watch";
 
 export type SpendRow = {
@@ -71,33 +72,16 @@ export function stacksBy(data: SpendData, by: Split) {
   });
 }
 
-/** A spreadsheet reads a cell starting with = + - or @ as a formula, so such a name gets a leading quote. */
-const cell = (v: string | number) => {
-  let s = String(v);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
-
 /** One row per day per agent (and feature and project), the same figures as the page; cost in dollars to four places. */
 export function toCsv(rows: SpendRow[]): string {
-  const head = ["date", "agent", "feature", "project", "tickets", "cost_usd"];
-  const lines = rows.map((r) => [r.date, r.agent, r.feature, r.project, r.tickets, (r.micros / 1e6).toFixed(4)].map(cell).join(","));
-  return [head.join(","), ...lines].join("\r\n") + "\r\n";
+  return buildCsv(
+    ["date", "agent", "feature", "project", "tickets", "cost_usd"],
+    rows.map((r) => [r.date, r.agent, r.feature, r.project, r.tickets, (r.micros / 1e6).toFixed(4)]),
+  );
 }
 
 const dayLabel = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
 const pct = (share: number) => (share > 0 && share < 0.01 ? "<1%" : `${Math.round(share * 100)}%`);
-
-function download(name: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
 
 export function SpendChart({ data, by }: { data: SpendData; by: Split }) {
   const stacks = stacksBy(data, by);
