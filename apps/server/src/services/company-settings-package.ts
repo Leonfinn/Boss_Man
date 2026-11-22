@@ -118,7 +118,7 @@ const host = (u: string) => {
 
 /** The hosts this server already sends a secret to: any company's second opinion or semantic wiki search set up with it. */
 async function sentTo(db: Db, secretId: string): Promise<Set<string>> {
-  const out = new Set<string>();
+  const out = new Set<string>(); // not state: a local built and returned on each call
   const so = await db.select({ value: settings.value }).from(settings).where(like(settings.key, `${CARRIED_SETTING_KEYS.secondOpinion}:%`));
   for (const r of so) {
     const v = SecondOpinionSettings.safeParse(r.value);
