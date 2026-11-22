@@ -105,6 +105,8 @@ export const OWNER_CONTROLS = {
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
   Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
+  // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
+  Engagements: [],
   Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
@@ -226,6 +228,8 @@ export type OwnerScreen = keyof typeof OWNER_CONTROLS;
 export const OWNER_FIELDS = {
   "Any screen": ["New company name"],
   "Log in": ["Username", "Password"],
+  // The Engagements list's status filter (BOS-2260).
+  Engagements: ["Show"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.

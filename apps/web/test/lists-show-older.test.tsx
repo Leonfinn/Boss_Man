@@ -36,11 +36,11 @@ describe("Show older on paged lists", () => {
     );
     const { container, getByText, queryByText } = render(<Engagements />);
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
-    expect(urls[0]).toBe("/api/engagements?limit=50");
+    expect(urls[0]).toBe("/api/engagements?limit=50&status=open");
     expect(container.querySelectorAll("tbody tr")).toHaveLength(50);
     expect(container.querySelector("tbody tr")!.textContent).toContain("Job 59");
     await act(async () => { fireEvent.click(getByText("Show older")); await vi.advanceTimersByTimeAsync(50); });
-    expect(urls.at(-1)).toBe(`/api/engagements?limit=50&before=${row(10).id}`);
+    expect(urls.at(-1)).toBe(`/api/engagements?limit=50&status=open&before=${row(10).id}`);
     const titles = [...container.querySelectorAll("tbody tr a")].map((a) => a.textContent);
     expect(titles).toHaveLength(60);
     expect(titles.at(-1)).toBe("Job 0");
