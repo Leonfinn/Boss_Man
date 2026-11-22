@@ -15,6 +15,7 @@ import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { DeletedNotice, DeletedPages } from "../components/DeletedPages";
 import { WikiCompare } from "../components/WikiCompare";
+import { CopyLinkButton } from "../components/CopyLinkButton";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
@@ -247,10 +248,11 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
             )}
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start" }}>
           <button type="button" className="btn" onClick={() => setEditing(true)}>
             Edit
           </button>
+          <CopyLinkButton />
           <button type="button" className="btn" onClick={() => onNewHere(p.folder)}>
             New page here
           </button>
