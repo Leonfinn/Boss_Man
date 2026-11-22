@@ -94,7 +94,7 @@ describe("GitHub CI before review (BOS-1664)", () => {
     const s = await setup({ files: [wf], ci: "passed", quick: "none" });
     const [t] = await s.db.select().from(tickets).where(eq(tickets.id, s.ticket));
     const [other] = await s.db.insert(tickets).values({ companyId: s.co, projectId: t!.projectId, title: "O", number: 2, systemState: "in_progress" } as never).returning();
-    await s.db.insert(checkJobs).values({ projectId: t!.projectId, ticketId: other!.id, kind: "pre_review", scope: "quick", commit: "othercommit", tree: s.d.tree, state: "passed" });
+    await s.db.insert(checkJobs).values({ companyId: s.co, projectId: t!.projectId, ticketId: other!.id, kind: "pre_review", scope: "quick", commit: "othercommit", tree: `tree-headcommit1`, state: "passed" });
     const msg = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     expect(msg).not.toMatch(/only after your quick check passes/);
     await settled(s);
@@ -107,7 +107,7 @@ describe("GitHub CI before review (BOS-1664)", () => {
     expect(s.publish).not.toHaveBeenCalled();
     const [t] = await s.db.select().from(tickets).where(eq(tickets.id, s.ticket));
     const [other] = await s.db.insert(tickets).values({ companyId: s.co, projectId: t!.projectId, title: "O", number: 2, systemState: "in_progress" } as never).returning();
-    await s.db.insert(checkJobs).values({ projectId: t!.projectId, ticketId: other!.id, kind: "pre_review", scope: "quick", commit: "othercommit", tree: s.d.tree, state: "passed" });
+    await s.db.insert(checkJobs).values({ companyId: s.co, projectId: t!.projectId, ticketId: other!.id, kind: "pre_review", scope: "quick", commit: "othercommit", tree: `tree-headcommit1`, state: "passed" });
     const svc2 = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, wake: (_a, w) => void s.wakes.push(w), context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
     await svc2.recover();
     await settled(s);
