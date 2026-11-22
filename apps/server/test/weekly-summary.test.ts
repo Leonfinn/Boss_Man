@@ -108,6 +108,9 @@ describe("weekly email", () => {
     expect(await w.sendNow(other!.id)).toEqual({ to: "me@example.com" });
     expect(sent).toHaveLength(1);
     expect((await w.get(other!.id)).lastSentAt).toBeNull();
+    // The Monday sweep still sends that week's email afterwards.
+    expect(await make({ t: new Date("2026-12-28T09:00:00Z") }, sent).run(other!.id)).toBe(true);
+    expect(sent).toHaveLength(2);
     await expect(make(tue, sent, false).sendNow(other!.id)).rejects.toThrow(/isn't set up/);
     const failing = weeklySummaryService(db, { send: async () => { throw new Error("down"); }, isConfigured: async () => true, localDayHour: () => ({ day: 2, hour: 3 }), now: () => tue.t });
     await expect(failing.sendNow(other!.id)).rejects.toThrow(/did not accept it: down/);
