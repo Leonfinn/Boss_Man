@@ -1539,6 +1539,14 @@ write_staging_status() { # result message
   mv "$OUTBOX/staging-status.json.tmp" "$OUTBOX/staging-status.json"
   [[ -z $ended ]] || cat "$OUTBOX/staging-status.json" >>"$OUTBOX/staging-history.jsonl"
 }
+# The last 30 lines this staging run added to the deployer log (from byte offset $1), short lines, secrets blanked, at most
+# 2500 characters, so a failed run's reason is readable from the staging record without opening the host.
+staging_log_tail() { # offset
+  [[ -f $LOG ]] || return 0
+  tail -c +"$(($1 + 1))" "$LOG" 2>/dev/null | tail -n 30 | cut -c1-200 \
+    | sed -E 's/(authorization[=: ]+)(bearer|basic)[ ]+[^ ]+/\1[redacted]/Ig; s/(bearer[ ]+)[^ ]+/\1[redacted]/Ig; s/((token|secret|password|passwd|api[_-]?key|authorization|bearer|credential)[A-Za-z0-9_-]*[=: ]+)[^ ]+/\1[redacted]/Ig; s/(ghp_|github_pat_|sk-|xox[bp]-)[A-Za-z0-9_-]+/[redacted]/g; s#(https?://)[^/@ ]+@#\1[redacted]@#g' \
+    | tail -c 2500 || true
+}
 staging_done() { log "staging $1: $2"; write_staging_status "$1" "$2"; return 0; } # result message: record the outcome; the tick goes on
 staging_lane_file() { # tells the server whether the lane is on, so it only offers a staging target when it can be used
   ((DRY)) && return 0
@@ -1631,13 +1639,17 @@ staging_tick() {
   printf '%s\n' "$(date +%s)" >"$STATE/last-staging"
   write_staging_status running "Running: staging ${commit:0:8}"
   log "Running the staging deploy for ${commit:0:8} (request $id)."
-  local before="" rc=0
+  local before="" rc=0 log_from=0
+  log_from="$(stat -c %s "$LOG" 2>/dev/null || echo 0)"
   have_docker && before="$(docker ps -q --filter "label=com.docker.compose.project=${SMOKE_PRODUCTION_PROJECT:-boss-man}" 2>/dev/null | sort | paste -sd, - || true)"
   # BOSSMAN_PRODUCTION_DIRS: staging's isolation checks compare against production's folder, wherever it is.
   (cd "$STAGING_DIR" && BOSSMAN_PRODUCTION_DIRS="$REPO" timeout "$STAGING_TIMEOUT_SECONDS" scripts/deploy-staging.sh "$commit") >>"$LOG" 2>&1 || rc=$?
   if ((rc != 0)); then
     S_KV=(smoke=skipped)
-    staging_done failed "The staging deploy of ${commit:0:8} stopped with an error (exit $rc). The deployer log on the host has the details. Staging was not rolled back: scripts/deploy-staging.sh --rollback in the staging folder does that."; return 0
+    local tail_text
+    tail_text="$(staging_log_tail "$log_from")"
+    [[ -z $tail_text ]] || S_KV+=("log_tail=$tail_text")
+    staging_done failed "The staging deploy of ${commit:0:8} stopped with an error (exit $rc). The last lines of its log are in the staging record (log_tail); the deployer log on the host has the rest. Staging was not rolled back: scripts/deploy-staging.sh --rollback in the staging folder does that."; return 0
   fi
   # The smoke checks, from the checkout just deployed (merged code, like the deploy script itself).
   local sm="$STAGING_DIR/scripts/smoke-staging.sh" out="" src=0 name res why img="" failed=""

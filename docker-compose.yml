@@ -217,6 +217,10 @@ services:
       NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
       # The stall profiler (BOS-602): 0 turns it off. Empty = on (the server checks only for "0").
       BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
+      BOSSMAN_DB_POOL_MAX: ${BOSSMAN_DB_POOL_MAX:-}
+      BOSSMAN_DB_CONNECT_TIMEOUT_MS: ${BOSSMAN_DB_CONNECT_TIMEOUT_MS:-}
+      BOSSMAN_DB_IDLE_TIMEOUT_MS: ${BOSSMAN_DB_IDLE_TIMEOUT_MS:-}
+      BOSSMAN_DB_STATEMENT_TIMEOUT_MS: ${BOSSMAN_DB_STATEMENT_TIMEOUT_MS:-}
     secrets:
       - master_key
     # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.

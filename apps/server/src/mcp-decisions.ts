@@ -184,6 +184,8 @@ export function registerDecisionTools(
                     output?: string;
                     triedFirst?: string;
                     steps?: string[];
+                    /** A hand-apply update card keeps its steps here, not in `steps` (BOS-2208). */
+                    handSteps?: string[];
                     lastFailure?: { note: string };
                     lint?: CardLint;
                     conflictsBecause?: string;
@@ -209,7 +211,7 @@ export function registerDecisionTools(
                     ...(ctx.planText ? ["Plan:", untrusted("decision card plan", ctx.planText.slice(0, 1500))] : []),
                     ...(ctx.output ? ["Last output:", untrusted("decision card check output", ctx.output.slice(0, 1500))] : []),
                     ...(ctx.triedFirst ? ["What was tried first:", untrusted("decision card", ctx.triedFirst)] : []),
-                    ...(ctx.steps?.length ? [`Steps for the owner: ${untrusted("decision card steps", ctx.steps.join(" / "))}`] : []),
+                    ...((ctx.handSteps?.length ? ctx.handSteps : ctx.steps)?.length ? [`Steps for the owner: ${untrusted("decision card steps", (ctx.handSteps?.length ? ctx.handSteps : ctx.steps)!.join(" / "))}`] : []),
                     ...(ctx.lastFailure ? [`Last failure: ${ctx.lastFailure.note}`] : []),
                     ...(ctx.conflictsBecause ? [`Merge line: ${ctx.conflictsBecause}`] : []),
                     // Findings quote the agent's own step text, so they are untrusted like the steps (BOS-417).

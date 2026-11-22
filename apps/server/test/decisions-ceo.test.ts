@@ -76,6 +76,18 @@ describe("the CEO sees the whole Decisions queue (BOS-149)", () => {
     const ownerQueue = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>;
     expect(ownerQueue.map((d) => d.id)).not.toContain(held!.id);
   });
+
+  it("shows a hand-apply update card's steps (BOS-2208: they live in handSteps, not steps)", async () => {
+    const c = (ctx = await setup());
+    const [card] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "approval", question: "Main has moved to b07c5beb.", options: ["Approve", "Not now"], recommendedOption: "Approve", tier: "owner", context: { type: "self_deploy", target: "server", commit: "b".repeat(40), fromCommit: "a".repeat(40), infra: true, handSteps: ["Pin the approved commit with this command", "Apply it with this command"] } })
+      .returning();
+    const list = textOf(await (await c.mcp(c.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }));
+    expect(list).toContain(card!.id);
+    expect(list).toContain("Steps for the owner:");
+    expect(list).toContain("Pin the approved commit with this command / Apply it with this command");
+  });
 });
 
 describe("the CEO clears stale and duplicate cards (BOS-149)", () => {

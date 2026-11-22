@@ -258,6 +258,11 @@ export const ALERT_KINDS = {
   sweep_step_failing: {
     topRung: "owner",
   },
+  // spend-rate.ts (BOS-2173): a day's spend is over 3 times the usual daily rate. Only the owner can judge whether the
+  // spend is expected; one alert per company per UTC day. A plain notice: it has no cause to close on.
+  spend_rate: {
+    topRung: "owner",
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",

@@ -6,7 +6,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { TOOL_KINDS } from "@boss-man/shared";
+import { RuleMatchSchema, TOOL_KINDS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
@@ -95,14 +95,7 @@ export function policyRoutes(
   });
 
   // Decision rules (R19): what happens when an agent asks to use a tool.
-  const Match = z.object({
-    kinds: z.array(z.string()).max(10).optional(),
-    commandPattern: z.string().min(1).max(500).optional(),
-    titlePattern: z.string().min(1).max(500).optional(),
-    safeOnly: z.boolean().optional(),
-    scratchOnly: z.boolean().optional(),
-    agentIds: z.array(z.string().min(1).max(64)).min(1).max(50).optional(),
-  });
+  const Match = RuleMatchSchema;
   const Outcome = z.enum(["allow", "ceo", "owner", "deny"]);
   const ruleErrors = (reply: FastifyReply) => (err: unknown) => {
     if (err instanceof RuleError) return reply.code(err.status).send({ error: "rejected", message: err.message });
