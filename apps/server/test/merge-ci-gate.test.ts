@@ -133,7 +133,7 @@ function fakeGitHub() {
   return { fetch, calls, state, reads };
 }
 
-async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRed?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; prepare?: (c: Extract<RunnerCommand, { type: "workspace.merge" }>) => unknown; changed?: string[] } = {}) {
+async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRed?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; prepare?: (c: Extract<RunnerCommand, { type: "workspace.merge" }>) => unknown; changed?: string[]; noCiToken?: boolean } = {}) {
   const gh = fakeGitHub();
   const { db, close } = await openPglite();
   // In charge until a test hands over (BOS-1752): `lead.on = false` plays the blue/green switch on this copy.
@@ -149,6 +149,12 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRe
   await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/leon/site.git", verifyCommand: "pnpm test" });
   const { secret } = (await req("POST", "/api/secrets", { name: "GitHub", kind: "generic", value: "github-token-value" })).json();
   await req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "GIT_TOKEN" });
+  // BOS-2285: with no second account's token the gate raises the "CI identity" owner card; the tests below that count
+  // open cards run with one granted, and noCiToken tests that card itself.
+  if (!opts.noCiToken) {
+    const { secret: ciSecret } = (await req("POST", "/api/secrets", { name: "GitHub CI", kind: "generic", value: "made-up-ci-token-value" })).json();
+    await req("POST", `/api/secrets/${ciSecret.id}/grants`, { companyId: company.id, envName: "GIT_CI_TOKEN" });
+  }
   if (opts.switchOn !== false) expect((await req("PUT", "/api/settings/wait-for-ci", { on: true })).json()).toEqual({ on: true });
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   const sent: RunnerCommand[] = [];
@@ -216,6 +222,13 @@ const ciWaitRows = async (c: Awaited<ReturnType<typeof setup>>) =>
     .filter((e) => e.event.startsWith("ci_wait_"));
 
 describe("merge gate waits for GitHub CI (BOS-1070)", () => {
+  it("BOS-2285: with no second account's token the gate raises one CI identity card and still merges", async () => {
+    const c = (ctx = await setup({ noCiToken: true }));
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    const open = await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"));
+    expect(open).toEqual([{ dedupeKey: expect.stringContaining("owner-todo:ci-identity:") }]);
+  });
+
   it("publishes the merge commit, merges once CI passes on it, records the pass and deletes the CI branch", async () => {
     const c = (ctx = await setup());
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
