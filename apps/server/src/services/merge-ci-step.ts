@@ -284,6 +284,12 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     const said = [...tail.matchAll(/^boss-man re-run: (.+)$/gm)].pop()?.[1];
     return { retry: false, why: `Boss Man couldn't re-run ${files.length > 1 ? "them" : "it"} at its gate (${(cur.state === "failed" && cur.exitCode === CANT_RERUN_EXIT && said ? said : cur.reason ?? cur.state).slice(0, 200)})` };
   };
+  /**
+   * not state: one landing attempt's accepted GitHub retries, by merge commit: the test files that failed once and passed
+   * when the gate re-ran them. A merge-train member covered by a pass behind it while its retry still runs (BOS-2360) has
+   * its wait stopped, so no retry result comes back; ciCovered reports these files to the CEO instead.
+   */
+  const retriedFlaky = new Map<string, string[]>();
   // The one retry is recorded only once GitHub accepted it: the record is what the per-commit and per-week limits count.
   const announceFlakeRetry = async (prep: { commit: string }, { files, slow }: { files: string[]; slow?: SlowJob[] }, accepted: boolean, refused?: string) => {
     // BOS-2082: GitHub's own answer, so the activity says why (on 21 Nov it said only "needs Actions: Read and write").
@@ -304,6 +310,7 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
       return;
     }
     await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: FLAKE_RETRY_KIND, passed: true, detail: files.join("\n") });
+    retriedFlaky.set(prep.commit, files);
     const counts = files.map((f) => `${f}: retry ${(flakeCounts.get(f) ?? 0) + 1} of ${RETRIES_PER_WEEK} this week`).join("; ");
     await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `${files.join(", ")} passed when Boss Man re-ran ${files.length > 1 ? "them" : "it"} on the same merge commit, so Boss Man asked GitHub to re-run the failed jobs once (${counts}). Nothing to do.` });
   };
@@ -438,7 +445,13 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: true, detail: `covered by ${cover.byCommit}` });
     await lineEvent(db, t, { event: "ci_covered", by: cover.by, commit: cover.byCommit, ...(failed ? { failed: true } : {}) });
     const sha = cover.byCommit.slice(0, 12);
-    if (!failed) {
+    // A pass behind arrived while GitHub's one retry of this commit's flaky tests was still going: they failed once on
+    // GitHub and passed at the gate, so they are a one-off the CEO hears about, as after a passed retry.
+    const retried = retriedFlaky.get(prep.commit) ?? [];
+    if (!failed && retried.length) {
+      await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI failed once in ${retried.join(", ")} on ${prep.commit.slice(0, 12)}; while its retry ran, GitHub CI passed on ${sha}, the merge of ${cover.byRef} stacked on this one, which holds this change: a one-off failure, so it lands. Boss Man told the CEO about the flaky test. Nothing to do.` });
+      await reportFlaky(retried, undefined, prep.commit).catch(() => undefined);
+    } else if (!failed) {
       await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub CI passed on ${sha}, the merge of ${cover.byRef} stacked on this one in the merge train, so this change passed GitHub there and lands without waiting for its own run. Nothing to do.` });
     } else {
       const found = await deps.gitHosts!.failures(ci!.cfg, ci!.token, failed.status.failed).catch(() => []);

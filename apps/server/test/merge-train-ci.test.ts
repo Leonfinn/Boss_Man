@@ -326,13 +326,32 @@ describe("merge train with GitHub CI gating (BOS-2360)", () => {
   it("a GitHub flake on a stacked run is retried (BOS-2345), not blamed on any ticket, and reported to the CEO", async () => {
     const c = await setup();
     c.gh.state.named = true;
-    // A's first run fails in a test file the branch doesn't change; the retry passes. B's run waits until A's retry was asked
-    // for, so no pass behind A covers it first.
+    // A's first run fails in a test file the branch doesn't change; the retry passes. B's run stays running until A's retry
+    // was seen passing, so A lands on its own retry, not on a cover.
+    const aRetryPassed = () => c.gh.state.seen.some((s) => s.who === "A" && s.state === "passed");
+    c.gh.state.ci = (_has, who) => (who === "A" ? "failed" : aRetryPassed() ? "passed" : "running");
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await approveInOrder(c, [a, b]);
+    expect([await c.outcome(a), await c.outcome(b)]).toEqual(["merged", "merged"]);
+    expect(c.gh.state.failedReruns).toEqual(["A"]);
+    expect(await c.events(a, "ci_covered")).toEqual([]);
+    expect(await c.allEvents("attempt_failed")).toEqual([]);
+    const flaky = await c.db.select({ title: tickets.title }).from(tickets).where(eq(tickets.title, `Flaky on GitHub: ${FLAKY_TEST}`));
+    expect(flaky.length).toBe(1);
+  }, 60_000);
+
+  it("a pass behind covers a member while its GitHub flake retry still runs: it lands and the flaky test still reaches the CEO", async () => {
+    const c = await setup();
+    c.gh.state.named = true;
+    // A's first run fails in a test file the branch doesn't change; its retry never ends. B passes once A's retry was asked
+    // for, so B's pass covers A in the middle of the retry (Jane's review, BOS-2360).
+    c.gh.state.retried = () => "running";
     c.gh.state.ci = (_has, who) => (who === "A" ? "failed" : c.gh.state.failedReruns.length ? "passed" : "running");
     const [a, b] = [await c.ticket("A"), await c.ticket("B")];
     await approveInOrder(c, [a, b]);
     expect([await c.outcome(a), await c.outcome(b)]).toEqual(["merged", "merged"]);
     expect(c.gh.state.failedReruns).toEqual(["A"]);
+    expect(await c.events(a, "ci_covered")).toEqual([expect.objectContaining({ by: b })]);
     expect(await c.allEvents("attempt_failed")).toEqual([]);
     const flaky = await c.db.select({ title: tickets.title }).from(tickets).where(eq(tickets.title, `Flaky on GitHub: ${FLAKY_TEST}`));
     expect(flaky.length).toBe(1);
