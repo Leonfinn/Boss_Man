@@ -18,6 +18,7 @@ import { ImagePreviews, useImageAttach, withAttachments } from "../components/Im
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { ThinkingTrace } from "../components/ThinkingTrace";
 import { linkPieces, type LinkContext } from "../links";
+import { countHits, dayStart, findQuery, findSpots, firstOnOrAfter, spotIndex, splitHits, stepSpot, type FindSpot, type Segment } from "../chat-find";
 import type { TraceBody } from "@boss-man/shared";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
@@ -27,10 +28,10 @@ type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "w
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
-export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = {}): ReactNode {
+export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = {}, mark: (words: string) => ReactNode = (w) => w): ReactNode {
   return linkPieces(text, { ...ctx, companyId: wikiCompanyId ?? ctx.companyId }).map((p, i) =>
     p.kind === "text" ? (
-      <Fragment key={i}>{p.text}</Fragment>
+      <Fragment key={i}>{mark(p.text)}</Fragment>
     ) : p.kind === "image" ? (
       <a key={i} href={p.src} target="_blank" rel="noreferrer" className="msg-img">
         <img src={p.src} alt={p.alt} loading="lazy" />
@@ -41,11 +42,14 @@ export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = 
       </a>
     ) : (
       <a key={i} href={p.href}>
-        {p.text}
+        {mark(p.text)}
       </a>
     ),
   );
 }
+
+/** What a message shows as words (plain text and link text), for the find box: never the markup or an image. */
+const visibleParts = (text: string) => linkPieces(text, {}).flatMap((p) => (p.kind === "text" || p.kind === "link" ? [p.text] : []));
 
 /** The whole conversation as Markdown (BOS-2313): oldest first, no thinking traces; attachments stay as their links. */
 export function chatMarkdown(agentName: string, date: string, items: Message[]): string {
@@ -295,6 +299,138 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   }, [current?.id, latest]);
 
   const ceo = team.find((t) => t.role === "ceo");
+
+  // Find in this conversation and Go to date (BOS-2411). `at` is the current match as "the nth in message X", so
+  // loading older messages above it moves nothing; the matches are counted over the words a message shows.
+  const shownText = (m: Message) => (m.text.includes(ASK_CEO) && ceo ? m.text.split(ASK_CEO)[0]! : m.text);
+  const partsOf = (m: Message) => ({ id: m.id, parts: visibleParts(shownText(m)) });
+  const [findText, setFindText] = useState("");
+  const [query, setQuery] = useState("");
+  const [at, setAt] = useState<FindSpot | null>(null);
+  const [findNote, setFindNote] = useState<string | null>(null);
+  const [dateNote, setDateNote] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [jump, setJump] = useState<{ id: string } | null>(null);
+  const searchRun = useRef(0);
+  // After a short pause in typing; clearing the box takes effect at once.
+  useEffect(() => {
+    if (!findQuery(findText)) {
+      setQuery("");
+      return;
+    }
+    const t = setTimeout(() => setQuery(findText), 250);
+    return () => clearTimeout(t);
+  }, [findText]);
+  useEffect(() => {
+    setAt(null);
+    setFindNote(null);
+  }, [query]);
+  useEffect(() => {
+    searchRun.current++;
+    setSearching(false);
+    setFindText("");
+    setQuery("");
+    setAt(null);
+    setFindNote(null);
+    setDateNote(null);
+  }, [convKey]);
+  const spots = query ? findSpots(items.map(partsOf), query) : [];
+  const here = spotIndex(spots, at);
+  const curSpot = here >= 0 ? spots[here]! : null;
+  const curKey = curSpot ? `${curSpot.id}:${curSpot.n}` : "";
+  // The newest match is current until the owner steps.
+  useEffect(() => {
+    if (spots.length && here < 0) setAt(spots[spots.length - 1]!);
+  }, [spots.length, here, query]);
+  useEffect(() => {
+    if (curKey) logRef.current?.querySelector(".find-hit.current")?.scrollIntoView({ block: "center" });
+  }, [curKey, query]);
+  useEffect(() => {
+    if (jump) document.getElementById(`chat-msg-${jump.id}`)?.scrollIntoView({ block: "start" });
+  }, [jump]);
+  const step = (dir: 1 | -1) => setAt(stepSpot(spots, curSpot, dir));
+  const onFindKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      step(e.shiftKey ? -1 : 1);
+    }
+  };
+  // Loads older pages until one has a match or the start is reached.
+  const searchOlder = async () => {
+    const first = items[0];
+    if (!company || !current || !first || searching || !query) return;
+    const run = ++searchRun.current;
+    setSearching(true);
+    setFindNote(null);
+    setDateNote(null);
+    try {
+      let all = olderHere?.items ?? [];
+      let top = first;
+      let more = hasMore;
+      let page: Message[] = [];
+      let hits = 0;
+      while (more && !hits) {
+        const res = await api<Chat>(`/api/companies/${company.id}/chat?agentId=${current.id}&before=${top.id}`);
+        if (searchRun.current !== run) return;
+        page = res.items;
+        all = [...page, ...all];
+        more = (res.hasMore ?? false) && page.length > 0;
+        top = page[0] ?? top;
+        hits = page.reduce((sum, m) => sum + countHits(partsOf(m).parts, query), 0);
+      }
+      setOlder({ key: convKey, items: all, hasMore: more });
+      if (hits) {
+        setAt(findSpots(page.map(partsOf), query).at(-1) ?? null);
+        setFindNote(`${hits} more found`);
+      } else {
+        setFindNote("No more matches; start of the conversation");
+      }
+      setError(null);
+    } catch (err) {
+      if (searchRun.current === run) setError((err as Error).message);
+    } finally {
+      if (searchRun.current === run) setSearching(false);
+    }
+  };
+  const goToDate = async (value: string) => {
+    setDateNote(null);
+    const start = dayStart(value);
+    if (start === null || !company || !current || !items.length || searching) return;
+    const run = ++searchRun.current;
+    setSearching(true);
+    try {
+      let list = items;
+      let all = olderHere?.items ?? [];
+      let more = hasMore;
+      let loaded = false;
+      while (more && new Date(list[0]!.createdAt).getTime() >= start) {
+        const res = await api<Chat>(`/api/companies/${company.id}/chat?agentId=${current.id}&before=${list[0]!.id}`);
+        if (searchRun.current !== run) return;
+        loaded = true;
+        all = [...res.items, ...all];
+        list = [...res.items, ...list];
+        more = (res.hasMore ?? false) && res.items.length > 0;
+      }
+      if (loaded) setOlder({ key: convKey, items: all, hasMore: more });
+      const target = firstOnOrAfter(list, start);
+      const nextDay = new Date(start);
+      nextDay.setDate(nextDay.getDate() + 1);
+      const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
+      if (!target) {
+        setDateNote(`There are no messages on or after ${day(new Date(start).toISOString())}.`);
+      } else {
+        if (new Date(target.createdAt).getTime() >= nextDay.getTime()) {
+          setDateNote(!more && target.id === list[0]!.id ? `This chat doesn't go back that far: it starts on ${day(target.createdAt)}.` : `No messages on that day; showing the next one, on ${day(target.createdAt)}.`);
+        }
+        setJump({ id: target.id });
+      }
+      setError(null);
+    } catch (err) {
+      if (searchRun.current === run) setError((err as Error).message);
+    } finally {
+      if (searchRun.current === run) setSearching(false);
+    }
+  };
   const send = (e?: FormEvent, to = current, body = text) => {
     e?.preventDefault();
     // From the box, the attachment links go on when sending; a message passed in whole (Ask the CEO) is sent as it is.
@@ -392,6 +528,45 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                   {preparing ? "Preparing" : "Download"}
                 </button>
               </header>
+              <div className="chat-find" role="search">
+                <input
+                  type="search"
+                  aria-label="Find in this conversation"
+                  placeholder="Find in this conversation"
+                  value={findText}
+                  onChange={(e) => setFindText(e.target.value)}
+                  onKeyDown={onFindKey}
+                />
+                {query && (
+                  <span className="muted" role="status">
+                    {spots.length ? `${here + 1} of ${spots.length}` : "No matches"}
+                  </span>
+                )}
+                {query && (
+                  <>
+                    <button type="button" className="btn" onClick={() => step(-1)} disabled={spots.length < 2} title="Previous match">
+                      Previous
+                    </button>
+                    <button type="button" className="btn" onClick={() => step(1)} disabled={spots.length < 2} title="Next match">
+                      Next
+                    </button>
+                  </>
+                )}
+                {query && hasMore && (
+                  <button type="button" className="btn" onClick={() => void searchOlder()} disabled={searching}>
+                    {searching ? "Searching…" : "Search older messages"}
+                  </button>
+                )}
+                <label className="chat-date">
+                  Go to date
+                  <input type="date" onChange={(e) => void goToDate(e.target.value)} disabled={searching} />
+                </label>
+                {(findNote || dateNote) && (
+                  <p className="muted" role="status">
+                    {dateNote ?? findNote}
+                  </p>
+                )}
+              </div>
               <div className="chat-log" role="log" aria-live="polite" ref={logRef}>
                 {hasMore && (
                   <button type="button" className="btn" onClick={() => void loadOlder()} disabled={loadingOlder}>
@@ -408,6 +583,20 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                 )}
                 {items.map((m, i) => {
                   const trace = m.trace;
+                  // Matches are numbered in the order they are drawn, the same order findSpots counted them.
+                  let seq = 0;
+                  const mark = (words: string): ReactNode =>
+                    !query
+                      ? words
+                      : splitHits(words, query).map((s: Segment, k) =>
+                          s.hit ? (
+                            <mark key={k} className={`find-hit${curSpot?.id === m.id && curSpot.n === seq++ ? " current" : ""}`}>
+                              {s.text}
+                            </mark>
+                          ) : (
+                            <Fragment key={k}>{s.text}</Fragment>
+                          ),
+                        );
                   return (
                     <div key={m.id} id={`chat-msg-${m.id}`} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}${m.id === messageId ? " found" : ""}`}>
                       {trace && m.role === "assistant" && (
@@ -422,13 +611,13 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                       <p>
                         {m.text.includes(ASK_CEO) && ceo ? (
                           <>
-                            {linked(m.text.split(ASK_CEO)[0]!)}
+                            {linked(m.text.split(ASK_CEO)[0]!, undefined, {}, mark)}
                             <button type="button" className="linkish" onClick={() => send(undefined, ceo, items.slice(0, i).reverse().find((x) => x.role === "owner")?.text ?? "")}>
                               Ask the CEO
                             </button>
                           </>
                         ) : (
-                          linked(m.text)
+                          linked(m.text, undefined, {}, mark)
                         )}
                       </p>
                       <small>

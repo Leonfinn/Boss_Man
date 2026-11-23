@@ -1845,3 +1845,10 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 [data-shortcut-card]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-msg.found p { outline: 2px solid var(--badge); outline-offset: 2px; }
+/* Find in this conversation (BOS-2411): the box, its count and buttons sit above the log; matches are marked. */
+.chat-find { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 20px; border-bottom: 1px solid var(--border); }
+.chat-find input[type="search"] { flex: 1 1 200px; min-width: 0; }
+.chat-find .chat-date { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.chat-find p { flex: 1 0 100%; margin: 0; font-size: 13px; }
+.find-hit { background: #ffe58a; color: inherit; border-radius: 2px; }
+.find-hit.current { background: #ffb020; outline: 2px solid var(--badge); }
