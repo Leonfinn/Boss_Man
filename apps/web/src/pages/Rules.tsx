@@ -132,7 +132,32 @@ function RuleEditForm({ rule, onSave, onCancel }: { rule: Rule; onSave: (patch: 
   );
 }
 
-type RuleFilter = { text: string; outcome: Outcome | "" };
+type UseCounts = { allow: number; ceo: number; owner: number; deny: number };
+type Usage = Record<string, { week: UseCounts; month: UseCounts; lastAt: string }>;
+const total = (c: UseCounts) => c.allow + c.ceo + c.owner + c.deny;
+const split = (c: UseCounts) => `${c.allow} allowed, ${c.ceo} sent to the CEO, ${c.owner} sent to you, ${c.deny} refused`;
+
+/** "3 days ago" / "today" for when a rule last matched. */
+export function agoText(iso: string, now: Date = new Date()): string {
+  const days = Math.floor((now.getTime() - new Date(iso).getTime()) / 86_400_000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+}
+
+/** "12 this week · 40 in 30 days · last matched 2 days ago", or a "Not used in 30 days" tag (BOS-2372). Nothing until the usage has loaded. */
+export function RuleUsageLine({ name, usage }: { name: string; usage: Usage | undefined }) {
+  if (!usage) return null;
+  const u = usage[name];
+  if (!u || total(u.month) === 0) return <p style={{ fontSize: 12.5 }}><span className="tag">Not used in 30 days</span></p>;
+  return (
+    <p className="muted" style={{ fontSize: 12.5 }} title={`This week: ${split(u.week)}. Last 30 days: ${split(u.month)}.`}>
+      {total(u.week)} this week · {total(u.month)} in 30 days · last matched {agoText(u.lastAt)}
+      <br />
+      30 days: {split(u.month)}
+    </p>
+  );
+}
+
+type RuleFilter ={ text: string; outcome: Outcome | "" };
 const filterOn = (f: RuleFilter) => Boolean(f.text.trim() || f.outcome);
 
 /** View-only filter (BOS-2323): case-insensitive substring over name, command pattern, title pattern and the names of the agents a rule applies to; plus an outcome. */
@@ -155,7 +180,7 @@ function FilterCount({ shown, total, f }: { shown: number; total: number; f: Rul
   );
 }
 
-function RuleRows({ rules, all = rules, filtered = false, agents, shadowed, editingId, onEdit, onSave, onMove, onChange, onDelete }: { rules: Rule[]; all?: Rule[]; filtered?: boolean; agents: Agent[]; shadowed: string[]; editingId: string | null; onEdit: (id: string | null) => void; onSave: (r: Rule, patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
+function RuleRows({ rules, all = rules, filtered = false, usage, agents, shadowed, editingId, onEdit, onSave, onMove, onChange, onDelete }: { rules: Rule[]; all?: Rule[]; filtered?: boolean; usage?: Usage; agents: Agent[]; shadowed: string[]; editingId: string | null; onEdit: (id: string | null) => void; onSave: (r: Rule, patch: { name: string; match: Match; outcome: Outcome }) => Promise<void>; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
   if (!all.length) return <p className="muted">None yet.</p>;
   if (!rules.length) return null;
   return (
@@ -181,6 +206,7 @@ function RuleRows({ rules, all = rules, filtered = false, agents, shadowed, edit
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
               When {describeMatch(r.match, agents)}
             </p>
+            <RuleUsageLine name={r.name} usage={usage} />
             {r.createdBy && (
               <p className="muted" style={{ fontSize: 12.5 }}>
                 Made by {r.createdBy}{r.createdAt ? ` on ${new Date(r.createdAt).toLocaleString()}` : ""}{r.sourceDecisionId ? " from a decision card (see Decisions, answered)" : ""}. Remove it with the button on this row.
@@ -227,6 +253,9 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const company = companies.find((c) => c.id === scopeId);
   const allAgents = (scopeId ? company?.agents : companies.flatMap((c) => c.agents)) ?? [];
   const list = usePoll((signal) => api<RuleList>(`/api/policy-rules${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 60_000, scopeId ?? "all");
+  // Usage is a nice-to-have: a failed or odd reply just hides the lines (a rule with no usage shown is not marked unused).
+  const usageList = usePoll((signal) => api<{ rules?: Usage }>(`/api/policy-rules/usage${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 300_000, `usage-${scopeId ?? "all"}`);
+  const usage = usageList.data?.rules && typeof usageList.data.rules === "object" ? usageList.data.rules : undefined;
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -359,6 +388,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           rules={shownRules}
           all={rules}
           filtered={filterOn(filter)}
+          usage={usage}
           agents={allAgents}
           shadowed={list.data?.shadowedIds ?? []}
           editingId={editingId}
@@ -502,6 +532,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
                 <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
                   When {describeMatch(r.match)}
                 </p>
+                <RuleUsageLine name={r.name} usage={usage} />
               </div>
               {outcomeTag(r.outcome)}
             </li>
