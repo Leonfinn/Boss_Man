@@ -24,6 +24,7 @@ import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, sibli
 import { dockerClient } from "./docker.js";
 import { watchGuardEvents } from "./guard-events.js";
 import { CHECKS_FILE, launcher, launcherServer } from "./launcher.js";
+import { releaseReader } from "./release-current.js";
 import { checkSetup, explainError } from "./selfcheck.js";
 import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseImageRef, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
@@ -100,6 +101,8 @@ const cfg: LauncherConfig = {
   runnerImage: parseImageRef("BOSSMAN_RUNNER_IMAGE", env.BOSSMAN_RUNNER_IMAGE),
   netguardImage: parseImageRef("BOSSMAN_NETGUARD_IMAGE", env.BOSSMAN_NETGUARD_IMAGE),
 };
+// BOS-1227: BOSSMAN_RELEASE_FILE names the updater's `release-current` file (a read-only volume); unset or missing = the environment images.
+cfg.release = releaseReader(env.BOSSMAN_RELEASE_FILE?.trim() || undefined, { runner: cfg.runnerImage, netguard: cfg.netguardImage }, (msg) => console.error(JSON.stringify({ at: new Date().toISOString(), msg })));
 const socketPath = env.DOCKER_SOCKET ?? "/var/run/docker.sock";
 const docker = dockerClient(socketPath);
 // BOSSMAN_DATA_HOST=auto: the data folder is a named volume; ask Docker where it is on the host (BOS-974). A path = use that. Empty = BOSSMAN_DATA is a host path too.

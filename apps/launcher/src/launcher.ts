@@ -77,8 +77,18 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
 
   /** Runs one slug's work after the previous work for that slug: guards are removed and made by name, so two at once would collide. */
   const chains = new Map<string, Promise<unknown>>();
+  /** BOS-1227: how many locked jobs (a runner put, restart, recreate or guard start) are queued or running; the updater reads it through GET /busy. */
+  let inFlight = 0;
   function locked<T>(slug: string, work: () => Promise<T>): Promise<T> {
-    const run = (chains.get(slug) ?? Promise.resolve()).then(work, work);
+    inFlight++;
+    const counted = async () => {
+      try {
+        return await work();
+      } finally {
+        inFlight--;
+      }
+    };
+    const run = (chains.get(slug) ?? Promise.resolve()).then(counted, counted);
     const tail = run.catch(() => undefined);
     chains.set(slug, tail);
     void tail.then(() => chains.get(slug) === tail && chains.delete(slug));
@@ -240,6 +250,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
 
   return {
     /** What the CPU reserve decided at start (cpu-layout.ts): on or off, which threads, and why. */
+    /** BOS-1227: true while a runner is being made, restarted or guarded. The updater defers recreating the launcher while this is true. */
+    busy: () => ({ busy: inFlight > 0, jobs: inFlight }),
     cpu: () => cfg.cpuPlan ?? { on: false, reserved: [] as number[], runnerThreads: [] as number[], hostThreads: 0, reason: "Not worked out." },
     /** The guard mode and the BOSSMAN_NETGUARD_ALLOW entries this launcher started with (host:port only), so the owner can see them (BOS-770). */
     netguard: () => ({ mode, allow: [...(cfg.guardAllow ?? [])] }),
@@ -593,6 +605,10 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (url.pathname === "/cpu") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, api.cpu());
+      }
+      if (url.pathname === "/busy") {
+        if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
+        return send(200, api.busy());
       }
       if (url.pathname === "/netguard") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
