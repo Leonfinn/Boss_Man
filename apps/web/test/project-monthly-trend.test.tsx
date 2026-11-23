@@ -31,7 +31,7 @@ describe("ProjectMonthlyTrend", () => {
 
   it("says so instead of drawing empty bars when nothing was spent", () => {
     render(<ProjectMonthlyTrend months={months.map((m) => ({ ...m, paygMicros: 0, planMicros: 0, runs: 0 }))} capMicros={null} />);
-    expect(screen.getByText(/No spend or runs on this project/)).toBeTruthy();
+    expect(screen.getByText(/No spend in the last 6 months/)).toBeTruthy();
     expect(screen.queryByRole("img")).toBeNull();
   });
 });

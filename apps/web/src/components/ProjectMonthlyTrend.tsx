@@ -21,7 +21,7 @@ export function ProjectMonthlyTrend({ months, capMicros }: { months: ProjectMont
     <section aria-label="Spend by month" style={{ marginTop: 16 }}>
       <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>Month by month</h2>
       {quiet ? (
-        <p className="muted" style={{ margin: 0 }}>No spend or runs on this project in the last {months.length} months.</p>
+        <p className="muted" style={{ margin: 0 }}>No spend in the last {months.length} months.</p>
       ) : (
         <>
           <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Spend per month for the last ${months.length} months, plan use and pay-as-you-go. The table below has the same figures.`} style={{ width: "100%", maxWidth: 520, height: "auto", display: "block" }}>
