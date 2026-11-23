@@ -95,6 +95,20 @@ describe("server health", () => {
     expect((await svc.read()).warnings).toEqual([]);
   });
 
+  it("lists a query running over 60 s with its duration and text with values removed", async () => {
+    const { db } = await setup();
+    // PGlite has one connection, so no second one can be seen running: stub the pg_stat_activity answer, keep the rest real.
+    const stubbed = Object.create(db) as typeof db;
+    const real = db.execute.bind(db);
+    stubbed.execute = (async (q: Parameters<typeof db.execute>[0]) =>
+      JSON.stringify(q).includes("pg_stat_activity") ? { rows: [{ seconds: 75, query: `select * from users where email = 'jo@example.com' and token = $1 ${"x".repeat(100)}` }] } : real(q)) as typeof db.execute;
+    const h = await dataHealthService(stubbed, { statfs: disk(50) }).read();
+    expect(h.slowQueries).toHaveLength(1);
+    expect(h.slowQueries[0]!.seconds).toBe(75);
+    expect(h.slowQueries[0]!.query.length).toBeLessThanOrEqual(80);
+    expect(h.slowQueries[0]!.query).not.toMatch(/jo@example|\$1/);
+  });
+
   it("says 'not available' for an unreadable folder instead of failing", async () => {
     const opened = await openPglite();
     close = opened.close;
