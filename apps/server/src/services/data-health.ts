@@ -1,4 +1,4 @@
-// BOS-2380: data and database health for Settings → System (not server-health.ts, the memory and freeze alerts): free space on the data disk, database size and growth, query limit hits,
+// BOS-2380: data and database health for the server health box (not server-health.ts, the memory and freeze alerts): free space on the data disk, database size and growth, query limit hits,
 // long-running queries. Read on demand; checkWarnings() runs inside the hourly disk pass (services/disk.ts).
 import { statfsSync } from "node:fs";
 import { desc, gte, sql } from "drizzle-orm";
@@ -121,7 +121,7 @@ export function dataHealthService(db: Db, deps: { dataDir?: string; now?: () => 
           .values({
             companyId: c.id,
             kind: "question",
-            question: `${warnings.join(" ")} See Settings → System → Server health. Free space on the server's disk (old Docker images, logs, backups) or move the data folder to a bigger disk; nothing is stopped by this warning.`,
+            question: `${warnings.join(" ")} See Settings → Updates → Server health. Free space on the server's disk (old Docker images, logs, backups) or move the data folder to a bigger disk; nothing is stopped by this warning.`,
             options: ["Got it"],
             recommendedOption: "Got it",
             dedupeKey: `serverhealth:${c.id}:${dayKey(now())}`,

@@ -1,4 +1,4 @@
-// BOS-2380: how often the database limits were hit, for Settings → System. Counted in memory by db/client.ts's limit watcher.
+// BOS-2380: how often the database limits were hit, for the server health box. Counted in memory by db/client.ts's limit watcher.
 const DAY_MS = 86_400_000;
 // lost on restart, harmless because the page says "since the server started" and the log line still names the first hit.
 const hits: { kind: "statement" | "connect"; at: number }[] = [];

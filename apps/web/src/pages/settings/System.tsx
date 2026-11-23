@@ -70,7 +70,8 @@ const healthGb = (b: number | null) => (b === null ? "not available" : b < 1024 
 /** BOS-2380: the server's own disk, database size and query limits, read when the page loads. Read-only: no buttons. */
 export function ServerHealth() {
   const view = usePoll((signal) => api<ServerHealthView>("/api/data-health", { signal }), 60_000, "data-health");
-  const v = view.data;
+  // An answer without the expected parts (an old server, a stub) shows the loader, not a blank page.
+  const v = view.data && view.data.database && view.data.limits ? view.data : undefined;
   return (
     <Section id="server-health-h" title="Server health">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -78,7 +79,7 @@ export function ServerHealth() {
       </p>
       {view.error && !v ? <LoadError what="server health" message={view.error.message} onRetry={view.reload} /> : !v ? <Loader /> : (
         <>
-          {v.warnings.map((w) => (
+          {(v.warnings ?? []).map((w) => (
             <p key={w} className="error" role="alert">{w}</p>
           ))}
           <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18 }}>
@@ -89,8 +90,8 @@ export function ServerHealth() {
             </li>
             <li data-testid="health-limits">Last 24 hours (since the server started, if less): {v.limits.statementTimeouts} queries cut off for running too long, {v.limits.poolFull} times the connection pool was full.</li>
             <li data-testid="health-slow">
-              {v.slowQueries.length ? "Running over 60 seconds now:" : "No query is running over 60 seconds."}
-              {v.slowQueries.map((q, i) => (
+              {v.slowQueries?.length ? "Running over 60 seconds now:" : "No query is running over 60 seconds."}
+              {(v.slowQueries ?? []).map((q, i) => (
                 <div key={i} className="mono" style={{ fontSize: 13 }}>{q.seconds} s: {q.query}</div>
               ))}
             </li>

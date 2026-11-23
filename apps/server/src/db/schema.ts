@@ -2304,7 +2304,7 @@ export const deviceProfiles = pgTable(
   (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
 );
 
-/** BOS-2380: one reading of the database's size per day (UTC), so the 7-day growth on Settings → System survives a restart. */
+/** BOS-2380: one reading of the database's size per day (UTC), so the 7-day growth in the server health box survives a restart. */
 export const serverSizeReadings = pgTable("server_size_readings", {
   day: text("day").primaryKey(),
   dbBytes: bigint("db_bytes", { mode: "number" }).notNull(),

@@ -270,7 +270,7 @@ export function settingsLimitsRoutes(
     w.disconnect(id, WORKER_OFF_CLOSE, "worker removed");
     return { ok: true };
   });
-  // BOS-2380: server health for Settings → System, read on demand.
+  // BOS-2380: server health for the server health box, read on demand.
   const dataHealth = dataHealthService(db);
   owner.get("/api/data-health", async () => dataHealth.read());
   // BOS-313: check the merged result before pushing it (off by default while it rolls out).
