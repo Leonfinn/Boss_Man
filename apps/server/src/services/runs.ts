@@ -4,6 +4,7 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, fundingSources, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
+import { record } from "./activity.js";
 import type { runnersService } from "./runners.js";
 
 /**
@@ -71,6 +72,16 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
   let wake: WakeHook | null = null;
   const now = deps.now ?? (() => new Date());
 
+  /** A queued or deferred wake of this company that has not started; else 404 (another company's wake looks missing). */
+  async function waitingWake(companyId: string, wakeId: string) {
+    const [w] = await db
+      .select({ id: wakes.id, agentId: wakes.agentId, ticketId: wakes.ticketId, reason: wakes.reason })
+      .from(wakes)
+      .where(and(eq(wakes.id, wakeId), eq(wakes.companyId, companyId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
+    if (!w) throw new RunError(404, "That agent is not waiting to start any more.");
+    return w;
+  }
+
   async function load(runId: string, companyId?: string) {
     const [r] = await db.select().from(runs).where(eq(runs.id, runId));
     if (!r || (companyId && r.companyId !== companyId)) throw new RunError(404, "No such run.");
@@ -107,6 +118,32 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
         .leftJoin(tickets, eq(tickets.id, wakes.ticketId))
         .where(and(eq(wakes.companyId, companyId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
+    },
+
+    /**
+     * Start a waiting wake now (BOS-2328): clears its not-before time and deferral so the scheduler's next
+     * pass considers it. It changes no limit: the scheduler still applies run slots and company limits and
+     * may defer it again with its reason. The owner's reason goes to the activity log.
+     */
+    async startWaiting(companyId: string, wakeId: string, reason?: string) {
+      const w = await waitingWake(companyId, wakeId);
+      await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(eq(wakes.id, w.id));
+      await record(db, { companyId, kind: "wake_start_now", agentId: null, ticketId: w.ticketId, summary: `The owner started a waiting wake now${reason ? `: ${reason}` : ""}`, detail: { actor: "owner", wakeId: w.id, wakeAgentId: w.agentId, wakeReason: w.reason, why: reason ?? null } });
+      return { id: w.id };
+    },
+
+    /** Remove a waiting wake that is no longer wanted (BOS-2328), with the owner's reason in the activity log. */
+    async cancelWaiting(companyId: string, wakeId: string, reason?: string) {
+      const w = await waitingWake(companyId, wakeId);
+      await db.delete(wakes).where(eq(wakes.id, w.id));
+      await record(db, { companyId, kind: "wake_cancelled", agentId: null, ticketId: w.ticketId, summary: `The owner cancelled a waiting wake${reason ? `: ${reason}` : ""}`, detail: { actor: "owner", wakeId: w.id, wakeAgentId: w.agentId, wakeReason: w.reason, why: reason ?? null } });
+      return { id: w.id };
+    },
+
+    /** Where a waiting wake stands now, for the row after "Start now": still waiting, with why, or started. */
+    async wakeState(companyId: string, wakeId: string) {
+      const [w] = await db.select({ status: wakes.status, statusReason: wakes.statusReason, runId: wakes.runId }).from(wakes).where(and(eq(wakes.id, wakeId), eq(wakes.companyId, companyId)));
+      return w ?? null;
     },
 
     /** Runs that have finished, newest first, with what they cost. */

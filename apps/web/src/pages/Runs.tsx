@@ -241,7 +241,26 @@ export function waitingFor(iso: string, now = Date.now()) {
 const reasonText = (reason: string) => REASON_LABEL[reason] ?? reason[0]!.toUpperCase() + reason.slice(1);
 
 /** Agents woken but not started yet: which agent, for what, why, and since when (BOS-2320). Read-only. */
-function WaitingTable({ rows, companies }: { rows: WaitingWake[]; companies: Company[] }) {
+function WaitingTable({ rows, companies, onChanged }: { rows: WaitingWake[]; companies: Company[]; onChanged: () => void }) {
+  // Per row: which button is working, and what the server said (BOS-2328).
+  const [busy, setBusy] = useState<Record<string, "start" | "cancel">>({});
+  const [said, setSaid] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const act = async (w: WaitingWake, kind: "start" | "cancel") => {
+    const verb = kind === "start" ? "Start" : "Cancel";
+    const reason = window.prompt(`${verb} this wait${kind === "start" ? " now" : ""}? Why (optional):`, "");
+    if (reason === null) return;
+    setBusy((b) => ({ ...b, [w.id]: kind }));
+    try {
+      const res = await api<{ started?: boolean; waitingReason?: string | null }>(`/api/companies/${w.companyId}/wakes/${w.id}/${kind === "start" ? "start-now" : "cancel"}`, { method: "POST", body: { reason: reason.trim() || undefined } });
+      if (kind === "start" && res.started === false) setSaid((s) => ({ ...s, [w.id]: { ok: false, text: `Not started yet: ${res.waitingReason ?? "waiting for a free run slot"}. It will start when there is room.` } }));
+      else setSaid((s) => { const { [w.id]: _gone, ...rest } = s; return rest; });
+    } catch (err) {
+      setSaid((s) => ({ ...s, [w.id]: { ok: false, text: err instanceof Error ? err.message : "That did not work." } }));
+    } finally {
+      setBusy((b) => { const { [w.id]: _gone, ...rest } = b; return rest; });
+      onChanged();
+    }
+  };
   return (
     <div className="table-wrap">
       <table>
@@ -250,6 +269,7 @@ function WaitingTable({ rows, companies }: { rows: WaitingWake[]; companies: Com
             <th scope="col">Agent</th>
             <th scope="col">What for</th>
             <th scope="col">Waiting</th>
+            <th scope="col"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -280,6 +300,19 @@ function WaitingTable({ rows, companies }: { rows: WaitingWake[]; companies: Com
                     {w.notBefore ? ` until ${when(w.notBefore)}` : ""}
                   </div>
                 )}
+                {said[w.id] && (
+                  <div role="status" className="muted" style={{ fontSize: 13 }}>
+                    {said[w.id]!.text}
+                  </div>
+                )}
+              </td>
+              <td style={{ whiteSpace: "nowrap" }}>
+                <button type="button" disabled={!!busy[w.id]} onClick={() => void act(w, "start")}>
+                  {busy[w.id] === "start" ? "Starting" : "Start now"}
+                </button>{" "}
+                <button type="button" disabled={!!busy[w.id]} onClick={() => void act(w, "cancel")}>
+                  {busy[w.id] === "cancel" ? "Cancelling" : "Cancel"}
+                </button>
               </td>
             </tr>
           ))}
@@ -483,7 +516,7 @@ export function Runs({ companies }: { companies: Company[] }) {
           Waiting to start
         </h2>
         {waiting.data?.length ? (
-          <WaitingTable rows={waiting.data} companies={companies} />
+          <WaitingTable rows={waiting.data} companies={companies} onChanged={() => { waiting.reload(); active.reload(); }} />
         ) : waiting.data ? (
           <p className="muted">No agents are waiting to start.</p>
         ) : waiting.error ? (

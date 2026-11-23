@@ -113,7 +113,7 @@ export const OWNER_CONTROLS = {
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
   Engagements: [],
-  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV"],
+  Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV", "Start now", "Cancel", "Starting", "Cancelling"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
