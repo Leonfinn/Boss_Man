@@ -210,6 +210,8 @@ export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, backg
 
 /** BOS-1555: a finished check's result wake; the agent picks it up before starting anything new. */
 const CHECK_RESULT_REASON = "check_result";
+/** BOS-2356: the sender of a nudge that was dropped instead of delivered is told so, with the reason. */
+export const NUDGE_DROPPED_REASON = "nudge dropped";
 /** Reasons whose older unstarted copies for one agent and ticket are dropped for the newest (BOS-1555). */
 const SUPERSEDED_REASONS = [CHECK_RESULT_REASON, "check due", "checking an old card"];
 /** BOS-1791: wakes that hand a ticket to its assignee; dropped when the ticket was parked or reassigned after they were queued. */
@@ -1069,16 +1071,58 @@ export function schedulerService(
     if (waited > limits.staleWakeMs) return `it waited ${Math.round(waited / 3_600_000)} hours, so it is out of date`;
     if (!w.note) return null;
     const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, w.companyId));
-    const named: Array<{ systemState: string }> = [];
+    const named: Array<{ systemState: string; stateChangedAt: Date | null }> = [];
+    const cols = { systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt };
     const ids = [...new Set(w.note.match(NOTE_TICKET_IDS) ?? [])];
-    if (ids.length) named.push(...(await db.select({ systemState: tickets.systemState }).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.id, ids)))));
+    if (ids.length) named.push(...(await db.select(cols).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.id, ids)))));
     const prefix = company?.prefix;
     if (prefix) {
       const re = new RegExp(`\\b${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)\\b`, "gi");
       const numbers = [...new Set([...w.note.matchAll(re)].map((m) => Number(m[1])))];
-      if (numbers.length) named.push(...(await db.select({ systemState: tickets.systemState }).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.number, numbers)))));
+      if (numbers.length) named.push(...(await db.select(cols).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.number, numbers)))));
     }
-    return named.length && named.every((x) => x.systemState === "done") ? "every ticket it named was already finished" : null;
+    // BOS-2356: BOS-2172's creation-time rule. A ticket counts as finished for this wake only if it closed after the wake was
+    // queued (at the same moment included, and with no close time recorded, as replayOfClosed does). A nudge sent about a ticket
+    // that was already done is something new (a follow-up, a question about the result) and is delivered: on 23 Nov the CEO's
+    // nudges to Florence naming finished tickets were dropped silently and she never woke.
+    const closedSince = (x: { systemState: string; stateChangedAt: Date | null }) => x.systemState === "done" && (!x.stateChangedAt || w.createdAt.getTime() <= x.stateChangedAt.getTime());
+    return named.length && named.every(closedSince) ? "every ticket it named was finished after it was sent" : null;
+  }
+
+  /**
+   * BOS-2356: tells each agent whose nudge was dropped (by any of the drops in tick()), once per dropped nudge, why, so
+   * a dropped nudge is never silent. The notice is a "nudge dropped" wake, never a nudge, so it has no nudges row and
+   * can't be dropped into another notice: no loop. It is ticketless (a wake with a ticket would start that ticket) and,
+   * through notify(), goes straight into the sender's live run when there is one, or joins a notice already waiting.
+   * The Scrum Master's nudges come from the watchdog, which tracks its own actions, so it isn't woken for them.
+   */
+  async function tellNudgeSenders(wakeIds: string[], why: string): Promise<void> {
+    if (!wakeIds.length) return;
+    const dropped = await db
+      .select({ fromId: nudges.fromAgentId, toId: nudges.toAgentId, why: nudges.why, number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
+      .from(nudges)
+      .leftJoin(tickets, eq(tickets.id, nudges.ticketId))
+      .leftJoin(companies, eq(companies.id, nudges.companyId))
+      .where(inArray(nudges.wakeId, wakeIds));
+    if (!dropped.length) return;
+    const people = await db
+      .select({ id: agents.id, name: agents.name, duty: agents.duty, retiredAt: agents.retiredAt })
+      .from(agents)
+      .where(inArray(agents.id, [...new Set(dropped.flatMap((d) => [d.fromId, d.toId]))]));
+    const who = new Map(people.map((p) => [p.id, p]));
+    for (const d of dropped) {
+      const from = who.get(d.fromId);
+      if (!from || from.retiredAt || from.duty === SCRUM_MASTER_DUTY) continue;
+      const to = who.get(d.toId)?.name ?? "a colleague";
+      // A nudge on a ticket names it; a ticketless one names its tickets in the quoted text below.
+      const about = d.number != null ? ` about ${ticketRef(d.prefix, d.number) ?? "a ticket"} "${d.title ?? ""}"` : "";
+      const note = [
+        `Your nudge to ${to}${about} was not delivered: ${why}. ${to} was not woken for it.`,
+        untrusted(`agent ${from.name}`, `What you sent: ${(d.why ?? "(not recorded)").slice(0, 300)}`),
+        `If it still matters, write it on an open ticket with ticket_reply, or nudge again with that ticket.`,
+      ].join("\n");
+      await self.notify(from.id, { reason: NUDGE_DROPPED_REASON, note }).catch((err) => deps.log?.(`telling ${from.name} a nudge was dropped failed: ${(err as Error).message}`));
+    }
   }
 
   /** Whether the agent has a ready or in-progress ticket that hasn't started a run yet, so a ticketless wake must not take its slot (BOS-1136). */
@@ -1574,6 +1618,11 @@ export function schedulerService(
       return outcomeOf(row!);
     },
 
+    /** BOS-2356: for a drop outside the scheduler (the owner stops or parks a ticket): tells the senders of any nudges among these dropped wakes. */
+    nudgesDropped(wakeIds: string[], why: string): Promise<void> {
+      return tellNudgeSenders(wakeIds, why);
+    },
+
     /**
      * Tells an agent something (R86), the one way to do it. A live run on the same ticket (or
      * none, for a ticketless notice) is told directly; otherwise the note joins a wake already
@@ -2014,6 +2063,7 @@ export function schedulerService(
           // BOS-2172: one line on the ticket, so its activity shows why nobody was woken.
           const n = ids.length;
           await record(db, { companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, kind: "wake_dropped", summary: `Dropped ${n === 1 ? "a wake" : `${n} wakes`} (${finished.reasons.join(", ")}) queued before this ticket was finished, instead of starting a run`, at: now() });
+          await tellNudgeSenders(ids, "the ticket it was about was finished after you sent it");
           result.dropped += n;
           continue;
         }
@@ -2021,6 +2071,7 @@ export function schedulerService(
         const parked = await parkedTicketWake(w);
         if (parked) {
           await db.update(wakes).set({ status: "dropped", statusReason: parked }).where(eq(wakes.id, w.id));
+          await tellNudgeSenders([w.id], parked);
           result.dropped++;
           continue;
         }
@@ -2031,6 +2082,7 @@ export function schedulerService(
           await db.update(nudges).set({ dropped: true }).where(eq(nudges.wakeId, w.id));
           const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
           await record(db, { companyId: w.companyId, agentId: w.agentId, ticketId: null, kind: "nudge", summary: `A "${w.reason}" wake for ${who?.name ?? "an agent"} was dropped instead of delivered: ${stale}`, at: now() });
+          await tellNudgeSenders([w.id], stale);
           result.dropped++;
           continue;
         }
