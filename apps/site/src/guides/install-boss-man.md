@@ -268,7 +268,7 @@ Run every `docker compose` command from `$B/src`.
 
 ```sh Run on the Linux machine, as root
 cd $B/src
-docker compose build server launcher netguard
+docker compose build server launcher
 scripts/update-runner.sh
 ```
 
