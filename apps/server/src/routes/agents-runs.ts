@@ -9,6 +9,7 @@ import { OWNER_MESSAGE_MAX, THINKING_LEVELS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentNotes, agents } from "../db/schema.js";
 import { AgentError, type agentsService } from "../services/agents.js";
+import { AgentRecordError, agentRecordService } from "../services/agent-record.js";
 import { NOTE_LIMITS, NoteError, type notesService } from "../services/agent-notes.js";
 import { logoType } from "../services/image-type.js";
 import { permissionsForRun } from "../services/permission-store.js";
@@ -87,6 +88,13 @@ export function agentRunsRoutes(
   });
   owner.post("/api/agents/:id/retire", async (req, reply) => agentsSvc.retire(IdParam.parse(req.params).id).catch(agentErrors(reply)));
   owner.get("/api/agents/:id/history", async (req, reply) => agentsSvc.history(IdParam.parse(req.params).id).catch(agentErrors(reply)));
+  // One agent's last 30 days (BOS-2389): finished tickets, first-time passes, send-backs, time to merge, cost.
+  owner.get("/api/agents/:id/record", async (req, reply) =>
+    agentRecordService(db).record(IdParam.parse(req.params).id).catch((err: unknown) => {
+      if (err instanceof AgentRecordError) return reply.code(404).send({ error: "not_found", message: err.message });
+      throw err;
+    }),
+  );
 
   // The CEO's lasting notes (BOS-85): the owner sees, adds, edits and deletes them, within the same caps, and sees colleagues' requests.
   const noteErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {

@@ -16,6 +16,7 @@ const ROUTES: Array<["GET" | "POST" | "PUT" | "PATCH" | "DELETE", string]> = [
   ["PATCH", `/api/agents/${ID}`],
   ["POST", `/api/agents/${ID}/retire`],
   ["GET", `/api/agents/${ID}/history`],
+  ["GET", `/api/agents/${ID}/record`],
   ["GET", `/api/agents/${ID}/notes`],
   ["POST", `/api/agents/${ID}/notes`],
   ["PATCH", `/api/agent-notes/${ID}`],
