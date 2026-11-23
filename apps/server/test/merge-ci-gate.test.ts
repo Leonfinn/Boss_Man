@@ -1355,18 +1355,19 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       });
     });
 
-    it("with the merge train on too, the merge skips the train and still waits for CI (BOS-1366)", async () => {
+    it("with the merge train on too, the merge takes the train and still waits for CI (BOS-1366, BOS-2360)", async () => {
       const c = (ctx = await setup({ features: ["carried-check", "ci-publish", "check-jobs", "merge-base"] }));
       await serverMode(c);
       await c.db.insert(settings).values({ key: "merge_train", value: true });
       const res = approveAndWait(c.req, c.ticket.id);
       await finishJob(c, { state: "passed", exitCode: 0 });
       expect((await res).json()).toMatchObject({ outcome: "merged" });
-      // Published and read like any CI-gated merge; no train base was sent, since CI only ever runs on a merge with main.
+      // Published and read like any CI-gated merge, then landed as the train's head: on exactly the base it was prepared on.
+      // (Before BOS-2360 the train was skipped with CI gating on; merge-train-ci.test.ts covers a train of several.)
       expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
       expect(c.gh.reads.get(MERGE)).toBeGreaterThan(0);
       const merges = c.sent.filter((m): m is Extract<RunnerCommand, { type: "workspace.merge" }> => m.type === "workspace.merge");
-      expect(merges.some((m) => m.base || m.expectBase)).toBe(false);
+      expect(merges.find((m) => m.phase === "finish")?.expectBase).toBe(MAIN);
     });
 
     // BOS-1733 (CI fix 2): GitHub fails in a named test the branch doesn't change. The gate re-runs it on the same merge

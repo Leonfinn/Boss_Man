@@ -527,20 +527,22 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
         } finally {
           finished = true;
         }
-        if (o.kind === "stopped") {
-          const c = behind();
-          return c && ciStop.why?.startsWith(COVERED_WHY) ? covered(c, null) : { kind: "stopped" };
-        }
+        const covering = ciStop.why?.startsWith(COVERED_WHY) ? behind() : null;
+        if (covering) return covered(covering, null);
+        // Halted (the member restacked, or its own side ended the attempt): this answer is for a commit that won't land, so
+        // it is dropped, as alongsideCi drops CI's answer once the gate's own side has ended the attempt.
+        if (o.kind === "stopped" || ciStop.stopped) return { kind: "stopped" };
         if (o.kind === "failed") {
           train.ciState(ticketId, prep.commit, "failed");
           for (;;) {
+            if (ciStop.stopped) return { kind: "stopped" };
             const v = train.ciFailure(ticketId);
             if (v === "covered") return covered(train.ciCoveredBy(ticketId)!, o);
             if (v === "restack") return { kind: "restack" };
             if (v === "stands") break;
-            if (ciStop.stopped) return { kind: "stopped" };
             await pause();
           }
+          if (ciStop.stopped) return { kind: "stopped" };
         }
         // Before ciVerdict, so the members ahead see the pass (or a no-pass landing) at once.
         if (o.kind === "passed") train.ciState(ticketId, prep.commit, "passed");
@@ -626,7 +628,10 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
         // A stacked prepare that came back main_moved: its base isn't on main any more. Wait for a new base rather than spin.
         let badBase: string | null = null;
         let again = false;
+        // BOS-2360: see the CI side's `finally` below.
+        let lateCi: Early | null = null;
         for (;;) {
+          if (lateCi) return lateCi;
           // BOS-1604: the owner turned the train off. A member about to prepare again holds no checked tree, so it leaves
           // and lands the way it did before, like one still waiting for a seat. Before this, a seated member kept restacking
           // until the cap (with the back-off, up to ~20 min). A member with a passed check never gets here, so it keeps its base.
@@ -700,6 +705,16 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
             const ce = side.end();
             return ce && ce !== "ok" && ce !== "restack" ? ce : r;
           };
+          /**
+           * gone(), but GitHub's verdict first: its send-back moves the ticket out of review, which mustn't read as "left review".
+           * A stop waits for the CI side to end (settle), so a send-back under way is seen.
+           */
+          const goneOrCi = async (): Promise<ServerMergeEnd | Early | null> => {
+            const ce = side?.end();
+            if (ce && ce !== "ok" && ce !== "restack") return ce;
+            const stop = await gone();
+            return stop ? settle(stop) : null;
+          };
           try {
           const round = () =>
             runRound(ref, {
@@ -719,14 +734,12 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
             let verdict = train.failure(ticketId);
             while (verdict === "wait") {
               await pause();
-              {
-            const stop = await gone();
-            if (stop) return stop;
-          }
               // BOS-2360: GitHub's own failure, decided meanwhile, is the answer (as alongsideCi's CI-first case).
-              const ce = side?.end();
-              if (ce && ce !== "ok" && ce !== "restack") return ce;
-              verdict = ce === "restack" ? "restack" : train.failure(ticketId);
+              {
+                const stop = await goneOrCi();
+                if (stop) return stop;
+              }
+              verdict = side?.end() === "restack" ? "restack" : train.failure(ticketId);
             }
             if (verdict === "restack") {
               // A member ahead failed or changed: this failure may be theirs. Again without them, nothing charged.
@@ -749,6 +762,7 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
           }
           // BOS-2360: GitHub CI ended the attempt (its failure stands, a card, a timeout): its verdict is the answer.
           if (r.status === "stopped") {
+            await side?.halt("GitHub CI ended the merge attempt");
             const ce = side?.end();
             if (ce === "restack") {
               if (!(await restack(train.stale(ticketId) ?? "ahead_changed"))) return { status: "main_moved" };
@@ -772,9 +786,9 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
             if (why || (train.isHead(ticketId) && (!side || ce === "ok"))) break;
             await pause();
             {
-            const stop = await gone();
-            if (stop) return stop;
-          }
+              const stop = await goneOrCi();
+              if (stop) return stop;
+            }
             why = train.stale(ticketId);
           }
           if (why) {
@@ -797,6 +811,13 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
           return fin;
           } finally {
             await side?.halt(haltWhy);
+            // GitHub's verdict landed while this member restacked (a send-back already under way): it ends the attempt.
+            try {
+              const ce = side?.end();
+              if (ce && ce !== "ok" && ce !== "restack") lateCi = ce;
+            } catch {
+              // An error from the CI wait after a restack: the new round's own wait reports its own.
+            }
           }
         }
       }
