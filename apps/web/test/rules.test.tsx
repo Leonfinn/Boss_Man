@@ -208,4 +208,44 @@ describe("decision rules", () => {
     expect(line.textContent).toContain("Deletes, moves and requests that name a path come straight to you.");
     expect(line.textContent).not.toContain("goes to you.");
   });
+
+  // BOS-2323: filter box and outcome filter, view-only.
+  it("filters rules by text and outcome, hides move buttons while filtering, and says when nothing matches", async () => {
+    const mk = (id: string, name: string, outcome: string, match: object) => ({ id, companyId: "c1", name, match, outcome, position: 0 });
+    const data = {
+      company: [mk("r1", "Docker restarts", "allow", { commandPattern: "^docker restart" }), mk("r2", "GitHub reads", "ceo", { titlePattern: "^mcp__github__" }), mk("r3", "Kit pushes", "deny", { agentIds: ["a1"] })],
+      global: [],
+      defaults: [{ name: "Reads are fine", match: { kinds: ["read"] }, outcome: "allow" }, { name: "Deletes ask", match: { kinds: ["delete"] }, outcome: "owner" }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(data), { status: 200 })));
+    const co: Company = { ...company, agents: [{ id: "a1", name: "Kit" } as Company["agents"][number]] };
+    render(<Rules companies={[co]} companyId="c1" go={() => {}} />);
+    await screen.findByText("Docker restarts");
+    expect(screen.getByLabelText("Move GitHub reads up")).toBeTruthy();
+    expect(screen.queryByText(/rules shown/)).toBeNull();
+
+    const box = screen.getByLabelText("Filter rules");
+    fireEvent.change(box, { target: { value: "GITHUB" } });
+    expect(screen.queryByText("Docker restarts")).toBeNull();
+    expect(screen.getByText("GitHub reads")).toBeTruthy();
+    expect(screen.getAllByText(/1 of 3 rules shown/).length).toBe(1);
+    expect(screen.queryByLabelText("Move GitHub reads up")).toBeNull();
+
+    fireEvent.change(box, { target: { value: "kit" } }); // agent name
+    expect(screen.getByText("Kit pushes")).toBeTruthy();
+    fireEvent.change(box, { target: { value: "docker restart" } }); // command pattern
+    expect(screen.getByText("Docker restarts")).toBeTruthy();
+
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Show rules that"), { target: { value: "deny" } });
+    expect(screen.getByText("Kit pushes")).toBeTruthy();
+    expect(screen.queryByText("GitHub reads")).toBeNull();
+    expect(screen.getByText(/0 of 2 rules shown/)).toBeTruthy(); // defaults: none deny
+
+    fireEvent.change(screen.getByLabelText("Show rules that"), { target: { value: "" } });
+    fireEvent.change(box, { target: { value: "zzz" } });
+    expect(screen.getAllByText(/No rules match/).length).toBe(2);
+    fireEvent.change(box, { target: { value: "" } });
+    expect(screen.getByLabelText("Move GitHub reads up")).toBeTruthy();
+  });
 });
