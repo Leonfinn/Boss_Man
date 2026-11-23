@@ -121,6 +121,7 @@ export function dataHealthService(db: Db, deps: { dataDir?: string; now?: () => 
           .values({
             companyId: c.id,
             kind: "question",
+            tier: "owner",
             question: `${warnings.join(" ")} See Settings → Updates → Server health. Free space on the server's disk (old Docker images, logs, backups) or move the data folder to a bigger disk; nothing is stopped by this warning.`,
             options: ["Got it"],
             recommendedOption: "Got it",
