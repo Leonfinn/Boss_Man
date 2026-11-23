@@ -338,9 +338,9 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
   const here = spotIndex(spots, at);
   const curSpot = here >= 0 ? spots[here]! : null;
   const curKey = curSpot ? `${curSpot.id}:${curSpot.n}` : "";
-  // The newest match is current until the owner steps.
+  // The first match shown is current until the owner steps.
   useEffect(() => {
-    if (spots.length && here < 0) setAt(spots[spots.length - 1]!);
+    if (spots.length && here < 0) setAt(spots[0]!);
   }, [spots.length, here, query]);
   useEffect(() => {
     if (curKey) logRef.current?.querySelector(".find-hit.current")?.scrollIntoView({ block: "center" });

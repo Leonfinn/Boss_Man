@@ -28,9 +28,10 @@ describe("chat find helper (BOS-2411)", () => {
     expect(findSpots(msgs, "")).toEqual([]);
   });
 
-  it("steps to the next and previous match and wraps; no current match starts at the newest", () => {
+  it("steps to the next and previous match and wraps; no current match starts at the first (next) or last (previous)", () => {
     const spots = [{ id: "a", n: 0 }, { id: "b", n: 0 }, { id: "b", n: 1 }];
-    expect(stepSpot(spots, null, 1)).toEqual({ id: "b", n: 1 });
+    expect(stepSpot(spots, null, 1)).toEqual({ id: "a", n: 0 });
+    expect(stepSpot(spots, null, -1)).toEqual({ id: "b", n: 1 });
     expect(stepSpot(spots, { id: "b", n: 1 }, 1)).toEqual({ id: "a", n: 0 });
     expect(stepSpot(spots, { id: "a", n: 0 }, -1)).toEqual({ id: "b", n: 1 });
     expect(stepSpot([], null, 1)).toBeNull();

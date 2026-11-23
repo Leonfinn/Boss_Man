@@ -45,11 +45,11 @@ export function findSpots(messages: FindMessage[], query: string): FindSpot[] {
 /** Where a spot is in the list (-1 when it is not there). */
 export const spotIndex = (spots: FindSpot[], at: FindSpot | null) => (at ? spots.findIndex((s) => s.id === at.id && s.n === at.n) : -1);
 
-/** The spot after (or before) the current one, wrapping round at either end; the newest match when none is current. */
+/** The spot after (or before) the current one, wrapping round at either end; with none current, the first (or last). */
 export function stepSpot(spots: FindSpot[], at: FindSpot | null, dir: 1 | -1): FindSpot | null {
   if (!spots.length) return null;
   const i = spotIndex(spots, at);
-  if (i < 0) return spots[spots.length - 1]!;
+  if (i < 0) return dir === 1 ? spots[0]! : spots[spots.length - 1]!;
   return spots[(i + dir + spots.length) % spots.length]!;
 }
 

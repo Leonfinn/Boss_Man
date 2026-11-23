@@ -19,7 +19,7 @@ const company = { id: "c1", name: "App Co", agents: [{ id: "a1", name: "Radagast
 const msg = (i: number, text = `msg-${i}`) => ({ id: `m${i}`, role: "owner", text, createdAt: new Date(2026, 9, 1 + i, 9).toISOString() });
 
 // 60 newest messages (30..89); the older page holds 0..29 (hasMore false). "needle" is in 12 and 40 and 41.
-const text = (i: number) => (i === 12 ? "an old needle here" : i === 40 ? "Needle one" : i === 41 ? "and NEEDLE two" : `msg-${i}`);
+const text = (i: number) => (i === 12 ? "an old needle here" : i === 40 ? "Needle one" : i === 41 ? "and NEEDLE two" : i === 42 ? "needle three" : `msg-${i}`);
 const mk = (from: number, to: number) => Array.from({ length: to - from }, (_, k) => msg(from + k, text(from + k)));
 
 function stub(opts: { older?: unknown[]; hasMore?: boolean } = {}) {
@@ -40,32 +40,47 @@ const renderChat = () => render(<ChatPage companies={[company]} companyId="c1" a
 const type = (v: string) => fireEvent.change(screen.getByLabelText("Find in this conversation"), { target: { value: v } });
 
 describe("chat: find in this conversation (BOS-2411)", () => {
-  it("highlights every match, says N of M, starts on the newest, and steps with the buttons and Enter", async () => {
+  it("highlights all 3 matches, says 1 of 3, and Next, Previous and Enter step and scroll to each", async () => {
     stub();
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      if (this.matches("mark.current")) scrolled.push(this.closest("p")?.textContent ?? "");
+    };
     const { container } = renderChat();
     await screen.findByText("msg-89");
     type("needle");
-    await screen.findByText("2 of 2");
-    expect(container.querySelectorAll("mark.find-hit")).toHaveLength(2);
-    expect(container.querySelector("mark.current")?.textContent).toBe("NEEDLE");
-    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-    await screen.findByText("1 of 2");
+    await screen.findByText("1 of 3");
+    expect(container.querySelectorAll("mark.find-hit")).toHaveLength(3);
     expect(container.querySelector("mark.current")?.textContent).toBe("Needle");
-    fireEvent.keyDown(screen.getByLabelText("Find in this conversation"), { key: "Enter" });
-    await screen.findByText("2 of 2");
-    fireEvent.keyDown(screen.getByLabelText("Find in this conversation"), { key: "Enter", shiftKey: true });
-    await screen.findByText("1 of 2");
+    const box = screen.getByLabelText("Find in this conversation");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await screen.findByText("2 of 3");
+    expect(container.querySelector("mark.current")?.textContent).toBe("NEEDLE");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("3 of 3");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("1 of 3");
+    fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    await screen.findByText("3 of 3");
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    await screen.findByText("2 of 3");
+    expect(scrolled.slice(0, 3)).toEqual(["Needle one", "and NEEDLE two", "needle three"]);
+    Element.prototype.scrollIntoView = () => {};
   });
 
-  it("clearing the box removes the highlights", async () => {
+  it("clearing the box removes the highlights and does not scroll", async () => {
     stub();
+    let scrolls = 0;
     const { container } = renderChat();
     await screen.findByText("msg-89");
     type("needle");
-    await screen.findByText("2 of 2");
+    await screen.findByText("1 of 3");
+    Element.prototype.scrollIntoView = () => void scrolls++;
     type("");
     await waitFor(() => expect(container.querySelectorAll("mark")).toHaveLength(0));
-    expect(screen.queryByText("2 of 2")).toBeNull();
+    expect(screen.queryByText("1 of 3")).toBeNull();
+    expect(scrolls).toBe(0);
+    Element.prototype.scrollIntoView = () => {};
   });
 
   it("Search older messages loads the older page and says how many were found", async () => {
