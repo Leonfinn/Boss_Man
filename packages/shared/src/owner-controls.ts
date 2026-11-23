@@ -376,6 +376,8 @@ export const OWNER_FIELDS = {
     "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
     // The Penpot form (BOS-1582).
     "Penpot address", "Access token", "Export email (optional)", "Export password (optional)",
+    // The status filter on a deploy target's history (BOS-2409).
+    "Show",
   ],
   // Who reviews at each risk level, and the "did it move the goal?" check.
   Reviews: ["Ask after (days)"],
