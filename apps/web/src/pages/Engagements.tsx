@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type EngagementRow, type EngagementView } from "../api";
 import { useOlder, usePoll } from "../hooks";
 
@@ -46,11 +46,19 @@ export function Engagements() {
     }
     setShow(v);
   };
-  const filter = show === "all" ? "" : `&status=${show}`;
+  // The box updates at once; the list reloads once typing pauses (BOS-2315).
+  const [typed, setTyped] = useState("");
+  const [term, setTerm] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setTerm(typed.trim()), 300);
+    return () => clearTimeout(t);
+  }, [typed]);
+  const filter = (show === "all" ? "" : `&status=${show}`) + (term ? `&q=${encodeURIComponent(term)}` : "");
   // The server filters and sends the newest PAGE; older ones come on "Show older" (BOS-2165), under the same filter.
-  const list = usePoll((signal) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}`, { signal }), 15_000, `engagements:${show}`);
-  const older = useOlder(list.data, PAGE, (before) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}&before=${before}`), `engagements:${show}`);
+  const list = usePoll((signal) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}`, { signal }), 15_000, `engagements:${show}:${term}`);
+  const older = useOlder(list.data, PAGE, (before) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}&before=${before}`), `engagements:${show}:${term}`);
   const rows = older.rows ?? [];
+  const none = term ? `No engagements match "${term}".` : null;
   return (
     <>
       <header className="page-head">
@@ -59,18 +67,24 @@ export function Engagements() {
           <p className="sub">Work one company does for another, with agreed terms and a cost cap charged to the requester.</p>
         </div>
       </header>
-      <label className="label" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-        Show
-        <select value={show} onChange={(e) => pick(e.target.value)}>
-          <option value="open">Open</option>
-          <option value="all">All</option>
-          {Object.entries(STATUS).map(([k, s]) => (
-            <option key={k} value={k}>
-              {s.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+        <label className="label" style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+          Show
+          <select value={show} onChange={(e) => pick(e.target.value)}>
+            <option value="open">Open</option>
+            <option value="all">All</option>
+            {Object.entries(STATUS).map(([k, s]) => (
+              <option key={k} value={k}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="label" style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+          Search engagements
+          <input type="search" maxLength={200} placeholder="Title or company" value={typed} onChange={(e) => setTyped(e.target.value)} />
+        </label>
+      </div>
       {!list.data ? (
         list.error && !away(list.error) ? (
           <LoadError what="engagements" message={list.error.message} onRetry={list.reload} />
@@ -79,11 +93,11 @@ export function Engagements() {
         )
       ) : rows.length === 0 ? (
         <p className="muted">
-          {show === "all"
+          {none ?? (show === "all"
             ? "No engagements yet. A CEO asks another company for work, and you approve it in Decisions."
             : show === "open"
               ? "No open engagements."
-              : "No engagements with this status."}
+              : "No engagements with this status.")}
         </p>
       ) : (
         <div className="table-wrap">
