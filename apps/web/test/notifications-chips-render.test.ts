@@ -66,16 +66,19 @@ describe.skipIf(!browser || !server)("Notifications chips in a real browser", ()
           barClient: bar.clientWidth,
           minChip: Math.min(...chips),
           count: chips.length,
-          summaryH: (document.querySelector("details.pushes > summary") as HTMLElement | null)?.getBoundingClientRect().height ?? 0,
         };
       });
+      // "Recent phone pushes" moved to Settings → Notifications (BOS-2327): measure its summary there.
+      await page.goto(`${server!.resolvedUrls.local[0]}#/settings/c1/notifications`, { waitUntil: "networkidle" });
+      await page.waitForSelector("details.pushes > summary", { timeout: 15_000 });
+      const summaryH = await page.evaluate(() => (document.querySelector("details.pushes > summary") as HTMLElement).getBoundingClientRect().height);
       if (process.env.BOSSMAN_SCRATCH) await page.screenshot({ path: path.join(process.env.BOSSMAN_SCRATCH, `notifications-chips-${size.name}.png`) });
       await page.close();
       expect(r.count).toBeGreaterThanOrEqual(9);
       expect(r.docScroll).toBeLessThanOrEqual(r.docClient);
       if (size.touch) {
         expect(r.minChip).toBeGreaterThanOrEqual(44);
-        expect(r.summaryH).toBeGreaterThanOrEqual(44);
+        expect(summaryH).toBeGreaterThanOrEqual(44);
       } else {
         expect(r.minChip).toBeGreaterThanOrEqual(28);
       }
