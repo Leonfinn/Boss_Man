@@ -37,6 +37,7 @@ export async function checkMachineStats(db: Db, now = new Date(), companyId?: st
     .innerJoin(companies, sql`${companies.id} = ${checkJobs.companyId}`)
     .where(and(companyId ? sql`${checkJobs.companyId} = ${companyId}` : undefined, isNotNull(checkJobs.endedAt), gte(checkJobs.endedAt, since), sql`${checkJobs.state} in ('passed','failed','stuck','cancelled')`, sql`(${checkJobs.workerId} is not null or ${checkJobs.runnerId} is not null)`))
     .orderBy(desc(checkJobs.endedAt));
+  // lost on restart, harmless because it is a per-call local, rebuilt from the database on every request
   const by = new Map<string, typeof rows>();
   for (const r of rows) {
     const key = r.job.workerId ?? "runner";
