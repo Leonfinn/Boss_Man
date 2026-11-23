@@ -44,6 +44,25 @@ dist="$run_dir/dist"
 previous="$run_dir/previous-sitemap.xml"
 install -d "$dist"
 
+# 0. The install guide's "last tested" line (BOS-1488): save the newest release's install-result.json, which the Install test
+# workflow attaches. Best effort, public GitHub data only: when it cannot be fetched (no jq, no network, no release yet) the
+# guide says the install has not been measured; it never shows a guess. INSTALL_RESULT_FILE set by the caller wins.
+if [ -z "${INSTALL_RESULT_FILE:-}" ]; then
+  repo_slug="${GITHUB_REPOSITORY:-$(grep -o '"repo": *"https://github.com/[^"]*"' apps/site/src/site.json 2> /dev/null | sed 's|.*github.com/||; s|"$||' || true)}"
+  if command -v jq > /dev/null && command -v curl > /dev/null && [ -n "$repo_slug" ]; then
+    result_url="$(curl -fsS --max-time 20 "https://api.github.com/repos/$repo_slug/releases?per_page=10" 2> /dev/null \
+      | jq -r '[.[] | select(.draft | not) | .assets[]? | select(.name == "install-result.json") | .browser_download_url] | first // empty' 2> /dev/null || true)"
+    if [ -n "$result_url" ] && curl -fsSL --max-time 20 "$result_url" -o "$run_dir/install-result.json" 2> /dev/null; then
+      export INSTALL_RESULT_FILE="$run_dir/install-result.json"
+      echo "publish-site: install test result saved from the newest release that has one"
+    else
+      echo "publish-site: no install test result found (the guide will say it has not been measured)"
+    fi
+  else
+    echo "publish-site: curl, jq or the repository name is missing, so no install test result (the guide will say it has not been measured)"
+  fi
+fi
+
 # 1. Build from this checkout. SITE_OUT keeps the build out of the repo, so a publish never leaves dist/ behind.
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "publish-site: building $site_url from $commit"

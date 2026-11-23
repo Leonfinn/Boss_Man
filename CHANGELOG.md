@@ -16,6 +16,13 @@ Release step: adding to this file is part of every release (Release Manager, on 
    the release wake ("Release log: record") runs on every live commit, so republish from that commit before you finish it,
    and say in the log entry whether the site was republished. Run `scripts/publish-site.sh` (docs/18-website.md): it builds,
    deploys and sends the IndexNow notice of the changed pages in one go.
+6. The install guide's "Last tested on ..." line comes from the release's Install test, which starts when the Release
+   workflow ends and takes 10 minutes or more, so the publish in step 5 shows the previous result. Before you finish the
+   wake, check the new release (`gh release view v<version>`, or the releases page): it has an `install-result.json` file
+   once the test is done. Wait for it (schedule_check, do not poll), then run `scripts/publish-site.sh` a second time so the
+   guide shows the new result. If the release title ends "(install test FAILED)", also raise a ticket for the CEO with
+   `create_ticket` (project Development, risk high, size 1), saying which release failed. In the log entry say what the
+   test gave (pass or fail, minutes) and whether the site was republished.
 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->

@@ -4,10 +4,10 @@ description: Take a 64-bit machine with Docker to the Boss Man web page, from re
 group: Start here
 order: 2
 lead: This guide takes you from a 64-bit machine with Docker to the Boss Man web page in your browser. The main way installs ready-made images. Building from source is the second option, further down.
-time: About 10 minutes for the image install. You need a 64-bit machine with Docker and Compose, and a web browser on the same network.
+time: {{install-time}}You need a 64-bit machine with Docker and Compose, and a web browser on the same network.
 ---
 
-The full references are in the repository: [`docs/35-install-from-images.md`](@repo/blob/main/docs/35-install-from-images.md) for the image install, and [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) for building from source. Memory limits and other tuning are in [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md). On Proxmox, use a VM, not an LXC container: see [`docs/32-proxmox.md`](@repo/blob/main/docs/32-proxmox.md).
+{{install-test}} The full references are in the repository: [`docs/35-install-from-images.md`](@repo/blob/main/docs/35-install-from-images.md) for the image install, and [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) for building from source. Memory limits and other tuning are in [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md). On Proxmox, use a VM, not an LXC container: see [`docs/32-proxmox.md`](@repo/blob/main/docs/32-proxmox.md).
 
 Still deciding? [What can go wrong with AI agent teams](/what-can-go-wrong) matches published failure stories, such as runaway bills and deleted databases, to what Boss Man does about each, and says where it does nothing yet.
 

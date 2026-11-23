@@ -91,6 +91,9 @@ until curl -fsS "http://127.0.0.1:${INSTALL_HOST_PORT:-31100}/api/health" >/dev/
   sleep 3
 done
 ok "the server answers /api/health"
+# BOS-1488: the time from this script's first command (SECONDS counts from its start) to /api/health answering. The Install
+# test workflow reads it for the release's result; nothing else needs it.
+[ -z "${INSTALL_SECONDS_FILE:-}" ] || echo "$SECONDS" > "$INSTALL_SECONDS_FILE"
 
 launcher_log="$(dc logs launcher 2>&1)"
 echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
