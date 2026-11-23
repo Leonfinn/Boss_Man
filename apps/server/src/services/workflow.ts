@@ -15,6 +15,8 @@ const TAIL_FROM = 0.75;
 const TAIL_FLAG_TIMES = 2;
 /** A size needs this many timed tickets before the "behaves like the next size" note will lean on its median. */
 const SIGNAL_MIN = 3;
+/** Whole weeks in the week-by-week table (the part-week so far comes after them). */
+const TREND_WEEKS = 8;
 /** Reference tickets kept per size for the sizing guide. */
 const EXAMPLES_PER_SIZE = 3;
 
@@ -372,7 +374,32 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
 
       // The whole team over the same window: a company-wide middle time can't be summed from the roles.
       const overall = stats(done, flagRows.length, answeredRows.length, answeredRows.filter((x) => x.answer !== x.recommended).length, () => true);
-      return { days, since: since.toISOString(), costBasis, overall, byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
+      // ----- Week by week: the last 8 whole weeks (Monday 00:00 UTC), oldest first, then the part-week so far -----
+      const dow = (t.getUTCDay() + 6) % 7;
+      const thisMonday = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - dow * DAY;
+      const weekStarts = Array.from({ length: TREND_WEEKS + 1 }, (_, i) => thisMonday - (TREND_WEEKS - i) * 7 * DAY);
+      const trendRows = doneRows.filter((r) => r.assigneeAgentId && r.stateChangedAt.getTime() >= weekStarts[0]!);
+      const trendIds = trendRows.map((r) => r.id);
+      const trendReviews = trendIds.length ? await db.select({ ticketId: ticketReviews.ticketId, verdict: ticketReviews.verdict }).from(ticketReviews).where(inArray(ticketReviews.ticketId, trendIds)) : [];
+      const trendRework = new Map<string, number>();
+      const trendReviewed = new Set<string>();
+      for (const r of trendReviews) {
+        trendReviewed.add(r.ticketId);
+        if (r.verdict === "changes_requested") trendRework.set(r.ticketId, (trendRework.get(r.ticketId) ?? 0) + 1);
+      }
+      const trendCosts = trendIds.length
+        ? await db.select({ ticketId: runs.ticketId, micros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8` }).from(costEvents).innerJoin(runs, eq(runs.id, costEvents.runId)).where(inArray(runs.ticketId, trendIds)).groupBy(runs.ticketId)
+        : [];
+      const trendCost = new Map(trendCosts.map((c) => [c.ticketId!, Number(c.micros)]));
+      const trend = weekStarts.map((start, i) => {
+        const end = i === TREND_WEEKS ? Infinity : weekStarts[i + 1]!;
+        const wk: Done[] = trendRows
+          .filter((r) => r.stateChangedAt.getTime() >= start && r.stateChangedAt.getTime() < end)
+          .map((r) => ({ agentId: r.assigneeAgentId!, cycleMs: cycleOf.get(r.id) ?? null, rework: trendRework.get(r.id) ?? 0, reviewed: trendReviewed.has(r.id), costMicros: trendCost.get(r.id) ?? 0, costBy: new Map() }));
+        const s = stats(wk, 0, 0, 0, () => true);
+        return { weekStart: new Date(start).toISOString(), partial: i === TREND_WEEKS, done: s.done, firstPassRate: s.firstPassRate, meanRework: s.meanRework, medianCycleMs: s.medianCycleMs, costPerDoneMicros: s.costPerDoneMicros };
+      });
+      return { days, since: since.toISOString(), costBasis, trend, overall, byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
     },
     /** The scorecard plus `previous`: the whole team's figures and the handoffs for the same length of time just before (as the retro builds its earlier period). */
     async scorecardWithPrevious(companyId: string, days: number) {
