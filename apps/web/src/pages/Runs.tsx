@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
@@ -257,14 +257,14 @@ function EndAllRuns({ count, onDone }: { count: number; onDone: () => void }) {
 
 const PAGE = 50;
 const FILTER_KEY = "bm.runs.filter";
-type Filter = { companyId: string; agentId: string; result: "" | "finished" | "failed" | "interrupted" };
-const NO_FILTER: Filter = { companyId: "", agentId: "", result: "" };
+type Filter = { companyId: string; agentId: string; result: "" | "finished" | "failed" | "interrupted"; q: string };
+const NO_FILTER: Filter = { companyId: "", agentId: "", result: "", q: "" };
 
 /** The owner's last filter, so a reload (or coming back later) keeps it. */
 function savedFilter(): Filter {
   try {
     const f = JSON.parse(localStorage.getItem(FILTER_KEY) ?? "{}") as Partial<Filter>;
-    return { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "" };
+    return { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "", q: typeof f.q === "string" ? f.q.slice(0, 100) : "" };
   } catch {
     return NO_FILTER;
   }
@@ -304,19 +304,31 @@ export function Runs({ companies }: { companies: Company[] }) {
   const [moreError, setMoreError] = useState<string | null>(null);
   const company = companies.find((c) => c.id === filter.companyId);
   const filterKey = JSON.stringify(filter);
+  // What is typed in the search box; it joins the filter after a short pause.
+  const [typed, setTyped] = useState(filter.q);
   const change = (patch: Partial<Filter>) => {
-    const next = { ...filter, ...patch };
-    // An agent belongs to one company, so changing company clears the agent.
-    if (patch.companyId !== undefined) next.agentId = "";
-    localStorage.setItem(FILTER_KEY, JSON.stringify(next));
-    setFilter(next);
+    setFilter((cur) => {
+      const next = { ...cur, ...patch };
+      // An agent belongs to one company, so changing company clears the agent.
+      if (patch.companyId !== undefined) next.agentId = "";
+      localStorage.setItem(FILTER_KEY, JSON.stringify(next));
+      return next;
+    });
   };
+  useEffect(() => {
+    const q = typed.trim();
+    if (q === filter.q) return;
+    const t = setTimeout(() => change({ q }), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typed]);
   const query = (extra = "") => {
     const p = new URLSearchParams({ limit: String(PAGE) });
     // A saved company that no longer exists is ignored, not sent (it would show an empty list with no way out).
     if (company) p.set("companyId", filter.companyId);
     if (company && filter.agentId) p.set("agentId", filter.agentId);
     if (filter.result) p.set("result", filter.result);
+    if (filter.q) p.set("q", filter.q);
     return `/api/runs/recent?${p.toString()}${extra}`;
   };
   const active = usePoll((signal) => api<RunRow[]>("/api/runs", { signal }), 5_000, "active");
@@ -339,7 +351,7 @@ export function Runs({ companies }: { companies: Company[] }) {
       setLoadingMore(false);
     }
   };
-  const filtered = !!(filter.companyId || filter.agentId || filter.result);
+  const filtered = !!(filter.companyId || filter.agentId || filter.result || filter.q);
   return (
     <>
       <header className="page-head">
@@ -382,6 +394,10 @@ export function Runs({ companies }: { companies: Company[] }) {
             ]}
             onPick={(id) => change({ result: id as Filter["result"] })}
           />
+          <label className="label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            Search by ticket
+            <input type="search" value={typed} maxLength={100} placeholder="BOS-2250 or words in the title" onChange={(e) => setTyped(e.target.value)} />
+          </label>
         </div>
         {shown?.length ? (
           <RunTable rows={shown} companies={companies} finished />
