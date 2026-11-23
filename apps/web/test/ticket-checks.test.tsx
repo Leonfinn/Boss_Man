@@ -39,12 +39,12 @@ describe("ticket Checks list (BOS-2371)", () => {
   });
 
   it("folds checks past the tenth under 'N older checks'", async () => {
-    apiMock.mockResolvedValue({ checks: Array.from({ length: 13 }, (_, i) => check(i)) });
+    apiMock.mockResolvedValue({ checks: Array.from({ length: 12 }, (_, i) => check(i)) });
     render(<TicketChecks ticketId="t1" />);
     const older = await screen.findByTestId("ticket-checks-older");
-    expect(older.querySelector("summary")!.textContent).toBe("3 older checks");
-    expect(older.querySelectorAll("tbody tr")).toHaveLength(3);
-    expect(screen.getAllByTestId("ticket-check-row")).toHaveLength(13);
+    expect(older.querySelector("summary")!.textContent).toBe("2 older checks");
+    expect(older.querySelectorAll("tbody tr")).toHaveLength(2);
+    expect(screen.getAllByTestId("ticket-check-row")).toHaveLength(12);
   });
 
   it("is hidden for a ticket with no checks", async () => {

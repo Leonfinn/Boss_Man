@@ -77,6 +77,7 @@ describe("ticket checks list (BOS-2371)", () => {
     await ctx.db.insert(checkJobs).values({ ...base, kind: "pre_review", scope: "quick", state: "failed", runnerId: runner!.id, queuedAt: at(30), startedAt: at(29), endedAt: at(25), logTail: "ok one\n FAIL  test/foo.test.ts > adds up\nmore" });
     await ctx.db.insert(checkJobs).values({ ...base, kind: "merge", state: "stuck", workerId: worker!.id, queuedAt: at(20), startedAt: at(19), endedAt: at(10), reason: "no output for 15 minutes" });
     await ctx.db.insert(checkJobs).values({ ...base, kind: "pre_review", scope: "full", state: "passed", workerId: worker!.id, queuedAt: at(9), startedAt: at(8), endedAt: at(2), logTail: "error: noise in a passing log" });
+    await ctx.db.insert(checkJobs).values({ ...base, kind: "merge", state: "running", runnerId: runner!.id, queuedAt: at(1.5), startedAt: at(1) });
     await ctx.db.insert(checkJobs).values({ ...base, kind: "pre_review", scope: "quick", state: "queued", queuedAt: at(1) });
     // Another ticket's check must not show.
     const [other] = await ctx.db.insert(tickets).values({ companyId: co, projectId: ctx.project.id, title: "Other" }).returning();
@@ -85,15 +86,17 @@ describe("ticket checks list (BOS-2371)", () => {
     const { checks } = (await ctx.req("GET", `/api/tickets/${ctx.ticketId}/checks`)).json() as { checks: Array<Record<string, unknown>> };
     expect(checks.map((c) => [c.what, c.state, c.machine])).toEqual([
       ["quick", "queued", null],
+      ["merge", "running", "company runner"],
       ["full", "passed", "Big box"],
       ["merge", "stuck", "Big box"],
       ["quick", "failed", "company runner"],
     ]);
     expect(checks[0]!.startedAt).toBeNull();
-    expect(checks[1]!.firstLine).toBeNull(); // a passed check has no failing line, whatever its log says
-    expect(checks[2]!.firstLine).toBe("no output for 15 minutes"); // no log: the recorded reason
-    expect(checks[3]!.firstLine).toContain("test/foo.test.ts");
-    expect(checks[3]).toMatchObject({ startedAt: at(29).toISOString(), endedAt: at(25).toISOString() });
+    expect(checks[1]).toMatchObject({ startedAt: at(1).toISOString(), endedAt: null, firstLine: null }); // running: the page counts to now
+    expect(checks[2]!.firstLine).toBeNull(); // a passed check has no failing line, whatever its log says
+    expect(checks[3]!.firstLine).toBe("no output for 15 minutes"); // no log: the recorded reason
+    expect(checks[4]!.firstLine).toContain("test/foo.test.ts");
+    expect(checks[4]).toMatchObject({ startedAt: at(29).toISOString(), endedAt: at(25).toISOString() });
   });
 
   it("stops at the newest 50", async () => {
