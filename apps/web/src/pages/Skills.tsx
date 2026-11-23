@@ -597,9 +597,14 @@ function Proposals({ companyId }: { companyId: string }) {
   );
 }
 
-export function Skills({ company }: { company: Company | undefined }) {
+export function Skills({ company, skillId }: { company: Company | undefined; skillId?: string }) {
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
-  const [picked, setPicked] = useState<string | null>(null);
+  // #/skills/<id> (the search box, BOS-2347) shows that skill, its pack folded open. App remounts the page on every
+  // address change, so the first value is enough. On a phone the view sits under the list, so it is scrolled to.
+  const [picked, setPicked] = useState<string | null>(skillId ?? null);
+  useEffect(() => {
+    if (skillId && list.data?.some((s) => s.id === skillId)) document.getElementById("skill-view")?.scrollIntoView?.({ block: "start" });
+  }, [skillId, !!list.data]);
   const [pickedPack, setPickedPack] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
@@ -680,7 +685,7 @@ export function Skills({ company }: { company: Company | undefined }) {
             {loose.map(item)}
           </ul>
         </nav>
-        <div>
+        <div id="skill-view">
           {adding || (!picked && !pickedPack && rows.length === 0) ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <AddSkill

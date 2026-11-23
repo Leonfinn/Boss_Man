@@ -1,6 +1,7 @@
 // The app-wide search box (BOS-2192): one owner route that finds tickets, wiki pages and chat
 // messages in one company, and since BOS-2326 features, decisions (owner cards) and runs, which come back as
-// titles and short status words only (no answer text, no run outcome detail). Plain case-insensitive matching (ILIKE), no index or embeddings: a
+// titles and short status words only (no answer text, no run outcome detail); since BOS-2347 agents (by name and job,
+// never their instructions) and skills (by name and description, this company's library only). Plain case-insensitive matching (ILIKE), no index or embeddings: a
 // company's few thousand rows scan in milliseconds, and meaning search is BOS-2116's.
 // Every query filters on the company in the address, so no other company's rows can come back.
 import { ticketRef } from "@boss-man/shared";
@@ -8,7 +9,7 @@ import { and, desc, eq, isNotNull, or, sql, type AnyColumn } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, features, ownerChatMessages, runs, tickets, wikiPages } from "../db/schema.js";
+import { agents, companies, decisions, features, ownerChatMessages, runs, skills, tickets, wikiPages } from "../db/schema.js";
 import { liveWikiPage } from "../services/wiki.js";
 
 /** At most this many results per group. */
@@ -17,13 +18,19 @@ export const SEARCH_GROUP_MAX = 8;
 export const SEARCH_MIN = 2;
 const SNIPPET_AROUND = 60;
 
-/** At most this many features, decisions and runs (BOS-2326): they come after the main three groups. */
+/** At most this many features, decisions and runs (BOS-2326), agents and skills (BOS-2347): they come after the main three groups. */
 export const SEARCH_EXTRA_MAX = 5;
 /** A decision's title is the first line of its question, cut to this length. */
 const DECISION_TITLE_MAX = 160;
 
 export type SearchHit = { id: string; title: string; snippet: string; link: string; ref?: string | null; exact?: boolean; who?: string; at?: string };
-export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[]; features: SearchHit[]; decisions: SearchHit[]; runs: SearchHit[] };
+export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[]; features: SearchHit[]; decisions: SearchHit[]; runs: SearchHit[]; agents: SearchHit[]; skills: SearchHit[] };
+
+/** An agent's job in the Agents page's words (web Agents.tsx jobOf; the server can't import web code). */
+export function agentJob(a: { role: string; title: string | null; duty: string | null }): string {
+  if (a.role === "ceo") return "CEO";
+  return a.title ?? (a.duty === "wiki" ? "Wiki Maintainer" : a.role === "manager" ? "Manager" : "Agent");
+}
 
 /** A run's result in the Runs page's words (Runs.tsx outcomeTag): never the raw outcome, which can carry an error's text. */
 export function runResultWord(outcome: string | null): string {
@@ -74,7 +81,7 @@ export function refOf(q: string): { prefix: string | null; number: number } | nu
 
 export async function search(db: Db, companyId: string, rawQ: string): Promise<SearchResults> {
   const q = rawQ.trim();
-  const empty: SearchResults = { q, tickets: [], wiki: [], chats: [], features: [], decisions: [], runs: [] };
+  const empty: SearchResults = { q, tickets: [], wiki: [], chats: [], features: [], decisions: [], runs: [], agents: [], skills: [] };
   if (q.length < SEARCH_MIN) return empty;
   const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
   if (!company) return empty;
@@ -84,7 +91,7 @@ export async function search(db: Db, companyId: string, rawQ: string): Promise<S
   const exactNumber = ref && (!ref.prefix || ref.prefix === (company.prefix || "T").toUpperCase()) ? ref.number : null;
 
   const ticketCols = { id: tickets.id, title: tickets.title, number: tickets.number, body: around(tickets.body, q), titleHit: sql<boolean>`${tickets.title} ilike ${like}` };
-  const [exact, ticketRows, wikiRows, chatRows, featureRows, decisionRows, runRows] = await Promise.all([
+  const [exact, ticketRows, wikiRows, chatRows, featureRows, decisionRows, runRows, agentRows, skillRows] = await Promise.all([
     exactNumber === null ? Promise.resolve([]) : db.select(ticketCols).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.number, exactNumber))).limit(1),
     db
       .select(ticketCols)
@@ -138,6 +145,21 @@ export async function search(db: Db, companyId: string, rawQ: string): Promise<S
       )
       .orderBy(desc(runs.startedAt))
       .limit(SEARCH_EXTRA_MAX),
+    // (BOS-2347) Agents by name, job title or role ("ceo", "manager"); never the instructions. Working agents
+    // before retired ones, name matches first.
+    db
+      .select({ id: agents.id, name: agents.name, role: agents.role, title: agents.title, duty: agents.duty, retiredAt: agents.retiredAt })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), or(sql`${agents.name} ilike ${like}`, sql`${agents.title} ilike ${like}`, sql`${agents.role}::text ilike ${like}`)))
+      .orderBy(sql`(${agents.retiredAt} is null) desc`, sql`(${agents.name} ilike ${like}) desc`, agents.name)
+      .limit(SEARCH_EXTRA_MAX),
+    // Skills in this company's library by name or description (the files are never read).
+    db
+      .select({ id: skills.id, name: skills.name, description: around(skills.description, q), nameHit: sql<boolean>`${skills.name} ilike ${like}` })
+      .from(skills)
+      .where(and(eq(skills.companyId, companyId), or(sql`${skills.name} ilike ${like}`, sql`${skills.description} ilike ${like}`)))
+      .orderBy(sql`(${skills.name} ilike ${like}) desc`, skills.name)
+      .limit(SEARCH_EXTRA_MAX),
   ]);
 
   const ticketHit = (t: (typeof ticketRows)[number], isExact: boolean): SearchHit => {
@@ -165,6 +187,10 @@ export async function search(db: Db, companyId: string, rawQ: string): Promise<S
       const what = r.ticketTitle ?? (r.origin ? r.origin.replace(/_/g, " ") : "no ticket");
       return { id: r.id, title: `${r.agent ?? "An agent"} on ${what}`, ref, who: r.agent ?? undefined, snippet: runResultWord(r.outcome), at: r.startedAt.toISOString(), link: `runs/${r.id}` };
     }),
+    // The Agents page opens an agent's panel from #/agents/<id>; the Skills page shows a skill from #/skills/<id>.
+    // Neither page carries the company in the address: both show the company on screen, which is the one searched.
+    agents: agentRows.map((a) => ({ id: a.id, title: a.name, snippet: `${agentJob(a)}${a.retiredAt ? " · Retired" : ""}`, link: `agents/${a.id}` })),
+    skills: skillRows.map((s) => ({ id: s.id, title: s.name, snippet: snippetOf(s.description, s.nameHit ? "" : q), link: `skills/${s.id}` })),
   };
 }
 
