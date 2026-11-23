@@ -58,6 +58,49 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
   );
 }
 
+type ServerHealthView = {
+  disk: { freeBytes: number; totalBytes: number; freePercent: number } | null;
+  database: { bytes: number | null; dayAgoBytes: number | null; weekAgoBytes: number | null; growthPercent7d: number | null };
+  limits: { statementTimeouts: number; poolFull: number };
+  slowQueries: { seconds: number; query: string }[];
+  warnings: string[];
+};
+const healthGb = (b: number | null) => (b === null ? "not available" : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(0)} MB` : `${(b / 1024 ** 3).toFixed(1)} GB`);
+
+/** BOS-2380: the server's own disk, database size and query limits, read when the page loads. Read-only: no buttons. */
+export function ServerHealth() {
+  const view = usePoll((signal) => api<ServerHealthView>("/api/data-health", { signal }), 60_000, "data-health");
+  const v = view.data;
+  return (
+    <Section id="server-health-h" title="Server health">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Free space on the disk holding the server's data, the size of the database, and queries that were cut off or are running long. You get one notice a day when free space drops below 10% or 5 GB, or the database grows more than 50% in 7 days. Nothing is stopped by it.
+      </p>
+      {view.error && !v ? <LoadError what="server health" message={view.error.message} onRetry={view.reload} /> : !v ? <Loader /> : (
+        <>
+          {v.warnings.map((w) => (
+            <p key={w} className="error" role="alert">{w}</p>
+          ))}
+          <ul style={{ fontSize: 14, margin: 0, paddingLeft: 18 }}>
+            <li data-testid="health-disk">Data disk: {v.disk ? `${healthGb(v.disk.freeBytes)} free of ${healthGb(v.disk.totalBytes)} (${v.disk.freePercent.toFixed(0)}% free)` : "not available"}</li>
+            <li data-testid="health-db">
+              Database: {healthGb(v.database.bytes)}. 1 day ago {healthGb(v.database.dayAgoBytes)}, 7 days ago {healthGb(v.database.weekAgoBytes)}
+              {v.database.growthPercent7d !== null ? ` (${v.database.growthPercent7d > 0 ? "+" : ""}${v.database.growthPercent7d}% in 7 days)` : ""}. Earlier days fill in as the server keeps one reading a day.
+            </li>
+            <li data-testid="health-limits">Last 24 hours (since the server started, if less): {v.limits.statementTimeouts} queries cut off for running too long, {v.limits.poolFull} times the connection pool was full.</li>
+            <li data-testid="health-slow">
+              {v.slowQueries.length ? "Running over 60 seconds now:" : "No query is running over 60 seconds."}
+              {v.slowQueries.map((q, i) => (
+                <div key={i} className="mono" style={{ fontSize: 13 }}>{q.seconds} s: {q.query}</div>
+              ))}
+            </li>
+          </ul>
+        </>
+      )}
+    </Section>
+  );
+}
+
 /** A clock that ticks every 15 s, so a countdown on the page moves without waiting for the next poll (BOS-953). */
 export function useNow(everyMs = 15_000): number {
   const [now, setNow] = useState(() => Date.now());
