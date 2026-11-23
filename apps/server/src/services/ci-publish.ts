@@ -81,11 +81,16 @@ export async function withActionsToken<R>(target: CiTarget, call: (token: string
   return { got: await call(target.token), first };
 }
 
-/** BOS-2345: rerun-failed-jobs with the Actions token; a refusal on both tokens names the second account's first. */
+/**
+ * BOS-2345: rerun-failed-jobs with the Actions token. A refusal names each token tried, by its secret's name (never its
+ * value), with GitHub's own status and message, the second account's first.
+ */
 export async function rerunFailedJobsWith(hosts: Required<Pick<Hosts, "rerunFailedJobs">>, target: CiTarget, runId: number): Promise<RerunAnswer> {
   const { got, first } = await withActionsToken(target, (token) => hosts.rerunFailedJobs(target.cfg, token, runId), (r) => r.ok);
-  if (got.ok || !first || first.ok) return got;
-  return { ok: false, ...(first.status ? { status: first.status } : {}), why: `the second account's token (GIT_CI_TOKEN) was refused: ${first.why}; GIT_TOKEN was refused too` };
+  if (got.ok) return got;
+  const main = `with GIT_TOKEN: ${got.why}`;
+  if (!first || first.ok) return { ...got, why: main };
+  return { ...got, ...(first.status ? { status: first.status } : {}), why: `with the second account's GIT_CI_TOKEN: ${first.why}; then ${main}` };
 }
 type Hosts = Pick<ReturnType<typeof gitHostService>, "ciStatus" | "workflowRuns" | "rerunRun"> & Partial<Pick<ReturnType<typeof gitHostService>, "rerunFailedJobs">>;
 

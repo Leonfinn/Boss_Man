@@ -2,7 +2,7 @@
 // GIT_CI_TOKEN when the company granted one, and fall back to GIT_TOKEN when GitHub refuses it. Reads stay on GIT_TOKEN.
 import { describe, expect, it } from "vitest";
 import { publishAndWait, rerunFailedJobsWith, withActionsToken, type CiTarget, type PublishDeps } from "../src/services/ci-publish.js";
-import type { CiStatus, GitHostConfig, RerunAnswer } from "../src/services/git-hosts.js";
+import { gitHostService, type CiStatus, type GitHostConfig, type RerunAnswer } from "../src/services/git-hosts.js";
 
 const cfg: GitHostConfig = { kind: "github", apiBase: "https://api.example.com", owner: "acme", repo: "app" };
 const timing = { pollMs: 1, graceMs: 1_000, ceilingMs: 60_000, retryMs: 1 };
@@ -73,7 +73,41 @@ describe("BOS-2345: the flake retry's token", () => {
     const r = await run({ cfg, token: "main-token", actionsToken: "ci-token" }, ["ci-token", "main-token"]);
     expect(r.reruns).toEqual(["ci-token", "main-token"]);
     expect(r.outcome).toMatchObject({ kind: "failed", why: expect.stringContaining("GIT_CI_TOKEN") });
-    expect(r.announced[0]).toEqual({ accepted: false, refused: "the second account's token (GIT_CI_TOKEN) was refused: refused for ci; GIT_TOKEN was refused too" });
+    expect(r.announced[0]).toEqual({ accepted: false, refused: "with the second account's GIT_CI_TOKEN: refused for ci; then with GIT_TOKEN: refused for main" });
+  });
+
+  it("a refusal with GIT_TOKEN alone names it", async () => {
+    const r = await run({ cfg, token: "main-token" }, ["main-token"]);
+    expect(r.outcome).toMatchObject({ kind: "failed", why: "with GIT_TOKEN: refused for main" });
+  });
+});
+
+describe("BOS-2345: the refusal path through the real GitHub client shows no token value", () => {
+  // Token-shaped values, so a GitHub message that echoed one back would be caught by the redaction.
+  const mainToken = `ghp_${"A".repeat(36)}`;
+  const ciToken = `ghp_${"B".repeat(36)}`;
+
+  it("names both tokens by name, keeps GitHub's status and message, and never their values", async () => {
+    const asked: string[] = [];
+    const hosts = gitHostService({
+      fetch: (async (_url: string, init: RequestInit) => {
+        const auth = String((init.headers as Record<string, string>).authorization ?? "");
+        asked.push(auth === `Bearer ${ciToken}` ? "ci" : auth === `Bearer ${mainToken}` ? "main" : "other");
+        // A hostile or careless answer that quotes the token it was sent.
+        const message = `Resource not accessible by personal access token ${auth.replace("Bearer ", "")}`;
+        return new Response(JSON.stringify({ message }), { status: 403, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+    });
+    const got = await rerunFailedJobsWith(hosts, { cfg, token: mainToken, actionsToken: ciToken }, 7);
+    expect(asked).toEqual(["ci", "main"]);
+    expect(got.ok).toBe(false);
+    const why = got.ok ? "" : got.why;
+    expect(why).toContain("with the second account's GIT_CI_TOKEN:");
+    expect(why).toContain("then with GIT_TOKEN:");
+    expect(why).toContain("GitHub answered 403: Resource not accessible by personal access token");
+    expect(why).not.toContain(mainToken);
+    expect(why).not.toContain(ciToken);
+    expect(why).not.toMatch(/A{20}|B{20}/);
   });
 });
 
