@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { lintJournal, lintSql } from "./lint-migrations.mjs";
+import { lintJournal, lintSql, newMigrations } from "./lint-migrations.mjs";
 import { findUnannotated } from "./check-in-memory-state.mjs";
 
 const bad = (sql) => lintSql("t.sql", sql);
@@ -25,7 +25,18 @@ test("flags each contract statement", () => {
     'ALTER TABLE "a" ADD COLUMN "x" text, ADD COLUMN "b" numeric(10,2) NOT NULL;',
     'TRUNCATE "a";',
     'DELETE FROM "a";',
+    'ALTER TABLE "a" ALTER COLUMN "b" DROP DEFAULT;',
+    'DROP VIEW "v";',
+    'DROP FUNCTION "f"();',
+    'DROP SCHEMA "s";',
+    'ALTER TYPE "s" DROP VALUE \'x\';',
   ]) assert.equal(bad(sql).length, 1, sql);
+});
+
+test("the image updater's swap keeps the old release running on the new schema (BOS-1226): a non-expand-only migration above the baseline fails the real folder", () => {
+  // Every migration that exists now passes: the new rules do not re-judge history that was already shipped.
+  const dir = new URL("../apps/server/drizzle/", import.meta.url);
+  for (const f of newMigrations(dir.pathname)) assert.deepEqual(lintSql(f, readFileSync(new URL(f, dir), "utf8")), [], f);
 });
 
 test("a contract-ok marker on the line, or the line above, clears it", () => {
