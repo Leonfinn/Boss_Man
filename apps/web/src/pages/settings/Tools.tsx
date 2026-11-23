@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { api, ApiError, type Company, type Project } from "../../api";
-import { usePoll } from "../../hooks";
+import { useOlder, usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
 import { Loader } from "../../components/Loader";
@@ -356,6 +356,70 @@ function tagResultText(r: string | null) {
   return r.replace(/^skipped: /, "tag not moved: ").replace(/^failed: /, "tag move failed: ");
 }
 
+type DeployHistoryRow = {
+  id: string;
+  deploy: { id: string; ref: string; commit: string | null; notes: string | null; status: string; outcome: string | null; ticketId: string | null; tagName: string | null; tagResult: string | null; createdAt: string };
+  agentName: string | null;
+  ticketRef: string | null;
+};
+
+const DEPLOY_PAGE = 20;
+const DEPLOY_STATUS_TEXT: Record<string, string> = {
+  pending_approval: "waiting for you",
+  approved: "approved, starting",
+  running: "running",
+  succeeded: "succeeded",
+  failed: "failed",
+  rejected: "refused",
+};
+
+/** A target's deploys, newest first, in a fold under its row (BOS-2318). Loads only once opened. */
+function DeployHistory({ targetId, name }: { targetId: string; name: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)} style={{ marginTop: 6 }}>
+      <summary>Deploys</summary>
+      {open && <DeployHistoryList targetId={targetId} name={name} />}
+    </details>
+  );
+}
+
+function DeployHistoryList({ targetId, name }: { targetId: string; name: string }) {
+  const first = usePoll((signal) => api<{ deploy: DeployHistoryRow["deploy"]; agentName: string | null; ticketRef: string | null }[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}`, { signal }).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), 30_000, `deploy-history-${targetId}`);
+  const older = useOlder<DeployHistoryRow>(first.data ?? null, DEPLOY_PAGE, (before) => api<Omit<DeployHistoryRow, "id">[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}&before=${before}`).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), `deploy-history-${targetId}`);
+  if (!older.rows) return first.error ? <LoadError what={`the deploys of ${name}`} message={first.error.message} onRetry={first.reload} /> : <Loader label="Loading the deploys" />;
+  if (!older.rows.length) return <p className="muted" style={{ fontSize: 13 }}>No deploys to {name} yet.</p>;
+  return (
+    <>
+      <ul style={{ listStyle: "none", padding: 0, margin: "6px 0", display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
+        {older.rows.map(({ deploy: d, agentName, ticketRef }) => (
+          <li key={d.id}>
+            <span className={d.status === "failed" || d.status === "rejected" ? "error" : undefined}>{DEPLOY_STATUS_TEXT[d.status] ?? d.status}</span> <span className="muted">{when(d.createdAt)}</span>{" "}
+            <span className="mono">{d.ref}</span>
+            {d.commit && <span className="mono muted"> ({d.commit.slice(0, 7)})</span>}
+            <span className="muted"> · asked by {agentName ?? "you"}</span>
+            {d.ticketId && (
+              <>
+                {" "}
+                · <a href={`#/tickets/${d.ticketId}`}>{ticketRef ?? "ticket"}</a>
+              </>
+            )}
+            {d.notes && <div className="muted">{d.notes}</div>}
+            {d.outcome && d.status !== "succeeded" && <div className="muted">{d.outcome}</div>}
+            {d.tagResult && <div className={d.tagResult.startsWith("failed") ? "error" : "muted"}>{tagResultText(d.tagResult)}</div>}
+          </li>
+        ))}
+      </ul>
+      {older.error && <LoadError what="older deploys" message={older.error} onRetry={() => void older.more()} />}
+      {older.canMore && (
+        <button type="button" className="btn small" disabled={older.busy} onClick={() => void older.more()}>
+          Show older
+        </button>
+      )}
+    </>
+  );
+}
+
 /**
  * Deploy targets (R14, R15, DR-033): where agents ship work, which deploys wait for you, and the tag
  * Boss Man moves after a successful deploy. Owner-only: agents can list targets but never edit them.
@@ -468,6 +532,7 @@ export function DeployTargets({ company }: { company: Company }) {
                     ) : (
                       <span className="muted">none yet</span>
                     )}
+                    <DeployHistory targetId={t.id} name={t.name} />
                   </td>
                   <td style={{ whiteSpace: "nowrap" }}>
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => edit(t)} aria-label={`Edit deploy target ${t.name}`}>

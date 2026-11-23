@@ -174,6 +174,27 @@ describe("deploys (R15)", () => {
     expect((await c.db.select().from(deploys).where(eq(deploys.id, r.deploy.id)))[0]).toMatchObject({ status: "failed", outcome: "The run ended without reporting a result." });
   });
 
+  it("lists a target's deploys newest first, a page at a time, with the whole list unchanged (BOS-2318)", async () => {
+    const c = (ctx = await setup());
+    await c.target({ name: "Staging", kind: "docker", endpoint: "tcp://socket-proxy:2375" });
+    await c.target({ name: "Other", kind: "docker", endpoint: "tcp://socket-proxy:2376" });
+    const [staging] = await c.db.select().from(deployTargets).where(eq(deployTargets.name, "Staging"));
+    const [other] = await c.db.select().from(deployTargets).where(eq(deployTargets.name, "Other"));
+    for (let i = 1; i <= 5; i++) {
+      await c.db.insert(deploys).values({ companyId: c.company.id, targetId: staging!.id, agentId: c.ceo.id, ref: `v${i}`, status: "failed", createdAt: new Date(Date.UTC(2026, 0, i)) });
+    }
+    await c.db.insert(deploys).values({ companyId: c.company.id, targetId: other!.id, ref: "other", status: "rejected" });
+    const whole = await c.deploys.list(c.company.id);
+    expect(whole.map((r) => r.deploy.ref)).toEqual(["v1", "v2", "v3", "v4", "v5", "other"]);
+    const p1 = await c.deploys.list(c.company.id, { targetId: staging!.id, limit: 2 });
+    expect(p1.map((r) => r.deploy.ref)).toEqual(["v5", "v4"]);
+    expect(p1[0]).toMatchObject({ agentName: expect.any(String), ticketRef: null });
+    const p2 = await c.deploys.list(c.company.id, { targetId: staging!.id, limit: 2, before: p1[1]!.deploy.id });
+    expect(p2.map((r) => r.deploy.ref)).toEqual(["v3", "v2"]);
+    expect((await c.deploys.list(c.company.id, { targetId: staging!.id })).length).toBe(5);
+    expect((await c.deploys.list(c.company.id, { targetId: staging!.id, limit: 1000 })).length).toBe(5);
+  });
+
   it("refuses unknown targets and credentials in the request", async () => {
     const c = (ctx = await setup());
     await expect(c.deploys.request(c.actor, { target: "Prod", ref: "v1" })).rejects.toThrow(/no deploy targets/);

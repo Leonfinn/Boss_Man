@@ -335,6 +335,7 @@ reads:
   - /api/companies/:id/mcp-servers
   - /api/companies/:id/penpot
   - /api/companies/:id/projects
+  - /api/deploys
 
 ## #/settings/<company>/transfer
 sections: 
