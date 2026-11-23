@@ -115,7 +115,7 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
         <dl className="shortcuts-list">
           <div className="shortcuts-row">
             <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
-            <dd>Search tickets, wiki and chats</dd>
+            <dd>Search tickets, wiki, chats, features, decisions and runs</dd>
           </div>
           <div className="shortcuts-row">
             <dt><kbd>?</kbd></dt>
