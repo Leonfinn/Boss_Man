@@ -354,9 +354,11 @@ sections:
   - Now running
   - Other actions
   - Recent updates
+  - Server health
   - Stop all work
   - Updates
 reads: 
+  - /api/data-health
   - /api/kill-switch
   - /api/maintenance
   - /api/runner-report
