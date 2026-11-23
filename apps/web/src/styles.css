@@ -1821,5 +1821,13 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .search-results li { display: flex; flex-direction: column; gap: 2px; padding: 8px 16px; cursor: pointer; min-height: 44px; justify-content: center; }
 .search-results li.active { background: var(--accent-soft); }
 .search-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Keyboard shortcuts list (BOS-2321): reuses the search box's back and panel. */
+.shortcuts-title { flex: 1; margin: 0; font-size: 16px; }
+.shortcuts-list { margin: 0; padding: 8px 16px; overflow-y: auto; }
+.shortcuts-row { display: flex; gap: 12px; align-items: baseline; padding: 6px 0; }
+.shortcuts-row dt { flex: 0 0 120px; margin: 0; }
+.shortcuts-row dd { margin: 0; }
+.shortcuts-list kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--line-strong); border-radius: 4px; }
+.shortcuts-note { margin: 0; padding: 4px 16px 12px; font-size: 13px; }
 .search-snippet { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-msg.found p { outline: 2px solid var(--badge); outline-offset: 2px; }
