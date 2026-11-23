@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isClaudeModel, modelFitProblem } from "../src/funding.js";
+import { HARNESSES, harnessLoadsSkills, isClaudeModel, modelFitProblem } from "../src/funding.js";
 
 describe("modelFitProblem (BOS-477)", () => {
   it("refuses a DeepSeek model on a Claude account, naming the field", () => {
@@ -59,5 +59,28 @@ describe("modelFitProblem (BOS-477)", () => {
   it("knows Claude model IDs", () => {
     expect(isClaudeModel("claude-opus-4-5")).toBe(true);
     expect(isClaudeModel("synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017")).toBe(false);
+  });
+});
+
+describe("harnessLoadsSkills (BOS-2354)", () => {
+  it("says Claude Code and OpenCode load an agent's skills", () => {
+    expect(harnessLoadsSkills("claude")).toBe(true);
+    expect(harnessLoadsSkills("opencode")).toBe(true);
+  });
+
+  it("says Codex does not, since a skill given to a Codex agent does nothing", () => {
+    expect(harnessLoadsSkills("codex")).toBe(false);
+  });
+
+  it("agrees with the harness list: every harness except Codex loads skills", () => {
+    for (const { value } of HARNESSES) {
+      expect(harnessLoadsSkills(value), value).toBe(value !== "codex");
+    }
+  });
+
+  it("takes an exact harness name, so a misspelling or padding is not a skill harness", () => {
+    for (const value of ["", " ", "Claude", "OPENCODE", "opencode ", " claude", "claude-code", "synthetic"]) {
+      expect(harnessLoadsSkills(value), value).toBe(false);
+    }
   });
 });
