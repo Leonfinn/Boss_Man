@@ -365,6 +365,12 @@ function saveFeatureOpen(state: { ids: string[] }) {
 type FeatureForecastView = { pointsDone: number; pointsLeft: number; unsized: number; pace: number; expectedFinish: string | null };
 type FeatureWithPoints = Feature & { pointsDone?: number; pointsTotal?: number };
 
+/** "N of M points" for a feature card; empty when no task is sized. */
+export function cardPoints(f: Feature): string {
+  const p = f as FeatureWithPoints;
+  return p.pointsTotal ? `${p.pointsDone ?? 0} of ${p.pointsTotal} points` : "";
+}
+
 /** "3 Dec" from a YYYY-MM-DD date. */
 function dayMonth(date: string): string {
   const d = new Date(`${date}T00:00:00Z`);
@@ -492,11 +498,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
         ) : (
           "–"
         )}
-        {!!(f as FeatureWithPoints).pointsTotal && (
-          <div style={{ fontSize: 12 }}>
-            {(f as FeatureWithPoints).pointsDone} of {(f as FeatureWithPoints).pointsTotal} points
-          </div>
-        )}
+        {cardPoints(f) && <div style={{ fontSize: 12 }}>{cardPoints(f)}</div>}
         <BlockedLine n={counts.blocked} />
       </td>
     </tr>

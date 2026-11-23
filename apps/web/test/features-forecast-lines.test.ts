@@ -1,6 +1,13 @@
 // BOS-2396: the feature page's forecast lines in plain words.
 import { describe, expect, it } from "vitest";
-import { forecastLines } from "../src/pages/Features";
+import { cardPoints, forecastLines } from "../src/pages/Features";
+
+describe("cardPoints", () => {
+  it("reads N of M points on a list card, and nothing when unsized", () => {
+    expect(cardPoints({ pointsDone: 5, pointsTotal: 13 } as never)).toBe("5 of 13 points");
+    expect(cardPoints({ pointsDone: 0, pointsTotal: 0 } as never)).toBe("");
+  });
+});
 
 describe("forecastLines", () => {
   it("says points done, left and the expected finish", () => {
