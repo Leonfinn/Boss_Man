@@ -97,6 +97,8 @@ export const OWNER_CONTROLS = {
     "Undo", "Undoing", "Scrum Master", "Show all …",
     // The header's "Copy link", "Copied" for a moment after a copy (BOS-2233).
     "Copy link", "Copied",
+    // The header's "Download": the ticket as Markdown, "Preparing" while it fetches the conversation (BOS-2314).
+    "Download", "Preparing",
   ],
   // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
