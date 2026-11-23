@@ -1,6 +1,6 @@
 // Agents (R62): who works for the company, what each is doing and has used this month, and
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
 import { Star } from "lucide-react";
 import { DAY_NAMES, describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
@@ -807,17 +807,27 @@ function CeoApprovals({ companyId }: { companyId: string }) {
   );
 }
 
-export function Agents({ company, onChanged }: { company: Company | undefined; onChanged: () => void }) {
+export function Agents({ company, agentId, onChanged }: { company: Company | undefined; agentId?: string; onChanged: () => void }) {
   const list = usePoll((signal) => (company ? api<AgentRow[]>(`/api/companies/${company.id}/agents`, { signal }) : Promise.resolve([])), 15_000, `agents-${company?.id ?? "none"}`);
   const templates = usePoll((signal) => api<{ templates: Template[]; ceo?: Omit<Template, "role"> }>("/api/agent-templates", { signal }), 3_600_000, "agent-templates");
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, "sources");
   const models = usePoll((signal) => (company ? api<ModelLists>(`/api/companies/${company.id}/models`, { signal }) : Promise.resolve(null)), 300_000, `models-${company?.id ?? "none"}`);
   const reviewPolicy = usePoll((signal) => (company ? api<ReviewPolicy>(`/api/companies/${company.id}/review-policy`, { signal }) : Promise.resolve(null)), 60_000, `agent-reviews-${company?.id ?? "none"}`);
   const [hiring, setHiring] = useState(false);
-  const [open, setOpen] = useState<string | null>(null);
+  // #/agents/<id> (the search box, BOS-2347) opens that agent's panel. App remounts the page on every address
+  // change, so the first value is enough; the panel is scrolled into view once the list has drawn it.
+  const [open, setOpen] = useState<string | null>(agentId ?? null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState("");
+  const shown = useRef(false);
+  useEffect(() => {
+    if (!agentId || shown.current || !list.data) return;
+    const panel = document.getElementById(`agent-panel-${agentId}`);
+    if (!panel) return;
+    shown.current = true;
+    panel.closest("li")?.scrollIntoView?.({ block: "start" });
+  }, [agentId, list.data]);
   if (!company) return <NoCompany />;
   const refreshModels = async () => {
     const r = await api<{ probed: Record<string, { ok: boolean; error?: string }> }>(`/api/companies/${company!.id}/models/refresh`, { method: "POST" });
