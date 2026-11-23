@@ -258,7 +258,7 @@ export const OWNER_FIELDS = {
   // The "Remember this" box under the owner's own message (BOS-2184).
   Chat: ["Add this to the standing rules every agent reads"],
   Notifications: [
-    "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
+    "Search notifications", "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
