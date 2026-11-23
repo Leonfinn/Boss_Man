@@ -198,6 +198,8 @@ export const OWNER_CONTROLS = {
     "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
     // Removing a deploy target that has past deploys (BOS-2158).
     "Remove anyway",
+    // The Deploys fold under each deploy target (BOS-2318): the next page of older deploys.
+    "Show older",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
