@@ -2,7 +2,7 @@
 // never a "pass" in the note or an owner card answer. These tests pin the gate's pure helpers.
 import { describe, expect, it } from "vitest";
 import type { Criterion } from "@boss-man/shared";
-import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, outsideServiceEvidenceRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
+import { CARD_CITE_REFUSAL, citedOpenCard, hostFactRefusal, outsideServiceEvidenceRefusal, pageShotRefusal, uncitedCardPasses } from "../src/services/host-fact-gate.js";
 import type { HostFact } from "../src/services/host-facts.js";
 
 const after = (text: string): Criterion => ({ text, after: "merge" });
@@ -185,5 +185,54 @@ describe("outsideServiceEvidenceRefusal", () => {
     expect(outsideServiceEvidenceRefusal(crit, [old], LIVE, "1 pass; 2 pass, shot abcd1234")).not.toBeNull();
     expect(outsideServiceEvidenceRefusal(crit, [], LIVE, "1 pass; 2 fail: Google knows no pages")).toBeNull();
     expect(outsideServiceEvidenceRefusal([after("The panel loads")], [], LIVE, "1 pass")).toBeNull();
+  });
+});
+
+// BOS-2266: R37's page-criterion gate, tested directly. A pass on a page clause needs a screenshot of this ticket
+// attached since go-live, cited by (first 8 of) its id, and the clause's words quoted in the note.
+describe("pageShotRefusal: a page-clause pass needs a fresh screenshot and a quote (BOS-1682)", () => {
+  const PAGE_TEXT = 'The roadmap page shows "Your roadmap" (page: https://example.com/roadmap shows "Your roadmap")';
+  const PAGE = after(PAGE_TEXT);
+  const shot = (createdAt: string, id = "abcd1234-0000-0000-0000-000000000000") => ({ id, createdAt: new Date(createdAt) });
+
+  it("accepts a pass that cites a screenshot taken since go-live and quotes the page text", () => {
+    const note = '1 pass: screenshot abcd1234; the page reads "Your roadmap"';
+    expect(pageShotRefusal([PAGE], [shot("2026-11-16T12:00:00.000Z")], LIVE, note)).toBeNull();
+  });
+
+  it("accepts the whole image id in any case", () => {
+    const note = '1 pass: shot ABCD1234-0000-0000-0000-000000000000; page shows "Your roadmap"';
+    expect(pageShotRefusal([PAGE], [shot("2026-11-16T12:00:00.000Z")], LIVE, note)).toBeNull();
+  });
+
+  it("refuses a bare pass and says a screenshot is needed and the text must be quoted", () => {
+    const out = pageShotRefusal([PAGE], [], LIVE, "1 pass");
+    expect(out).toContain("A pass on a page criterion needs a screenshot");
+    expect(out).toContain("no screenshot of this ticket taken since go-live is cited");
+    expect(out).toContain('the note doesn\'t quote "Your roadmap" as seen on the page');
+  });
+
+  it("refuses a screenshot attached before go-live, naming the go-live time", () => {
+    const old = shot("2026-11-16T10:00:00.000Z");
+    const out = pageShotRefusal([PAGE], [old], LIVE, '1 pass: shot abcd1234; page shows "Your roadmap"');
+    expect(out).toContain("the screenshot cited was attached before this ticket went live (2026-11-16 11:00 UTC)");
+    expect(out).not.toContain("no screenshot of this ticket taken since go-live is cited");
+  });
+
+  it("refuses a fresh screenshot when the page text is not quoted", () => {
+    const out = pageShotRefusal([PAGE], [shot("2026-11-16T12:00:00.000Z")], LIVE, "1 pass: shot abcd1234");
+    expect(out).toContain('the note doesn\'t quote "Your roadmap" as seen on the page');
+    expect(out).not.toContain("no screenshot of this ticket taken since go-live is cited");
+  });
+
+  it("leaves a fail verdict, a criterion not checked after merge, and one with no page clause alone", () => {
+    expect(pageShotRefusal([PAGE], [], LIVE, "1 fail")).toBeNull();
+    expect(pageShotRefusal([after("The panel loads")], [], LIVE, "1 pass")).toBeNull();
+    expect(pageShotRefusal(['The page loads (page: https://example.com/x shows "Ready")'], [], LIVE, "1 pass")).toBeNull();
+  });
+
+  it("counts any screenshot when no go-live time is recorded", () => {
+    const note = '1 pass: shot abcd1234; page shows "Your roadmap"';
+    expect(pageShotRefusal([PAGE], [shot("2020-01-01T00:00:00.000Z")], null, note)).toBeNull();
   });
 });

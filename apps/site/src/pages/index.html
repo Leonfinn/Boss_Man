@@ -198,9 +198,9 @@ nav: home
   <div class="wrap install">
     <div>
       <h2>Install it on a Linux machine with Docker</h2>
-      <p class="intro">Two guides take you from an empty machine to your first task, with a check after each step: <a href="/guides/install-boss-man">Install Boss Man</a> (steps 1 to 6) and <a href="/guides/first-company-and-ticket">Your first company and task</a> (steps 7 to 12).</p>
+      <p class="intro">Download two files from a release and run three Docker commands: Boss Man comes as ready-made images, so nothing is built on your machine. Two guides take you from there to your first task, with a check after each step: <a href="/guides/install-boss-man">Install Boss Man</a> (steps 1 to 6) and <a href="/guides/first-company-and-ticket">Your first company and task</a> (steps 7 to 12).</p>
       <ul class="need">
-        <li>A 64-bit Linux machine with Docker Engine and Docker Compose v2. A home server or NAS works.</li>
+        <li>A 64-bit Linux machine (x86-64 or arm64) with Docker Engine and Docker Compose v2. A home server, NAS or Proxmox VM works.</li>
         <li>A GitHub or Gitea account for the code your agents work on.</li>
         <li>A Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic.</li>
         <li>To be happy pasting commands into a terminal.</li>
@@ -208,8 +208,8 @@ nav: home
       <div class="why">
         <h3>Why Linux?</h3>
         <p>Boss Man runs on a 64-bit Linux machine with Docker. Two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.</p>
-        <p><strong>Mac and Windows:</strong> not supported yet, but we're testing Docker Desktop. On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet, and Windows hasn't been tested. For now, use a Linux machine.</p>
-        <p class="beta"><span class="flag">ALPHA</span>Ready-made images for x86 and ARM machines come after the alpha.</p>
+        <p><strong>Mac and Windows:</strong> Docker Desktop 4.60 or newer is a preview. It is not yet proven on a real machine, so for now use a Linux machine.</p>
+        <p class="beta">Want to change the code? The guide also shows how to build Boss Man from source.</p>
       </div>
       <div class="actions">
         <a class="btn" href="/guides/install-boss-man">Read the install guide</a>
@@ -221,11 +221,11 @@ nav: home
         <span class="boss" aria-hidden="true"><img src="/img/boss-head-clean.webp" width="256" height="256" alt=""></span>
         <h3>The steps in the two guides</h3>
         <ol>
-          <li>Choose a folder</li>
-          <li>Get the code</li>
-          <li>Make the folders and the master key</li>
-          <li>Write the settings file</li>
-          <li>Build and start Boss Man</li>
+          <li>Get the two release files</li>
+          <li>Pick a registry</li>
+          <li>Make the keys</li>
+          <li>Choose who can reach it</li>
+          <li>Download the images and start</li>
           <li>Make your owner account</li>
           <li>Name your company</li>
           <li>Add a project and wait for its runner</li>

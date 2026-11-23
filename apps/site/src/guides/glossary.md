@@ -66,7 +66,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## L
 
-- **Launcher**: The part of Boss Man that starts each company's runner for you. `BOSSMAN_LAUNCHER=1` in `.env` turns it on. ([Guide 2](/guides/install-boss-man#4-write-the-settings-file))
+- **Launcher**: The part of Boss Man that starts each company's runner for you. The image install always turns it on. In the build install, `BOSSMAN_LAUNCHER=1` in `.env` turns it on. ([Guide 2](/guides/install-boss-man#4-write-the-settings-file))
 - **Let the CEO question me first**: A button on the New task and New feature form. It sends your draft to the CEO's chat, where the CEO asks you a few questions and then adds the task or feature for you. ([Guide 3](/guides/first-company-and-ticket#let-the-ceo-question-you-first))
 
 ## M

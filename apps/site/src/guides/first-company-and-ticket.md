@@ -16,7 +16,7 @@ You need Boss Man installed (see [Install Boss Man](/guides/install-boss-man)). 
 
 Type a **Company name** and a sentence or two under **What it's for**. The CEO plans the work from this. Choose **Create the company**, then **Next**.
 
-Boss Man creates the company's CEO agent and a paused Wiki Maintainer. If the launcher is on (`BOSSMAN_LAUNCHER=1` in `.env`, as [Install Boss Man](/guides/install-boss-man) sets), Boss Man also starts the company's runner. If it is off, you start the runner yourself in step 3.
+Boss Man creates the company's CEO agent and a paused Wiki Maintainer. If the launcher is on (the image install always turns it on, and the build install sets `BOSSMAN_LAUNCHER=1` in `.env`, as [Install Boss Man](/guides/install-boss-man#build-from-source) shows), Boss Man also starts the company's runner. If it is off, you start the runner yourself in step 3.
 
 ## 2. A project
 
