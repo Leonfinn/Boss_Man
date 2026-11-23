@@ -148,7 +148,7 @@ export const OWNER_CONTROLS = {
     "Feedback portal", "Search", "Anonymous …", "Save times",
     "Download CSV", "Preparing",
   ],
-  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote"],
+  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote", "Copy link", "Copied"],
   Agents: [
     "Refresh models", "Asking the runner", "Choose from the list", "Hire …", "Use the default", "Replace with the current …",
     "Fill in from the …", "Rehire", "Undo", "Save", "Add note", "Cancel", "Edit", "Delete", "Start", "Pause", "Close",
@@ -321,7 +321,7 @@ export const OWNER_FIELDS = {
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",
-    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email",
+    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email", "Search features",
   ],
   Agents: [
     "Only start", "From", "To", "Time zone",
