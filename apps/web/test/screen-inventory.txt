@@ -395,7 +395,7 @@ sections:
   - History
   - Skill proposals
   - Skills
-reads:
+reads: 
   - /api/companies/:id/skill-proposals
   - /api/companies/:id/skills
   - /api/companies/:id/skills/:id
