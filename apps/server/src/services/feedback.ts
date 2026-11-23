@@ -723,7 +723,7 @@ export function feedbackService(
         .filter((f) => f.status === "released" && f.releasedAt)
         .sort((a, b) => b.releasedAt!.getTime() - a.releasedAt!.getTime())
         .slice(0, 30)
-        .map((f) => ({ id: f.id, title: portalTitle(f.publicTitle, f.publicSummary), summary: f.publicSummary!.trim().slice(0, 1000), releasedAt: f.releasedAt! }));
+        .map((f) => ({ id: f.id, title: portalTitle(f.publicTitle, f.publicSummary) ?? f.publicSummary!.trim().slice(0, 120), summary: f.publicSummary!.trim().slice(0, 1000), releasedAt: f.releasedAt! }));
     },
     /** A visitor's vote: one per visitor and feature; voting again changes it. */
     async portalVote(companyId: string, voter: string, input: { featureId: string; importance: Importance; comment?: string | null; name?: string | null; email?: string | null; confirm?: PortalConfirm }) {
