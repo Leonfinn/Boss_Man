@@ -1614,7 +1614,26 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   );
 }
 
-type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; companyName?: string; note?: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null };
+type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; companyName?: string; note?: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null; kind?: string; outcome?: "merged" | "closed" | "open" | null; state?: string | null };
+type CeoWeek = { total: number; byKind: Array<{ kind: string; count: number }> };
+
+/** (BOS-2382) The kinds of card the Answered filter offers, by the key the server sends. */
+const ANSWERED_KINDS: Array<[string, string, string]> = [
+  ["merge", "Merge", "merges"],
+  ["plan", "Plan", "plans"],
+  ["hire", "Hire", "hires"],
+  ["permission", "Permission", "permissions"],
+  ["model", "Model", "model changes"],
+  ["question", "Question", "questions"],
+  ["deploy", "Deploy", "deploys"],
+  ["skill", "Skill", "skills"],
+  ["engagement", "Engagement", "engagements"],
+  ["stale_blocker", "Stale blocker", "stale blockers"],
+  ["lesson", "Lesson", "lessons"],
+  ["rule_proposal", "Rule", "rules"],
+];
+const kindPlural = (k: string) => ANSWERED_KINDS.find((x) => x[0] === k)?.[2] ?? k.replace(/_/g, " ") + " cards";
+const outcomeText = (i: AnsweredItem) => (i.outcome === "merged" ? "The ticket merged." : i.outcome === "closed" ? "The ticket was closed without a merge." : i.outcome === "open" ? `The ticket is still open${i.state ? ` (${i.state.replace(/_/g, " ")})` : ""}.` : null);
 
 const answeredBy = (i: AnsweredItem) => (i.by === "owner" ? "You" : i.by === "ceo" ? i.byName ?? "The CEO" : i.by === "auto" ? "Automatically" : "Withdrawn by the team");
 const answeredWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -1647,6 +1666,10 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
   const [done, setDone] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  // (BOS-2382) Who answered and what kind of card; the list reaches back 8 weeks.
+  const [by, setBy] = useState("");
+  const [kind, setKind] = useState("");
+  const [ceoWeek, setCeoWeek] = useState<CeoWeek | null>(null);
   const exportCsv = async () => {
     setExporting(true);
     setExportError(null);
@@ -1678,7 +1701,13 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
       if (q.trim()) params.set("q", q.trim());
       if (companyId) params.set("companyId", companyId);
       if (pinned) params.set("id", pinned);
-      const r = await api<{ items: AnsweredItem[]; next: string | null }>(`/api/decisions/answered?${params.toString()}`);
+      else {
+        params.set("weeks", "8");
+        if (by) params.set("by", by);
+        if (kind) params.set("kind", kind);
+      }
+      const r = await api<{ items: AnsweredItem[]; next: string | null; ceoWeek?: CeoWeek }>(`/api/decisions/answered?${params.toString()}`);
+      if (r.ceoWeek) setCeoWeek(r.ceoWeek);
       setItems((prev) => (cursor ? [...prev, ...r.items] : r.items));
       setNext(r.next);
       setDone(true);
@@ -1693,7 +1722,7 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
     const t = setTimeout(() => void load(null, text), text ? 300 : 0);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, text, companyId, pinned]);
+  }, [opened, text, companyId, pinned, by, kind]);
   useEffect(() => {
     if (pinned && items.some((i) => i.id === pinned)) document.getElementById(`decision-${pinned}`)?.scrollIntoView?.({ block: "center" });
   }, [pinned, items]);
@@ -1707,6 +1736,33 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
           </p>
         ) : (
           <>
+            {ceoWeek && ceoWeek.total > 0 && (
+              <p data-testid="ceo-week" style={{ margin: "0 0 8px" }}>
+                This week the CEO answered {ceoWeek.total} {ceoWeek.total === 1 ? "card" : "cards"} for you: {ceoWeek.byKind.map((k) => `${k.count} ${k.count === 1 ? kindPlural(k.kind).replace(/s$/, "") : kindPlural(k.kind)}`).join(", ")}.{" "}
+                <a href="#/decisions" onClick={() => { setBy("ceo"); setKind(""); }}>Show them</a>
+              </p>
+            )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <label className="muted">
+                Who answered{" "}
+                <select aria-label="Who answered" value={by} onChange={(e) => setBy(e.target.value)}>
+                  <option value="">Everyone</option>
+                  <option value="owner">You</option>
+                  <option value="ceo">The CEO</option>
+                  <option value="auto">Automatic</option>
+                  <option value="withdrawn">Withdrawn</option>
+                </select>
+              </label>
+              <label className="muted">
+                Kind{" "}
+                <select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+                  <option value="">All kinds</option>
+                  {ANSWERED_KINDS.map(([k, label]) => (
+                    <option key={k} value={k}>{label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />{" "}
             <button type="button" className="btn small" disabled={exporting || (done && items.length === 0)} onClick={() => void exportCsv()}>
               {exporting ? "Preparing…" : "Download CSV"}
@@ -1732,10 +1788,14 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
                 )}{" "}
                 <span className="muted">· {answeredWhen(i.at)}</span>
               </div>
+              {i.by === "ceo" && i.note && <div className="muted" data-testid="ceo-reason">Reason: {i.note}</div>}
               {i.ticket && (
-                <a href={`#/tickets/${i.ticket.id}`} title={i.ticket.title}>
-                  {i.ticket.ref ? <strong>{i.ticket.ref}</strong> : null} {i.ticket.title}
-                </a>
+                <div>
+                  <a href={`#/tickets/${i.ticket.id}`} title={i.ticket.title}>
+                    {i.ticket.ref ? <strong>{i.ticket.ref}</strong> : null} {i.ticket.title}
+                  </a>
+                  {i.by === "ceo" && outcomeText(i) && <span className="muted" data-testid="ceo-outcome"> · {outcomeText(i)}</span>}
+                </div>
               )}
             </li>
           ))}
