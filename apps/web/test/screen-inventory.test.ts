@@ -31,6 +31,11 @@ const REDIRECTS: Redirect[] = [
     ],
   },
   {
+    from: "#/notifications/<anything>",
+    to: "#/settings/<company>/notifications",
+    keeps: { sections: ["How you're told", "Set up your phone", "Other places to send alerts", "Weekly summary"], reads: ["/api/notification-settings", "/api/alert-destinations", "/api/notifications/pushes"] },
+  },
+  {
     from: "#/settings/<company>/workflow",
     to: "#/settings/<company>/reviews",
     keeps: { sections: ["Reviews", "Did it move the goal?"] },

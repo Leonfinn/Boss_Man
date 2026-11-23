@@ -893,7 +893,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
       {loaded && linkedId && !decisions.some((d) => d.id === linkedId) && (
         // (BOS-1159) A link to a card that is gone says so, instead of opening a page with nothing on it.
         <p role="status" data-testid="linked-card-gone" className="card" style={{ fontWeight: 600 }}>
-          That card is not open any more: it was answered or withdrawn, or it belongs to another company. The Board stops showing it on its next refresh.
+          That card is not open any more: it was answered or withdrawn, or it belongs to another company. The Board stops showing it on its next refresh. A closed card of this company is shown under Answered below.
         </p>
       )}
       {!loaded && (loadError
@@ -929,7 +929,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
                 // (BOS-1691) Touching or typing in a card counts as having it open, so a later close or re-check tells the feed.
-                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} onPointerDown={() => markOpened(d.id)} onFocusCapture={() => markOpened(d.id)} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
+                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} data-shortcut-card tabIndex={-1} onPointerDown={() => markOpened(d.id)} onFocusCapture={() => markOpened(d.id)} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
                   <div className="body">
                     <div className="head-line">
                       {d.step ? (
@@ -1423,7 +1423,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                             return (
                               <>
                                 {!modelEdits[d.id] && <p className="answer-label" id={`answer-label-${d.id}`}>Your answer</p>}
-                                <div className={`actions${stacked ? " stacked" : d.kind === "question" ? " wide" : ""}`} role="group" aria-labelledby={modelEdits[d.id] ? undefined : `answer-label-${d.id}`} onClickCapture={(e) => {
+                                <div className={`actions${stacked ? " stacked" : d.kind === "question" ? " wide" : ""}`} role="group" data-shortcut-open aria-labelledby={modelEdits[d.id] ? undefined : `answer-label-${d.id}`} onClickCapture={(e) => {
                                   const target = e.target as HTMLElement | null;
                                   if (target && target.tagName === "BUTTON" && (target as HTMLButtonElement).disabled && d.context?.type === "workflow_change" && !notes[d.id]?.trim()) {
                                     reasonBoxes.current.get(d.id)?.focus();
@@ -1609,7 +1609,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
         </section>
       )}
       <ClosedGroup notices={shownNotices} advised={advised} />
-      <AnsweredList companyId={filter} />
+      <AnsweredList companyId={filter} linkedId={loaded && linkedId && !decisions.some((d) => d.id === linkedId) ? linkedId : null} />
     </>
   );
 }
@@ -1631,8 +1631,14 @@ export function answeredToCsv(rows: AnsweredItem[]): string {
  * (BOS-2187) Past answers, newest first, 50 at a time. Read when the owner opens it, so the page costs nothing until then.
  * A search box narrows it to questions containing the text.
  */
-export function AnsweredList({ companyId }: { companyId?: string | null }) {
-  const [opened, setOpened] = useState(false);
+export function AnsweredList({ companyId, linkedId }: { companyId?: string | null; linkedId?: string | null }) {
+  // (BOS-2326) A #/decisions/<id> link to a closed card (the search box sends these) opens this list on that one
+  // card; the "Show all answered" link goes back to #/decisions, which drops it and shows the whole list.
+  const pinned = linkedId ?? null;
+  const [opened, setOpened] = useState(!!pinned);
+  useEffect(() => {
+    if (pinned) setOpened(true);
+  }, [pinned]);
   const [items, setItems] = useState<AnsweredItem[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1671,6 +1677,7 @@ export function AnsweredList({ companyId }: { companyId?: string | null }) {
       if (cursor) params.set("cursor", cursor);
       if (q.trim()) params.set("q", q.trim());
       if (companyId) params.set("companyId", companyId);
+      if (pinned) params.set("id", pinned);
       const r = await api<{ items: AnsweredItem[]; next: string | null }>(`/api/decisions/answered?${params.toString()}`);
       setItems((prev) => (cursor ? [...prev, ...r.items] : r.items));
       setNext(r.next);
@@ -1686,23 +1693,34 @@ export function AnsweredList({ companyId }: { companyId?: string | null }) {
     const t = setTimeout(() => void load(null, text), text ? 300 : 0);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, text, companyId]);
+  }, [opened, text, companyId, pinned]);
+  useEffect(() => {
+    if (pinned && items.some((i) => i.id === pinned)) document.getElementById(`decision-${pinned}`)?.scrollIntoView?.({ block: "center" });
+  }, [pinned, items]);
   return (
-    <details data-testid="answered-list" style={{ marginTop: 16 }} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
+    <details data-testid="answered-list" style={{ marginTop: 16 }} open={opened} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
       <summary style={{ fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Answered</summary>
       <div style={{ marginTop: 8 }}>
-        <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />{" "}
-        <button type="button" className="btn small" disabled={exporting || (done && items.length === 0)} onClick={() => void exportCsv()}>
-          {exporting ? "Preparing…" : "Download CSV"}
-        </button>
-        {exportError && <p role="alert" className="muted">{exportError}</p>}
+        {pinned ? (
+          <p className="muted" style={{ marginBottom: 8 }}>
+            Showing the card you opened. <a href="#/decisions">Show all answered</a>
+          </p>
+        ) : (
+          <>
+            <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />{" "}
+            <button type="button" className="btn small" disabled={exporting || (done && items.length === 0)} onClick={() => void exportCsv()}>
+              {exporting ? "Preparing…" : "Download CSV"}
+            </button>
+            {exportError && <p role="alert" className="muted">{exportError}</p>}
+          </>
+        )}
         {error && (
           <LoadError what="answered cards" message={error} onRetry={() => void load(null, text)} />
         )}
-        {done && items.length === 0 && !error && <p className="muted">{text.trim() ? "No answered card matches that." : "No card has been answered yet."}</p>}
+        {done && items.length === 0 && !error && <p className="muted">{pinned ? "That card is not among the answered cards." : text.trim() ? "No answered card matches that." : "No card has been answered yet."}</p>}
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
           {items.map((i) => (
-            <li key={i.id} className="strip stack-narrow strip-cols" style={{ fontSize: 14 }}>
+            <li key={i.id} id={`decision-${i.id}`} className={`strip stack-narrow strip-cols${i.id === pinned ? " linked" : ""}`} aria-current={i.id === pinned ? "true" : undefined} style={{ fontSize: 14 }}>
               <RolledTitle text={i.question} />
               <div>
                 {i.status === "answered" ? (

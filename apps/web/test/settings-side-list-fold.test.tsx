@@ -35,6 +35,6 @@ describe("Settings side list groups", () => {
     const c = menu(undefined);
     expect(c.querySelectorAll(".set-group-fold")).toHaveLength(0);
     expect(c.querySelectorAll(".set-group-current")).toHaveLength(0);
-    expect(c.querySelectorAll(".set-nav li")).toHaveLength(15);
+    expect(c.querySelectorAll(".set-nav li")).toHaveLength(16);
   });
 });

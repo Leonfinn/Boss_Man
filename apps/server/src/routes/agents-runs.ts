@@ -140,9 +140,11 @@ export function agentRunsRoutes(
         result: z.enum(["finished", "failed", "interrupted"]).optional(),
         // "Show more": only runs that ended before this moment (the oldest one already shown).
         before: z.coerce.date().optional(),
+        // A ticket ref ("BOS-2250", any case) or words from the ticket's title.
+        q: z.string().trim().max(100).optional(),
       })
       .parse(req.query);
-    return runsSvc.recent(q.limit, q.companyId, { agentId: q.agentId, result: q.result, before: q.before });
+    return runsSvc.recent(q.limit, q.companyId, { agentId: q.agentId, result: q.result, before: q.before, q: q.q });
   });
   owner.get("/api/runs/:id/transcript", async (req, reply) => {
     const { id } = IdParam.parse(req.params);

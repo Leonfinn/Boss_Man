@@ -17,7 +17,7 @@ export function ScrumMaster({ company }: { company: Company | undefined }) {
         <WatchdogHealth companyId={company.id} />
       </header>
       <OpenIssues companyId={company.id} />
-      <ScrumMasterLog companyId={company.id} />
+      <ScrumMasterLog companyId={company.id} filterable />
     </>
   );
 }

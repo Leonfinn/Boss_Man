@@ -87,4 +87,27 @@ describe("Answered list", () => {
     fireEvent(d2, new Event("toggle"));
     await waitFor(() => expect(r2.container.querySelector('[role="alert"]')).not.toBeNull());
   });
+
+  it("opens by itself on the one closed card a #/decisions/<id> link names, marked, with a link back to them all (BOS-2326)", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (calls.push(String(url)), reply({ items: [item(7)], next: null }))));
+    const { container } = render(<AnsweredList companyId="c1" linkedId="d7" />);
+    await screen.findByText("Question 7");
+    expect(container.querySelector("details")!.open).toBe(true);
+    expect(new URL(calls[0]!, "http://x").searchParams.get("id")).toBe("d7");
+    const li = container.querySelector("#decision-d7")!;
+    expect(li.className).toContain("linked");
+    expect(li.getAttribute("aria-current")).toBe("true");
+    expect(screen.getByText("Show all answered").getAttribute("href")).toBe("#/decisions");
+    // No link: the whole list, unfiltered, with its search box.
+    cleanup();
+    calls.length = 0;
+    const r2 = render(<AnsweredList companyId="c1" />);
+    const d2 = r2.container.querySelector("details")!;
+    d2.open = true;
+    fireEvent(d2, new Event("toggle"));
+    await screen.findByText("Question 7");
+    expect(new URL(calls[0]!, "http://x").searchParams.get("id")).toBeNull();
+    expect(screen.getByRole("searchbox", { name: "Search answered cards" })).toBeTruthy();
+  });
 });

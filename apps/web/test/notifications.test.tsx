@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Notice } from "../src/api";
 import { Notifications } from "../src/pages/Notifications";
+import { NotificationSettings } from "../src/pages/settings/Notifications";
 
 afterEach(() => {
   cleanup();
@@ -88,8 +89,30 @@ describe("notifications", () => {
       fireEvent.click(screen.getByRole("button", { name: /^Asks/ }));
       fireEvent.click(screen.getByRole("button", { name: /^No company/ }));
       await waitFor(() => expect(urls(f).some((u) => u.includes("status=unread") && u.includes("level=ask") && u.includes("company=none"))).toBe(true));
-      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!)).toEqual({ status: "unread", level: "ask", company: "none" });
+      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!)).toEqual({ status: "unread", level: "ask", company: "none", text: "" });
       expect(await screen.findByText("No notifications match")).toBeTruthy();
+    });
+
+    it("searches after a pause, saves the text, keeps it on Show older, and Clear filters empties the box (BOS-2316)", async () => {
+      const mk = (i: number): Notice => ({ ...notice("x"), id: `n${i}`, title: `Runner ${i}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 100 - i)).toISOString() });
+      const page = Array.from({ length: 50 }, (_, i) => mk(i));
+      const f = vi.fn((u: string) => Promise.resolve(new Response(JSON.stringify({ items: u.includes("before=") ? [mk(60)] : page, unread: 1 }), { status: 200, headers: { "content-type": "application/json" } })));
+      vi.stubGlobal("fetch", f);
+      render(<Notifications feed={{ items: [notice("hello")], unread: 1 }} onChanged={() => {}} companies={companies} />);
+      const box = screen.getByLabelText("Search notifications") as HTMLInputElement;
+      fireEvent.change(box, { target: { value: "run" } });
+      fireEvent.change(box, { target: { value: "runner" } });
+      // Nothing is asked for while the typing continues; one request follows the pause, with the whole text.
+      expect(urls(f as ReturnType<typeof stubFetch>).some((u) => u.includes("q="))).toBe(false);
+      await waitFor(() => expect(urls(f as ReturnType<typeof stubFetch>).filter((u) => u.includes("q=")).length).toBeGreaterThan(0));
+      expect(urls(f as ReturnType<typeof stubFetch>).filter((u) => u.includes("q=")).every((u) => u.includes("q=runner"))).toBe(true);
+      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!).text).toBe("runner");
+      fireEvent.click(await screen.findByRole("button", { name: "Show older" }));
+      expect(await screen.findByText("Runner 60")).toBeTruthy();
+      expect(urls(f as ReturnType<typeof stubFetch>).find((u) => u.includes("before="))).toContain("q=runner");
+      fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+      await waitFor(() => expect(box.value).toBe(""));
+      expect(JSON.parse(sessionStorage.getItem("notifications-filters")!).text).toBe("");
     });
 
     it("clears every filter from the empty state", async () => {
@@ -160,9 +183,16 @@ describe("notifications", () => {
 
     it("folds the phone-push history shut, with a line saying how many", async () => {
       vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } }))));
-      const { container } = render(<Notifications feed={feed} onChanged={() => {}} companies={companies} />);
+      const { container } = render(<NotificationSettings companies={companies} />);
       await screen.findByText("Recent phone pushes");
       expect((container.querySelector("details.pushes") as HTMLDetailsElement).open).toBe(false);
+    });
+
+    it("links to the notification settings and no longer holds them (BOS-2327)", () => {
+      stubFetch([]);
+      render(<Notifications feed={feed} onChanged={() => {}} companies={companies} />);
+      expect(screen.getByRole("link", { name: "Notification settings" }).getAttribute("href")).toBe("#/settings/notifications");
+      expect(screen.queryByText("Recent phone pushes")).toBeNull();
     });
   });
 });

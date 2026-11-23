@@ -85,6 +85,22 @@ describe("answered cards list (BOS-2187)", () => {
     expect(bad.statusCode).toBe(200);
   });
 
+  it("returns only the one closed card an id names, and nothing for an open card's id (BOS-2326)", async () => {
+    ctx = await setup();
+    const rows = await ctx.db
+      .insert(decisions)
+      .values([
+        { companyId: ctx.companyId, kind: "question", question: "Pick a host", options: [], recommendedOption: "a", status: "answered", answer: "a", answeredAt: new Date() },
+        { companyId: ctx.companyId, kind: "question", question: "Pick a colour", options: [], recommendedOption: "a", status: "answered", answer: "a", answeredAt: new Date() },
+        { companyId: ctx.companyId, kind: "question", question: "Still open", options: [], recommendedOption: "a" },
+      ])
+      .returning({ id: decisions.id });
+    const one = (await ctx.get(`/api/decisions/answered?id=${rows[1]!.id}`)).json() as { items: Array<{ question: string }> };
+    expect(one.items.map((i) => i.question)).toEqual(["Pick a colour"]);
+    expect(((await ctx.get(`/api/decisions/answered?id=${rows[2]!.id}`)).json() as { items: unknown[] }).items).toEqual([]);
+    expect((await ctx.get("/api/decisions/answered?id=not-a-uuid")).statusCode).toBe(400);
+  });
+
   it("pages through cards answered in the same millisecond with no repeat or gap", async () => {
     ctx = await setup();
     const at = new Date("2026-11-02T09:00:00.000Z");

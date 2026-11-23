@@ -2693,9 +2693,9 @@ export async function buildApp(opts: AppOptions) {
     // (BOS-2187) Past answers, newest first, 50 at a time: pass the last page's `next` as `cursor`.
     owner.get("/api/decisions/answered", async (req) => {
       const q = z
-        .object({ cursor: z.string().max(100).optional(), q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional(), companyId: z.string().uuid().optional() })
+        .object({ cursor: z.string().max(100).optional(), q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional(), companyId: z.string().uuid().optional(), id: z.string().uuid().optional() })
         .parse(req.query ?? {});
-      return decisionsSvc.answeredList({ ...(q.cursor ? { cursor: q.cursor } : {}), ...(q.q ? { q: q.q } : {}), ...(q.limit ? { limit: q.limit } : {}), ...(q.companyId ? { companyId: q.companyId } : {}) });
+      return decisionsSvc.answeredList({ ...(q.cursor ? { cursor: q.cursor } : {}), ...(q.q ? { q: q.q } : {}), ...(q.limit ? { limit: q.limit } : {}), ...(q.companyId ? { companyId: q.companyId } : {}), ...(q.id ? { id: q.id } : {}) });
     });
 
     // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).

@@ -1,8 +1,8 @@
 // The Settings addresses, kept apart from the Settings page itself so the app shell can redirect an old address
 // without loading the whole Settings page (BOS-1843: pages load when opened). test/first-load.test.ts keeps
 // SETTINGS_PAGE_IDS equal to the pages in Settings.tsx.
-export type SettingsPage = "funding" | "secrets" | "tools" | "reviews" | "team" | "watchdog" | "permissions" | "updates" | "limits" | "runner" | "email" | "server" | "devices" | "transfer" | "account";
-export const SETTINGS_PAGE_IDS: readonly SettingsPage[] = ["funding", "secrets", "tools", "reviews", "team", "watchdog", "permissions", "updates", "limits", "runner", "email", "server", "devices", "transfer", "account"];
+export type SettingsPage = "funding" | "secrets" | "tools" | "reviews" | "team" | "watchdog" | "permissions" | "updates" | "limits" | "runner" | "email" | "server" | "devices" | "transfer" | "account" | "notifications";
+export const SETTINGS_PAGE_IDS: readonly SettingsPage[] = ["notifications","funding", "secrets", "tools", "reviews", "team", "watchdog", "permissions", "updates", "limits", "runner", "email", "server", "devices", "transfer", "account"];
 
 /** The address of a Settings page: its own URL for a company, else the menu. */
 export const settingsPath = (companyId: string | undefined, page: SettingsPage) => (companyId ? `settings/${companyId}/${page}` : "settings");
@@ -29,6 +29,9 @@ export function settingsRedirect(route: readonly string[], companyId: string | u
     // Any other page that no longer exists opens the menu rather than a page that is gone.
     return "settings";
   }
+  // BOS-2327: the notification settings left the feed page; an address for them (#/notifications/settings, or any
+  // part of them) opens the new Settings page. The bare #/notifications is the feed and keeps working.
+  if (page === "notifications" && rest.length > 0) return settingsPath(companyId, "notifications");
   if (page === "funding") return settingsPath(companyId, "funding");
   if (page === "secrets") return settingsPath(companyId, "secrets");
   // The Rules page was its own page; it is now Permissions, and its scope (a company id, or "all") is kept.

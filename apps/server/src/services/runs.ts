@@ -3,7 +3,7 @@
 // ended wakes the agent again on the same ticket with the message instead.
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, costEvents, fundingSources, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
+import { agents, companies, costEvents, fundingSources, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 /**
@@ -84,7 +84,15 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     },
 
     /** Runs that have finished, newest first, with what they cost. */
-    async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date } = {}) {
+    async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date; q?: string } = {}) {
+      // "BOS-2250" (any case) finds the runs on that ticket by its ref; other text matches the ticket title.
+      const text = filter.q?.trim();
+      const ref = text ? /^([a-z][a-z0-9]*)-(\d+)$/i.exec(text) : null;
+      const byTicket = !text
+        ? undefined
+        : ref
+          ? sql`${tickets.number} = ${Number(ref[2])} and upper(coalesce((select ${companies.ticketPrefix} from ${companies} where ${companies.id} = ${tickets.companyId}), 'T')) = ${ref[1]!.toUpperCase()}`
+          : sql`${tickets.title} ilike ${`%${text.replace(/[\\%_]/g, "\\$&")}%`}`;
       const rows = await db
         .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome , purpose: runs.purpose, reason: wakes.reason, note: wakes.note, ...runOriginQuery("runs"), inputTokens: runs.inputTokens, outputTokens: runs.outputTokens, cachedReadTokens: runs.cachedReadTokens, cachedWriteTokens: runs.cachedWriteTokens, fundingKind: fundingSources.kind })
         .from(runs)
@@ -100,6 +108,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
             filter.agentId ? eq(runs.agentId, filter.agentId) : undefined,
             filter.before ? lt(runs.endedAt, filter.before) : undefined,
             filter.result ? resultWhere(filter.result) : undefined,
+            byTicket,
           ),
         )
         .orderBy(desc(runs.endedAt))

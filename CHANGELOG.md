@@ -27,6 +27,55 @@ Release step: adding to this file is part of every release (Release Manager, on 
 Check before committing: pnpm --filter @boss-man/site build (it stops on a heading that is not a date, or one out of order).
 -->
 
+## 23 November 2026
+
+- Parts of Boss Man that are still loading now say "Loading…", and a part that fails to load says what failed and offers Retry, instead of a blank space or a false "none yet". This covers the Dashboard, ticket pages, the Spend report, Settings → Funding → Budgets, the Features page, a feature's own page, Settings → Devices, the Roadmap tabs, the Notifications page, four Wiki loads, Settings → Reviews, the CEO's chapters, and Settings → Tools.
+- A ticket's Activity feed says "Loading the conversation" and offers Retry instead of looking empty.
+- The Feedback page has a Download CSV button that exports every note in the current tab and search.
+- The Board has a Download CSV button that exports the tickets shown, honouring search and filters.
+- Wiki pages and a feature's own page now have a "Copy link" button, like ticket and run pages.
+- A wiki page has a Download button that saves it as a Markdown file, and the Wiki page shows a list of the 10 pages most recently changed.
+- The Chat header has a Download button that saves the whole conversation as a Markdown file.
+- The Features page and the Agents page each have a search/filter box that narrows the list.
+- The Engagements page filters to open engagements or one status.
+- Each objective on the Roadmap has a Change button to rename it and set its priority.
+- Recent updates on Settings → Server and runner has "Show older" to see updates past the newest 5, and the Notifications page has "Show older" to read notices past the newest 50.
+- Settings → Tools now lets you change a tool server in place instead of removing and re-adding it.
+- On the check machines settings, "Memory limit per check" now explains that it only limits a single check, and shows how much memory the machine has once the machine reports it (redeploy each check machine once after you update the runners).
+- Agents on the OpenCode/Synthetic harness now get their skills after you update the runners, and the Skills page flags agents that can't load them.
+- Boss Man asks once, in the product, for a second-account token so test-branch failures stop emailing you.
+- The website install guide now leads with the ready-made Docker image install, keeping build-from-source as a second option.
+- A new website guide explains moving a company from Paperclip, and the Paperclip guide now marks the export step confirmed on TrueNAS, adds an scp copy step, and runs the issues export from a throwaway Postgres container.
+- Each release now runs an install test on a clean machine, and the install guide shows the date of the latest test, whether it passed and how long the install took.
+
+## 22 November 2026
+
+- Settings → Account can now change your password and sign out every other device.
+- Parts of Boss Man that are still loading now say "Loading…", and a part that fails to load says so and offers Retry, instead of showing a false "none yet". This covers the Tools, Rules, Credentials and Secrets settings and the Scrum Master log.
+- The Board, Skills and Engagements lists load faster on big projects; older ones are behind a "Show older" button.
+- The Board now has a Select mode: move, assign or prioritise several tickets at once.
+- A "Copy link" button on ticket and run pages copies a link you can paste anywhere.
+- Ctrl+K anywhere opens one search box that finds any ticket, wiki page or chat message.
+- Long ticket conversations and agent chats have a "Load older messages" button past the newest 200 or 500.
+- Dashboard "Needs you" items show how long the oldest one has waited and the usual wait. Decisions has an "Answered" list of cards you have already dealt with.
+- Ticket pages show a "What Boss Man recorded" block: the runs, the spend, the last check and the files it touched.
+- Run pages list every permission question that came up in that run, kept after a restart.
+- On a permission card, "Allow" can now be for an hour, until midnight, or always.
+- Each agent can be given working hours; outside them it is not started on new work. Off by default.
+- Alerts can go to Slack, Discord or any webhook, chosen per kind of alert. You add and test each destination once in Settings → Notifications.
+- If a background safety step keeps failing you get one alert instead of silence, and a sign-in lockout tells you once (at most three an hour). Spending over three times your usual rate gives you one alert a day naming the top agents and tickets.
+- The morning summary now says what merged and what it cost, there is an optional weekly summary by email, and a "Send one now" button to try it without waiting for Monday.
+- Settings → System has an optional "hold new starts when this many things need you" limit, and a stuck database query now fails fast with a clear message instead of freezing the page.
+- A new Spend page shows the last 30 days by day, split by agent or feature, with a Download CSV button. The Runs, Workflow report and Features pages get their own Download CSV buttons too.
+- Company export and import now carry your deploy targets, your own permission rules, approvals, templates and the second-opinion setup. A one-time step: after importing, re-grant the secrets and re-add any Allow rules, and switch the second opinion back on (adding its key secret if it is missing).
+- Roadmap: you can change or remove a key result, and the Setup checklist now ends at "First ticket merged", showing how long it took from when you set up.
+- The Wiki has a 30-day "Deleted pages" bin with Restore, and you can compare any two versions of a page side by side with added and removed lines marked.
+- In the CEO chat, "Remember this" adds your own message to the standing rules, with an Undo.
+- The website "What's new" page now shows the 21 November changes.
+- Removing the portal logo or unlinking feedback asks you first, and so does removing an alert destination or a ticket's wait link. Switching a project back to the company's reviews asks before it deletes the project's own review table.
+- Automatic daily database backups, keeping the newest 14 days, with the time of the latest shown in Settings → Server. Applying this update by hand once is needed (see its card), then it runs by itself.
+- The check machines report their memory, and Settings warns if checks together would overcommit it. One-time step: redeploy each check machine once after you update the runners.
+
 ## 21 November 2026
 
 - Pages that are still loading now say "Loading…", and a page that fails to load says so, instead of showing a blank space. This covers the public portal, the Roadmap, the Wiki, the Agents list, Settings → Watchdog and Settings → Funding.

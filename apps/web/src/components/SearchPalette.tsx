@@ -1,5 +1,6 @@
 // The search box (BOS-2192): Ctrl+K / Cmd+K from any screen, or the sidebar's search button, finds
-// tickets, wiki pages and chat messages in the company on screen and jumps to the one picked.
+// tickets, wiki pages and chat messages in the company on screen and jumps to the one picked; since BOS-2326
+// also features, decisions (owner cards) and runs.
 // Mounted once in App.tsx; the button lives in the sidebar and opens it through a window event, so
 // neither has to pass state through the shell.
 import { Search } from "lucide-react";
@@ -7,7 +8,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../api";
 
 export type SearchHit = { id: string; title: string; snippet: string; link: string; ref?: string | null; exact?: boolean; who?: string; at?: string };
-export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[] };
+export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[]; features?: SearchHit[]; decisions?: SearchHit[]; runs?: SearchHit[] };
 
 /** The sidebar's button sends this; the palette listens for it. */
 export const OPEN_SEARCH = "bm-open-search";
@@ -23,7 +24,7 @@ const keyHint = () => (isMac() ? "⌘K" : "Ctrl K");
 /** The search button for the sidebar: works with a touch or a mouse, no keyboard needed. */
 export function SearchButton() {
   return (
-    <button type="button" className="side-search" onClick={() => window.dispatchEvent(new Event(OPEN_SEARCH))} title={`Search (${isMac() ? "⌘" : "Ctrl"}+K)`} aria-label="Search tickets, wiki and chats">
+    <button type="button" className="side-search" onClick={() => window.dispatchEvent(new Event(OPEN_SEARCH))} title={`Search (${isMac() ? "⌘" : "Ctrl"}+K)`} aria-label="Search tickets, wiki, chats, features, decisions and runs">
       <Search size={18} strokeWidth={1.75} aria-hidden="true" />
       <span className="nav-label">Search</span>
       <kbd className="side-search-key" aria-hidden="true">{keyHint()}</kbd>
@@ -31,11 +32,20 @@ export function SearchButton() {
   );
 }
 
-const GROUPS: Array<{ key: "tickets" | "wiki" | "chats"; label: string }> = [
+// Features, decisions and runs (BOS-2326) come after the first three. They are optional in the answer so a page
+// opened before the server was updated, talking to the older server, still works.
+const GROUPS: Array<{ key: "tickets" | "wiki" | "chats" | "features" | "decisions" | "runs"; label: string }> = [
   { key: "tickets", label: "Tickets" },
   { key: "wiki", label: "Wiki" },
   { key: "chats", label: "Chats" },
+  { key: "features", label: "Features" },
+  { key: "decisions", label: "Decisions" },
+  { key: "runs", label: "Runs" },
 ];
+const hitsOf = (r: SearchResults, key: (typeof GROUPS)[number]["key"]) => r[key] ?? [];
+/** When a decision was raised or a run started, short and in the owner's own time. */
+const when = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+const TIMED = new Set(["decisions", "runs"]);
 
 export function SearchPalette({ companyId, go }: { companyId: string | undefined; go: (to: string) => void }) {
   const [open, setOpen] = useState(false);
@@ -44,6 +54,8 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState(0);
+  // Bumped by Retry after a failed search: the same query is asked again.
+  const [attempt, setAttempt] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   // Only the latest request's answer is shown: a slow reply to "pel" must not replace "pelican"'s.
   const asked = useRef(0);
@@ -95,7 +107,7 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
       );
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [q, open, companyId]);
+  }, [q, open, companyId, attempt]);
 
   const close = () => {
     setOpen(false);
@@ -103,7 +115,7 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
     setResults(null);
     setActive(0);
   };
-  const flat = results ? GROUPS.flatMap((g) => results[g.key]) : [];
+  const flat = results ? GROUPS.flatMap((g) => hitsOf(results, g.key)) : [];
   const pick = (hit: SearchHit | undefined) => {
     if (!hit) return;
     close();
@@ -140,8 +152,8 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
             aria-expanded={flat.length > 0}
             aria-controls="search-results"
             aria-activedescendant={flat[active] ? `search-hit-${active}` : undefined}
-            aria-label="Search tickets, wiki and chats"
-            placeholder="Search tickets, wiki pages and chats"
+            aria-label="Search tickets, wiki, chats, features, decisions and runs"
+            placeholder="Search tickets, wiki, chats, features, decisions, runs"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
@@ -152,16 +164,23 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
         <div id="search-results" role="listbox" aria-label="Results" className="search-results">
           {!companyId && <p className="muted">Pick a company first.</p>}
           {companyId && term.length < SEARCH_MIN && <p className="muted">Type at least {SEARCH_MIN} letters, or a ticket number like BOS-12.</p>}
-          {error && <p className="error" role="alert">{error}</p>}
+          {error && (
+            <p className="error" role="alert">
+              {error}{" "}
+              <button type="button" className="linkish" onClick={() => setAttempt((a) => a + 1)}>
+                Retry
+              </button>
+            </p>
+          )}
           {term.length >= SEARCH_MIN && loading && !results && <p className="muted">Searching…</p>}
           {results && !flat.length && !loading && <p className="muted">Nothing matches "{term}".</p>}
           {results &&
             GROUPS.map((g) =>
-              results[g.key].length ? (
+              hitsOf(results, g.key).length ? (
                 <section key={g.key} aria-label={g.label}>
                   <h3>{g.label}</h3>
                   <ul>
-                    {results[g.key].map((hit) => {
+                    {hitsOf(results, g.key).map((hit) => {
                       index += 1;
                       const i = index;
                       return (
@@ -170,7 +189,12 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
                             {hit.ref && <span className="mono">{hit.ref} </span>}
                             {hit.title}
                           </span>
-                          {hit.snippet && <span className="search-snippet">{hit.snippet}</span>}
+                          {(hit.snippet || (TIMED.has(g.key) && hit.at)) && (
+                            <span className="search-snippet">
+                              {hit.snippet}
+                              {TIMED.has(g.key) && hit.at ? `${hit.snippet ? " · " : ""}${when(hit.at)}` : null}
+                            </span>
+                          )}
                         </li>
                       );
                     })}

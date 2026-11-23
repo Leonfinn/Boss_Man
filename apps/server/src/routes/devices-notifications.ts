@@ -119,6 +119,7 @@ export function notificationRoutes(
         status: z.enum(["unread", "read"]).optional(),
         level: z.enum(["note", "flag", "page", "ask"]).optional(),
         company: z.union([z.literal("none"), Uuid]).optional(),
+        q: z.string().max(200).optional(),
       })
       .parse(req.query);
     return { items: await notes.list(q), unread: await notes.unread(), counts: await notes.unreadCounts() };

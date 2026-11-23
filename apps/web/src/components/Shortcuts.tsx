@@ -1,4 +1,5 @@
 // Keyboard shortcuts (BOS-2321): "?" lists them, and "g" then a letter jumps to a main screen.
+// BOS-2330: j/k move between cards and Enter opens one, on screens that mark their cards (Board, Decisions).
 // Mounted once in App.tsx beside the search box. Ctrl/Cmd+K itself stays the search box's own listener;
 // this only lists it.
 import { useEffect, useRef, useState } from "react";
@@ -26,6 +27,57 @@ function busyElsewhere(target: EventTarget | null): boolean {
   const el = target instanceof HTMLElement ? target : null;
   if (el && (el.isContentEditable || el.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"))) return true;
   return document.querySelector("[aria-modal='true']:not(.shortcuts-palette), dialog[open]") !== null;
+}
+
+/**
+ * Card keys (BOS-2330). A screen opts in by marking each card `data-shortcut-card` (with tabIndex -1, so it
+ * can hold focus) and, inside it, what Enter opens with `data-shortcut-open`. The cards are read from the page
+ * at press time, in document order, so whatever the screen shows (filters, folded lanes) is what j/k walks.
+ * Board lanes are sections in order with their cards inside, so document order is down a lane, then the next.
+ */
+export const CARD_SELECTOR = "[data-shortcut-card]";
+
+/** The current screen's own keys for the "?" list, or null on a screen without any. */
+export function screenKeys(hash: string): { title: string; rows: Array<{ keys: string[]; what: string }> } | null {
+  const on = /^#\/board(\/|$)/.test(hash) ? "Board" : /^#\/decisions(\/|$)/.test(hash) ? "Decisions" : null;
+  if (!on) return null;
+  return {
+    title: `On ${on === "Board" ? "the Board" : "Decisions"}`,
+    rows: [
+      { keys: ["j"], what: on === "Board" ? "Next card (down the lane, then the next lane)" : "Next card" },
+      { keys: ["k"], what: "Previous card" },
+      { keys: ["Enter"], what: on === "Board" ? "Open the card's task" : "Go to the card's answer buttons" },
+    ],
+  };
+}
+
+/** Moves focus to the next (+1) or previous (-1) card. False when the screen has no cards. */
+function moveCard(step: 1 | -1): boolean {
+  const cards = Array.from(document.querySelectorAll<HTMLElement>(CARD_SELECTOR));
+  if (cards.length === 0) return false;
+  const active = document.activeElement instanceof HTMLElement ? document.activeElement.closest<HTMLElement>(CARD_SELECTOR) : null;
+  const at = active ? cards.indexOf(active) : -1;
+  // With no card focused yet, j starts at the first card and k at the last.
+  const next = at === -1 ? (step === 1 ? 0 : cards.length - 1) : Math.min(cards.length - 1, Math.max(0, at + step));
+  const card = cards[next]!;
+  card.focus({ preventScroll: true });
+  card.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  return true;
+}
+
+/**
+ * Enter on a focused card: a link target is clicked (as the mouse would); anything else is a group whose first
+ * enabled control takes focus, so the owner can then pick with Tab and Enter (no answer is given by key). A card
+ * with no target (a decision already answered or waiting on advice) focuses its own first control. Only when the
+ * card itself has focus: Enter on a button or link inside it is that control's own.
+ */
+function openCard(): boolean {
+  const card = document.activeElement instanceof HTMLElement && document.activeElement.matches(CARD_SELECTOR) ? document.activeElement : null;
+  if (!card) return false;
+  const target = card.querySelector<HTMLElement>("[data-shortcut-open]") ?? card;
+  if (target instanceof HTMLAnchorElement) target.click();
+  else target.querySelector<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)")?.focus();
+  return true;
 }
 
 /**
@@ -80,7 +132,15 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
           return;
         }
       }
-      if (key === "g") gAt.current = Date.now();
+      if (key === "g") {
+        gAt.current = Date.now();
+        return;
+      }
+      if (e.key === "j" || e.key === "k") {
+        if (moveCard(e.key === "j" ? 1 : -1)) e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter" && openCard()) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -92,6 +152,7 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
 
   if (!open) return null;
   const mod = isMac() ? "⌘" : "Ctrl";
+  const here = screenKeys(window.location.hash);
   return (
     <div className="search-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <div
@@ -115,7 +176,7 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
         <dl className="shortcuts-list">
           <div className="shortcuts-row">
             <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
-            <dd>Search tickets, wiki and chats</dd>
+            <dd>Search tickets, wiki, chats, features, decisions and runs</dd>
           </div>
           <div className="shortcuts-row">
             <dt><kbd>?</kbd></dt>
@@ -128,6 +189,19 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
             </div>
           ))}
         </dl>
+        {here && (
+          <>
+            <h3 className="shortcuts-section">{here.title}</h3>
+            <dl className="shortcuts-list" aria-label={here.title}>
+              {here.rows.map((r) => (
+                <div key={r.keys.join()} className="shortcuts-row">
+                  <dt>{r.keys.map((k) => <kbd key={k}>{k}</kbd>)}</dt>
+                  <dd>{r.what}</dd>
+                </div>
+              ))}
+            </dl>
+          </>
+        )}
         <p className="muted shortcuts-note">Shortcuts don't work while you're typing in a box.</p>
       </div>
     </div>

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PhoneLoginButton } from "../src/pages/Notifications";
+import { PhoneLoginButton } from "../src/pages/settings/Notifications";
 
 // BOS-1004: the "Create phone login" button. The password shows once, in a box that drops it when dismissed.
 

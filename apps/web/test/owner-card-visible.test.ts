@@ -102,4 +102,16 @@ describe.skipIf(!can)("an open owner card is reachable from the Board, Decisions
     expect(await page.textContent('[data-testid="linked-card-gone"]')).toMatch(/not open any more/);
     await page.close();
   }, 60_000);
+
+  it("opens the Answered list on a closed card the link names, marked (BOS-2326: a search result for an answered card)", async () => {
+    const page = await openApp(browser!, vite!, { width: 1280, height: 900 });
+    const answered = { id: GONE, question: "Use the blue theme?", status: "answered", answer: "Yes", by: "owner", byName: null, at: now, ticket: null };
+    await stubApi(page, { ...api, "/api/decisions/answered": { items: [answered], next: null } });
+    await page.evaluate((id: string) => { window.location.hash = `#/decisions/${id}`; }, GONE);
+    await page.waitForSelector(`#decision-${GONE}`, { timeout: 15_000 });
+    expect(await page.getAttribute(`#decision-${GONE}`, "aria-current")).toBe("true");
+    expect(await page.textContent(`#decision-${GONE}`)).toContain("Use the blue theme?");
+    expect(await page.locator('[data-testid="answered-list"]').evaluate((d: Element) => (d as HTMLDetailsElement).open)).toBe(true);
+    await page.close();
+  }, 60_000);
 });

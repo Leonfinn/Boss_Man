@@ -3,7 +3,7 @@
 // Nothing here knows about tickets or the database: callers pass what to ask the runner and where to say what happens.
 import type { MergeResult } from "@boss-man/shared";
 import type { SlowJob } from "./ci-flake.js";
-import { GitHostError, type CiStatus, type GitHostConfig, type gitHostService } from "./git-hosts.js";
+import { GitHostError, type CiStatus, type GitHostConfig, type gitHostService, type RerunAnswer } from "./git-hosts.js";
 
 /** BOS-1070: how the gate waits for CI. Tests pass shorter ones through deps.ciTiming. */
 export const CI_TIMING = {
@@ -61,7 +61,37 @@ export class CiPublishError extends Error {}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export type CiTarget = { cfg: GitHostConfig; token: string };
+/**
+ * `token` is the company's GIT_TOKEN, used for every read. `actionsToken` (BOS-2345) is the second account's GIT_CI_TOKEN
+ * when the company granted one: GitHub Actions writes (re-run, cancel) try it first, so the owner's own GIT_TOKEN needs no
+ * Actions write permission once the second account is set up.
+ */
+export type CiTarget = { cfg: GitHostConfig; token: string; actionsToken?: string };
+
+/**
+ * BOS-2345: runs an Actions write with the second account's token when there is one, and once more with GIT_TOKEN when
+ * that was refused (a second account not yet a collaborator, or its token lacking Actions write). `got` is the last answer;
+ * `first` is the second account's refused one when the fallback ran, so the caller can say which token was refused.
+ */
+export async function withActionsToken<R>(target: CiTarget, call: (token: string) => Promise<R>, ok: (r: R) => boolean): Promise<{ got: R; first?: R }> {
+  const ci = target.actionsToken && target.actionsToken !== target.token ? target.actionsToken : null;
+  if (!ci) return { got: await call(target.token) };
+  const first = await call(ci);
+  if (ok(first)) return { got: first };
+  return { got: await call(target.token), first };
+}
+
+/**
+ * BOS-2345: rerun-failed-jobs with the Actions token. A refusal names each token tried, by its secret's name (never its
+ * value), with GitHub's own status and message, the second account's first.
+ */
+export async function rerunFailedJobsWith(hosts: Required<Pick<Hosts, "rerunFailedJobs">>, target: CiTarget, runId: number): Promise<RerunAnswer> {
+  const { got, first } = await withActionsToken(target, (token) => hosts.rerunFailedJobs(target.cfg, token, runId), (r) => r.ok);
+  if (got.ok) return got;
+  const main = `with GIT_TOKEN: ${got.why}`;
+  if (!first || first.ok) return { ...got, why: main };
+  return { ...got, ...(first.status ? { status: first.status } : {}), why: `with the second account's GIT_CI_TOKEN: ${first.why}; then ${main}` };
+}
 type Hosts = Pick<ReturnType<typeof gitHostService>, "ciStatus" | "workflowRuns" | "rerunRun"> & Partial<Pick<ReturnType<typeof gitHostService>, "rerunFailedJobs">>;
 
 /**
@@ -159,7 +189,7 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
         // BOS-2082: GitHub's own answer is kept, so a refusal says whether it was the token's permission or something else.
         let refused: string | null = runIds.length ? null : "GitHub named no workflow run to re-run";
         for (const id of runIds) {
-          const r = await deps.hosts.rerunFailedJobs(deps.target.cfg, deps.target.token, id);
+          const r = await rerunFailedJobsWith({ rerunFailedJobs: deps.hosts.rerunFailedJobs }, deps.target, id);
           if (!r.ok) refused ??= r.why;
         }
         const accepted = refused === null;
@@ -179,7 +209,7 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
         if (newer) return { kind: "superseded", newerSha: newer.headSha };
         const runs = s.cancelled!.map((r) => r.name);
         if (rerunAt !== null) return { kind: "cancelled", runs, rerunTried: true };
-        if (!(await deps.hosts.rerunRun(deps.target.cfg, deps.target.token, mine.id))) return { kind: "cancelled", runs, rerunTried: false };
+        if (!(await withActionsToken(deps.target, (token) => deps.hosts.rerunRun(deps.target.cfg, token, mine.id), Boolean)).got) return { kind: "cancelled", runs, rerunTried: false };
         rerunAt = Date.now();
         await deps.announceRerun?.(pushed);
       }

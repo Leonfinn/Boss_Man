@@ -162,7 +162,7 @@ export const OWNER_CONTROLS = {
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
   Settings: [
     // "Server and runner" is the name of the last group, not a page (BOS-1492); its pages are Updates … Devices and privacy.
-    "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
     "Server and runner",
     "Run the setup wizard",
@@ -202,6 +202,8 @@ export const OWNER_CONTROLS = {
     "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
     // Removing a deploy target that has past deploys (BOS-2158).
     "Remove anyway",
+    // The Deploys fold under each deploy target (BOS-2318): the next page of older deploys.
+    "Show older",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
@@ -236,6 +238,8 @@ export const OWNER_FIELDS = {
   "Log in": ["Username", "Password"],
   // The Engagements list's status filter (BOS-2260).
   Engagements: ["Show", "Search engagements"],
+  // The Runs page's search box (BOS-2317).
+  Runs: ["Search by ticket"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
@@ -254,7 +258,7 @@ export const OWNER_FIELDS = {
   // The "Remember this" box under the owner's own message (BOS-2184).
   Chat: ["Add this to the standing rules every agent reads"],
   Notifications: [
-    "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
+    "Search notifications", "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
@@ -267,7 +271,7 @@ export const OWNER_FIELDS = {
     "Assign to", "Risk", "Project", "Assigned to", "Feature", "Spending limit per month (USD)", "At the limit",
   ],
   Ticket: [
-    "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
+    "Filter", "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
     "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
@@ -318,12 +322,13 @@ export const OWNER_FIELDS = {
   Agents: [
     "Only start", "From", "To", "Time zone",
     "Thinking", "Blank", "Name", "Job title", "Agent", "Model", "Paid from", "Instructions", "Upload a picture", "Title",
-    "Note", "Review by (optional)", "Why (what you said)", "What waits for you from the CEO",
+    "Note", "Review by (optional)", "Why (what you said)",
   ],
   Skills: [
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip", "Filter",
   ],
+  "Scrum Master": ["Filter"],
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background agents at once (0 to 16)",
@@ -372,7 +377,7 @@ export const OWNER_FIELDS = {
   Reviews: ["Ask after (days)"],
   // The settings that shape how the team works day to day.
   "Team and CEO": [
-    "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it",
+    "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it", "What waits for you from the CEO",
   ],
   // The Scrum Master's watchdog.
   Watchdog: ["Record only (rehearse)", "Scrum Master"],
@@ -411,7 +416,7 @@ export const OWNER_MENU = [
 /** The tabs along the top of a screen (Settings.tsx TABS, Board.tsx PROJECT_TABS). */
 export const OWNER_TABS = {
   Settings: [
-    "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
   ],
   Board: ["Kanban", "Budget", "Config"],
@@ -430,7 +435,7 @@ export const OWNER_SECTIONS = {
   Reviews: ["Reviews"],
   "Team and CEO": [
     "Pause this company", "Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references",
-    "Did it move the goal?", "Cleaning up temp files",
+    "What the CEO can do without asking", "Did it move the goal?", "Cleaning up temp files",
   ],
   Watchdog: ["Watchdog"],
   Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],

@@ -14,6 +14,11 @@ const RULES = [
   [/\bALTER\s+COLUMN\s+\S+\s+(SET\s+DATA\s+)?TYPE\b/i, "ALTER COLUMN ... TYPE"],
   [/\bSET\s+NOT\s+NULL\b/i, "SET NOT NULL"],
   [/\bTRUNCATE\b/i, "TRUNCATE"],
+  // The image updater (BOS-1226) migrates, flips, and keeps the old release as a standby it can start again: old code must run against the
+  // new schema for the soak and after a going-back. A dropped default or a dropped object the old release uses breaks it like a DROP COLUMN.
+  [/\bALTER\s+COLUMN\s+\S+\s+DROP\s+DEFAULT\b/i, "ALTER COLUMN ... DROP DEFAULT"],
+  [/\bDROP\s+(SCHEMA|VIEW|MATERIALIZED\s+VIEW|FUNCTION|TRIGGER|SEQUENCE|EXTENSION|RULE|POLICY)\b/i, "DROP of a schema object"],
+  [/\bALTER\s+TYPE\s+\S+\s+(DROP|RENAME)\s+VALUE\b/i, "ALTER TYPE ... DROP/RENAME VALUE"],
   [/\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)/i, "DELETE FROM without WHERE"],
 ];
 const ADD_COLUMN = /\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:[^,(]|\([^)]*\))*)/gi;
