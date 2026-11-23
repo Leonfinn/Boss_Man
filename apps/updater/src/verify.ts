@@ -110,5 +110,5 @@ function classify(e: unknown, cacheOnly: boolean): UpdaterError {
   if (cacheOnly && (code.startsWith("TUF_") || ROOT_CODES.has(code))) return new UpdaterError("root_stale", ROOT_MESSAGE);
   if (code === "UNTRUSTED_SIGNER_ERROR") return new UpdaterError("not_signed", "This release was not signed by this project's release workflow, so it was refused.");
   if (code === "SIGNATURE_ERROR") return new UpdaterError("not_signed", "The signature does not match release.json (the file was changed), so the release was refused.");
-  return new UpdaterError("not_signed", "The release signature could not be verified, so the release was refused.");
+  return new UpdaterError("not_signed", "The release signature could not be verified (the file may have been changed), so the release was refused.");
 }
