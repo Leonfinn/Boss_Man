@@ -402,6 +402,7 @@ reads:
 
 ## #/spend
 sections: 
+  - Costliest tickets
   - Spend
 reads: 
   - /api/companies/:id/spend-report
