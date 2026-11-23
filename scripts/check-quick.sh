@@ -191,12 +191,17 @@ whole_repo_closure() { # whole_repo_closure <file> <helper>...: the file and eve
   done
   echo "$seen"
 }
+# BOS-2286: a whole-repo test also runs when its text (or its helpers') names a changed file outside the packages by its repo
+# path: web's check-worker-compose.test.ts reads "../../../deploy/check-worker/compose.yaml", and BOS-2161 changed that file
+# with no web change, so the test did not run and GitHub failed on it. This is every changed file outside the five package
+# folders (deploy/, docker-compose*.yml, docs/, scripts/, .github/ ...), one per line; a file inside a package already
+# touches that package. Known limit: a path built from pieces ("deploy", file) never names the file and is missed.
+wr_outside="$(grep -vE '^(apps/(launcher|runner|server|web)|packages/shared)/' <<<"$changed" || true)"
 whole_repo_tests() { # whole_repo_tests <package dir> [<touched dir>...]: its whole-repo test files to run, relative to the package, sorted
-  # With no touched list the package itself counts as touched. A test runs when its package is touched, or when a package it reads is.
-  local d=$1 all cands helpers new f t h reads p want out=""
+  # A test runs when its package is touched, when a package it reads is, or when it names a changed file in $wr_outside.
+  local d=$1 all cands helpers new f t h reads p want out="" closure
   shift
   local touched=("$@")
-  [ "${#touched[@]}" -gt 0 ] || touched=("$d")
   all="$(find "$d" -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) -print 2>/dev/null)" || all=""
   [ -n "$all" ] || return 0
   # A test may read through a helper in its test folder, at any depth (screen-inventory.test.ts imports screen-scan.ts): the helper
@@ -226,11 +231,15 @@ whole_repo_tests() { # whole_repo_tests <package dir> [<touched dir>...]: its wh
     [ "$d" != apps/web ] || grep -lE "$whole_repo_browser" $all 2>/dev/null || true
   } | sort -u)"
   for t in $want; do
-    # shellcheck disable=SC2046,SC2086  # one argument per file; paths have no spaces
-    reads="$d $(whole_repo_pkgs_in $(whole_repo_closure "$t" $helpers))"
+    # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+    closure="$(whole_repo_closure "$t" $helpers)"
+    # shellcheck disable=SC2086
+    reads="$d $(whole_repo_pkgs_in $closure)"
     for p in $reads; do
-      case " ${touched[*]} " in *" $p "*) out="$out$t"$'\n'; break ;; esac
+      case " ${touched[*]-} " in *" $p "*) out="$out$t"$'\n'; continue 2 ;; esac
     done
+    # shellcheck disable=SC2086
+    if [ -n "$wr_outside" ] && grep -qF -f <(printf '%s\n' "$wr_outside") $closure 2>/dev/null; then out="$out$t"$'\n'; fi
   done
   printf '%s' "$out" | sed "s#^$d/##"
   return 0
@@ -347,13 +356,15 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
   if whole_repo_on; then
     # BOS-1789: every package is looked at, not only the touched ones: a test that reads a touched package runs too.
     for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
-      [ "${#pkgs[@]}" -gt 0 ] || break
+      [ "${#pkgs[@]}" -gt 0 ] || [ -n "$wr_outside" ] || break
       files="$(whole_repo_tests "$d" "${pkgs[@]}")"
       [ -n "$files" ] || continue
       name="$(node -p "require('./$d/package.json').name")"
       # The browser tests of apps/web open the built app (apps/web/dist) and skip when it is missing: build it first, here in
-      # the slot, so they really run. The build step after the slot wait is then left out (web_built_early).
-      if [ "$d" = apps/web ] && [[ " ${pkgs[*]} " == *" apps/web "* ]]; then step "build web (before the browser tests)" pnpm --filter @boss-man/web build; fi
+      # the slot, so they really run. The build step after the slot wait is then left out (web_built_early). A browser test
+      # picked only because it names a changed file outside the packages (BOS-2286) needs the build too.
+      # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+      if [ "$d" = apps/web ] && { [[ " ${pkgs[*]-} " == *" apps/web "* ]] || (cd apps/web && grep -qlE "$whole_repo_browser" $files); }; then step "build web (before the browser tests)" pnpm --filter @boss-man/web build; fi
       # shellcheck disable=SC2086  # one argument per file; paths have no spaces
       step "whole-repo tests ($d, $(grep -c . <<<"$files") files)" pnpm --filter "$name" exec vitest run $files
     done
@@ -379,6 +390,13 @@ for d in "${pkgs[@]}" apps/site; do
   if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"; partial=1
   else need_slot=1; fi
 done
+# BOS-2286: a change outside the packages only (a compose or deploy file) touches no package, but a whole-repo test that names
+# the changed file must still run, in the slot like the others.
+if [ "$need_slot" -eq 0 ] && [ -n "$wr_outside" ] && whole_repo_on; then
+  for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
+    [ -z "$(whole_repo_tests "$d")" ] || { need_slot=1; break; }
+  done
+fi
 # A fresh tree has no packages (BOS-952): the server-owned check queue runs this script in a new detached worktree, and
 # typecheck, vitest and the web build then fail with "tsc: not found". Install them first, here before the slot wait so
 # the install never holds a check slot. The queue job sets the shared pnpm store (BOS-655), so this is quick when warm.
@@ -416,6 +434,37 @@ if [ "$need_slot" -eq 1 ]; then
   elif [ "$rc" -ne 0 ]; then failed=1; fi
 fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
+# BOS-2286: the shell tests (*.test.sh) whose subject changed. Before this only the full check and GitHub ran them, so a queued
+# check passed where GitHub then failed (negated-redirect.test.sh, BOS-2176). A test runs when
+#   - it changed, or it names a changed file by its repo path (deploy/ntfy.yml, docker-compose.yml, .github/workflows/ci.yml),
+#   - or it names a changed file of its own folder by file name (scripts/x.test.sh runs "$here/x.sh" and the helpers beside it),
+#   - or it reads the whole repo's file list (a `git ls-files` code line with no `cd` into a temp repo: negated-redirect and
+#     shell-tests-needed, 1 and 3 s), whatever changed. host-deployer.test.sh lists files of its own temp repo (cd "$T/src")
+#     and takes 7 minutes, so it runs only for its own subject.
+# Through scripts/test-shell.sh, so each runs in the same scrubbed environment as in the full check and on GitHub. Only where
+# the whole-repo tests run (queued checks and the gate; CHECK_QUICK_WHOLE_REPO=1 on a hand run). Not for BOSSMAN_FULL_CHECK_NEXT:
+# that full check runs every shell test itself.
+shell_tests_for_changes() { # prints the tracked shell tests to run for $changed, one per line
+  local t dir c base
+  git ls-files '*.test.sh' | while IFS= read -r t; do
+    # A whole-repo line runs git ls-files as code: not in a comment or a quoted string (check-quick.test.sh writes such lines
+    # into its fixtures), and not after a cd into a temp repo.
+    if grep -qxF -- "$t" <<<"$changed" || { grep -E "^[^'#]*git( -C \"[^\"]*\")? ls-files" "$t" | grep -qv 'cd '; } \
+      || grep -qF -f <(printf '%s\n' "$changed") "$t"; then echo "$t"; continue; fi
+    dir="$(dirname "$t")"
+    while IFS= read -r c; do
+      [ "$(dirname "$c")" = "$dir" ] || continue
+      base="$(basename "$c")"
+      # The file name as a whole word: x.sh must not match check-x.sh.
+      if grep -qE "(^|[^A-Za-z0-9_.-])${base//./\\.}([^A-Za-z0-9_.-]|$)" "$t"; then echo "$t"; break; fi
+    done <<<"$changed"
+  done
+}
+if whole_repo_on; then
+  shell_tests="$(shell_tests_for_changes)"
+  # shellcheck disable=SC2086  # one argument per file; tracked shell test paths have no spaces
+  [ -z "$shell_tests" ] || step "shell tests ($(grep -c . <<<"$shell_tests"): $(tr '\n' ' ' <<<"$shell_tests" | sed 's/ $//'))" scripts/test-shell.sh $shell_tests
+fi
 # At the gate the heavy phase already built the web app when apps/web has whole-repo tests (web_built_early).
 web_built_early=0
 if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web "${pkgs[@]}")" ]; then
