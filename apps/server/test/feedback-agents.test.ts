@@ -107,6 +107,32 @@ describe("agents and feedback", () => {
     await ceo.close();
   });
 
+  it("filters the feature list by status before paging, and tickets count leaves out the ticket items (BOS-2325)", async () => {
+    const c = await setup();
+    await c.db.insert(features).values([
+      { companyId: c.company.id, title: "Idea one", status: "idea" },
+      { companyId: c.company.id, title: "Planned one", status: "planned" },
+      { companyId: c.company.id, title: "Shipped one", status: "released" },
+      { companyId: c.company.id, title: "Turned down", status: "declined" },
+    ]);
+    const ceo = await c.mcp(c.ceo.id);
+    const list = async (args: Record<string, unknown>) => JSON.parse(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "features", ...args } })));
+    expect((await list({})).total).toBe(3);
+    expect((await list({ status: "all" })).total).toBe(3);
+    const open = await list({ status: "open" });
+    expect(open.total).toBe(2);
+    expect(open.features.map((f: { title: string }) => f.title).sort()).toEqual(["Idea one", "Planned one"]);
+    expect((await list({ status: "released" })).features.map((f: { title: string }) => f.title)).toEqual(["Shipped one"]);
+    expect((await list({ status: "declined" })).features.map((f: { title: string }) => f.title)).toEqual(["Turned down"]);
+    const full = await list({ status: "open" });
+    expect(full.features[0].tickets).toHaveProperty("items");
+    const short = await list({ status: "open", tickets: "count" });
+    expect(short.features[0].tickets).toEqual({ total: 0, done: 0 });
+    const refused = await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: open.features[0].id, status: "open", reason: "test" } });
+    expect(textOf(refused)).toContain("only filters");
+    await ceo.close();
+  });
+
   it("lets anyone log and read feedback, and only the CEO triage it", async () => {
     const c = await setup();
     const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "CSV export" })).json();
