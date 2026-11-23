@@ -416,6 +416,7 @@ reads:
 sections: 
   - About
   - Activity
+  - Checks
   - Feature
   - Related
   - Roadmap, feature and dependencies
@@ -431,6 +432,7 @@ reads:
   - /api/runs/:id/transcript
   - /api/tickets/:id
   - /api/tickets/:id/artifacts
+  - /api/tickets/:id/checks
   - /api/tickets/:id/ci
   - /api/tickets/:id/diff
   - /api/tickets/:id/images
