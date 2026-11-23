@@ -321,7 +321,7 @@ export const OWNER_FIELDS = {
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",
-    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email", "Search features",
+    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email", "Search features", "Copy the address by hand",
   ],
   Agents: [
     "Only start", "From", "To", "Time zone",
