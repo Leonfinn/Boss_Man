@@ -21,7 +21,16 @@ export type SpendRow = {
   tickets: number;
   micros: number;
 };
-export type SpendData = { timeZone: string; days: string[]; rows: SpendRow[]; totalMicros: number };
+export type SpendTopTicket = {
+  ticketId: string | null;
+  ref: string | null;
+  title: string;
+  state: string | null;
+  feature: string | null;
+  micros: number;
+  runs: number;
+};
+export type SpendData = { timeZone: string; days: string[]; rows: SpendRow[]; totalMicros: number; topTickets?: SpendTopTicket[] };
 export type Split = "agent" | "feature" | "project";
 
 const PERIODS = [7, 30, 90] as const;
@@ -157,6 +166,51 @@ export function SpendTable({ data, by }: { data: SpendData; by: Split }) {
   );
 }
 
+/** The period's costliest tickets (BOS-2370), each title a link to its ticket, with its share of the period's total. */
+export function TopTicketsTable({ data }: { data: SpendData }) {
+  const list = data.topTickets ?? [];
+  if (list.length === 0) return null;
+  return (
+    <section>
+      <h2>Costliest tickets</h2>
+      <div className="table-wrap">
+        <table style={{ minWidth: 0 }}>
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>State</th>
+              <th>Feature</th>
+              <th style={{ textAlign: "right" }}>Runs</th>
+              <th style={{ textAlign: "right" }}>Spend</th>
+              <th style={{ textAlign: "right" }}>Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((t) => (
+              <tr key={t.ticketId ?? "none"}>
+                <td>
+                  {t.ticketId ? (
+                    <>
+                      {t.ref ? <span className="mono">{t.ref}</span> : null} <a href={`#/tickets/${t.ticketId}`}>{t.title}</a>
+                    </>
+                  ) : (
+                    t.title
+                  )}
+                </td>
+                <td>{t.state ? t.state.replace(/_/g, " ") : ""}</td>
+                <td>{t.feature ?? ""}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{t.runs}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{usd(t.micros)}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{pct(data.totalMicros ? t.micros / data.totalMicros : 0)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 export function SpendReport({ company }: { company: Company | undefined }) {
   const [days, setDays] = useState<number>(30);
   const [by, setBy] = useState<Split>("agent");
@@ -206,6 +260,7 @@ export function SpendReport({ company }: { company: Company | undefined }) {
         <>
           <SpendChart data={data} by={by} />
           {data.rows.length === 0 ? <p className="muted">No spend in the last {days} days.</p> : <SpendTable data={data} by={by} />}
+          <TopTicketsTable data={data} />
         </>
       )}
     </>
