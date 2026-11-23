@@ -86,10 +86,12 @@ describe("circular failures (R50)", () => {
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-a1b2c3d/x.ts:10:3");
     await fail("Model overloaded (529)");
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-9z8y7x6/x.ts:12:9");
-    expect(await c.db.select().from(decisions).where(eq(decisions.kind, "question"))).toHaveLength(0);
+    // Each unknown error also raises its own "did not restart it" card at once (BOS-2357); only the circular-failure card is counted here.
+    const circular = async () => (await c.db.select().from(decisions).where(eq(decisions.kind, "question"))).filter((d) => d.question.startsWith("An agent run has hit the same failure"));
+    expect(await circular()).toHaveLength(0);
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-q1w2e3r/x.ts:14:1");
     await fail("TypeError: cannot read properties of undefined (reading 'limit') at /tmp/ws-zzzzzzz/x.ts:15:1");
-    const alerts = await c.db.select().from(decisions).where(eq(decisions.kind, "question"));
+    const alerts = await circular();
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.question).toMatch(/^An agent run has hit the same failure 3 times in 2 hours on "Add rate limiting"/);
   });
