@@ -485,8 +485,12 @@ export function feedbackService(
 
     // ---- Notes and insights ----
     createNote,
-    async notes(companyId: string, opts: { state?: "unprocessed" | "processed" | "archived"; q?: string; before?: Date; limit?: number } = {}) {
+    async notes(companyId: string, opts: { state?: "unprocessed" | "processed" | "archived"; q?: string; before?: Date; limit?: number; delivered?: boolean } = {}) {
       const q = opts.q?.trim();
+      // Delivered: at least one linked feature, and none that is not released.
+      const delivered = opts.delivered
+        ? sql`exists (select 1 from ${insights} where ${insights.noteId} = ${feedbackNotes.id}) and not exists (select 1 from ${insights} join ${features} on ${features.id} = ${insights.featureId} where ${insights.noteId} = ${feedbackNotes.id} and ${features.status} <> 'released')`
+        : undefined;
       const like = q ? `%${q.replace(/[%_\\]/g, "\\$&")}%` : null;
       const rows = await db
         .select({ note: feedbackNotes, customer: feedbackCustomers.name, insightCount: sql<number>`(select count(*) from ${insights} where ${insights.noteId} = ${feedbackNotes.id})`.mapWith(Number) })
@@ -497,13 +501,28 @@ export function feedbackService(
             eq(feedbackNotes.companyId, companyId),
             counted,
             opts.state ? eq(feedbackNotes.state, opts.state) : undefined,
+            delivered,
             opts.before ? lt(feedbackNotes.createdAt, opts.before) : undefined,
             like ? or(ilike(feedbackNotes.text, like), ilike(feedbackNotes.title, like), ilike(feedbackCustomers.name, like)) : undefined,
           ),
         )
         .orderBy(desc(feedbackNotes.createdAt))
         .limit(Math.min(opts.limit ?? 50, 200));
-      return rows.map((r) => ({ ...r.note, customer: r.customer, insightCount: r.insightCount }));
+      // One query for every listed note's linked features.
+      const links = rows.length
+        ? await db
+            .select({ noteId: insights.noteId, id: features.id, title: features.title, status: features.status })
+            .from(insights)
+            .innerJoin(features, eq(features.id, insights.featureId))
+            .where(inArray(insights.noteId, rows.map((r) => r.note.id)))
+            .orderBy(asc(insights.createdAt))
+        : [];
+      return rows.map((r) => ({
+        ...r.note,
+        customer: r.customer,
+        insightCount: r.insightCount,
+        features: links.filter((l) => l.noteId === r.note.id).map((l) => ({ id: l.id, title: l.title, status: l.status })),
+      }));
     },
     async unprocessedCount(companyId?: string) {
       const rows = await db

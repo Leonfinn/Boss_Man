@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Company, NoteSummary } from "../src/api";
-import { Feedback, fetchAllNotes, notesToCsv } from "../src/pages/Feedback";
+import { Feedback, fetchAllNotes, noteFilter, notesToCsv } from "../src/pages/Feedback";
 
 beforeEach(() => localStorage.clear());
 afterEach(() => {
@@ -23,6 +23,7 @@ const note = (over: Partial<NoteSummary>): NoteSummary => ({
   createdAt: "2026-11-08T12:00:00Z",
   customer: "Sam",
   insightCount: 2,
+  features: [],
   ...over,
 });
 
@@ -98,5 +99,12 @@ describe("Download CSV button", () => {
     expect(rows).toHaveLength(220);
     expect(urls[0]).toContain("state=archived&limit=200&q=export");
     expect(urls[1]).toContain("before=");
+  });
+});
+
+describe("noteFilter", () => {
+  it("maps the Delivered tab to delivered=true and the others to a state", () => {
+    expect(noteFilter("delivered")).toBe("delivered=true");
+    expect(noteFilter("processed")).toBe("state=processed");
   });
 });
