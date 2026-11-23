@@ -8,7 +8,8 @@ import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } fro
 import { z } from "zod";
 import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, decisions, notifications, settings } from "../db/schema.js";
+import { agents, companies, decisions, notifications, settings } from "../db/schema.js";
+import { summarizeWeek } from "./notification-week.js";
 import type { DecisionContext } from "./decisions.js";
 import type { AlertKind } from "./webhook-delivery.js";
 
@@ -410,6 +411,22 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         clearedAt: r.n.pushClearedAt,
         clearNote: r.n.pushClearNote,
       }));
+    },
+
+    /** BOS-2420: the last 7 days of notices by day in the quiet-hours time zone (UTC when none is set). */
+    async weekSummary() {
+      const tz = (await getSettings()).quietHours?.timeZone ?? "UTC";
+      const t = now();
+      const rows = await db
+        .select({ n: notifications, agentName: agents.name })
+        .from(notifications)
+        .leftJoin(agents, eq(agents.id, notifications.agentId))
+        .where(gt(notifications.createdAt, new Date(t.getTime() - 8 * 86_400_000)));
+      return summarizeWeek(
+        rows.map((r) => ({ id: r.n.id, createdAt: r.n.createdAt, pushedAt: r.n.pushedAt, demotedBy: r.n.demotedBy, pushError: r.n.pushError, agentId: r.n.agentId, agentName: r.agentName, link: r.n.link, title: r.n.title })),
+        tz,
+        t,
+      );
     },
 
     async setSettings(next: NotifySettings) {

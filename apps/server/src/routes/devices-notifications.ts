@@ -126,6 +126,8 @@ export function notificationRoutes(
   });
   // The last 20 phone pushes, with why each was urgent and whether its card is still open (BOS-1097).
   owner.get("/api/notifications/pushes", async () => ({ items: await notes.recentPushes(20) }));
+  // BOS-2420: "Last 7 days" on Settings → Notifications.
+  owner.get("/api/notifications/week", async () => notes.weekSummary());
   owner.post("/api/notifications/read", async (req) => {
     const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
     await notes.markRead(b.all ? "all" : (b.ids ?? []));

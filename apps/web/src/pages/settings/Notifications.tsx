@@ -8,6 +8,7 @@ import { when } from "../Runs";
 import { MoreAbout } from "../../components/MoreAbout";
 import { AlertDestinations } from "../../components/AlertDestinations";
 import { WeeklySummaryForm } from "../../components/WeeklySummaryForm";
+import { LoadError } from "../../components/LoadError";
 import { SaveButton, useSaveState } from "../../components/SaveButton";
 
 type LoginPoll =
@@ -561,12 +562,96 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
   );
 }
 
+type WeekCounts = { notices: number; pushed: number; quiet: number; cap: number; failed: number };
+type WeekView = {
+  timeZone: string;
+  days: Array<{ day: string } & WeekCounts>;
+  totals: WeekCounts;
+  topAgents: Array<{ agentId: string; name: string; notices: number; pushed: number }>;
+  lastFailure: { id: string; at: string; error: string; link: string; title: string } | null;
+};
+
+/** "Last 7 days" (BOS-2420): what quiet hours and the per-agent cap did, failed pushes, and the noisiest agents. */
+function LastSevenDays() {
+  const week = usePoll((signal) => api<WeekView>("/api/notifications/week", { signal }), 60_000, "notifications-week");
+  const w = week.data;
+  return (
+    <details className="pushes">
+      <summary>
+        <span>Last 7 days</span>
+        {w && <span className="muted">{` · ${w.totals.notices} notices, ${w.totals.pushed} to your phone`}</span>}
+      </summary>
+      {week.error && !w ? <LoadError what="the last 7 days" message={week.error.message} onRetry={week.reload} /> : null}
+      {w && !w.totals.notices && <p className="muted">Nothing was sent in the last 7 days.</p>}
+      {w && w.totals.notices > 0 && (
+        <>
+          <p className="muted" style={{ fontSize: 13 }}>
+            Days are in {w.timeZone}. "Lowered" means a notice was turned into a note by quiet hours or by the per-agent cap.
+          </p>
+          <table style={{ borderCollapse: "collapse", fontSize: 14 }}>
+            <thead>
+              <tr>
+                <th align="left">Day</th>
+                <th align="right">Notices</th>
+                <th align="right">To your phone</th>
+                <th align="right">Lowered by quiet hours</th>
+                <th align="right">Lowered by the cap</th>
+                <th align="right">Failed pushes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {w.days.map((d) => (
+                <tr key={d.day}>
+                  <td>{d.day}</td>
+                  <td align="right">{d.notices}</td>
+                  <td align="right">{d.pushed}</td>
+                  <td align="right">{d.quiet}</td>
+                  <td align="right">{d.cap}</td>
+                  <td align="right">{d.failed}</td>
+                </tr>
+              ))}
+              <tr>
+                <td>
+                  <strong>7 days</strong>
+                </td>
+                <td align="right">{w.totals.notices}</td>
+                <td align="right">{w.totals.pushed}</td>
+                <td align="right">{w.totals.quiet}</td>
+                <td align="right">{w.totals.cap}</td>
+                <td align="right">{w.totals.failed}</td>
+              </tr>
+            </tbody>
+          </table>
+          {w.topAgents.length > 0 && (
+            <>
+              <p style={{ marginBottom: 4 }}>Agents that notified you most</p>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {w.topAgents.map((a) => (
+                  <li key={a.agentId}>
+                    {a.name}: {a.notices} notices, {a.pushed} to your phone
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {w.lastFailure && (
+            <p className="error" style={{ fontSize: 14 }}>
+              Latest failed push ({when(w.lastFailure.at)}): {w.lastFailure.error} <a href={w.lastFailure.link}>See the notice</a>
+            </p>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
 /** Settings → Notifications (BOS-2327): how the owner is told, moved here from the feed page unchanged. */
 export function NotificationSettings({ companies }: { companies: Company[] | null }) {
   return (
     <>
       <SettingsForm />
       <RecentPhonePushes />
+      <LastSevenDays />
       <AlertDestinations />
       <WeeklySummaryForm companies={companies} />
     </>

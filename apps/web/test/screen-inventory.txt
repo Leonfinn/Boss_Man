@@ -257,6 +257,7 @@ reads:
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
   - /api/notifications/pushes
+  - /api/notifications/week
   - /api/setup
 
 ## #/settings/<company>/permissions
