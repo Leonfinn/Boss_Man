@@ -24,6 +24,7 @@ import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 import { ago } from "./Dashboard";
 import { ageShort } from "../age";
+import { yourReviewFirst } from "../board-lane-order";
 import { WorkStands } from "../components/WorkStands";
 import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
@@ -920,7 +921,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Awaiting review" : c.name);
   const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
-  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean; liveCheck?: boolean; checking?: boolean }> => {
+  const laneList = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean; liveCheck?: boolean; checking?: boolean }> => {
     const open = col.tickets.filter((t) => !t.waitingOnOwner);
     // BOS-1636: merged work in Blocked that only waits for its after-merge check is not stuck: its own lane, shown only when there is some.
     // BOS-1907: the lane is "Merged, watching". A merged ticket still in In progress (merged before the change) shows here too.
@@ -944,6 +945,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       { col, tickets: waiting, mine: true },
     ];
   });
+  // BOS-2337: "Your review" comes first when it has cards.
+  const lanes = yourReviewFirst(laneList);
   const heldCount = lanes.find((l) => l.held)?.tickets.length ?? 0;
   const shownTotal = lanes.reduce((n, l) => n + l.tickets.filter(passes).length, 0);
   const downloadCsv = () => {
