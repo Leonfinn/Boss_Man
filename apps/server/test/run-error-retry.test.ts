@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, deployTargets, deploys, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { RUN_ERROR_RESUME_KIND, classifyRunError, runErrorRetry } from "../src/services/run-error-retry.js";
 
 const MIN = 60_000;
@@ -134,6 +134,25 @@ describe("a run that ends on an error (BOS-2357)", () => {
     expect(await retry.afterRun(run!.id)).toBe("skipped");
     expect(await retry.afterRun(run!.id)).toBe("skipped");
     expect(await c.db.select().from(activity).where(eq(activity.kind, RUN_ERROR_RESUME_KIND))).toHaveLength(0);
+  });
+
+  it("a deploy's run that ends on an error (passing or not) gets one card naming the target, and no resume", async () => {
+    const c = (ctx = await setup());
+    const [target] = await c.db.insert(deployTargets).values({ companyId: c.companyId, name: "Staging box", kind: "ssh", endpoint: "example.com" }).returning();
+    const mk = async (error: string, status: "failed" | "succeeded") => {
+      const [run] = await c.db.insert(runs).values({ companyId: c.companyId, agentId: c.agentId, ticketId: c.ticketId, startedAt: new Date(Date.now() - 5 * MIN), lastEventAt: new Date(), outcome: `error: ${error}` }).returning();
+      await c.db.insert(deploys).values({ companyId: c.companyId, targetId: target!.id, agentId: c.agentId, ref: "v1", status, runId: run!.id });
+      return run!.id;
+    };
+    let resumed = 0;
+    const raised: string[] = [];
+    const retry = runErrorRetry(c.db, { now: () => new Date(), resume: async () => (resumed++, { outcome: "queued" }), alert: async (i) => (raised.push(i.question), { id: "x" }) });
+    expect(await retry.afterRun(await mk("SSE read timed out", "failed"))).toBe("card");
+    expect(await retry.afterRun(await mk("something odd", "failed"))).toBe("card");
+    expect(await retry.afterRun(await mk("SSE read timed out", "succeeded"))).toBe("skipped");
+    expect(resumed).toBe(0);
+    expect(raised).toHaveLength(2);
+    expect(raised[0]).toContain("Staging box");
   });
 
   it("a run that ended cleanly is left alone", async () => {
