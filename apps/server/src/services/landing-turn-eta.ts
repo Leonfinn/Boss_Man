@@ -51,7 +51,7 @@ export async function usualCiWait(db: Db, companyId: string, now: Date): Promise
  * Each ticket behind it needs its own run after the one before lands. Without a usual wait: nothing is guessed.
  */
 export function landingEtas(p: { holderSinceMs: number; ciSinceMs: number | null; lineIds: string[]; usualMs: number | null; nowMs: number }): { holder: number | null; line: Map<string, number> } {
-  const line = new Map<string, number>();
+  const line = new Map<string, number>(); // lost on restart, harmless because it is built fresh on every call
   if (p.usualMs === null) return { holder: null, line };
   const holder = Math.max(p.nowMs, (p.ciSinceMs ?? p.holderSinceMs) + p.usualMs);
   p.lineIds.forEach((id, i) => line.set(id, holder + (i + 1) * p.usualMs!));
