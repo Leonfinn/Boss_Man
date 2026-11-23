@@ -329,6 +329,17 @@ notlogged "kind-only.test.ts" "a test that uses only a type of the changed file"
 # A hand run picks them too.
 run 0 "a hand run of a shared change" env
 logged "pnpm --filter @boss-man/server exec vitest related --run test/direct.test.ts test/screens.test.ts" "hand run server"
+# A user that many tests import (a hub, like the server's app.ts) is not followed: its tests are left to the full check and GitHub.
+g checkout -q main
+wr apps/server/src/hub.ts 'import { OWNER_TABS } from "@boss-man/shared"; export const app = OWNER_TABS;'
+for i in 1 2 3; do wr "apps/server/test/via-hub$i.test.ts" 'import { app } from "../src/hub.js"; it("x", () => app);'; done
+g add -A; g commit -q -m "hub"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B sc5 origin/main; commit packages/shared/src/tabs.ts
+run 0 "a hub over the limit is not followed" env BOSSMAN_MERGE_CHECK=1 CHECK_QUICK_HUB_TESTS=2
+logged "pnpm --filter @boss-man/server exec vitest related --run test/direct.test.ts test/screens.test.ts" "hub: the other picks stay"
+notlogged "via-hub" "hub: tests through a hub"
+run 0 "a file within the limit is followed" env BOSSMAN_MERGE_CHECK=1 CHECK_QUICK_HUB_TESTS=3
+logged "test/via-hub1.test.ts test/via-hub2.test.ts test/via-hub3.test.ts" "within the limit"
 # A change that only re-exports (index.ts) picks nothing extra; typecheck covers it.
 g checkout -q -B sc2 origin/main; commit packages/shared/src/index.ts
 run 0 "an index.ts change" env BOSSMAN_MERGE_CHECK=1

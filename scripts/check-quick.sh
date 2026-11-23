@@ -343,9 +343,11 @@ related_files() { # related_files <dir>
 #   2. the value names they export (function, const, let, class, enum, export { ... }); types are left out: the typecheck of
 #      every package, which runs on any shared change, catches those;
 #   3. in launcher, runner, server and web, the files that import @boss-man/shared and use one of those names as a word;
-#   4. the test files among them, and the test files that import one of the others directly (by file name, as whole_repo_imports).
-# Known limit: a test that reaches the user only through a hub (test -> app.ts -> ... -> user) is not picked; those are what
-# made the plain related run the whole suite. The full check (high and critical) and GitHub (the rest) still run them.
+#   4. the test files among them, and the test files that import one of the others directly (by file name, as whole_repo_imports),
+#      unless that file is a hub, imported by more than CHECK_QUICK_HUB_TESTS (default 50) test files.
+# Known limit: a test that reaches the user only through a hub (test -> app.ts -> ... -> user, or a hub that uses the name
+# itself) is not picked; those are what made the plain related run the whole suite. The full check (high and critical) and
+# GitHub (the rest) still run them.
 # A short name (plan, rank) picks extra tests: too many is safe, too few is the risk.
 test_file_re='\.(test|spec)\.(ts|tsx|mts)$'
 shared_src_changed="$(grep -E '^packages/shared/src/.*\.(ts|tsx)$' <<<"$changed" | grep -vE "$test_file_re|\.d\.ts$|^packages/shared/src/index\.ts$" || true)"
@@ -371,7 +373,7 @@ if [ -n "$shared_src_changed" ]; then
   } 2>/dev/null | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | sort -u | tr '\n' '|' | sed 's/|$//')" || shared_names=""
 fi
 shared_consumer_tests() { # shared_consumer_tests <package dir>: its test files that use what the shared change exports, relative to it
-  local d=$1 users mods tests="" re
+  local d=$1 users mods tests="" all m b hits
   [ -n "$shared_names" ] || return 0
   case "$d" in apps/launcher | apps/runner | apps/server | apps/web) ;; *) return 0 ;; esac
   users="$({ grep -rlE --include='*.ts' --include='*.tsx' --include='*.mts' "[\"']@boss-man/shared(/[^\"']*)?[\"']" "$d/src" "$d/test" 2>/dev/null || true; } \
@@ -380,10 +382,16 @@ shared_consumer_tests() { # shared_consumer_tests <package dir>: its test files 
   tests="$(grep -E "$test_file_re" <<<"$users" || true)"
   mods="$(grep -vE "$test_file_re" <<<"$users" || true)"
   if [ -n "$mods" ]; then
-    # One grep for all of them: the import pattern of whole_repo_imports, with the file names as alternatives.
-    re="$(sed -E 's#.*/##; s#\.[a-z]+$##; s#\.#\\.#g' <<<"$mods" | sort -u | tr '\n' '|' | sed 's/|$//')"
-    tests="$tests"$'\n'"$({ find "$d/src" "$d/test" -type f \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.test.mts' -o -name '*.spec.ts' -o -name '*.spec.tsx' \) -print 2>/dev/null || true; } \
-      | { xargs -r grep -lE "(from|import|require)[[:space:](]*[\"']([^\"']*[/#])?($re)(\.(js|jsx|ts|tsx|mjs|mts))?[\"']" 2>/dev/null || true; })"
+    all="$(find "$d/src" "$d/test" -type f \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.test.mts' -o -name '*.spec.ts' -o -name '*.spec.tsx' \) -print 2>/dev/null || true)"
+    for m in $mods; do
+      b="$(basename "$m")"; b="${b%.*}"; b="${b//./\\.}"
+      # The import pattern of whole_repo_imports.
+      hits="$({ xargs -r grep -lE "(from|import|require)[[:space:](]*[\"']([^\"']*[/#])?$b(\.(js|jsx|ts|tsx|mjs|mts))?[\"']" 2>/dev/null || true; } <<<"$all")"
+      # A hub (the server's app.ts, mcp.ts and db/schema.ts, web's api.ts: each imported by 115 to 330 tests on 23 Nov, where
+      # every other file has at most 37) is the known limit above: its tests are not picked through it, or a change to
+      # risk.ts picked 362 server tests and 129 web tests (BOS-2334 measurements).
+      [ "$(grep -c . <<<"$hits")" -gt "${CHECK_QUICK_HUB_TESTS:-50}" ] || tests="$tests"$'\n'"$hits"
+    done
   fi
   { grep . <<<"$tests" || true; } | sed "s#^$d/##" | sort -u
 }
