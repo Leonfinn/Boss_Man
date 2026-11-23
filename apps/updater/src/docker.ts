@@ -93,7 +93,7 @@ export function assertSafeCreate(spec: unknown, allow: { volume: string; network
   if (m["Type"] !== "volume" || m["Source"] !== allow.volume) refuse("it mounts something other than the pack volume");
 }
 
-export type ServerKind = "colour" | "migrate" | "updater";
+export type ServerKind = "colour" | "migrate" | "updater" | "launcher";
 export type ServerAllow = { labelKey: string; labelValue: string; networks: string[]; volumes: string[]; kind: ServerKind; /** The one bind an updater may have: the Docker socket, `<host path>:/var/run/docker.sock`. */ socketBind?: string };
 
 /**
@@ -110,19 +110,22 @@ export function assertSafeServerCreate(spec: unknown, allow: ServerAllow): void 
   if (typeof s.Image !== "string" || !/^[a-z0-9.:/_-]+@sha256:[0-9a-f]{64}$/.test(s.Image)) refuse("the image is not named by digest");
   if (s.Labels?.[allow.labelKey] !== allow.labelValue) refuse("it does not carry this install's label");
   if (s.Env !== undefined && (!Array.isArray(s.Env) || !s.Env.every((e) => typeof e === "string"))) refuse("its environment is not a list of KEY=value text");
-  if (allow.kind === "updater" ? s.User !== "0:0" : s.User !== undefined && s.User !== "") refuse("it sets a user the spec does not");
+  // BOS-1227: the launcher is the second thing that may hold the Docker socket (one exact bind) and start as root with the same two capabilities.
+  const socketKind = allow.kind === "updater" || allow.kind === "launcher";
+  if (socketKind ? s.User !== "0:0" : s.User !== undefined && s.User !== "") refuse("it sets a user the spec does not");
   const h = s.HostConfig ?? {};
   if (h["Privileged"] !== false) refuse("it is not marked unprivileged");
   if (Array.isArray(h["Devices"]) && h["Devices"].length > 0) refuse("it asks for a device");
   const capAdd = Array.isArray(h["CapAdd"]) ? (h["CapAdd"] as string[]) : [];
-  if (allow.kind === "updater" ? capAdd.slice().sort().join() !== "SETGID,SETUID" : capAdd.length > 0) refuse("it asks for an extra capability");
+  if (socketKind ? capAdd.slice().sort().join() !== "SETGID,SETUID" : capAdd.length > 0) refuse("it asks for an extra capability");
   if (!Array.isArray(h["CapDrop"]) || !(h["CapDrop"] as string[]).includes("ALL")) refuse("it does not drop all capabilities");
   if (typeof h["NetworkMode"] !== "string" || !allow.networks.includes(h["NetworkMode"])) refuse("it is not on one of the install's own networks");
   for (const k of ["PidMode", "UTSMode", "UsernsMode", "CgroupnsMode"]) if (h[k] !== undefined && h[k] !== "" && h[k] !== "private") refuse(`it asks for another ${k}`);
   if (h["IpcMode"] !== undefined && h["IpcMode"] !== "" && h["IpcMode"] !== "private") refuse("it asks to share another process space");
   if (Array.isArray(h["Binds"]) && h["Binds"].length > 0) {
-    if (allow.kind !== "updater" || !allow.socketBind || h["Binds"].length !== 1 || h["Binds"][0] !== allow.socketBind) refuse("it asks for a host folder");
-  } else if (allow.kind === "updater" && allow.socketBind) refuse("the next updater would have no Docker socket");
+    if (!socketKind || !allow.socketBind || h["Binds"].length !== 1 || h["Binds"][0] !== allow.socketBind) refuse("it asks for a host folder");
+  } else if (socketKind && allow.socketBind) refuse("it would have no Docker socket");
+  if (allow.kind === "launcher" && h["ReadonlyRootfs"] !== true) refuse("the launcher must have a read-only root");
   const mounts = Array.isArray(h["Mounts"]) ? (h["Mounts"] as Record<string, unknown>[]) : [];
   for (const m of mounts) if (m["Type"] !== "volume" || typeof m["Source"] !== "string" || !allow.volumes.includes(m["Source"])) refuse("it mounts something the install does not list");
   if (!(allow.kind === "migrate") && h["RestartPolicy"] === undefined) refuse("it has no restart policy");
@@ -133,13 +136,13 @@ export type ContainerInfo = {
   Name?: string;
   Image?: string;
   Created?: string;
-  Config: { Labels: Record<string, string> | null; Image?: string };
-  State: { Status?: string; Running?: boolean; ExitCode?: number };
+  Config: { Labels: Record<string, string> | null; Image?: string; Env?: string[] | null };
+  State: { Status?: string; Running?: boolean; ExitCode?: number; Health?: { Status?: string } };
   NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null }> };
 };
 export type ImageInfo = { Id: string; Architecture?: string; RepoDigests?: string[] };
 
-export type DockerOptions = { installLabel: string; volume: string; network: string; /** Networks the swap may attach containers to. */ networks?: string[]; /** Named volumes a colour may mount. */ volumes?: string[]; socketBind?: string };
+export type DockerOptions = { installLabel: string; volume: string; network: string; /** Networks the swap may attach containers to. */ networks?: string[]; /** Named volumes a colour may mount. */ volumes?: string[]; socketBind?: string; /** Named volumes only the launcher may mount (BOS-1227): its data, key folder and the updater's state folder. */ launcherVolumes?: string[] };
 
 export function dockerClient(transport: Transport, opts: DockerOptions) {
   const [labelKey = "", labelValue = ""] = opts.installLabel.split("=", 2);
@@ -188,7 +191,7 @@ export function dockerClient(transport: Transport, opts: DockerOptions) {
     },
     /** A server colour, the migrate one-shot or the next updater, from the colour spec (checked by assertSafeServerCreate). */
     async createServer(name: string, spec: { Labels?: Record<string, string> } & Record<string, unknown>, kind: ServerKind): Promise<string> {
-      assertSafeServerCreate(spec, { labelKey, labelValue, networks: opts.networks ?? [opts.network], volumes: opts.volumes ?? [], kind, socketBind: opts.socketBind });
+      assertSafeServerCreate(spec, { labelKey, labelValue, networks: opts.networks ?? [opts.network], volumes: kind === "launcher" ? (opts.launcherVolumes ?? []) : (opts.volumes ?? []), kind, socketBind: opts.socketBind });
       const r = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
       const j = r.status === 201 ? json<{ Id: string }>(r) : null;
       return j?.Id ?? fail(r, "Creating the container failed");
@@ -304,9 +307,12 @@ export function dockerClient(transport: Transport, opts: DockerOptions) {
       if (r.status === 404) return null;
       return r.status === 200 ? json<ImageInfo>(r) : fail(r, "Reading the image failed");
     },
-    async removeImage(ref: string) {
+    /** Removes an image. false = Docker refused because a container still uses it (409): that is how "only when unused" is decided. */
+    async removeImage(ref: string): Promise<boolean> {
       const r = await call("DELETE", `/images/${encodeURIComponent(ref)}`);
+      if (r.status === 409) return false;
       if (r.status !== 200 && r.status !== 404) fail(r, "Removing the image failed");
+      return true;
     },
   };
 }

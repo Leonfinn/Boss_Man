@@ -119,6 +119,72 @@ export function updaterSpec(cfg: SwapReady, image: string, version: string, dige
   };
 }
 
+export const LABEL_HELPER = "com.bossman.helper";
+/** Where the launcher sees the updater's state folder (read-only), and the file in it (release-current.ts in the launcher). */
+export const RELEASE_FILE_NAME = "release-current.json";
+export const RELEASE_FILE_IN_LAUNCHER = "/run/release/release-current.json";
+
+export type HelperRelease = { version: string; launcher: string; runner: string; netguard: string; /** digests only: sha256:... */ };
+
+/**
+ * The launcher (BOS-1227): created from data like the colours, never copied from the running one. The image is the release's launcher
+ * digest; BOSSMAN_RUNNER_IMAGE and BOSSMAN_NETGUARD_IMAGE are the release's digests, so a launcher that starts without the
+ * `release-current` file still starts the release's runners. Root only to join the socket's group, then uid 1000 (apps/launcher/src/startup.ts).
+ */
+export function launcherSpec(cfg: SwapReady, r: HelperRelease) {
+  const h = cfg.swap.helpers;
+  if (!h) throw new UpdaterError("config", "The install does not define the launcher's settings (UPDATER_LAUNCHER_MOUNTS).");
+  const [lk, lv] = splitLabel(cfg);
+  return {
+    Image: `${cfg.registry}/boss-man-launcher@${r.launcher}`,
+    User: "0:0",
+    Env: [...h.launcherEnv, `BOSSMAN_RUNNER_IMAGE=${cfg.registry}/boss-man-runner@${r.runner}`, `BOSSMAN_NETGUARD_IMAGE=${cfg.registry}/boss-man-netguard@${r.netguard}`, `BOSSMAN_RELEASE_FILE=${RELEASE_FILE_IN_LAUNCHER}`],
+    Labels: { [lk]: lv, [LABEL_HELPER]: "launcher", [LABEL_RELEASE]: r.version, [LABEL_DIGEST]: r.launcher },
+    Healthcheck: { Test: ["CMD", "node", "dist/check.js"], Interval: 5_000_000_000, Timeout: 5_000_000_000, Retries: 2, StartPeriod: 5_000_000_000 },
+    HostConfig: {
+      Binds: [`${cfg.swap.socketHostPath}:/var/run/docker.sock`],
+      Mounts: h.launcherMounts.map((m) => ({ Type: "volume", Source: m.source, Target: m.target, ReadOnly: m.readOnly })),
+      NetworkMode: cfg.swap.launcherNetwork,
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      CapAdd: ["SETUID", "SETGID"],
+      SecurityOpt: ["no-new-privileges:true"],
+      Privileged: false,
+      Devices: [],
+      RestartPolicy: { Name: "unless-stopped" },
+      Memory: h.launcherMemory,
+      PidsLimit: 64,
+    },
+  };
+}
+
+/**
+ * The guard check (BOS-1227): the new guard image run once on its own, printing the ruleset it would load for a made-up address.
+ * No capability, no network of its own beyond the install's, nothing mounted: it proves the image starts and its script runs. Loading
+ * the rules in a runner's namespace happens at the next guard start, which stays fail-closed (a guard that does not load removes its runner).
+ */
+export function guardCheckSpec(cfg: SwapReady, image: string, version: string) {
+  const [lk, lv] = splitLabel(cfg);
+  return {
+    Image: image,
+    Cmd: ["--print"],
+    Env: ["NETGUARD_ALLOW=192.0.2.1:3100"],
+    Labels: { [lk]: lv, "com.bossman.guardcheck": version },
+    HostConfig: {
+      NetworkMode: cfg.network,
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      CapAdd: [],
+      SecurityOpt: ["no-new-privileges:true"],
+      Privileged: false,
+      Devices: [],
+      RestartPolicy: { Name: "no" },
+      Memory: 64 * 1024 * 1024,
+      PidsLimit: 32,
+    },
+  };
+}
+
 /** Refuses a release that needs a layout this updater does not build (the caller may update itself first when the release is newer). */
 export function checkLayout(installLayout: number | null): void {
   if (installLayout !== null && installLayout > LAYOUT) {

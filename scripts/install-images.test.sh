@@ -31,6 +31,8 @@ BOSSMAN_SERVER_DIGEST=$D
 BOSSMAN_LAUNCHER_DIGEST=$D
 BOSSMAN_NETGUARD_DIGEST=$D
 BOSSMAN_RUNNER_DIGEST=$D
+BOSSMAN_UPDATER_DIGEST=$D
+BOSSMAN_UPDATER_REPO=example/boss-man
 EOF
 
 # ---- Static checks: always run ----
@@ -43,19 +45,22 @@ echo "$cfg" | jq -e '[.services[] | has("build")] | any | not' >/dev/null && ok 
 # The only folder from the host is the Docker socket; everything else is a named volume.
 hostbinds="$(echo "$cfg" | jq -r '.services[].volumes[]? | select(.type == "bind") | .source' | sort -u)"
 [ "$hostbinds" = "/var/run/docker.sock" ] && ok "the only host path is the Docker socket" || bad "host paths bound: $hostbinds"
-sock="$(BOSSMAN_DOCKER_SOCK=/run/user/1000/docker.sock docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json | jq -r '.services.launcher.volumes[] | select(.target == "/var/run/docker.sock") | .source')"
+sock="$(BOSSMAN_DOCKER_SOCK=/run/user/1000/docker.sock docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json | jq -r '.services.updater.volumes[] | select(.target == "/var/run/docker.sock") | .source')"
 [ "$sock" = "/run/user/1000/docker.sock" ] && ok "BOSSMAN_DOCKER_SOCK picks the socket" || bad "socket setting: $sock"
 echo "$cfg" | jq -e '.services.setup.network_mode == "none" and (.services.setup.cap_add == ["CHOWN"])' >/dev/null && ok "setup has no network and one capability" || bad "setup is not locked down"
-echo "$cfg" | jq -e '.services.launcher.cap_add == ["SETGID","SETUID"] or .services.launcher.cap_add == ["SETUID","SETGID"]' >/dev/null && ok "the launcher keeps only SETUID and SETGID" || bad "launcher capabilities"
-# BOS-1226: the first colour compose makes and every colour the updater makes must be the same install (the updater builds them from
-# UPDATER_SPEC_ENV and UPDATER_SPEC_MOUNTS); a drift here is a difference that appears only after the first update.
-blue_env="$(echo "$cfg" | jq -r '.services["server-blue"].environment | to_entries | map(select(.key != "BOSSMAN_COLOUR" and .key != "BOSSMAN_ROLE")) | map("\(.key)=\(.value)") | .[]' | sort)"
-spec_env="$(echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SPEC_ENV' | grep -v '^$' | sort)"
-[ -n "$blue_env" ] && [ "$blue_env" = "$spec_env" ] && ok "server-blue's environment equals the updater's colour spec environment" || bad "server-blue's environment differs from UPDATER_SPEC_ENV"
-blue_mounts="$(echo "$cfg" | jq -r '.name as $p | .services["server-blue"].volumes[] | "\($p)_\(.source):\(.target)\(if .read_only then ":ro" else "" end)"' | sort)"
-spec_mounts="$(echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SPEC_MOUNTS' | grep -v '^$' | sort)"
-[ -n "$blue_mounts" ] && [ "$blue_mounts" = "$spec_mounts" ] && ok "server-blue's volumes equal the updater's colour spec mounts" || bad "server-blue's volumes differ from UPDATER_SPEC_MOUNTS: $blue_mounts / $spec_mounts"
-echo "$cfg" | jq -e '(.services.proxy.ports | length) == 2 and (.services["server-blue"] | has("ports") | not) and (.services.proxy.networks.front.ipv4_address != null)' >/dev/null && ok "the proxy owns the ports; the colour has none" || bad "proxy or colour ports"
+echo "$cfg" | jq -e '.services.updater.cap_add == ["SETGID","SETUID"] or .services.updater.cap_add == ["SETUID","SETGID"]' >/dev/null && ok "the updater keeps only SETUID and SETGID" || bad "updater capabilities"
+# BOS-1227 (941c): compose owns the database, the proxy, the updater and setup, and nothing else. A server or launcher service here
+# would let `docker compose up` bring an old one back beside the updater's, which is the fight the design rules out.
+svcs="$(echo "$cfg" | jq -r '.services | keys | join(" ")')"
+[ "$svcs" = "db proxy setup updater" ] && ok "compose runs only the database, the proxy, the updater and setup" || bad "services in compose: $svcs"
+echo "$cfg" | jq -e '(.services.proxy.ports | length) == 2 and (.services.proxy.networks.front.ipv4_address != null)' >/dev/null && ok "the proxy owns the ports" || bad "proxy ports"
+# The updater builds the first server colour and the launcher from its own settings: they must name the release's digests, and the
+# runner and guard images must not be in the launcher's environment list (the updater sets them from the release).
+fd="$(echo "$cfg" | jq -r '.services.updater.environment | [.UPDATER_FIRST_SERVER_DIGEST, .UPDATER_FIRST_LAUNCHER_DIGEST, .UPDATER_FIRST_RUNNER_DIGEST, .UPDATER_FIRST_NETGUARD_DIGEST] | unique | join(" ")')"
+[ "$fd" = "$D" ] && ok "the updater's first-start digests are the images.env digests" || bad "first-start digests: $fd"
+echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_ENV' | grep -Eq '^BOSSMAN_(RUNNER|NETGUARD)_IMAGE=' && bad "UPDATER_LAUNCHER_ENV sets a runner or guard image" || ok "the launcher's runner and guard images come from the release, not the environment list"
+echo "$cfg" | jq -r '.services.updater.environment.UPDATER_LAUNCHER_MOUNTS' | grep -q ':/run/release:ro$' && ok "the launcher sees release-current read-only" || bad "launcher release mount"
+echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SELF_MOUNTS' | grep -q 'launcher-key:/run/launcher:ro$' && ok "the next updater keeps the launcher key (read-only)" || bad "self mounts miss the launcher key"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
@@ -75,7 +80,8 @@ P="bminstall$$"
   echo "BOSSMAN_RUNNER_NETWORK=${P}_default"
 } > "$T/run.env"
 dc() { docker compose -p "$P" --env-file "$T/run.env" -f docker-compose.images.yml --profile images "$@"; }
-cleanup() { dc down -v --remove-orphans >/dev/null 2>&1; docker rm -f "boss-man-runner-smoke" "boss-man-netguard-smoke" >/dev/null 2>&1; rm -rf "$T"; }
+# The updater makes these (not compose), under fixed names, so they are removed here by name; `down -v` removes the volumes.
+cleanup() { docker rm -f "boss-man-runner-smoke" "boss-man-netguard-smoke" launcher launcher-next server-blue server-green updater-next >/dev/null 2>&1; dc down -v --remove-orphans >/dev/null 2>&1; rm -rf "$T"; }
 trap cleanup EXIT
 
 dc pull -q || { bad "pull by digest"; exit 1; }
@@ -104,14 +110,14 @@ ok "the server answers /api/health"
 # test workflow reads it for the release's result; nothing else needs it.
 [ -z "${INSTALL_SECONDS_FILE:-}" ] || echo "$SECONDS" > "$INSTALL_SECONDS_FILE"
 
-launcher_log="$(dc logs launcher 2>&1)"
+launcher_log="$(docker logs launcher 2>&1)"
 echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
 echo "$launcher_log" | grep -q '"msg":"data folder"' && ok "the launcher found its data volume on the host" || bad "launcher data folder"
 echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up and can reach Docker" || bad "launcher not listening"
 
 # Ask the launcher, from inside its container, to start a runner from the published runner image (it will not get a real token, so it cannot connect; starting is the point).
 tok="bmr_$(printf 'x%.0s' {1..43})"
-call() { dc exec -T --user 1000:1000 launcher node -e '
+call() { docker exec --user 1000:1000 launcher node -e '
 const fs=require("fs");const [m,p,b]=process.argv.slice(1);
 fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
  .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }

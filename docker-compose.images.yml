@@ -6,14 +6,22 @@
 # with this file from the release page. To use another registry, change BOSSMAN_REGISTRY in images.env.
 #
 #   docker compose --env-file images.env run --rm setup        # once: master key and database password, in a volume
-#   docker compose --env-file images.env --profile images pull # the runner and network-guard images the launcher starts
 #   docker compose --env-file images.env up -d
 # Then open http://<host>:3100 and create the owner account. Back up the "config" volume: without master.key, stored
 # secrets cannot be read.
 #
+# What compose runs (BOS-1227, 941c): the database, the proxy, the updater and setup. Nothing else. The updater makes the server (blue and
+# green colours) and the launcher itself, from the release this file's images.env pins, and from then on moves the whole release
+# (server, launcher, runner and network-guard images) through the Docker API at each update. Compose never owns a server or a
+# launcher, so `docker compose up` can never bring an older one back or fight the updater. The proxy owns the host ports and
+# the name "server"; which colour is live is a network alias the updater moves.
+#
 # Settings (all optional, in images.env or the environment): BOSSMAN_DOCKER_SOCK (the Docker socket on this host),
 # BOSSMAN_BIND / BOSSMAN_HOST_PORT, BOSSMAN_RUNNER_MEMORY and the others the build install (docker-compose.yml) documents.
 # The build install is unchanged and still works; do not run both on one host with the same project name.
+#
+# The environment of the first server and the launcher is in UPDATER_SPEC_ENV and UPDATER_LAUNCHER_ENV below: the updater builds
+# every colour and every launcher from those lists, at first start and at every update, so there is one place for them.
 
 name: boss-man
 
@@ -45,7 +53,7 @@ services:
       POSTGRES_DB: bossman
       POSTGRES_USER: bossman
       POSTGRES_PASSWORD_FILE: /run/db/db_password
-    # The updater (profile bluegreen) only touches containers that carry this label (BOS-941).
+    # The updater only touches containers that carry this label (BOS-941).
     labels:
       com.bossman.install: ${COMPOSE_PROJECT_NAME:-boss-man}
     volumes:
@@ -63,133 +71,8 @@ services:
       timeout: 5s
       retries: 10
 
-  server:
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-server@${BOSSMAN_SERVER_DIGEST:?Use --env-file images.env}
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgres://bossman@db:5432/bossman
-      BOSSMAN_DATABASE_PASSWORD_FILE: /run/db/db_password
-      BOSSMAN_MASTER_KEY_FILE: /run/config/master.key
-      BOSSMAN_LAUNCHER: "1"
-      BOSSMAN_DRAIN_MINUTES: ${BOSSMAN_DRAIN_MINUTES:-30}
-      BOSSMAN_LAUNCHER_URL: http://launcher:3105
-      BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
-      BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
-      BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}
-      BOSSMAN_PORTAL_PORT: "3101"
-      BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
-      NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
-      BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
-    mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
-    mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
-    oom_score_adj: -500
-    volumes:
-      - config:/run/config:ro
-      - db-secret:/run/db:ro
-      - launcher-key:/run/launcher:ro
-    networks: [default, launcher]
-    ports:
-      # Bound to localhost by default; set BOSSMAN_BIND=0.0.0.0 to reach it from the LAN.
-      - "${BOSSMAN_BIND:-127.0.0.1}:${BOSSMAN_HOST_PORT:-3100}:3100"
-      - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:${BOSSMAN_PORTAL_HOST_PORT:-3101}:3101"
-
-  launcher:
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-launcher@${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
-    restart: unless-stopped
-    environment:
-      # Company data is a named volume. The launcher asks Docker where it is on this host, because Docker starts the runners.
-      BOSSMAN_DATA: /data
-      BOSSMAN_DATA_HOST: auto
-      # The runner and guard images are pulled by `--profile images pull`; the launcher never pulls.
-      BOSSMAN_RUNNER_IMAGE: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
-      BOSSMAN_NETGUARD_IMAGE: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
-      BOSSMAN_RUNNER_NETWORK: ${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
-      BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
-      BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-}
-      BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
-      BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
-      BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
-      BOSSMAN_RESERVED_THREADS: ${BOSSMAN_RESERVED_THREADS:-off}
-      BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
-      BOSSMAN_OPENCODE_SESSION_DAYS: ${BOSSMAN_OPENCODE_SESSION_DAYS:-}
-      PNPM_STORE_DIR: ${PNPM_STORE_DIR:-}
-      BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
-      BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
-      BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
-    volumes:
-      - ${BOSSMAN_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
-      - data:/data
-      - launcher-key:/run/launcher
-    networks: [launcher]
-    read_only: true
-    # Starts as root with two capabilities only, to join the Docker socket's own group and become uid 1000 (apps/launcher/src/startup.ts).
-    # After that it keeps no capability. There is no group number to look up and put in a file.
-    user: "0:0"
-    cap_drop: [ALL]
-    cap_add: [SETUID, SETGID]
-    security_opt: ["no-new-privileges:true"]
-    mem_limit: 128m
-    pids_limit: 64
-
-  # ---- Blue/green updates (BOS-941b, profile "bluegreen"; design: engineering/architecture/bos-941-updater-container-design) ----
-  # Off by default. The three services below replace `server` (use one or the other, never both: they would fight over the port and
-  # the name "server"). The proxy owns the host ports and the name "server"; the updater swaps the colours through the Docker API
-  # and never runs compose. Making the first colour and the updater's key at first start is BOS-1227 (941c); until then this profile
-  # is for staging. The environment of server-blue and UPDATER_SPEC_ENV below must stay the same list: the updater builds every later
-  # colour from UPDATER_SPEC_ENV, so a difference here would be a difference after the first update.
-  server-blue:
-    container_name: server-blue
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-server@${BOSSMAN_SERVER_DIGEST:?Use --env-file images.env}
-    profiles: ["bluegreen"]
-    restart: unless-stopped
-    stop_grace_period: 60s
-    depends_on:
-      db:
-        condition: service_healthy
-    labels:
-      com.bossman.install: ${COMPOSE_PROJECT_NAME:-boss-man}
-      com.bossman.managed: "1"
-      com.bossman.colour: blue
-      com.bossman.release: ${BOSSMAN_VERSION:-0.0.0}
-      com.bossman.digest: ${BOSSMAN_SERVER_DIGEST}
-    environment:
-      DATABASE_URL: postgres://bossman@db:5432/bossman
-      BOSSMAN_DATABASE_PASSWORD_FILE: /run/db/db_password
-      BOSSMAN_MASTER_KEY_FILE: /run/config/master.key
-      BOSSMAN_LAUNCHER: "1"
-      BOSSMAN_DRAIN_MINUTES: ${BOSSMAN_DRAIN_MINUTES:-30}
-      BOSSMAN_LAUNCHER_URL: http://launcher:3105
-      BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
-      BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
-      BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_FRONT_PROXY_IP:-172.30.0.18}
-      BOSSMAN_PORTAL_PORT: "3101"
-      BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
-      NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
-      BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
-      BOSSMAN_COLOUR: blue
-      BOSSMAN_ROLE: auto
-    mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
-    mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
-    oom_score_adj: -500
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    volumes:
-      - config:/run/config:ro
-      - db-secret:/run/db:ro
-      - launcher-key:/run/launcher:ro
-    networks:
-      default:
-      launcher:
-      front:
-        # The alias the proxy dials ("server-live") is held by the live colour; the updater moves it at each update.
-        aliases: [server-blue-front, server-live]
-
   proxy:
     image: caddy:2.11.7@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
-    profiles: ["bluegreen"]
     restart: unless-stopped
     labels:
       com.bossman.install: ${COMPOSE_PROJECT_NAME:-boss-man}
@@ -251,9 +134,11 @@ services:
 
   updater:
     container_name: updater
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-updater@${BOSSMAN_UPDATER_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    profiles: ["bluegreen"]
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-updater@${BOSSMAN_UPDATER_DIGEST:?Use --env-file images.env (this release needs boss-man-updater published)}
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     labels:
       com.bossman.install: ${COMPOSE_PROJECT_NAME:-boss-man}
     # Starts as root with two capabilities only, to join the Docker socket's group and become uid 1000 (apps/updater/src/startup.ts).
@@ -265,7 +150,7 @@ services:
     mem_limit: 256m
     pids_limit: 128
     environment:
-      UPDATER_REPO: ${BOSSMAN_UPDATER_REPO:-}
+      UPDATER_REPO: ${BOSSMAN_UPDATER_REPO:?Use --env-file images.env (it names the GitHub repository that signed the release)}
       UPDATER_REGISTRY: ${BOSSMAN_REGISTRY}
       UPDATER_INSTALL_LABEL: com.bossman.install=${COMPOSE_PROJECT_NAME:-boss-man}
       UPDATER_CURRENT_VERSION: ${BOSSMAN_VERSION:-0.0.0}
@@ -278,7 +163,13 @@ services:
       UPDATER_DB_CONTAINER: ${COMPOSE_PROJECT_NAME:-boss-man}-db-1
       UPDATER_DOCKER_SOCK_HOST: ${BOSSMAN_DOCKER_SOCK:-/var/run/docker.sock}
       UPDATER_SERVER_MEMORY_RESERVED: "536870912"
-      # The values the updater gives every colour it makes: the same list as server-blue's environment, one KEY=value per line.
+      # The release this install file pins: the updater makes the server and the launcher from these digests at first start (no backup,
+      # no soak: nothing is serving yet) and only ever moves forward from there, by a signed release.
+      UPDATER_FIRST_SERVER_DIGEST: ${BOSSMAN_SERVER_DIGEST:?Use --env-file images.env}
+      UPDATER_FIRST_LAUNCHER_DIGEST: ${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
+      UPDATER_FIRST_RUNNER_DIGEST: ${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
+      UPDATER_FIRST_NETGUARD_DIGEST: ${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
+      # The values the updater gives every server colour it makes, one KEY=value per line.
       UPDATER_SPEC_ENV: |
         DATABASE_URL=postgres://bossman@db:5432/bossman
         BOSSMAN_DATABASE_PASSWORD_FILE=/run/db/db_password
@@ -300,27 +191,37 @@ services:
       UPDATER_SELF_MOUNTS: |
         ${COMPOSE_PROJECT_NAME:-boss-man}_updater-state:/state
         ${COMPOSE_PROJECT_NAME:-boss-man}_updater-key:/run/updater
+        ${COMPOSE_PROJECT_NAME:-boss-man}_launcher-key:/run/launcher:ro
+      # The values the updater gives every launcher it makes (the runner and guard images are set by the updater from the release; the
+      # `release-current` file in the updater's state folder, mounted read-only, tells a running launcher which release to start from).
+      UPDATER_LAUNCHER_ENV: |
+        BOSSMAN_DATA=/data
+        BOSSMAN_DATA_HOST=auto
+        BOSSMAN_RUNNER_NETWORK=${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
+        BOSSMAN_RUNNER_URL=ws://server:3100/api/runner/connect
+        BOSSMAN_RUNNER_MEMORY=${BOSSMAN_RUNNER_MEMORY:-}
+        BOSSMAN_RUNNER_PIDS=${BOSSMAN_RUNNER_PIDS:-4096}
+        BOSSMAN_RUNNER_CPU_SHARES=${BOSSMAN_RUNNER_CPU_SHARES:-512}
+        BOSSMAN_RUNNER_CPUS=${BOSSMAN_RUNNER_CPUS:-}
+        BOSSMAN_RESERVED_THREADS=${BOSSMAN_RESERVED_THREADS:-off}
+        BOSSMAN_CHECK_SLOTS=${BOSSMAN_CHECK_SLOTS:-}
+        BOSSMAN_OPENCODE_SESSION_DAYS=${BOSSMAN_OPENCODE_SESSION_DAYS:-}
+        PNPM_STORE_DIR=${PNPM_STORE_DIR:-}
+        BOSSMAN_NETGUARD=${BOSSMAN_NETGUARD:-auto}
+        BOSSMAN_NETGUARD_ALLOW=${BOSSMAN_NETGUARD_ALLOW:-}
+        BOSSMAN_LAUNCHER_KEY_FILE=/run/launcher/key
+      UPDATER_LAUNCHER_MOUNTS: |
+        ${COMPOSE_PROJECT_NAME:-boss-man}_data:/data
+        ${COMPOSE_PROJECT_NAME:-boss-man}_launcher-key:/run/launcher
+        ${COMPOSE_PROJECT_NAME:-boss-man}_updater-state:/run/release:ro
     volumes:
       - ${BOSSMAN_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - updater-state:/state
       - updater-key:/run/updater
-    # The updater's own private network, plus the front network so it can ask the new colour whether it is ready.
-    networks: [updater, front]
-
-  # Only here so `--profile images pull` fetches the images the launcher starts beside each company's runner. Never started
-  # (the "images" profile is off in `up`), so it leaves no stopped container in your dashboard.
-  runner-image:
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
-    profiles: ["images"]
-    restart: "no"
-  netguard:
-    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
-    profiles: ["images"]
-    restart: "no"
-    command: ["--build-only"]
-    network_mode: none
-    read_only: true
-    cap_drop: [ALL]
+      # The launcher's key, read-only: the updater asks the launcher whether a run is starting before it replaces it.
+      - launcher-key:/run/launcher:ro
+    # The updater's own private network, the front network (to ask a new colour whether it is ready) and the launcher's.
+    networks: [updater, front, launcher]
 
 networks:
   launcher:
@@ -345,8 +246,8 @@ volumes:
   db-data:
   # The last three database dumps the updater makes before an update.
   backups:
-  # The updater's progress file and its trusted-root cache; its key (the server reads it to call the updater).
+  # The updater's progress file, its trusted-root cache and `release-current`; its key (the server reads it to call the updater).
   updater-state:
   updater-key:
-  # The Claude pack volume the updater installs into (the launcher mounts it in 941c).
+  # The Claude pack volume the updater installs into (the launcher mounts it).
   claude-pack:
