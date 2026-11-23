@@ -91,6 +91,7 @@ sections:
   - Engagements
   - Terms
   - Thread
+  - Work
 reads: 
   - /api/engagements
   - /api/engagements/:id
