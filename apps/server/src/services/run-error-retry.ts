@@ -72,8 +72,10 @@ export function runErrorRetry(db: Db, deps: Deps) {
         );
         return "card";
       }
+      // onInterrupted answers null when it queues nothing (a deploy's run, BOS-480); that is not a resume and does not count.
+      const woke = (await deps.resume(runId)) as { outcome?: string } | null;
+      if (!woke || woke.outcome === "dropped") return "skipped";
       await record(db, { companyId: run.companyId, agentId: run.agentId, ticketId: run.ticketId, kind: RUN_ERROR_RESUME_KIND, summary: `Run ended on a passing error; resumed it: ${error}`, detail: { runId, error }, at });
-      await deps.resume(runId);
       return "resumed";
     },
   };
