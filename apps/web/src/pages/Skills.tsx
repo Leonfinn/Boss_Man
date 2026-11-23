@@ -646,7 +646,19 @@ function Proposals({ companyId }: { companyId: string }) {
   );
 }
 
+type Upstream = { status: "current" | "unchecked" } | { status: "newer"; commit: string; date: string | null } | { status: "error"; reason: string };
+
+/** A text tag (no button): the Refresh button stays the only way to take a newer version. */
+function UpstreamTag({ u }: { u: Upstream | undefined }) {
+  if (u?.status === "newer") return <span className="tag amber">Newer version available{u.date ? ` (${u.date.slice(0, 10)})` : ""}</span>;
+  if (u?.status === "error") return <span className="tag" title={u.reason}>Couldn't check for updates: {u.reason}</span>;
+  return null;
+}
+
 export function Skills({ company, skillId }: { company: Company | undefined; skillId?: string }) {
+  // The server keeps each source's answer for 6 hours, so asking now and then costs GitHub nothing extra.
+  const updates = usePoll((signal) => (company ? api<Record<string, Upstream>>(`/api/companies/${company.id}/skills/updates`, { signal }) : Promise.resolve({})), 600_000, company?.id ?? "none");
+  const upstream: Record<string, Upstream> = updates.data ?? {};
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
   // #/skills/<id> (the search box, BOS-2347) shows that skill, its pack folded open. App remounts the page on every
   // address change, so the first value is enough. On a phone the view sits under the list, so it is scrolled to.
@@ -680,6 +692,7 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
         ) : s.hasInstructions === false ? (
           <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>
         ) : null}
+        <UpstreamTag u={upstream[s.id]} />
         <small>
           {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => (company.agents.find((c) => c.id === a.id) && !harnessLoadsSkills(company.agents.find((c) => c.id === a.id)!.agentKind) ? `${a.name} (can't load skills)` : a.name)).join(", ") : "nobody yet"}
         </small>
@@ -725,6 +738,7 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
                         {p}
                       </button>{" "}
                       <span className="muted">({inPack.length})</span>
+                      {rows.some((r) => r.pack === p && upstream[r.id]?.status === "newer") && <span className="tag amber">Newer version available</span>}
                     </summary>
                     <ul>{inPack.map(item)}</ul>
                   </details>
