@@ -49,7 +49,7 @@ export async function spendBetween(db: Db, companyId: string, from: Date, to: Da
 
 async function mergedBetween(db: Db, companyId: string, from: Date, to: Date) {
   return db
-    .select({ title: tickets.title, number: tickets.number, featureId: tickets.featureId, feature: features.title })
+    .select({ id: tickets.id, title: tickets.title, number: tickets.number, featureId: tickets.featureId, feature: features.title })
     .from(tickets)
     .leftJoin(features, eq(features.id, tickets.featureId))
     .where(and(eq(tickets.companyId, companyId), isNotNull(tickets.mergedAt), gte(tickets.mergedAt, from), lt(tickets.mergedAt, to)))
@@ -86,7 +86,7 @@ export type WeeklyStored = { enabled: boolean; to: string | null; lastSentAt: st
 const key = (companyId: string) => `weekly_summary:${companyId}`;
 
 export type WeeklyFacts = {
-  merged: Array<{ title: string; feature: string | null }>;
+  merged: Array<{ title: string; feature: string | null; /** The ticket, for the in-app view's links; the email doesn't use it. */ id?: string }>;
   spentMicros: number;
   beforeMicros: number;
   released: string[];
@@ -121,21 +121,31 @@ export function weeklySummaryService(
     await db.insert(settings).values({ key: key(companyId), value: v }).onConflictDoUpdate({ target: settings.key, set: { value: v } });
   };
 
-  async function facts(companyId: string, at: Date): Promise<WeeklyFacts> {
+  /** The 7 days up to `at`. Waiting cards are always read as of `waitAt` (now): what waited in the past isn't kept. */
+  async function facts(companyId: string, at: Date, waitAt: Date = at): Promise<WeeklyFacts> {
     const from = new Date(at.getTime() - 7 * DAY);
     const merged = await mergedBetween(db, companyId, from, at);
     const rel = await db.select({ title: features.title }).from(features).where(and(eq(features.companyId, companyId), isNotNull(features.releasedAt), gte(features.releasedAt, from), lt(features.releasedAt, at)));
     return {
-      merged: merged.map((m) => ({ title: `${m.title.replace(/\s+/g, " ").slice(0, 80)}`, feature: m.feature })),
+      merged: merged.map((m) => ({ title: `${m.title.replace(/\s+/g, " ").slice(0, 80)}`, feature: m.feature, id: m.id })),
       spentMicros: await spendBetween(db, companyId, from, at),
       beforeMicros: await spendBetween(db, companyId, new Date(from.getTime() - 7 * DAY), from),
       released: rel.map((r) => r.title),
-      ...(await waitingCards(db, companyId, at)),
+      ...(await waitingCards(db, companyId, waitAt)),
     };
   }
 
   return {
     get,
+    /** The in-app summary (BOS-2390): the same facts and text as the email, for the 7 days up to now ("this") or the 7 days before ("last"). Works without email set up. */
+    async view(companyId: string, week: "this" | "last") {
+      const t = now();
+      const f = await facts(companyId, week === "this" ? t : new Date(t.getTime() - 7 * DAY), t);
+      const w = weeklyText(f);
+      const from = new Date((week === "this" ? t : new Date(t.getTime() - 7 * DAY)).getTime() - 7 * DAY);
+      const to = week === "this" ? t : new Date(t.getTime() - 7 * DAY);
+      return { week, from: from.toISOString(), to: to.toISOString(), ...f, text: week === "last" ? w.text.replace(/ this week/g, " last week") : w.text };
+    },
     /** Every company whose switch is on; one failing company doesn't stop the rest. */
     async runAll() {
       for (const c of await db.select({ id: companies.id }).from(companies)) await this.run(c.id).catch((err) => deps.log?.(`weekly summary for ${c.id} failed: ${(err as Error).message}`));

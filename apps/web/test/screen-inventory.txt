@@ -9,9 +9,11 @@ sections:
   - Needs you …
   - Recent tasks
   - Right now …
+  - Weekly summary
 reads: 
   - /api/companies/:id/dashboard
   - /api/companies/:id/merge-queue
+  - /api/companies/:id/weekly-summary/view
 
 ## #/agents
 sections: 
@@ -72,11 +74,13 @@ sections:
   - Needs you …
   - Recent tasks
   - Right now …
+  - Weekly summary
 reads: 
   - /api/companies/:id/dashboard
   - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
+  - /api/companies/:id/weekly-summary/view
   - /api/decisions/answered
   - /api/decisions/tally
   - /api/funding-sources
