@@ -30,7 +30,8 @@ const DAY = 86_400_000;
 
 describe("merge history route", () => {
   it("lists the last 14 days: results, waits, machine, the bounce's first failing line, per-day median; leaves out a 15-day-old merge", async () => {
-    const base = Date.now() - 3 * DAY;
+    // Start 2 h after a UTC midnight, so the merges (under 1 h long) stay on one day whatever time the test runs.
+    const base = Math.floor((Date.now() - 3 * DAY) / DAY) * DAY + 2 * 3_600_000;
     const ticket = async (title: string) =>
       (await ctx.db.insert(tickets).values({ companyId: ctx.companyId, projectId: ctx.projectId, title, systemState: "ready" }).returning())[0]!;
     const ev = (t: { id: string }, minute: number, detail: Record<string, unknown>, dayShift = 0) =>
