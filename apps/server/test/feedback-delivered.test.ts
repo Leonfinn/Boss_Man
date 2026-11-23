@@ -26,6 +26,8 @@ describe("feedback list: linked feature states and the delivered filter", () => 
     const delivered = await mk("a", [done.id]);
     const mixed = await mk("b", [done.id, open.id]);
     const unlinked = await mk("c", []);
+    const archived = await mk("d", [done.id]);
+    await req("PATCH", `/api/feedback/${archived}`, { state: "archived" });
 
     const all = (await req("GET", `${base}/feedback`)).json() as Array<{ id: string; features: Array<{ title: string; status: string }> }>;
     expect(all.find((n) => n.id === delivered)!.features).toMatchObject([{ title: "Dark mode", status: "released" }]);
@@ -33,6 +35,7 @@ describe("feedback list: linked feature states and the delivered filter", () => 
     expect(all.find((n) => n.id === unlinked)!.features).toEqual([]);
 
     const only = (await req("GET", `${base}/feedback?delivered=true`)).json() as Array<{ id: string }>;
-    expect(only.map((n) => n.id)).toEqual([delivered]);
+    // Delivered ignores the note's own state: the archived note is in too.
+    expect(only.map((n) => n.id).sort()).toEqual([delivered, archived].sort());
   });
 });

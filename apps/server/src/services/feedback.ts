@@ -517,11 +517,17 @@ export function feedbackService(
             .where(inArray(insights.noteId, rows.map((r) => r.note.id)))
             .orderBy(asc(insights.createdAt))
         : [];
+      const byNote = new Map<string, Array<{ id: string; title: string; status: (typeof links)[number]["status"] }>>();
+      for (const l of links) {
+        const list = byNote.get(l.noteId) ?? [];
+        list.push({ id: l.id, title: l.title, status: l.status });
+        byNote.set(l.noteId, list);
+      }
       return rows.map((r) => ({
         ...r.note,
         customer: r.customer,
         insightCount: r.insightCount,
-        features: links.filter((l) => l.noteId === r.note.id).map((l) => ({ id: l.id, title: l.title, status: l.status })),
+        features: byNote.get(r.note.id) ?? [],
       }));
     },
     async unprocessedCount(companyId?: string) {

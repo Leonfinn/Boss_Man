@@ -102,6 +102,24 @@ describe("Download CSV button", () => {
   });
 });
 
+describe("linked feature states", () => {
+  it("shows status tags, 'Not linked yet', and the delivered line on the Delivered tab", async () => {
+    const linked = note({ id: "n1", text: "Wants dark mode", features: [{ id: "f1", title: "Dark mode", status: "released" }] });
+    const bare = note({ id: "n2", text: "Wants nothing yet", features: [] });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const body = url.includes("delivered=true") ? [linked] : url.includes("/feedback?") ? [linked, bare] : url.includes("/feedback/unprocessed") ? {} : url.includes("/features") ? null : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    }));
+    render(<Feedback companies={companies} companyId="co-1" noteId={undefined} go={() => {}} />);
+    await screen.findByText("Wants nothing yet");
+    expect(screen.getByText("Dark mode: Released")).toBeTruthy();
+    expect(screen.getByText("Not linked yet")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("tab").find((t) => /delivered/i.test(t.textContent ?? ""))!);
+    await screen.findByText("1 note is delivered: their features are all released.");
+    expect(screen.queryByText("Wants nothing yet")).toBeNull();
+  });
+});
+
 describe("noteFilter", () => {
   it("maps the Delivered tab to delivered=true and the others to a state", () => {
     expect(noteFilter("delivered")).toBe("delivered=true");
