@@ -165,7 +165,7 @@ export const OWNER_CONTROLS = {
     "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
     "Server and runner",
-    "Run the setup wizard",
+    "Run the setup wizard", "Clear",
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
@@ -240,6 +240,8 @@ export const OWNER_FIELDS = {
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
   Runs: ["Search by ticket"],
+  // The Settings page's search box (BOS-2348).
+  Settings: ["Find a setting"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
