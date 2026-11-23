@@ -770,7 +770,7 @@ button.preset-card { cursor: pointer; }
 @media (min-width: 1200px) {
   /* (BOS-1492) The front page: the three groups side by side, so all 14 pages are in view without scrolling. */
   .set-nav-index { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 24px; align-items: start; }
-  .set-nav-index .set-wizard { grid-column: 1 / -1; }
+  .set-nav-index .set-wizard, .set-nav-index .set-find { grid-column: 1 / -1; }
   .set-nav-index ul { grid-template-columns: minmax(0, 1fr); }
 }
 /* A touch screen gets 44 px rows even on a wide screen (BOS-1018 §5: 40 px rows, 44 px on touch). */
