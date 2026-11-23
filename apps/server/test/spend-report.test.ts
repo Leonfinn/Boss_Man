@@ -27,7 +27,7 @@ async function setup() {
   const [run] = await db().insert(runs).values({ companyId: company!.id, ticketId: ticket!.id }).returning();
   const cost = (fundingSourceId: string, costMicros: number, occurredAt: string, extra: { runId?: string | null; agentId?: string | null; companyId?: string } = {}) =>
     db().insert(costEvents).values({ runId: run!.id, agentId: agent!.id, companyId: company!.id, fundingSourceId, costMicros, occurredAt: new Date(occurredAt), ...extra });
-  return { company: company!, elsewhere: elsewhere!, api: api!, sub: sub!, cost };
+  return { company: company!, project: project!, elsewhere: elsewhere!, api: api!, sub: sub!, cost };
 }
 
 describe("spendReport", () => {
@@ -62,6 +62,39 @@ describe("spendReport", () => {
     expect(nz.rows.map((r) => r.date)).toEqual(["2026-11-21"]);
     expect(nz.days.at(-1)).toBe("2026-11-22");
     expect(nz.totalMicros).toBe(100_000);
+  });
+
+  it("lists the costliest tickets with ref, state, feature, spend and run count, and the no-ticket spend as one row (BOS-2370)", async () => {
+    const s = await setup();
+    const [second] = await db().insert(tickets).values({ companyId: s.company.id, projectId: s.project.id, title: "Cheap one" }).returning();
+    const [run2] = await db().insert(runs).values({ companyId: s.company.id, ticketId: second!.id }).returning();
+    await s.cost(s.api.id, 1_000_000, "2026-11-20T10:00:00Z");
+    await s.cost(s.api.id, 2_000_000, "2026-11-20T11:00:00Z");
+    await s.cost(s.api.id, 500_000, "2026-11-20T11:00:00Z", { runId: run2!.id });
+    await s.cost(s.api.id, 1_200_000, "2026-11-20T12:00:00Z", { runId: null });
+    await s.cost(s.api.id, 1_200_000, "2026-11-20T13:00:00Z", { runId: null });
+    await s.cost(s.sub.id, 9_000_000, "2026-11-20T11:00:00Z");
+    await s.cost(s.api.id, 9_000_000, "2026-09-01T11:00:00Z");
+    const r = await spendReport(db(), s.company.id, { days: 7, timeZone: "UTC", now: NOW });
+    expect(r.topTickets.map((t) => [t.title, t.micros, t.runs])).toEqual([
+      ["Work", 3_000_000, 1],
+      ["Not on a ticket", 2_400_000, 0],
+      ["Cheap one", 500_000, 1],
+    ]);
+    expect(r.topTickets[0]).toMatchObject({ feature: "Search box", state: "backlog", ref: expect.stringMatching(/-\d+$/) });
+    expect(r.topTickets[1]).toMatchObject({ ticketId: null, ref: null });
+  });
+
+  it("caps the costliest tickets at 10", async () => {
+    const s = await setup();
+    for (let i = 0; i < 12; i++) {
+      const [t] = await db().insert(tickets).values({ companyId: s.company.id, projectId: s.project.id, title: `T${i}` }).returning();
+      const [rn] = await db().insert(runs).values({ companyId: s.company.id, ticketId: t!.id }).returning();
+      await s.cost(s.api.id, 100_000 + i, "2026-11-20T10:00:00Z", { runId: rn!.id });
+    }
+    const r = await spendReport(db(), s.company.id, { days: 7, timeZone: "UTC", now: NOW });
+    expect(r.topTickets).toHaveLength(10);
+    expect(r.topTickets[0]!.title).toBe("T11");
   });
 });
 
