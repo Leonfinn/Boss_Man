@@ -4,11 +4,10 @@
 // The requester sees the status and the thread, never the provider's tickets.
 import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { olderThan, pageLimit, type Page } from "./list-page.js";
-import { findCredential, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
+import { findCredential, ticketRef, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { closeCardBySystem } from "./card-validity.js";
 import { agents, companies, costEvents, decisions, engagementMessages, engagements, projects, runs, ticketDependencies, tickets } from "../db/schema.js";
-import { ticketRef } from "@boss-man/shared";
 
 export class EngagementError extends Error {
   constructor(

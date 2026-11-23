@@ -236,6 +236,33 @@ describe("charge-back (R26)", () => {
     expect(JSON.stringify(asRequester)).not.toContain("Deploy step");
   });
 
+  it("sums each engagement ticket's run costs into spentUsd, 0 for a ticket with no runs (BOS-2368)", async () => {
+    ctx = await setup();
+    const e = await ctx.request();
+    const [t1, t2] = await ctx.db
+      .insert(tickets)
+      .values([
+        { companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Costly step", engagementId: e.id },
+        { companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Free step", engagementId: e.id },
+      ])
+      .returning();
+    const fs = (await ctx.req("POST", "/api/funding-sources", { name: "API", kind: "api_credit", provider: "anthropic", monthlyGrantUsd: 200, cycleAnchor: "2026-10-01T00:00:00Z" })).json();
+    const [r1, r2] = await ctx.db
+      .insert(runs)
+      .values([
+        { companyId: ctx.homelab.company.id, agentId: ctx.homelab.ceo.id, ticketId: t1!.id },
+        { companyId: ctx.homelab.company.id, agentId: ctx.homelab.ceo.id, ticketId: t1!.id },
+      ])
+      .returning();
+    await ctx.db.insert(costEvents).values([
+      { runId: r1!.id, fundingSourceId: fs.id, companyId: ctx.homelab.company.id, costMicros: 1_250_000 },
+      { runId: r2!.id, fundingSourceId: fs.id, companyId: ctx.homelab.company.id, costMicros: 500_000 },
+    ]);
+    const view = await ctx.engagements.view(e.id, ctx.homelab.company.id);
+    expect(view.tickets!.map((t) => [t.title, t.spentUsd])).toEqual([["Costly step", 1.75], ["Free step", 0]]);
+    expect(t2!.id).toBeTruthy();
+  });
+
   it("shows an agent the last 20 messages and all of them on request", async () => {
     ctx = await setup();
     const e = await ctx.request();
