@@ -39,6 +39,69 @@ export type CheckWorkerView = {
   reason: string | null;
 };
 
+/** BOS-2373: one machine's last 7 days, from GET /api/settings/check-workers/stats. */
+export type MachineStatsView = {
+  machine: string;
+  total: number;
+  passed: number;
+  failed: number;
+  stuck: number;
+  medianSeconds: number | null;
+  longestSeconds: number | null;
+  recent: { id: string; ticketId: string; ref: string | null; title: string; kind: string; scope: string; result: string; seconds: number | null; endedAt: string | null }[];
+};
+
+const lengthText = (s: number | null) => (s === null ? "" : s < 90 ? `${s} s` : `${Math.round(s / 60)} min`);
+
+/** The 7-day line and the "Last 10 checks" fold for one machine. */
+export function MachineRecord({ stats }: { stats: MachineStatsView | undefined }) {
+  if (!stats || stats.total === 0) {
+    return (
+      <p className="muted" style={{ fontSize: 14, margin: 0 }} data-testid="machine-record">
+        No checks in the last 7 days
+      </p>
+    );
+  }
+  return (
+    <>
+      <p style={{ fontSize: 14, margin: 0 }} data-testid="machine-record">
+        {`7 days: ${stats.total} check${stats.total === 1 ? "" : "s"} · ${stats.passed} passed · ${stats.failed} failed · ${stats.stuck} stuck`}
+        {stats.medianSeconds !== null ? ` · median ${lengthText(stats.medianSeconds)}` : ""}
+        {stats.longestSeconds !== null ? ` · longest ${lengthText(stats.longestSeconds)}` : ""}
+      </p>
+      <details>
+        <summary style={{ fontSize: 14 }}>Last {Math.min(10, stats.recent.length)} checks</summary>
+        <table style={{ fontSize: 14 }}>
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>Kind</th>
+              <th>Scope</th>
+              <th>Result</th>
+              <th>Length</th>
+              <th>Ended</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.recent.map((c) => (
+              <tr key={c.id}>
+                <td>
+                  <a href={`#/tickets/${c.ticketId}`}>{c.ref ?? "ticket"}</a> {c.title}
+                </td>
+                <td>{c.kind}</td>
+                <td>{c.scope}</td>
+                <td>{c.result}</td>
+                <td>{lengthText(c.seconds)}</td>
+                <td>{when(c.endedAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
+    </>
+  );
+}
+
 type Draft = { name: string; companyIds: string[]; slots: string; threads: string; memoryGb: string; policy: SlotPolicy };
 const blank: Draft = { name: "", companyIds: [], slots: "1", threads: "", memoryGb: "", policy: DEFAULT_POLICY };
 
@@ -124,6 +187,8 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
   const choice = choices.find((c) => c.url === picked) ?? choices[0];
   const workerUrl = choice?.url ?? workerSocketUrl(window.location.origin);
   const list = companies.data ?? [];
+  const statsPoll = usePoll((signal) => api<MachineStatsView[]>("/api/settings/check-workers/stats", { signal }), 60_000, "check-worker-stats");
+  const statsOf = (machine: string) => (Array.isArray(statsPoll.data) ? statsPoll.data.find((s) => s.machine === machine) : undefined);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-workers">
@@ -131,6 +196,10 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
       <p className="muted" style={{ fontSize: 14 }}>
         Other machines that take checks when the runner's slots are full. A check worker runs checks only: merge checks (the full test run before a ticket lands) and quick checks (before review). It gets no secrets and runs no agents, and code only ever goes onto main from your main Boss Man server, never from a worker. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
       </p>
+      <div className="card" style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }} data-testid="check-runner-record">
+        <strong>Company runner</strong>
+        <MachineRecord stats={statsOf("runner")} />
+      </div>
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
       {workers.map((w) => (
         <div key={w.id} className="card" style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }} data-testid="check-worker">
@@ -144,6 +213,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               {w.toolchain?.node ? ` · Node ${w.toolchain.node}` : w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
             </span>
           </div>
+          <MachineRecord stats={statsOf(w.id)} />
           {w.memoryWarning && (
             <p style={{ fontSize: 14, margin: 0 }} className="tag red" data-testid="check-worker-memory-card-warning">
               Memory: {w.memoryWarning}

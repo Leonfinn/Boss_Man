@@ -16,6 +16,7 @@ import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, limitReason, memoryLine, read
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import type { mainCiService } from "../services/main-ci.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
+import { checkMachineStats } from "../services/check-machine-stats.js";
 import { runnerImageCommit } from "../services/runner-image.js";
 import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
@@ -269,6 +270,8 @@ export function settingsLimitsRoutes(
     w.disconnect(id, WORKER_OFF_CLOSE, "worker removed");
     return { ok: true };
   });
+  // BOS-2373: each machine's last 7 days of checks (read-only; its own block).
+  owner.get("/api/settings/check-workers/stats", async () => checkMachineStats(db));
   // BOS-313: check the merged result before pushing it (off by default while it rolls out).
   owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
   owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
