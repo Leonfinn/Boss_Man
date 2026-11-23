@@ -12,12 +12,13 @@ import { RowMenu } from "../components/RowMenu";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { buildCsv, download } from "../csv";
 import { clearDraft, saveDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { MoreAbout } from "../components/MoreAbout";
 
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
-type AgentRow = {
+export type AgentRow = {
   id: string;
   name: string;
   role: "ceo" | "manager" | "worker";
@@ -212,6 +213,26 @@ const isHours = (v: unknown): v is Hours => !!v && typeof v === "object" && Arra
 export const hoursText = (h: Hours) => `${h.days.map((d) => DAY_NAMES[d]).join(", ")}, ${h.start} to ${h.end} (${h.timeZone})`;
 const show = (v: unknown, sources: FundingSource[]) =>
   isHours(v) ? hoursText(v) : v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
+
+/** The listed agents as a spreadsheet: funding source by name only, working hours as days, times and zone. */
+export function agentsToCsv(rows: AgentRow[]): string {
+  return buildCsv(
+    ["name", "role", "job_title", "model", "thinking", "funding_source", "state", "working_days", "working_from", "working_to", "working_time_zone"],
+    rows.map((a) => [
+      a.name,
+      a.role,
+      jobOf(a),
+      a.model ?? "default",
+      a.thinking ?? "",
+      a.funding ?? "",
+      a.status,
+      a.workingHours ? a.workingHours.days.map((d) => DAY_NAMES[d] ?? d).join(" ") : "",
+      a.workingHours?.start ?? "",
+      a.workingHours?.end ?? "",
+      a.workingHours?.timeZone ?? "",
+    ]),
+  );
+}
 
 function Hire({ companyId, templates, sources, lists, refresh, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onDone: (name: string) => void }) {
   const [tpl, setTpl] = useState<Template | null>(null);
@@ -1000,7 +1021,17 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
       {!list.data && list.error && <LoadError what="agents" message={list.error.message} onRetry={list.reload} />}
       {!list.data && !list.error && <Loader label="Loading agents" />}
       {list.data && list.data.length > 0 && (
-        <input type="search" placeholder="Filter agents" aria-label="Filter agents" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input type="search" placeholder="Filter agents" aria-label="Filter agents" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <button
+            type="button"
+            className="btn"
+            disabled={!rows.length}
+            onClick={() => download(`agents-${company.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "company"}-${new Date().toISOString().slice(0, 10)}.csv`, agentsToCsv(rows))}
+          >
+            Download CSV
+          </button>
+        </div>
       )}
       {list.data && filter.trim() && rows.length === 0 && (
         <p className="muted">
