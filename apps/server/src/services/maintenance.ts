@@ -165,8 +165,8 @@ export function drainForecast(input: { runs: number; checks: RunnerCheck[]; dead
 
 /**
  * BOS-1951: the swap itself takes seconds, so a hold that still stands this long after it began, with no run, check or
- * merge going and no runner recently recreated or retrying, is waiting on something Boss Man can't name. Both the
- * banner (late, with the stop/cancel options) and the scheduler (chat keeps answering) read this one rule.
+ * merge going and no runner recently recreated or retrying, is waiting on something Boss Man can't name. The banner
+ * reads it (late, with the stop/cancel options). The chat no longer depends on it (BOS-2404: chat passes every hold).
  */
 export const UNKNOWN_WAIT_MS = 2 * 60_000;
 export function unknownWait(hold: Hold, at: Date, reconnectMs = SWAP_WINDOW_MS): boolean {
@@ -174,6 +174,21 @@ export function unknownWait(hold: Hold, at: Date, reconnectMs = SWAP_WINDOW_MS):
   if (at.getTime() - new Date(hold.since).getTime() < UNKNOWN_WAIT_MS) return false;
   if (Object.values(hold.tries ?? {}).length) return false; // a failed swap on its retry schedule is a swap, not a mystery
   return !Object.values(hold.swapped ?? {}).some((s) => at.getTime() - new Date(s).getTime() < reconnectMs); // a runner still dialling in
+}
+
+/**
+ * BOS-2404: the one time the owner's chat waits during an update: a runner was recreated and has not dialled back in.
+ * Returns when that wait ends at the latest (the recreate plus the reconnect window), or null when no runner is mid-swap.
+ * `isBack(slug)` says a runner is already connected again; without it every recent recreate counts. Pure, so the
+ * banner, the chat screen and their tests share it.
+ */
+export function swapInProgressUntil(hold: Hold | null, at: Date, reconnectMs = SWAP_WINDOW_MS, isBack: (slug: string) => boolean = () => false): Date | null {
+  if (!hold) return null;
+  const ends = Object.entries(hold.swapped ?? {})
+    .map(([slug, s]) => ({ slug, end: new Date(s).getTime() + reconnectMs }))
+    .filter(({ slug, end }) => end > at.getTime() && !isBack(slug))
+    .map(({ end }) => end);
+  return ends.length ? new Date(Math.max(...ends)) : null;
 }
 
 /** BOS-1954: the longest a drain pass waits for a scheduling pass to end before it tries again on the next pass. */
@@ -516,6 +531,25 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     return tell(text, h, h.kind === "wrapup" ? "wrapTold" : "startTold");
   }
 
+  /**
+   * BOS-2404: swapInProgressUntil, leaving out the runners already dialled back in and any the launcher no longer lists.
+   * If the launcher can't say, every recent recreate counts. Server-wide, like the banner; each company's chat screen
+   * names its own runner's swap (chat.ts state()).
+   */
+  async function swappingUntil(h: Hold): Promise<Date | null> {
+    if (!Object.keys(h.swapped ?? {}).length) return null;
+    let notSwapping: ((slug: string) => boolean) | undefined;
+    try {
+      const fleet = await deps.fleet();
+      const away = new Set<string>();
+      for (const r of fleet) if (!r.companyId || !(await deps.connected(r.companyId))) away.add(r.slug);
+      notSwapping = (slug) => !away.has(slug);
+    } catch {
+      // The launcher didn't answer: no runner is known to be back.
+    }
+    return swapInProgressUntil(h, now(), reconnectMs, notSwapping);
+  }
+
   const self = {
     /** Turns the hold on. Idempotent: a second call returns the hold that is already on. // leader-only */
     async start(opts: { reason?: string; minutes?: number; kind?: HoldKind } = {}): Promise<Hold> {
@@ -619,12 +653,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const busyNow = await runnerBusy(db, true, now());
       const active = busyNow.runs;
       const runsTotal = busyNow.runsTotal;
-      // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
       // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
       // A "stop the checks and update now" answer (force) means nothing is waited for any more.
       const checksList = h.kind === "wrapup" || h.kind === "building" || h.force || h.ignoreChecks ? [] : await runnerChecks(db, now());
-      // BOS-1877: the chat stays open while anything the swap waits on is still going (runs, or checks), not only runs.
-      // BOS-1951: merges being pushed to main hold the swap too (BOS-1645), so the banner names them and the chat stays open.
+      // BOS-1951: merges being pushed to main hold the swap too (BOS-1645), so the banner names them.
       // Not for a wrap-up hold: it swaps nothing. The same count the drain waits on, so text and swap never disagree.
       const mergeIds = h.kind === "wrapup" || h.kind === "building" || !deps.landingMergeIds ? [] : await deps.landingMergeIds().catch(() => [] as string[]);
       const mergesList = mergeIds.length
@@ -637,9 +669,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const mergesN = Math.max(mergeIds.length, mergesList.length);
       // Nothing named is going and the swap still has not happened: late and unnamed (see unknownWait).
       const unknown = h.kind !== "building" && runsTotal === 0 && checksList.length === 0 && mergesN === 0 && unknownWait(h, now(), reconnectMs);
-      // BOS-1955: a building hold is never "swapping": nothing is built yet, so chat stays open for the whole build.
+      // BOS-1955: a building hold is never "swapping": nothing is built yet.
       const forecast = h.kind === "building" ? { phase: "waiting" as const, expectedFinishAt: null, overdue: false } : drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now(), merges: mergesN, unknownWait: unknown });
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: h.kind === "building" || runsTotal > 0 || (h.kind !== "wrapup" && (checksList.length > 0 || mergesN > 0 || unknown)), blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, unknownWait: unknown, last };
+      // BOS-2404: the chat is open through every hold; it waits only while a runner is being recreated and not back yet.
+      const swapUntil = await swappingUntil(h);
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: !swapUntil, chatBackBy: swapUntil?.toISOString() ?? null, blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, unknownWait: unknown, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows

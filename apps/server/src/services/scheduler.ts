@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
 import { REAL_USE_LABEL, OUTGOING_LINE, harnessLoadsSkills, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
-import { CHAT_REASON } from "./chat.js";
+import { CHAT_REASON, RUNNER_OFFLINE } from "./chat.js";
 import { dueChatReport } from "./chat-report-back.js";
 import { agentHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
@@ -27,7 +27,7 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts, unknownWait } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
 import { createLaneWatch } from "./lane-watch.js";
 import { limitUnderHold, softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
@@ -284,8 +284,6 @@ export function schedulerService(
     onFeature?: (featureId: string) => Promise<unknown>;
     limits?: Partial<Limits>;
     now?: () => Date;
-    /** BOS-1951: tickets whose merge is being pushed to main; a runner swap waits for them, so chat keeps answering meanwhile. */
-    landingMergeIds?: () => Promise<string[]>;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
     quietHours?: () => Promise<QuietHours | null>;
     /** Tells the owner something without needing an answer (quota holds, credits in use). */
@@ -1142,7 +1140,7 @@ export function schedulerService(
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
     const [runner] = await db.select().from(runners).where(eq(runners.companyId, w.companyId));
     if (!agent || !company) return { ok: false, reason: "agent or company gone" };
-    if (!runner || !deps.runners.isConnected(runner.id)) return { ok: false, reason: "runner offline" };
+    if (!runner || !deps.runners.isConnected(runner.id)) return { ok: false, reason: RUNNER_OFFLINE };
 
     const runId = randomUUID();
     // Claim the wake before any side effect, so it can never start two runs.
@@ -1268,7 +1266,7 @@ export function schedulerService(
       if (chapter) await deps.chapters?.onLaunchFailed(runId);
       await db.delete(runs).where(eq(runs.id, runId));
       await db.update(wakes).set({ runId: null }).where(eq(wakes.id, w.id));
-      return { ok: false, reason: "runner offline" };
+      return { ok: false, reason: RUNNER_OFFLINE };
     }
     // A wake the WIP limit refused is marked, so the idle-slot sweeps don't count it against the ticket's daily allowance (BOS-1180).
     await db.update(wakes).set({ status: "launched", runId, launchedAt: now(), statusReason: wipRefused ? WIP_REFUSED_REASON : null }).where(eq(wakes.id, w.id));
@@ -1908,9 +1906,12 @@ export function schedulerService(
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
-      // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
-      // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
-      // may swap at any moment, so chats are held too, exactly as before.
+      // The owner's chat is never held by it (BOS-2404, DR on the wiki: "Owner chat passes every update hold"). It used to
+      // pass only while the swap waited on something on a list (runs BOS-349, checks BOS-1877, merges and "unknown"
+      // BOS-1951), and each wait not on the list held it silently: 23 Nov 20:28-20:47. The swap waits for a chat run that
+      // started during the hold, so passing never cuts a chat off. The only time a chat waits is the swap itself: its
+      // runner is being recreated, launch() says RUNNER_OFFLINE, and the chat screen names the swap and a time (chat.ts).
+      // The CEO's reply lane still passes only while work runs or checks go.
       let pass = queue;
       const hold = await getHold(db);
       if (hold && !holdBlocksStarts(hold, t)) {
@@ -1922,11 +1923,7 @@ export function schedulerService(
         // BOS-1877: running checks the swap waits on keep it from landing just as work runs do, so chat goes through
         // for them too (the swap then waits for that chat run). Not for a wrap-up hold, or once checks are not waited on.
         const checksWaited = hold.kind !== "wrapup" && !hold.force && !hold.ignoreChecks ? [...(await checkJobsByCompany(db, true, t)).values()].reduce((a, n) => a + n, 0) : 0;
-        // While work runs or checks are still going, only chat and reply wakes go on to launch; every other wake is held.
-        // BOS-1951: nor is the swap near while a merge is being pushed to main, or while it waits on something Boss Man can't
-        // name (the 19 Nov update sat 86 minutes with chat paused): chat pauses only for the swap itself.
-        const merging = hold.kind !== "wrapup" && work === 0 && checksWaited === 0 && deps.landingMergeIds ? (await deps.landingMergeIds().catch(() => [] as string[])).length : 0;
-        const mystery = work === 0 && checksWaited === 0 && merging === 0 && unknownWait(hold, t);
+        // While work runs or checks are still going, reply wakes go on to launch too; every other wake is held.
         // BOS-2058: a wake that reports on the update itself (wake-classes.ts PASSES_UPDATE_HOLD: UPDATE_ALERT_REASON, which
         // carries every "update is late" note) is never held by it. On 20 Nov at 11:48 the CEO's late-swap wake sat "update
         // pending" because a landing and then nothing nameable was what the swap waited on. Its run is a short reply-lane
@@ -1940,7 +1937,7 @@ export function schedulerService(
         const passes = (w: (typeof queue)[number]) => {
           if (duringUpdate(w.reason) === "passes") return true;
           if (passesByTicket(w)) return true;
-          if (w.reason === CHAT_REASON) return busy || merging > 0 || mystery;
+          if (w.reason === CHAT_REASON) return true;
           return busy && w.reason === CEO_REPLY_REASON;
         };
         const through = queue.filter(passes);
@@ -1993,7 +1990,7 @@ export function schedulerService(
       const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
       const pausedAgents = new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.paused, true))).map((a) => a.id));
       // The fence hold (BOS-373, DR-047): a company's agent work waits while its connected runner can't fence, unless
-      // the owner chose Off. An offline runner is left to launch()'s own "runner offline".
+      // the owner chose Off. An offline runner is left to launch()'s own RUNNER_OFFLINE.
       const fenceRows = await db
         .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, fenceOffFingerprint: companies.fenceOffFingerprint, guardOffChosenAt: companies.guardOffChosenAt, guardOffFingerprint: companies.guardOffFingerprint, runnerId: runners.id, sandbox: runners.sandbox, sandboxCheckedAt: runners.sandboxCheckedAt })
         .from(companies)
@@ -2275,7 +2272,7 @@ export function schedulerService(
           await wait(launched.reason);
           // "Runner offline" clears by itself: the wake stays queued and starts when the runner is
           // back, and the runner watch (BOS-467) is the one alert about an offline runner (BOS-480).
-          if (launched.reason !== "runner offline") await flagFailedStart(w, launched.reason);
+          if (launched.reason !== RUNNER_OFFLINE) await flagFailedStart(w, launched.reason);
           continue;
         }
         result.launched++;

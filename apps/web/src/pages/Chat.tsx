@@ -23,7 +23,7 @@ import type { TraceBody } from "@boss-man/shared";
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
 type Chat = { agentId: string; items: Message[]; hasMore?: boolean; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; runs: number; chatOpen: boolean; /** BOS-2404: while a runner is being swapped, when chat answers again at the latest. */ chatBackBy?: string | null; /** BOS-1951 */ merges?: number; checks?: number; unknownWait?: boolean; /** BOS-1877 */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -82,9 +82,15 @@ function busyText(state: string, name: string) {
   return state.replace(/^waiting: /, "Waiting: ");
 }
 
-/** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
+/** One plain line while a runner update waits: chat stays open the whole time (BOS-2404) and holds only while a runner is being swapped, with a time. */
 export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (!m.chatOpen)
+    return (
+      <p className="banner" role="status">
+        {`${m.kind === "settings" ? "Restarting the runners with the new setting" : "Swapping the runners to the new version"} now, usually under a minute${m.chatBackBy ? ` (chat answers again by ${atTime(m.chatBackBy)} at the latest)` : ""}. New messages are saved and answered then.`}
+      </p>
+    );
   if (m.kind === "building")
     return (
       <p className="banner" role="status">
@@ -94,24 +100,29 @@ export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (m.kind === "settings")
     return (
       <p className="banner" role="status">
-        {m.chatOpen
-          ? `Applying a runner setting change (not an update): waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open until then.`
-          : "Applying a runner setting change (not an update), back in a moment. New messages are saved and answered when it is done."}
+        {m.runs > 0
+          ? `Applying a runner setting change (not an update): waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open.`
+          : "Applying a runner setting change (not an update). Chat stays open."}
       </p>
     );
+  if (m.kind === "wrapup")
+    return (
+      <p className="banner" role="status">
+        {`Agents were asked to wrap up${m.runs > 0 ? `: ${m.runs} still finishing` : ""}. Nothing new starts, but chat stays open.`}
+      </p>
+    );
+  const expected = m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : "";
   return (
     <p className="banner" role="status">
-      {m.chatOpen
-        ? m.runs === 0 && m.unknownWait
-          ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner → Updates to stop waiting or cancel."
-          : m.runs === 0 && (m.merges ?? 0) > 0 && !(m.checks ?? 0)
-            ? `Update waiting for ${m.merges === 1 ? "a merge" : `${m.merges} merges`} being pushed to main${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
-          : m.runs === 0
-          ? `Update waiting for running checks to finish${m.expectedFinishAt ? `, expected about ${atTime(m.expectedFinishAt)}` : m.overdue ? " (taking longer than expected)" : ""}: chat stays open until then.`
-          : `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish: chat stays open until then.`
-        : m.phase === "swapping"
-          ? "Swapping the runners now, back in a moment. New messages are saved and answered when it is done."
-          : `Update pending${m.expectedFinishAt ? `: expected to finish about ${atTime(m.expectedFinishAt)}` : m.overdue ? ": taking longer than expected" : ""}. New messages are saved and answered when it is done.`}
+      {m.runs === 0 && m.unknownWait
+        ? "Update running late: Boss Man cannot say what it is waiting for. Chat stays open; see Settings → Server and runner → Updates to stop waiting or cancel."
+        : m.runs === 0 && (m.merges ?? 0) > 0 && !(m.checks ?? 0)
+          ? `Update waiting for ${m.merges === 1 ? "a merge" : `${m.merges} merges`} being pushed to main${expected}. Chat stays open.`
+          : m.runs === 0 && (m.checks ?? 0) > 0
+            ? `Update waiting for running checks to finish${expected}. Chat stays open.`
+            : m.runs > 0
+              ? `Update waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open.`
+              : `Update about to swap the runners${expected}. Chat stays open until the swap itself, which usually takes under a minute.`}
     </p>
   );
 }

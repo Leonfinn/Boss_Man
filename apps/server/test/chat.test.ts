@@ -238,16 +238,15 @@ describe("owner chat", () => {
     expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("answering");
   });
 
-  it("still holds the chat when nothing is working and an update is waiting (BOS-349)", async () => {
-    await (async () => {
-      const c = await setup();
-      await c.maintenance.start({ minutes: 30 });
-      // No agent is working, so the swap can land any moment: the chat waits, exactly as before.
-      expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Are you there?" })).statusCode).toBe(201);
-      await c.scheduler.tick();
-      expect(c.sent.some((x) => x.type === "run.start")).toBe(false);
-      expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: update pending");
-    })();
+  it("answers when nothing is working and an update is waiting (BOS-2404; BOS-349 held it here)", async () => {
+    const c = await setup();
+    await c.maintenance.start({ minutes: 30 });
+    // No agent is working. The chat used to wait here "because the swap can land any moment", and every wait the swap had
+    // that wasn't on its list held the chat too (23 Nov, 19 minutes). The swap waits for a chat run started during the hold.
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Are you there?" })).statusCode).toBe(201);
+    await c.scheduler.tick();
+    expect(c.sent.find((x): x is Start => x.type === "run.start")).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("answering");
   });
 
   it("stays open while an update waits only on a running check, not only on agents (BOS-1877)", async () => {
