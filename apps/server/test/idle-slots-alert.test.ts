@@ -85,6 +85,21 @@ describe("nothing is running alert", () => {
     expect(String(raised[0]!.question)).toContain("last run errored at 12:41 UTC");
   });
 
+  it("the 23 Nov shape: 0 runs, 2 Ready, 1 In-progress whose last run errored, every agent holding a future wake", async () => {
+    const [jo] = await db.insert(agents).values({ companyId, name: "Jo", role: "worker", agentKind: "claude" }).returning();
+    await addTicket("Ready one");
+    await addTicket("Ready two", { assigneeAgentId: jo!.id });
+    const [crashed] = await addTicket("Crashed", { systemState: "in_progress" });
+    await db.insert(runs).values({ companyId, agentId: ivyId, ticketId: crashed!.id, startedAt: at(-60), endedAt: at(-50), outcome: "error: SSE read timed out" });
+    for (const agentId of [ivyId, jo!.id]) await db.insert(wakes).values({ companyId, agentId, reason: "refresh", status: "deferred", notBefore: at(300) });
+    const raised: Array<Record<string, unknown>> = [];
+    await sweep(at(0), raised).run();
+    expect((await sweep(at(15), raised).run()).raised).toBe(1);
+    const q = String(raised[0]!.question);
+    for (const title of ["Ready one", "Ready two", "Crashed"]) expect(q).toContain(title);
+    expect(q.match(/deferred until 17:00 UTC/g)).toHaveLength(3);
+  });
+
   it("does not count an owner chat run as work", async () => {
     await addTicket("Next");
     await db.insert(runs).values({ companyId, agentId: ivyId, purpose: "chat" });
