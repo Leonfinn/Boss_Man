@@ -158,7 +158,7 @@ export const OWNER_CONTROLS = {
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
   Settings: [
     // "Server and runner" is the name of the last group, not a page (BOS-1492); its pages are Updates … Devices and privacy.
-    "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
     "Server and runner",
     "Run the setup wizard",
@@ -407,7 +407,7 @@ export const OWNER_MENU = [
 /** The tabs along the top of a screen (Settings.tsx TABS, Board.tsx PROJECT_TABS). */
 export const OWNER_TABS = {
   Settings: [
-    "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
   ],
   Board: ["Kanban", "Budget", "Config"],

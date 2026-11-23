@@ -17,6 +17,7 @@ import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, M
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
 import { Account } from "./settings/Account";
+import { NotificationSettings } from "./settings/Notifications";
 import { ExportCompany, ImportCompany } from "./settings/Transfer";
 
 export { Section, useAction } from "./settings/shared";
@@ -47,6 +48,7 @@ export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly Set
       { id: "funding", label: "Funding", hint: "Accounts agents run on, and budgets", help: "The subscriptions and API accounts agents run on, so their cost and quota are tracked, and each project's budget." },
       { id: "secrets", label: "Secrets", hint: "Keys and tokens, and who gets them", help: "Every stored credential, who gets it, and when it was used." },
       { id: "account", label: "Account", hint: "Your password, and signing out other devices", help: "Change your password, and sign out every other device that is logged in.", allCompanies: true },
+      { id: "notifications", label: "Notifications", hint: "How you're told, phone setup, alert destinations", help: "How Boss Man tells you: quiet hours, your phone, where alerts go, and the recent phone pushes. The feed itself is on the Notifications page.", allCompanies: true },
       { id: "tools", label: "Tools and deploys", hint: "Tool servers and deploy targets", help: "Tool servers (MCP) that give agents extra tools, and the deploy targets work can ship to." },
     ],
   },
@@ -315,6 +317,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
       </>
     ),
     account: <Account />,
+    notifications: <NotificationSettings companies={companies} />,
     transfer: (
       <>
         {company ? <ExportCompany key={company.id} company={company} /> : line}

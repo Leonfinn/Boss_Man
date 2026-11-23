@@ -48,6 +48,9 @@ describe("settings addresses outside the Settings page", () => {
     expect(settingsRedirect(["settings", "c1", "team"], "c1")).toBeNull();
     expect(settingsRedirect(["settings", "c1", "system"], "c1")).toBe("settings/c1/updates");
     expect(settingsRedirect(["rules", "all"], "c1")).toBe("settings/c1/permissions");
+    // BOS-2327: the notification settings left the feed page; the feed's own address stays.
+    expect(settingsRedirect(["notifications", "settings"], "c1")).toBe("settings/c1/notifications");
+    expect(settingsRedirect(["notifications"], "c1")).toBeNull();
     expect(settingsRedirect(["settings", "c1", "gone"], "c1")).toBe("settings");
     expect(settingsRedirect(["settings", "updates"], "c1")).toBe("settings/c1/updates");
     expect(settingsRedirect(["settings", "updates"], undefined)).toBeNull();
