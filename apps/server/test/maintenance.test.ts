@@ -1421,6 +1421,22 @@ describe("Ask agents to wrap up while an update waits (BOS-988)", () => {
     expect(await c.titles()).toContain("note: Runners updated");
   });
 
+  it("an update that takes over a wrap-up closes the wrap-up's record (BOS-2408), not left open as a restart", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await new Promise((r) => setTimeout(r, 5)); // test-lines-ok: the update's start time must differ from the wrap-up's
+    await c.maintenance.start();
+    expect((await getHold(c.db))!.kind).toBe("update");
+    await c.maintenance.step();
+    const rows = (await c.db.select().from(updateHolds)).sort((x, y) => x.startedAt.getTime() - y.startedAt.getTime());
+    expect(rows.map((r) => r.kind)).toEqual(["wrapup", "update"]);
+    expect(rows[0]!.endedAt).not.toBeNull();
+    expect(rows[0]!.endTitle).toContain("Taken over");
+    await c.maintenance.step();
+    expect((await c.db.select().from(updateHolds)).filter((r) => r.endTitle?.includes("Ended without a record"))).toHaveLength(0);
+  });
+
   it("Cancel wrap-up during an update takes back only the ask, never the update", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");

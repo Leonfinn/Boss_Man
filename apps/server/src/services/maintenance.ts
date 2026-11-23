@@ -572,6 +572,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // start message goes out below, so an agent that missed the wrap-up is told again by the update.
         if ((kind === "update" || kind === "settings") && have.kind === "wrapup") {
           const up: Hold = { ...have, kind, reason: kind === "settings" ? SETTINGS_REASON : "runner update", since: now().toISOString() };
+          // The wrap-up's own record ends here (its start time is the key); the update opens a new one below.
+          await history.close(have.since, { ok: true, title: "Taken over by a runner update (the wrap-up carries on as part of it)", body: "" });
           await save(up);
           await tellOnce(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP, up);
           return up;
