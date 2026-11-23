@@ -317,6 +317,7 @@ describe("test 9: a restart in the middle of a move resumes or cleans up", () =>
     put(s, { stage: "soaking", soakUntil: new Date(1_000_000 + 120_000).toISOString() });
     await (await recover(s.deps));
     expect(s.state.get().stage).toBe("done");
+    // test-lines-ok: fake daemon clock (no wall time); it checks the soak ends at its saved deadline, not a full 900 s soak
     expect(s.daemon.time).toBeLessThan(1_000_000 + 400_000);
     expect(s.daemon.find("server-blue")).toMatchObject({ running: false });
   });
