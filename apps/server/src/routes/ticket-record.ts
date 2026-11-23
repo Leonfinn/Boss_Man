@@ -6,10 +6,14 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { checkJobs, costEvents, projects, runs, tickets } from "../db/schema.js";
+import { mergeHistory } from "../services/merge-history.js";
 
 const IdParam = z.object({ id: z.string().uuid() });
 
 export function ticketRecordRoutes(owner: FastifyInstance, db: Db, deps: { filesChanged: (ticketId: string) => Promise<number | null> }) {
+  // BOS-2379: the Merge history page's read: the last 14 days of merges, read-only.
+  owner.get("/api/companies/:id/merge-history", async (req) => mergeHistory(db, IdParam.parse(req.params).id));
+
   owner.get("/api/tickets/:id/record", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const [t] = await db
