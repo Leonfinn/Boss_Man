@@ -271,6 +271,7 @@ reads:
   - /api/companies/:id/second-opinion
   - /api/companies/:id/second-opinion/stats
   - /api/policy-rules
+  - /api/policy-rules/usage
   - /api/secrets
 
 ## #/settings/<company>/reviews

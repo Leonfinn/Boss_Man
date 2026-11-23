@@ -14,15 +14,16 @@ const company: Company = { id: "c1", name: "App Co", mission: null, paused: fals
 describe("decision rules", () => {
   // BOS-2236: before the list arrives, or when it fails, the page must not pass for "no rules".
   it("shows Loading, not 'None yet.', and no add controls while the rules are on their way", async () => {
-    let release: (r: Response) => void = () => {};
-    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { release = resolve; })));
+    // The page also asks for rule usage (BOS-2372): keep every pending request, so none is left holding the shared request line.
+    const pending: Array<(r: Response) => void> = [];
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { pending.push(resolve); })));
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
     expect(screen.getByText("Loading…")).toBeTruthy();
     expect(screen.queryByText("None yet.")).toBeNull();
     expect(screen.queryByText("Add a rule")).toBeNull();
     expect(screen.queryByRole("checkbox")).toBeNull();
-    // Let the request finish so it does not hold the page's request line for later tests.
-    release(new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }));
+    // Let the requests finish so they do not hold the page's request line for later tests.
+    for (const release of pending) release(new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }));
     await screen.findByText("None yet.");
   });
 
@@ -247,5 +248,34 @@ describe("decision rules", () => {
     expect(screen.getAllByText(/No rules match/).length).toBe(2);
     fireEvent.change(box, { target: { value: "" } });
     expect(screen.getByLabelText("Move GitHub reads up")).toBeTruthy();
+  });
+
+  // BOS-2372: use per rule, "Not used in 30 days" for a rule with no match, and the built-in defaults too.
+  it("shows how often each rule matched and tags one unused for 30 days", async () => {
+    const list = {
+      company: [
+        { id: "r1", companyId: "c1", name: "Busy rule", match: { commandPattern: "^ls" }, outcome: "allow", position: 0 },
+        { id: "r2", companyId: "c1", name: "Quiet rule", match: { commandPattern: "^pwd" }, outcome: "allow", position: 1 },
+      ],
+      global: [],
+      defaults: [{ name: "Read-only shell", match: { kinds: ["read"] }, outcome: "allow" }],
+    };
+    const zero = { allow: 0, ceo: 0, owner: 0, deny: 0 };
+    const usage = { rules: { "Busy rule": { week: { ...zero, allow: 12 }, month: { ...zero, allow: 30, owner: 10 }, lastAt: new Date(Date.now() - 2 * 86_400_000).toISOString() }, "Read-only shell": { week: { ...zero, allow: 1 }, month: { ...zero, allow: 1 }, lastAt: new Date().toISOString() } } };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("/usage") ? usage : list), { status: 200 })));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    await screen.findByText(/12 this week · 40 in 30 days · last matched 2 days ago/);
+    expect(screen.getByText(/30 allowed, 0 sent to the CEO, 10 sent to you, 0 refused/)).toBeTruthy();
+    expect(screen.getAllByText("Not used in 30 days")).toHaveLength(1);
+    expect(screen.getByText(/1 this week · 1 in 30 days · last matched today/)).toBeTruthy();
+  });
+
+  it("keeps the rule list working and shows Retry when the usage load fails", async () => {
+    const list = { company: [{ id: "r1", companyId: "c1", name: "Busy rule", match: { commandPattern: "^ls" }, outcome: "allow", position: 0 }], global: [], defaults: [] };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (url.includes("/usage") ? new Response(JSON.stringify({ error: "Boom" }), { status: 500 }) : new Response(JSON.stringify(list), { status: 200 }))));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    expect(await screen.findByRole("button", { name: /retry/i })).toBeTruthy();
+    expect(screen.getByText("Busy rule")).toBeTruthy();
+    expect(screen.queryByText("Not used in 30 days")).toBeNull();
   });
 });
