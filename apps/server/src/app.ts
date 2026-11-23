@@ -1175,6 +1175,8 @@ export async function buildApp(opts: AppOptions) {
     wake: (agentId, w) => scheduler.notify(agentId, w),
     now: opts.now,
     branchHead: opts.branchHead ?? ((ticketId) => review.diff(ticketId).then((d) => d.head)),
+    // BOS-2303: a ticket approved while this check ran merges (or goes back) as soon as the check ends.
+    releaseHolds: (ticketId) => review.releaseHolds(ticketId),
   });
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.

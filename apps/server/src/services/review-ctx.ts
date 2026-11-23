@@ -24,7 +24,7 @@ import { record } from "./activity.js";
 import { wakeWatchers, type WatchNotify } from "./watch-triggers.js";
 import { leftLineSince, lineEvent, type HoldReason } from "./merge-line.js";
 import { priorityGroup } from "./priority-group.js";
-import { createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold } from "./review-holds.js";
+import { CHECK_WAIT_LABEL, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, type TurnWait } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
@@ -631,6 +631,23 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     return new ReviewHeldError(`This ticket's merge waits on ${refs}, so nothing was checked or merged. It stays approved in "Passed, held" and merges by itself once ${refs} is merged and live; leave it in review.`);
   }
 
+  /**
+   * BOS-2303: approved (or overruled) while its own quick check is queued or running, with no pass on that commit yet.
+   * Boss Man's own hold, with no waits, puts it in "Passed, held" with the approvals kept; the check's end starts the
+   * merge again (checkHold.onEnded, or the release sweep after a restart), and a failure there sends it back.
+   */
+  async function holdForCheck(ticketId: string, commit: string): Promise<ReviewHeldError> {
+    const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+    const text = `Its quick check of ${commit.slice(0, 8)} hasn't finished, so nothing was merged and no merge copy went to GitHub. It stays approved in "Passed, held": a pass starts the merge by itself, and a failure sends it back to its agent. Leave it in review.`;
+    if (!t) return new ReviewHeldError(text);
+    const { added } = await ensureSystemHold(db, t.id, [], `Approved while its quick check of ${commit.slice(0, 8)} was running: it merges by itself once that check passes.`);
+    if (added) {
+      await lineEvent(db, t, { event: "hold_started", hold: "quick_check", note: `${CHECK_WAIT_LABEL} (${commit.slice(0, 8)})` });
+      await record(db, { companyId: t.companyId, ticketId: t.id, kind: "review_hold_started", summary: `Approved and held: its quick check of ${commit.slice(0, 8)} is still running, so nothing was merged yet. A pass starts the merge by itself; a failure sends it back to its agent. The reviews and any sign-off stand.` });
+    }
+    return new ReviewHeldError(text);
+  }
+
   /** True while the owner's "Merge it, or send it back?" sign-off card for this ticket is open (BOS-471). */
   async function ownerSignoffOpen(ticketId: string): Promise<boolean> {
     return !!(await openSignoffCard(db, ticketId));
@@ -641,11 +658,19 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
    * then a hold, then a holding card, then a wait on another ticket (which also puts it in "Passed, held").
    */
   async function refuseIfHeld(ticketId: string): Promise<void> {
-    const [first] = await mergeHolds(db, ticketId);
+    const holds = await mergeHolds(db, ticketId);
+    const [first] = holds;
     if (!first) return;
     if (first.kind === "signoff") throw new SignoffPendingError();
+    // BOS-2303: Boss Man's own hold placed for the quick check says so, not the reviewer's wording.
+    const check = holds.find((h): h is Extract<typeof h, { kind: "check" }> => h.kind === "check");
+    if (first.kind === "hold" && check) {
+      const h = await openHold(db, ticketId);
+      if (h && !h.reviewerAgentId && !h.reviewRequestId) throw await holdForCheck(ticketId, check.commit);
+    }
     if (first.kind === "hold") throw new ReviewHeldError();
     if (first.kind === "card") throw cardHeld(first.id);
+    if (first.kind === "check") throw await holdForCheck(ticketId, first.commit);
     const waiting = await holdForWaits(ticketId);
     if (waiting) throw waiting;
   }
