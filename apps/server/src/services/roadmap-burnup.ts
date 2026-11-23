@@ -33,19 +33,21 @@ export function burnupWeeks(rows: BurnupRow[], today: string): BurnupPoint[] {
 
 /** Burn-up per milestone id; every id asked for gets 8 points (all zero when it has no sized work). */
 export async function roadmapBurnup(db: Db, milestoneIds: string[], today: string): Promise<Map<string, BurnupPoint[]>> {
-  const out = new Map<string, BurnupPoint[]>();
-  if (!milestoneIds.length) return out;
+  if (!milestoneIds.length) return new Map(milestoneIds.map((id): [string, BurnupPoint[]] => [id, []]));
   const feats = await db.select({ id: features.id, milestoneId: features.milestoneId }).from(features).where(inArray(features.milestoneId, milestoneIds));
   const msOfFeature = new Map(feats.map((f) => [f.id, f.milestoneId!]));
   const rows = await db
     .select({ milestoneId: tickets.milestoneId, featureId: tickets.featureId, size: tickets.size, createdAt: tickets.createdAt, state: tickets.systemState, changedAt: tickets.stateChangedAt })
     .from(tickets)
     .where(and(sql`${tickets.outcome} is distinct from 'cancelled'`, or(inArray(tickets.milestoneId, milestoneIds), feats.length ? inArray(tickets.featureId, feats.map((f) => f.id)) : undefined)));
-  const rowsOf = new Map<string, BurnupRow[]>();
-  for (const r of rows) {
-    const msId = r.milestoneId && milestoneIds.includes(r.milestoneId) ? r.milestoneId : r.featureId ? msOfFeature.get(r.featureId) : undefined;
-    if (msId) rowsOf.set(msId, [...(rowsOf.get(msId) ?? []), { size: r.size, createdAt: r.createdAt, doneAt: r.state === "done" ? r.changedAt : null }]);
-  }
-  for (const id of milestoneIds) out.set(id, burnupWeeks(rowsOf.get(id) ?? [], today));
-  return out;
+  const msIdOf = (r: (typeof rows)[number]) => (r.milestoneId && milestoneIds.includes(r.milestoneId) ? r.milestoneId : r.featureId ? msOfFeature.get(r.featureId) : undefined);
+  return new Map(
+    milestoneIds.map((id): [string, BurnupPoint[]] => [
+      id,
+      burnupWeeks(
+        rows.filter((r) => msIdOf(r) === id).map((r) => ({ size: r.size, createdAt: r.createdAt, doneAt: r.state === "done" ? r.changedAt : null })),
+        today,
+      ),
+    ]),
+  );
 }
