@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { agentWipCount, countInProgress } from "../src/services/agent-wip.js";
+import { agentWipCount, countInProgress, wipExemptKind } from "../src/services/agent-wip.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -112,5 +112,37 @@ describe("tickets that can't move don't count towards the WIP limit", () => {
     const cards = (await c.board()) as Array<{ id: string; checksParentMerged?: boolean }>;
     expect(cards.find((t) => t.id === check.id)?.checksParentMerged).toBe(true);
     expect(cards.find((t) => t.id === plain.id)?.checksParentMerged).toBe(false);
+  });
+});
+
+// BOS-1172/1907/1908: the one pure rule behind the WIP count and the board's "why it doesn't count" tag.
+describe("wipExemptKind", () => {
+  const counting = { planFirst: false, planApprovedAt: null, plan: null, mergedAt: null, goLiveWait: null };
+
+  it("a ticket nothing holds counts, and an open waits-on link frees it", () => {
+    expect(wipExemptKind(counting, false)).toBeNull();
+    expect(wipExemptKind(counting, true)).toBe("waits");
+  });
+
+  it("a plan-first ticket with a plan but no approval is freed; approved or still being planned is not", () => {
+    expect(wipExemptKind({ ...counting, planFirst: true, plan: "The plan" }, false)).toBe("plan");
+    expect(wipExemptKind({ ...counting, planFirst: true, plan: "The plan", planApprovedAt: new Date() }, false)).toBeNull();
+    expect(wipExemptKind({ ...counting, planFirst: true }, false)).toBeNull();
+    expect(wipExemptKind({ ...counting, plan: "The plan" }, false)).toBeNull();
+  });
+
+  it("a merged ticket is freed whether it waits to go live or is already live", () => {
+    expect(wipExemptKind({ ...counting, mergedAt: new Date(), goLiveWait: "server" }, false)).toBe("live");
+    expect(wipExemptKind({ ...counting, mergedAt: new Date(0), goLiveWait: null }, false)).toBe("live");
+  });
+
+  it("a ticket the agent is busy on elsewhere is parked as busy", () => {
+    expect(wipExemptKind(counting, false, "BOS-1")).toBe("busy");
+    expect(wipExemptKind(counting, false, null)).toBeNull();
+  });
+
+  it("an open waits-on link wins over every other reason", () => {
+    const held = { planFirst: true, planApprovedAt: null, plan: "The plan", mergedAt: new Date(), goLiveWait: "server" };
+    expect(wipExemptKind(held, true, "BOS-1")).toBe("waits");
   });
 });

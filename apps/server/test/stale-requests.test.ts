@@ -9,7 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { decisions, deploys, deployTargets, engagements, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { decisionsService } from "../src/services/decisions.js";
-import { ownerActed, STALE_REASON } from "../src/services/stale-requests.js";
+import { answerHoldsAsFact, ownerActed, STALE_REASON } from "../src/services/stale-requests.js";
 import { workService } from "../src/services/work.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -457,5 +457,30 @@ describe("alert answers wake on the alert's ticket (BOS-1120)", () => {
     await c.decisions.answer(d.id, "Got it");
     const rows = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "decision answered")));
     expect(rows).toHaveLength(0);
+  });
+});
+
+// BOS-1591/1593: only an answer that stays true counts as the owner's word, so a plan or a job for
+// the owner's hands ("Done") can be asked again rather than blocking a fresh ask as a repeat.
+describe("answerHoldsAsFact", () => {
+  it("holds a plain owner answer as a fact, and treats a missing context as a fact (nothing says otherwise)", () => {
+    expect(answerHoldsAsFact({})).toBe(true);
+    expect(answerHoldsAsFact({ settled: false, plan: false, ownerMustDo: false, steps: [] })).toBe(true);
+    expect(answerHoldsAsFact({ settled: null, plan: undefined })).toBe(true);
+    expect(answerHoldsAsFact(undefined)).toBe(true);
+    expect(answerHoldsAsFact(null)).toBe(true);
+  });
+
+  it("does not hold an answer the CEO settled, or one that was a plan or a job for the owner's hands", () => {
+    expect(answerHoldsAsFact({ settled: true })).toBe(false);
+    expect(answerHoldsAsFact({ settled: "Yes" })).toBe(false);
+    expect(answerHoldsAsFact({ plan: true })).toBe(false);
+    expect(answerHoldsAsFact({ ownerMustDo: true })).toBe(false);
+    expect(answerHoldsAsFact({ ownerMustDo: true, steps: ["Click Save"] })).toBe(false);
+  });
+
+  it("does not hold an answer whose card carried owner steps, even when ownerMustDo is not set", () => {
+    expect(answerHoldsAsFact({ steps: ["Open Settings"] })).toBe(false);
+    expect(answerHoldsAsFact({ steps: [] })).toBe(true);
   });
 });
