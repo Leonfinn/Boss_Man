@@ -21,8 +21,8 @@ import { resetTrains } from "../src/services/merge-train.js";
 type Ctx = Awaited<ReturnType<typeof setup>>;
 let ctx: Ctx | undefined;
 afterEach(async () => {
-  ctx?.stopJobs();
-  await new Promise((r) => setTimeout(r, 50));
+  // Wait for the fake check runner's loop to end (it is the only thing still writing to the database), not a fixed pause.
+  await ctx?.stopJobs();
   await ctx?.app.close();
   await ctx?.close();
   ctx = undefined;
@@ -215,7 +215,7 @@ async function setup(opts: { slots?: number } = {}) {
   };
   /** Plays the check runner: every queued merge job (the gate's own check, and its re-run of GitHub's failed tests) passes. */
   let stopped = false;
-  void (async () => {
+  const jobLoop = (async () => {
     while (!stopped) {
       const queued = await db.select().from(checkJobs).where(and(inArray(checkJobs.state, ["queued", "running"]), eq(checkJobs.kind, "merge"))).orderBy(asc(checkJobs.queuedAt)).catch(() => []);
       for (const j of queued) await db.update(checkJobs).set({ state: "passed", exitCode: 0, logTail: "ok", startedAt: new Date(), endedAt: new Date() }).where(and(eq(checkJobs.id, j.id), inArray(checkJobs.state, ["queued", "running"]))).catch(() => undefined);
@@ -226,7 +226,10 @@ async function setup(opts: { slots?: number } = {}) {
   const allEvents = async (event: string) => (await db.select({ detail: activity.detail }).from(activity).where(eq(activity.kind, "merge_line"))).map((r) => r.detail as Record<string, unknown>).filter((d) => d.event === event);
   const summaries = async (id: string) => (await db.select({ summary: activity.summary }).from(activity).where(eq(activity.ticketId, id))).map((r) => r.summary ?? "");
   const stateOf = async (id: string) => (await db.select({ s: tickets.systemState }).from(tickets).where(eq(tickets.id, id)))[0]?.s;
-  const out = { app: built.app, close, stopJobs: () => void (stopped = true), db, git, gh, ticket, approve, outcome, waitFor, names, events, allEvents, summaries, stateOf, companyId: company.id, serverStatus: built.serverStatus };
+  const out = { app: built.app, close, stopJobs: async () => {
+    stopped = true;
+    await jobLoop;
+  }, db, git, gh, ticket, approve, outcome, waitFor, names, events, allEvents, summaries, stateOf, companyId: company.id, serverStatus: built.serverStatus };
   ctx = out;
   return out;
 }
