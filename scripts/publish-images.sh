@@ -63,12 +63,12 @@ cmd_prefixes() {
 cmd_images() {
   local n
   for n in ${PUBLISH_IMAGES:-boss-man-server boss-man-launcher boss-man-netguard}; do
-    case "$n" in boss-man-server | boss-man-launcher | boss-man-netguard | boss-man-runner) echo "$n" ;; *) die "unknown image '$n'" ;; esac
+    case "$n" in boss-man-server | boss-man-launcher | boss-man-netguard | boss-man-runner | boss-man-updater) echo "$n" ;; *) die "unknown image '$n'" ;; esac
   done
 }
 
 cmd_dockerfile() {
-  case "${1:-}" in boss-man-server | boss-man-launcher | boss-man-netguard | boss-man-runner) echo "apps/${1#boss-man-}/Dockerfile" ;; *) die "unknown image '${1:-}'" ;; esac
+  case "${1:-}" in boss-man-server | boss-man-launcher | boss-man-netguard | boss-man-runner | boss-man-updater) echo "apps/${1#boss-man-}/Dockerfile" ;; *) die "unknown image '${1:-}'" ;; esac
 }
 
 cmd_tag() {
@@ -131,9 +131,24 @@ cmd_resolve_commit() {
   echo "$full"
 }
 
+# The Claude pack folder name for a commit: the first 24 hex characters of the sha256 of apps/runner/claude-pack/package-lock.json
+# at that commit, the same rule as lockHash() in apps/runner/src/claude-pack.ts. The updater (BOS-941a) compares the folder its pack
+# installer made with this signed value. Read from git at the released commit (main may have moved on since).
+pack_hash() {
+  local h
+  h="$(git show "$1:apps/runner/claude-pack/package-lock.json" 2>/dev/null | sha256sum | cut -c1-24)" || true
+  git cat-file -e "$1:apps/runner/claude-pack/package-lock.json" 2>/dev/null || die "commit $1 has no apps/runner/claude-pack/package-lock.json, so release.json cannot name the Claude pack hash"
+  [[ "$h" =~ ^[0-9a-f]{24}$ ]] || die "could not hash the Claude pack lockfile at $1"
+  echo "$h"
+}
+
+# The number of the colour-spec layout the updater's swap builds (941b). Bump it with a change to that layout.
+INSTALL_LAYOUT=1
+
 cmd_release_json() {
-  local version="${1:?version}" commit="${2:?commit}" tag="${3:?tag}" first p name d got images=() prefixes_json
+  local version="${1:?version}" commit="${2:?commit}" tag="${3:?tag}" first p name d got images=() prefixes_json packhash
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "version '$version' is not like 0.1.0 or 0.1.0-beta.1"
+  packhash="$(pack_hash "$commit")"
   load_prefixes
   first="${prefixes[0]}"
   load_images
@@ -147,8 +162,9 @@ cmd_release_json() {
       | jq -c --arg n "$name" --arg d "$d" '{name: $n, digest: $d, platforms: ([.manifests[] | select(.platform.os == "linux" and .platform.architecture != "unknown") | {key: (.platform.os + "/" + .platform.architecture), value: .digest}] | from_entries)}')")
   done
   prefixes_json="$(printf '%s\n' "${prefixes[@]}" | jq -R . | jq -sc .)"
-  printf '%s\n' "${images[@]}" | jq -s --arg v "$version" --arg c "$commit" --argjson p "$prefixes_json" \
-    '{schema: 1, version: $v, commit: $c, registries: $p, images: .}'
+  # packHash and installLayout are additive: an updater reading an older release.json simply finds them absent.
+  printf '%s\n' "${images[@]}" | jq -s --arg v "$version" --arg c "$commit" --argjson p "$prefixes_json" --arg h "$packhash" --argjson l "$INSTALL_LAYOUT" \
+    '{schema: 1, version: $v, commit: $c, registries: $p, images: ., packHash: $h, installLayout: $l}'
 }
 
 case "${1:-}" in

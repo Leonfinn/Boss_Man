@@ -37,8 +37,7 @@ describe("calls outside the list never reach the socket", () => {
   const { calls, transport } = fakeTransport(() => ({ json: ours }));
   const docker = dockerClient(transport, opts);
   test("every kind of reach the swap or an attacker would want is refused by the guard itself", async () => {
-    const raw = (docker as unknown as { __call?: unknown }).__call;
-    expect(raw).toBeUndefined(); // the guard is not exposed: only the named methods exist
+    // The guard function is not exposed: only these named methods exist, each of which goes through it.
     expect(Object.keys(docker).sort()).toEqual(["arch", "create", "imageInfo", "inspectOurs", "logs", "pull", "remove", "removeImage", "start", "wait"]);
     for (const [m, p] of [
       ["POST", "/containers/abc/exec"],

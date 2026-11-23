@@ -2,7 +2,7 @@
 # Container tests for the built images, run natively on each CPU architecture by CI's `images` job (BOS-971).
 # Needs Docker and the images boss-man-runner:ci and boss-man-netguard:current (build them first).
 #   scripts/image-tests.sh                 all tests
-#   scripts/image-tests.sh canary fence    only the named ones: canary, fence, netguard, no-anthropic
+#   scripts/image-tests.sh canary fence    only the named ones: canary, fence, netguard, no-anthropic, updater (needs boss-man-updater:ci)
 # The no-Anthropic check is a normal one now that the Claude pack has landed (BOS-972). XFAIL_NO_ANTHROPIC=1
 # still marks it as expected to fail, for trying an old image.
 # Safe to run twice: it removes the containers and the network it makes, even when a test fails.
@@ -114,6 +114,45 @@ test_no_anthropic() {
   say "no-anthropic ok"
 }
 
+# The updater image (BOS-1225, design section 10), for real on this architecture:
+#  1. group 0 (a Docker Desktop socket gives it) can write nothing the image ships;
+#  2. without its settings it refuses to start and names the first missing one;
+#  3. with them, as uid 1000 with every capability dropped and a read-only root, it answers GET /status with the right key,
+#     refuses a wrong key and a missing key (so the sigstore package and the compiled code are all in the image).
+# Needs the image UPDATER_IMAGE (default boss-man-updater:ci). Not part of the default set: CI names it.
+test_updater() {
+  local img="${UPDATER_IMAGE:-boss-man-updater:ci}" bad out c keyfile
+  bad="$(docker run --rm --entrypoint sh "$img" -c 'find /app /NOTICE /run/updater /state /usr/local/bin /usr/local/lib/node_modules ! -type l -group 0 -perm /g+w | head -10')"
+  [[ -z "$bad" ]] || fail "group 0 could write files the updater image ships:"$'\n'"$bad"
+  out="$(docker run --rm --user 1000:1000 --cap-drop ALL --read-only "$img" 2>&1)" && fail "the updater started with no settings"
+  [[ "$out" == *UPDATER_REPO* ]] || fail "the updater's start-up message should name the first missing setting, got: $out"
+  keyfile="$(mktemp)"
+  local testkey
+  testkey="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')" # a fresh throwaway value each run, 48 characters
+  printf '%s\n' "$testkey" >"$keyfile"
+  chmod 0644 "$keyfile"
+  c="$tag-updater"
+  made+=("$c")
+  docker run -d --name "$c" --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true --read-only \
+    --tmpfs /state:uid=1000,gid=1000 -v "$keyfile:/run/updater/key:ro" \
+    -e UPDATER_REPO=acme/boss-man -e UPDATER_REGISTRY=ghcr.io/acme -e UPDATER_INSTALL_LABEL=boss-man.install=imgtest \
+    -e UPDATER_CURRENT_VERSION=0.1.0 -e UPDATER_PACK_VOLUME=imgtest-pack -e UPDATER_NETWORK=imgtest_default -e UPDATER_NAME_PREFIX=imgtest-updater "$img" >/dev/null
+  local tries=0 code=""
+  while ((tries++ < 30)); do
+    code="$(docker exec -e "TESTKEY=$testkey" "$c" node -e 'fetch("http://127.0.0.1:3106/status",{headers:{authorization:"Bearer "+process.env.TESTKEY}}).then(async r=>{console.log(r.status+" "+(await r.json()).stage)},()=>{console.log("down")})' 2>/dev/null || true)"
+    [[ "$code" == "200 idle" ]] && break
+    [[ "$(docker inspect --format '{{.State.Running}}' "$c")" == true ]] || fail "the updater stopped: $(docker logs "$c" 2>&1 | tail -5)"
+    sleep 1
+  done
+  [[ "$code" == "200 idle" ]] || fail "GET /status with the right key should give 200 idle, got: $code. $(docker logs "$c" 2>&1 | tail -5)"
+  code="$(docker exec "$c" node -e 'fetch("http://127.0.0.1:3106/status",{headers:{authorization:"Bearer wrong"}}).then(r=>console.log(r.status))')"
+  [[ "$code" == 401 ]] || fail "a wrong key should be refused with 401, got: $code"
+  code="$(docker exec "$c" node -e 'fetch("http://127.0.0.1:3106/status").then(r=>console.log(r.status))')"
+  [[ "$code" == 401 ]] || fail "no key should be refused with 401, got: $code"
+  rm -f "$keyfile"
+  say "updater ok (group 0 writes nothing; settings are required; /status needs the key)"
+}
+
 tests=("$@")
 ((${#tests[@]})) || tests=(canary fence netguard no-anthropic)
 for t in "${tests[@]}"; do
@@ -122,7 +161,8 @@ for t in "${tests[@]}"; do
     fence) test_fence ;;
     netguard) test_netguard ;;
     no-anthropic) test_no_anthropic ;;
-    *) fail "unknown test $t (canary, fence, netguard, no-anthropic)" ;;
+    updater) test_updater ;;
+    *) fail "unknown test $t (canary, fence, netguard, no-anthropic, updater)" ;;
   esac
 done
 say "all requested tests passed"
