@@ -3,6 +3,7 @@ import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
 import { hashQuery, usePoll } from "../hooks";
 import { Loader } from "../components/Loader";
+import { LoadError } from "../components/LoadError";
 import { buildCsv, download } from "../csv";
 
 export const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
@@ -213,6 +214,81 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
   );
 }
 
+type WaitingWake = {
+  id: string;
+  agentId: string;
+  agent: string | null;
+  ticketId: string | null;
+  ticket: string | null;
+  ticketRef: string | null;
+  reason: string;
+  status: "queued" | "deferred";
+  statusReason: string | null;
+  notBefore: string | null;
+  createdAt: string;
+  companyId: string;
+};
+
+/** "waiting 12 min", "waiting 2 h 5 min": how long a wake has been queued (BOS-2320). */
+export function waitingFor(iso: string, now = Date.now()) {
+  const min = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 60_000));
+  if (min < 1) return "waiting less than a minute";
+  if (min < 60) return `waiting ${min} min`;
+  const h = Math.floor(min / 60);
+  return min % 60 ? `waiting ${h} h ${min % 60} min` : `waiting ${h} h`;
+}
+
+const reasonText = (reason: string) => REASON_LABEL[reason] ?? reason[0]!.toUpperCase() + reason.slice(1);
+
+/** Agents woken but not started yet: which agent, for what, why, and since when (BOS-2320). Read-only. */
+function WaitingTable({ rows, companies }: { rows: WaitingWake[]; companies: Company[] }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Agent</th>
+            <th scope="col">What for</th>
+            <th scope="col">Waiting</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((w) => (
+            <tr key={w.id}>
+              <td>
+                {w.agent ?? "An agent"}
+                {companies.length > 1 && <span className="muted"> · {companies.find((c) => c.id === w.companyId)?.name}</span>}
+              </td>
+              <td>
+                {w.ticketId ? (
+                  <>
+                    <a href={`#/tickets/${w.ticketId}`}>{w.ticket ?? "its ticket"}</a>
+                    {w.ticketRef ? <span className="muted"> · {w.ticketRef}</span> : null}
+                  </>
+                ) : (
+                  <span className="muted">No ticket</span>
+                )}
+                <div className="muted" style={{ fontSize: 13 }}>
+                  woken by: {reasonText(w.reason)}
+                </div>
+              </td>
+              <td>
+                {waitingFor(w.createdAt)}
+                {w.status === "deferred" && (
+                  <div className="muted" style={{ fontSize: 13 }}>
+                    Held{w.statusReason ? `: ${w.statusReason}` : ""}
+                    {w.notBefore ? ` until ${when(w.notBefore)}` : ""}
+                  </div>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** The owner's emergency stop (BOS-837): ends every run going now, in every company, after a plain confirm. */
 function EndAllRuns({ count, onDone }: { count: number; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -348,6 +424,16 @@ export function Runs({ companies }: { companies: Company[] }) {
   };
   const active = usePoll((signal) => api<RunRow[]>("/api/runs", { signal }), 5_000, "active");
   const recent = usePoll((signal) => api<RunRow[]>(query(), { signal }), 15_000, `recent:${filterKey}`);
+  // Waiting to start (BOS-2320): one request per company shown, merged in launch order (the server sorts each company's own).
+  const waitingIds = (company ? [company] : companies).map((c) => c.id);
+  const waiting = usePoll(
+    async (signal) => {
+      const lists = await Promise.all(waitingIds.map(async (id) => (await api<Omit<WaitingWake, "companyId">[]>(`/api/companies/${id}/wakes/waiting`, { signal })).map((w) => ({ ...w, companyId: id }))));
+      return lists.flat();
+    },
+    10_000,
+    `waiting:${waitingIds.join(",")}`,
+  );
   const olderRows = older.key === filterKey ? older.rows : [];
   const seen = new Set((recent.data ?? []).map((r) => r.id));
   const shown = recent.data ? [...recent.data, ...olderRows.filter((r) => !seen.has(r.id))] : null;
@@ -390,6 +476,20 @@ export function Runs({ companies }: { companies: Company[] }) {
           <LoadFailed what="the running runs" message={active.error.message} onRetry={active.reload} />
         ) : (
           <Loader label="Loading the running runs" />
+        )}
+      </section>
+      <section aria-labelledby="waiting-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <h2 id="waiting-h" style={{ fontSize: 18, fontWeight: 600 }}>
+          Waiting to start
+        </h2>
+        {waiting.data?.length ? (
+          <WaitingTable rows={waiting.data} companies={companies} />
+        ) : waiting.data ? (
+          <p className="muted">No agents are waiting to start.</p>
+        ) : waiting.error ? (
+          <LoadError what="the agents waiting to start" message={waiting.error.message} onRetry={waiting.reload} />
+        ) : (
+          <Loader label="Loading the agents waiting to start" />
         )}
       </section>
       <section aria-labelledby="recent-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
