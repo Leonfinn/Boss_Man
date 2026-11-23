@@ -53,6 +53,8 @@ describe("runsService.recent with q", () => {
 
   it("combines with before", async () => {
     // The run on "Login page polish" ended 3 minutes ago, the one on 2250 five minutes ago.
-    expect(await found("login", { before: new Date(Date.now() - 3.5 * 60_000) })).toEqual([ids.a]);
+    const cutoff = new Date(new Date().getTime());
+    cutoff.setMinutes(cutoff.getMinutes() - 4);
+    expect(await found("login", { before: cutoff })).toEqual([ids.a]);
   });
 });
