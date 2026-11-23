@@ -69,7 +69,8 @@ describe("portal feature links", () => {
     stub();
     render(<PortalApp />);
     await screen.findByLabelText("Search features");
-    expect(document.head.querySelector('link[rel="alternate"][type="application/atom+xml"]')).toBeTruthy();
+    // The link is added by an effect after the first paint: wait for it rather than assume it ran with the box.
+    await waitFor(() => expect(document.head.querySelector('link[rel="alternate"][type="application/atom+xml"]')).toBeTruthy());
     cleanup();
     document.head.querySelectorAll('link[rel="alternate"]').forEach((l) => l.remove());
     window.location.hash = "#" + "s".repeat(32);
