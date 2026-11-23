@@ -281,6 +281,8 @@ export type Ticket = {
   body?: string | null;
   parentTitle?: string | null;
   lastActivityAt?: string;
+  /** BOS-2400: when the ticket last changed state (the board sends the whole ticket row). */
+  stateChangedAt?: string;
   /** In review with an owner sign-off decision still open (the "Your review" lane). */
   waitingOnOwner?: boolean;
   waitingDecisionId?: string | null;
