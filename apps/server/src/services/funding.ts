@@ -616,14 +616,14 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         p.limit = s.limitValue ?? p.limit;
         out[i]!.plans.set(s.window, p);
       }
+      // Summed in the database: a busy source has many thousands of cost events in 8 weeks.
+      const weekIndex = sql<number>`floor((extract(epoch from ${now.toISOString()}::timestamptz) - extract(epoch from ${costEvents.occurredAt})) / ${weekMs / 1000})::int`;
       const spend = await db
-        .select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros })
+        .select({ week: weekIndex, costMicros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8` })
         .from(costEvents)
-        .where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since), lt(costEvents.occurredAt, now)));
-      for (const e of spend) {
-        const i = bucket(e.occurredAt);
-        if (i >= 0) out[i]!.spendMicros += e.costMicros;
-      }
+        .where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since), lt(costEvents.occurredAt, now)))
+        .groupBy(sql`1`);
+      for (const e of spend) if (e.week >= 0 && e.week < weeks) out[e.week]!.spendMicros += Number(e.costMicros);
       const holds = await db.select().from(fundingQuotaHolds).where(and(eq(fundingQuotaHolds.fundingSourceId, id), gte(fundingQuotaHolds.startedAt, since), lt(fundingQuotaHolds.startedAt, now))).orderBy(desc(fundingQuotaHolds.startedAt));
       for (const h of holds) {
         const i = bucket(h.startedAt);
