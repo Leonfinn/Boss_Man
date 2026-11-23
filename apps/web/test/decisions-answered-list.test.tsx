@@ -126,6 +126,9 @@ describe("Answered list", () => {
     expect(screen.getByTestId("ceo-reason").textContent).toContain("Looked safe");
     expect(screen.getByTestId("ceo-outcome").textContent).toContain("merged");
     expect(new URL(calls[0]!, "http://x").searchParams.get("weeks")).toBe("8");
+    fireEvent.click(screen.getByText("Show them"));
+    await waitFor(() => expect(calls.some((u) => u.includes("by=ceo"))).toBe(true));
+    expect((screen.getByLabelText("Who answered") as HTMLSelectElement).value).toBe("ceo");
     fireEvent.change(screen.getByLabelText("Who answered"), { target: { value: "ceo" } });
     await waitFor(() => expect(calls.some((u) => u.includes("by=ceo"))).toBe(true));
     fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "merge" } });
