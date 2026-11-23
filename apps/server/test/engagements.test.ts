@@ -290,7 +290,7 @@ describe("engagement list paging", () => {
     const get = async (q: string) => (await ctx.req("GET", `/api/engagements${q}`)).json() as Array<{ id: string; title: string }>;
     expect((await get("?q=PRINTER")).map((r) => r.title)).toEqual(["Printer audit", "Fix the Printer"]);
     expect((await get("?q=printer&status=signed_off")).map((r) => r.title)).toEqual(["Printer audit"]);
-    expect((await get(`?q=${encodeURIComponent(ctx.homelab.company.name.toUpperCase())}`))).toHaveLength(4);
+    expect((await get(`?q=${encodeURIComponent("HOMELAB CO")}`))).toHaveLength(4);
     expect((await get("?q=100%25")).map((r) => r.title)).toEqual(["Paint 100% red"]);
     expect(await get("?q=%25")).toHaveLength(1);
     expect(await get("?q=nothing-like-this")).toEqual([]);
