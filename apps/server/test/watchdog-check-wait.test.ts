@@ -62,7 +62,7 @@ describe("watchdog snapshot: waits in the check queue (BOS-1760)", () => {
 
     const snap = await ctx.watchdog.snapshot(ctx.companyId);
     const by = new Map(snap.tickets.map((t) => [t.id, t.checks]));
-    expect(by.get(queued.id)).toEqual([{ from: ctx.ago(291), to: null }]);
+    expect(by.get(queued.id)).toEqual([{ from: ctx.ago(291), to: null, position: 1 }]);
     expect(by.get(merging.id)).toEqual([{ from: ctx.ago(291), to: null }]);
     expect(by.get(moved.id)).toEqual([{ from: ctx.ago(291), to: ctx.ago(200) }]);
     expect(by.get(before.id)).toBeUndefined();
@@ -74,6 +74,20 @@ describe("watchdog snapshot: waits in the check queue (BOS-1760)", () => {
     expect(flagged).toContain(moved.id);
     expect(flagged).toContain(before.id);
     expect(flagged).toContain(idle.id);
+  });
+
+  it("BOS-2416: a ticket in review with its quick check queued is not flagged stale; one that passed is", async () => {
+    const inReview = async (title: string) =>
+      (await ctx.db.insert(tickets).values({ companyId: ctx.companyId, projectId: (await ctx.db.select().from(tickets).limit(1))[0]?.projectId ?? undefined!, title, systemState: "review", assigneeAgentId: null, stateChangedAt: ctx.ago(300) }).returning())[0]!;
+    const base = await ctx.ticket("seed");
+    const waiting = await inReview("Being checked");
+    const passed = await inReview("Check passed, no review open");
+    await ctx.job(waiting.id, { state: "queued", queuedAt: ctx.ago(110) });
+    await ctx.job(passed.id, { state: "passed", queuedAt: ctx.ago(250), endedAt: ctx.ago(200) });
+    const snap = await ctx.watchdog.snapshot(ctx.companyId);
+    const flagged = evaluate(snap, { ...DEFAULT_WATCHDOG, enabled: true }, ctx.ago(0)).filter((x) => x.ticketId !== base.id);
+    expect(flagged.find((x) => x.ticketId === waiting.id)).toBeUndefined();
+    expect(flagged.find((x) => x.ticketId === passed.id)?.rule).toBe("stale_review");
   });
 
   it("BOS-1836: GitHub CI before review counts as a wait until its result row; a lost start does not", async () => {
