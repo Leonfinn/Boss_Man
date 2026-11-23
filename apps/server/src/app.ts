@@ -1411,13 +1411,16 @@ export async function buildApp(opts: AppOptions) {
       return {
         target: { cfg: { kind: "github" as const, apiBase: p.gitApiBase, owner: repo.owner, repo: repo.repo }, token },
         prepare: () => merge("prepare"),
-        publish: async (commit) => {
+        publish: async (commit, needsMainWorkflows) => {
+          // Read again at send time: the runner may have reconnected without the feature since the context was built.
+          const canSwap = runners.can(runner.id, "ci-publish-main-workflows");
+          if (needsMainWorkflows && !canSwap) throw new Error("Not pushed to GitHub: this branch edits workflow files and the runner can't push main's workflow files instead.");
           const scanList = await preflightScanList.forScan();
           // A list that is set but can't be read is not skipped: the push can't be taken back.
           if (!scanList && (await privateDetails.isSet().catch(() => true))) throw new Error("Not pushed to GitHub: the owner's private-details list couldn't be read, so the scan before the push couldn't run in full. Saving the list again in Settings fixes it.");
           // BOS-2300: the early run always pushes main's workflow files (the branch's are the same unless it edits them), so an
           // edit to a workflow never reaches GitHub before review. Only a runner that says so honours the field.
-          return merge("publish", { commit, ...(scanList ? { scanList } : {}), ...(mainWorkflows ? { mainWorkflows: true } : {}) });
+          return merge("publish", { commit, ...(scanList ? { scanList } : {}), ...(canSwap ? { mainWorkflows: true } : {}) });
         },
         mainWorkflows,
         unpublish: () => merge("unpublish"),

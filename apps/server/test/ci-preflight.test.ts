@@ -173,12 +173,41 @@ describe("GitHub CI before review (BOS-1664)", () => {
     const msg = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     expect(msg).toMatch(/main's workflow files, not yours/);
     await settled(s);
-    expect(s.publish).toHaveBeenCalledWith("mergecommit1");
+    expect(s.publish).toHaveBeenCalledWith("mergecommit1", true);
     expect(s.wakes[0]!.note).toMatch(/passed/);
     expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
     // Before the run ends on a new head the move to review is held.
     const s2 = await setup({ files: [wfEdit], mainWorkflows: true });
     expect(await s2.svc.reviewRefusal(s2.co, s2.ticket)).toMatch(/request_check/);
+  });
+
+  it("BOS-2300: a workflow edit waiting for its quick check is not pushed if the runner later lacks the feature, then runs once it has it", async () => {
+    const s = await setup({ files: [wfEdit, wf], ci: "passed", mainWorkflows: true, quick: "none" });
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(s.publish).not.toHaveBeenCalled();
+    const [job] = await s.db.update(checkJobs).set({ state: "passed" }).where(eq(checkJobs.ticketId, s.ticket)).returning();
+    let feature = false;
+    const mk = () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }) as MergeResult, publish: s.publish, unpublish: s.unpublish, ...(feature ? { mainWorkflows: true } : {}) });
+    const svc2 = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, wake: (_a, w) => void s.wakes.push(w), context: async () => mk() });
+    await svc2.onQuickEnded(job!); // deferred launch, runner without the feature
+    expect(s.publish).not.toHaveBeenCalled();
+    expect(await svc2.recover()).toMatchObject({ launched: 0 }); // the sweep path too
+    expect(s.publish).not.toHaveBeenCalled();
+    feature = true;
+    await svc2.recover();
+    await settled(s);
+    expect(s.publish).toHaveBeenCalledWith("mergecommit1", true);
+    // The database is shared by every test here: a closed ticket is no longer swept by the other tests' recover().
+    await s.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, s.ticket));
+  });
+
+  it("BOS-2300: a recovered workflow-edit run is not pushed by a runner without the feature", async () => {
+    const s = await setup({ files: [wfEdit], ci: "passed" });
+    await s.db.insert(checkResults).values({ companyId: s.co, ticketId: s.ticket, sha: "headcommit1", kind: "ci_preflight_started", passed: false, detail: `${s.agent}|wf` });
+    const fresh = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
+    expect(await fresh.recover()).toMatchObject({ launched: 0, skipped: 1 });
+    expect(s.publish).not.toHaveBeenCalled();
+    await s.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, s.ticket));
   });
 
   it("with the check queue off the move to review is not held (request_check would refuse)", async () => {
