@@ -4,7 +4,8 @@ import { sharedGet } from "./shared-get";
 
 /** The part of the URL after "#", e.g. "/board/<projectId>", so the server only serves one page. */
 export function useRoute(): [string[], (to: string) => void] {
-  const read = () => (window.location.hash.replace(/^#\/?/, "") || "dashboard").split("/");
+  // A "?result=failed" on the end is a link's filter for the page, not part of the route (see hashQuery).
+  const read = () => (window.location.hash.replace(/^#\/?/, "").split("?")[0] || "dashboard").split("/");
   const [parts, setParts] = useState(read);
   useEffect(() => {
     const on = () => setParts(read());
@@ -12,6 +13,12 @@ export function useRoute(): [string[], (to: string) => void] {
     return () => window.removeEventListener("hashchange", on);
   }, []);
   return [parts, (to: string) => (window.location.hash = `#/${to}`)];
+}
+
+/** The "?a=b" part of the address after "#", e.g. "#/runs?result=failed". */
+export function hashQuery(): URLSearchParams {
+  const at = window.location.hash.indexOf("?");
+  return new URLSearchParams(at < 0 ? "" : window.location.hash.slice(at + 1));
 }
 
 function hidden() {

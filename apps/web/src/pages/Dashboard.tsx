@@ -53,7 +53,7 @@ function NoData({ children }: { children: string }) {
   return <span className="chart-empty muted">{children}</span>;
 }
 
-function Chart({ title, days, series, emptyText }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string }) {
+function Chart({ title, days, series, emptyText, failedLink }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string; failedLink?: string }) {
   const totals = days.map((d) => series.reduce((n, s) => n + Number(d[s.key] ?? 0), 0));
   const max = Math.max(1, ...totals);
   const label = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
@@ -81,11 +81,15 @@ function Chart({ title, days, series, emptyText }: { title: string; days: Day[];
         <span>{label(String(days.at(-1)?.day ?? ""))}</span>
       </div>
       <ul className="legend">
-        {series.map((s) => (
-          <li key={s.key}>
-            <span className={`swatch ${s.tone}`} aria-hidden="true" /> {s.label}
-          </li>
-        ))}
+        {series.map((s) => {
+          const failed = s.key === "failed" && failedLink ? days.reduce((n, d) => n + Number(d.failed ?? 0), 0) : 0;
+          return (
+            <li key={s.key}>
+              <span className={`swatch ${s.tone}`} aria-hidden="true" />{" "}
+              {failed > 0 ? <a href={failedLink}>{failed} failed in 14 days</a> : s.label}
+            </li>
+          );
+        })}
       </ul>
     </figure>
   );
@@ -244,6 +248,7 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
         <Chart
           title="Run activity"
           emptyText="No runs in the last 14 days"
+          failedLink="#/runs?result=failed"
           days={d.runsByDay}
           series={[
             { key: "succeeded", label: "Finished", tone: "green" },
