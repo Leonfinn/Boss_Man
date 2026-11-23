@@ -165,7 +165,9 @@ sections:
   - Permissions in this run
   - Running now
   - Runs
+  - Waiting to start
 reads: 
+  - /api/companies/:id/wakes/waiting
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
@@ -392,16 +394,19 @@ sections:
   - Add a skill
   - Add from another company
   - Files
+  - History
   - Skill proposals
   - Skills
 reads: 
   - /api/companies/:id/skill-proposals
   - /api/companies/:id/skills
   - /api/companies/:id/skills/:id
+  - /api/companies/:id/skills/:id/history
   - /api/companies/:id/skills/elsewhere
 
 ## #/spend
 sections: 
+  - Costliest tickets
   - Spend
 reads: 
   - /api/companies/:id/spend-report
@@ -439,6 +444,7 @@ reads:
 ## #/wiki
 sections: 
   - Company brief
+  - Links
   - Wiki
 reads: 
   - /api/companies/:id/brief
@@ -457,6 +463,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
+  - Week by week
   - What this shows
   - Workflow report
 reads: 

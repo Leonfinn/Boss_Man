@@ -1,0 +1,2 @@
+ALTER TABLE "deploys" ADD COLUMN "redeploy_of" uuid;--> statement-breakpoint
+ALTER TABLE "deploys" ADD CONSTRAINT "deploys_redeploy_of_deploys_id_fk" FOREIGN KEY ("redeploy_of") REFERENCES "public"."deploys"("id") ON DELETE set null ON UPDATE no action;

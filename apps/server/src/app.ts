@@ -26,6 +26,7 @@ import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions, checkWorkers } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
+import { watchCiTokenGrant } from "./services/ci-identity-card.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
@@ -99,6 +100,7 @@ import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
+import { landingTurnAlertSweep, usualCiWait } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
@@ -361,6 +363,8 @@ export async function buildApp(opts: AppOptions) {
   secretsSvc.onGrantChange(({ companyId, envName }) => {
     if (envName === PENPOT_ENV.url) void launch.syncAllow(companyId);
   });
+  // BOS-2335: the second-account card closes when GIT_CI_TOKEN is granted, not at the next merge.
+  watchCiTokenGrant(secretsSvc, db);
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
@@ -877,6 +881,7 @@ export async function buildApp(opts: AppOptions) {
     release: (ticketId) => decisionsSvc.release(ticketId),
     serverCalm: (rule) => health?.calmReason(rule) ?? null,
     freeSlots: (companyId) => scheduler.freeSlots(companyId),
+    landingTurnHeld: async (companyId, ticketId) => (await review.landingTurnStatus(companyId)).some((s) => s.holder?.ticketId === ticketId),
     liveCommit: () => process.env.BOSSMAN_COMMIT || null,
     now: opts.now,
   });
@@ -909,7 +914,10 @@ export async function buildApp(opts: AppOptions) {
       return checkHold?.sweep();
     },
     priorityWatch: () => priorityWatch.run(),
-    mergeStall: () => mergeStall.run(),
+    mergeStall: async () => {
+      await landingTurnAlert.run(); // BOS-2359
+      return mergeStall.run();
+    },
     // R46: refresh what each free check slot declined (the pump), then tell on any that has sat idle with a job waiting.
     checkIdle: async () => {
       await checks.pump();
@@ -1224,6 +1232,9 @@ export async function buildApp(opts: AppOptions) {
       return !!h && h.kind !== "wrapup";
     },
     launcherOn: () => launch.enabled,
+    // BOS-2359: the landing turns and the usual GitHub wait, for the holder's line and the estimates.
+    landingTurns: (companyId) => review.landingTurnStatus(companyId),
+    usualCiWait: (companyId) => usualCiWait(db, companyId, (opts.now ?? (() => new Date()))()),
     // BOS-1594: the stuck/over-capacity verdict's two live facts: an empty train seat (the restart seed wait excluded), and a check worker.
     emptySeatSince: async (companyId) => {
       const since = (await mergeTrainStatus(db, companyId).catch(() => [])).filter((p) => !p.seeding && p.emptySeatSince).map((p) => new Date(p.emptySeatSince!).getTime());
@@ -1321,6 +1332,17 @@ export async function buildApp(opts: AppOptions) {
     notify: (input) => notes.notify(input),
     now: opts.now,
   });
+  // BOS-2359: one CEO alert when a landing turn has been held for over twice the usual GitHub wait; it closes itself when the turn ends.
+  const landingTurnAlert = landingTurnAlertSweep({
+    companies: async () => (await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))).map((c) => c.id),
+    held: async (companyId) => {
+      const ci = new Map(review.runningMerges().map((m) => [m.ticketId, m.ci]));
+      return (await review.landingTurnStatus(companyId)).flatMap((s) => (s.holder ? [{ projectId: s.projectId, ticketId: s.holder.ticketId, ref: s.holder.ref, title: s.holder.title, sinceMs: Date.parse(s.holder.since), waitingFor: ci.get(s.holder.ticketId) ? `its GitHub run (started ${new Date(ci.get(s.holder.ticketId)!.since).toISOString().slice(11, 16)} UTC)` : "its check or merge" }] : []));
+    },
+    usual: (companyId) => usualCiWait(db, companyId, (opts.now ?? (() => new Date()))()),
+    alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
+    now: opts.now ?? (() => new Date()),
+  });
   // Merge stall alarm (BOS-1515): an empty train seat or no landing while tickets wait; the CEO first, the owner as in fix A.
   const mergeStall = mergeStallService(db, {
     tellCeo: async ({ companyId, ticketId, note }) => {
@@ -1379,7 +1401,9 @@ export async function buildApp(opts: AppOptions) {
         if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     stopTicket: async (ticketId) => {
-      await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
+      const stopped = await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"]))).returning({ id: wakes.id });
+      // BOS-2356: a nudge dropped here is never silent: its sender is told.
+      await scheduler.nudgesDropped(stopped.map((w) => w.id), "the owner stopped work on the ticket it was about");
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
     },
     moveAfterMerge: (ticketId, criteria) => review.moveAfterMerge(ticketId, criteria),
@@ -2461,8 +2485,11 @@ export async function buildApp(opts: AppOptions) {
     // What follows an owner's hand move, for the single route and the bulk one (BOS-2193).
     const afterOwnerMove = async (id: string, state: string, label: string, moved: { assigneeAgentId: string | null }) => {
       // Nobody should start work on a ticket the owner has parked or closed.
-      if (state === "done" || state === "backlog" || state === "blocked")
-        await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
+      if (state === "done" || state === "backlog" || state === "blocked") {
+        const dropped = await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]))).returning({ id: wakes.id });
+        // BOS-2356: a nudge dropped here is never silent: its sender is told.
+        await scheduler.nudgesDropped(dropped.map((w) => w.id), `the owner moved the ticket it was about to ${label}`);
+      }
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
     };
 

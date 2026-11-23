@@ -416,9 +416,9 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "agents" ? (
-          <Agents company={current} onChanged={companies.reload} />
+          <Agents company={current} agentId={route[1]} onChanged={companies.reload} />
         ) : page === "skills" ? (
-          <Skills company={current} />
+          <Skills company={current} skillId={route[1]} />
         ) : page === "features" ? (
           <Features companies={list} companyId={companyId} featureId={route[2]} go={go} />
         ) : page === "feedback" ? (

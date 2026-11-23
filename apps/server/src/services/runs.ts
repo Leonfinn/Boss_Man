@@ -83,6 +83,32 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
       wake = hook;
     },
 
+    /**
+     * Agents woken but not started yet (BOS-2320): the company's queued and deferred wakes in launch
+     * order (priority, then age). The note is left out on purpose: it can hold a decision's answer.
+     */
+    async waiting(companyId: string) {
+      return db
+        .select({
+          id: wakes.id,
+          agentId: wakes.agentId,
+          agent: agents.name,
+          ticketId: wakes.ticketId,
+          ticket: tickets.title,
+          ticketRef: sql<string | null>`case when ${tickets.number} is null then null else coalesce(nullif((select ${companies.ticketPrefix} from ${companies} where ${companies.id} = ${wakes.companyId}), ''), 'T') || '-' || ${tickets.number}::text end`,
+          reason: wakes.reason,
+          status: wakes.status,
+          statusReason: wakes.statusReason,
+          notBefore: wakes.notBefore,
+          createdAt: wakes.createdAt,
+        })
+        .from(wakes)
+        .leftJoin(agents, eq(agents.id, wakes.agentId))
+        .leftJoin(tickets, eq(tickets.id, wakes.ticketId))
+        .where(and(eq(wakes.companyId, companyId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
+        .orderBy(desc(wakes.priority), asc(wakes.createdAt));
+    },
+
     /** Runs that have finished, newest first, with what they cost. */
     async recent(limit = 50, companyId?: string, filter: { agentId?: string; result?: RunResult; before?: Date; q?: string } = {}) {
       // "BOS-2250" (any case) finds the runs on that ticket by its ref; other text matches the ticket title.

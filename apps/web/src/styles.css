@@ -711,6 +711,10 @@ details > summary { cursor: pointer; font-size: 14px; }
 .set-nav li > a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .set-item-label { flex: 1 1 auto; min-width: 0; }
 /* The one-line hint shows on the phone menu and as the page's help line; a menu row on a wide screen is just the name. */
+.set-find { margin-bottom: 10px; }
+.set-find input { width: 100%; min-height: 36px; box-sizing: border-box; }
+.set-find-jumps { list-style: none; margin: 0; padding: 0 0 0 16px; font-size: 13px; }
+.set-find-jumps a { display: inline-flex; align-items: center; min-height: 32px; color: var(--accent-ink); }
 .set-item-hint { display: none; color: var(--muted); font-size: 13px; font-weight: 400; }
 .set-item-chevron { color: var(--muted); font-size: 20px; line-height: 1; }
 .set-wizard .btn { width: 100%; }
@@ -766,7 +770,7 @@ button.preset-card { cursor: pointer; }
 @media (min-width: 1200px) {
   /* (BOS-1492) The front page: the three groups side by side, so all 14 pages are in view without scrolling. */
   .set-nav-index { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 24px; align-items: start; }
-  .set-nav-index .set-wizard { grid-column: 1 / -1; }
+  .set-nav-index .set-wizard, .set-nav-index .set-find { grid-column: 1 / -1; }
   .set-nav-index ul { grid-template-columns: minmax(0, 1fr); }
 }
 /* A touch screen gets 44 px rows even on a wide screen (BOS-1018 §5: 40 px rows, 44 px on touch). */

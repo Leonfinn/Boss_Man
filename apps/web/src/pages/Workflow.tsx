@@ -90,7 +90,8 @@ type RetroInfo = { retro: { id: string; startedAt: string; since: string; until:
 type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[]; reason: string | null; reasonLink: string | null; decidedBy: "ceo" | "owner" | null };
 type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
 type SizeNote = { role: string; size: number; likeSize: number };
-type Scorecard = { days: number; overall?: Stats; previous?: { overall: Stats; handoffs: Handoff[] } | null; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
+type TrendWeek = { weekStart: string; partial: boolean; done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null };
+type Scorecard = { days: number; trend?: TrendWeek[]; overall?: Stats; previous?: { overall: Stats; handoffs: Handoff[] } | null; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
 export function span(ms: number | null) {
@@ -106,7 +107,9 @@ const dollars = (micros: number | null) => (micros === null ? "–" : `$${(micro
 const LEVER: Record<string, string> = { playbook: "Playbook", lesson: "Brief lesson", instructions: "Instructions", review_policy: "Review policy", watchdog: "Watchdog", model: "Model", thinking: "Thinking level" };
 const STATUS: Record<ChangeRow["status"], string> = { proposed: "Waiting for an answer", applied: "Applied", skipped: "Skipped", kept: "Kept", reverted: "Reverted" };
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
-const decided = (c: ChangeRow) => c.status !== "proposed";
+/** Weeks start at Monday 00:00 UTC, so name the day in UTC whatever the viewer's zone. */
+const weekDay = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+const decided =(c: ChangeRow) => c.status !== "proposed";
 const label = (s: string) => s.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 function Ticket({ t }: { t: { id: string; ref: string | null; title: string } }) {
@@ -319,6 +322,40 @@ export function Workflow({ company }: { company: Company | undefined }) {
       ) : (
         <>
           <Findings d={d} companyId={company.id} setDays={setDays} />
+          {d.trend?.length ? (
+            <section id="trend">
+              <h2 tabIndex={-1}>Week by week</h2>
+              <p className="muted" style={{ fontSize: 14 }}>
+                The last 8 whole weeks (Monday to Monday, UTC), oldest first, whatever period is picked above. A week with nothing finished shows 0 and a dash.
+              </p>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Week of</th>
+                      <th>Done</th>
+                      <th>First pass</th>
+                      <th>Send-backs</th>
+                      <th>Median cycle</th>
+                      <th>Cost per done</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.trend.map((w) => (
+                      <tr key={w.weekStart} className={w.partial ? "muted" : undefined}>
+                        <td>{w.partial ? `${weekDay(w.weekStart)} (this week so far)` : weekDay(w.weekStart)}</td>
+                        <td>{w.done}</td>
+                        <td>{pct(w.firstPassRate)}</td>
+                        <td>{w.meanRework === null ? "–" : w.meanRework.toFixed(1)}</td>
+                        <td>{span(w.medianCycleMs)}</td>
+                        <td>{dollars(w.costPerDoneMicros)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
           <section id="roles">
             <h2 tabIndex={-1}>Roles</h2>
             <details>

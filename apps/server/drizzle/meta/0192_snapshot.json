@@ -1,5 +1,5 @@
 {
-  "id": "811ddefe-bc54-4889-baf5-865e7160d957",
+  "id": "5fc797d3-5d5c-4460-a724-b4dc4b1bbd88",
   "prevId": "1d526ede-8b23-4053-8211-e2b2e9040c78",
   "version": "7",
   "dialect": "postgresql",
@@ -3004,6 +3004,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "redeploy_of": {
+          "name": "redeploy_of",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3078,6 +3084,19 @@
           "tableTo": "runs",
           "columnsFrom": [
             "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "deploys_redeploy_of_deploys_id_fk": {
+          "name": "deploys_redeploy_of_deploys_id_fk",
+          "tableFrom": "deploys",
+          "tableTo": "deploys",
+          "columnsFrom": [
+            "redeploy_of"
           ],
           "columnsTo": [
             "id"
@@ -4418,87 +4437,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.funding_quota_holds": {
-      "name": "funding_quota_holds",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "funding_source_id": {
-          "name": "funding_source_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "window": {
-          "name": "window",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "ended_at": {
-          "name": "ended_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "funding_quota_holds_source_time": {
-          "name": "funding_quota_holds_source_time",
-          "columns": [
-            {
-              "expression": "funding_source_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "started_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "funding_quota_holds_funding_source_id_funding_sources_id_fk": {
-          "name": "funding_quota_holds_funding_source_id_funding_sources_id_fk",
-          "tableFrom": "funding_quota_holds",
-          "tableTo": "funding_sources",
-          "columnsFrom": [
-            "funding_source_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.funding_sources": {
       "name": "funding_sources",
       "schema": "",
@@ -4624,72 +4562,6 @@
           ]
         }
       },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.funding_window_summaries": {
-      "name": "funding_window_summaries",
-      "schema": "",
-      "columns": {
-        "funding_source_id": {
-          "name": "funding_source_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "window": {
-          "name": "window",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "resets_at": {
-          "name": "resets_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "peak_utilization": {
-          "name": "peak_utilization",
-          "type": "real",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "limit_value": {
-          "name": "limit_value",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "funding_window_summaries_funding_source_id_funding_sources_id_fk": {
-          "name": "funding_window_summaries_funding_source_id_funding_sources_id_fk",
-          "tableFrom": "funding_window_summaries",
-          "tableTo": "funding_sources",
-          "columnsFrom": [
-            "funding_source_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "funding_window_summaries_funding_source_id_window_resets_at_pk": {
-          "name": "funding_window_summaries_funding_source_id_window_resets_at_pk",
-          "columns": [
-            "funding_source_id",
-            "window",
-            "resets_at"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

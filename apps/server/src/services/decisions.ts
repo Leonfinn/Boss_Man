@@ -572,7 +572,7 @@ export function ceoFirstMergeNote(title: string, cardId: string, what: string) {
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean; /** An extra answer that closes the card for good (the CI-identity card's "Keep the emails"); "A step failed" never does. */ extraOption?: string },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -580,7 +580,7 @@ export async function raiseOwnerTodo(
       companyId: t.companyId,
       kind: "question",
       question: t.question,
-      options: t.quietFirst ? [QUIET_FIRST, TODO_DONE, TODO_FAILED] : [TODO_DONE, TODO_FAILED],
+      options: [...(t.quietFirst ? [QUIET_FIRST] : []), TODO_DONE, ...(t.extraOption ? [t.extraOption] : []), TODO_FAILED],
       recommendedOption: t.quietFirst ? QUIET_FIRST : TODO_DONE,
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
