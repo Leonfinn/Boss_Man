@@ -285,10 +285,11 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     return { retry: false, why: `Boss Man couldn't re-run ${files.length > 1 ? "them" : "it"} at its gate (${(cur.state === "failed" && cur.exitCode === CANT_RERUN_EXIT && said ? said : cur.reason ?? cur.state).slice(0, 200)})` };
   };
   /**
-   * not state: one landing attempt's accepted GitHub retries, by merge commit: the test files that failed once and passed
+   * One landing attempt's accepted GitHub retries, by merge commit: the test files that failed once and passed
    * when the gate re-ran them. A merge-train member covered by a pass behind it while its retry still runs (BOS-2360) has
    * its wait stopped, so no retry result comes back; ciCovered reports these files to the CEO instead.
    */
+  // not state: local to this landing attempt's closure, gone when the attempt ends.
   const retriedFlaky = new Map<string, string[]>();
   // The one retry is recorded only once GitHub accepted it: the record is what the per-commit and per-week limits count.
   const announceFlakeRetry = async (prep: { commit: string }, { files, slow }: { files: string[]; slow?: SlowJob[] }, accepted: boolean, refused?: string) => {
