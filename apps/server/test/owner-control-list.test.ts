@@ -92,6 +92,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/SaveButton.tsx": "Any screen",
   // The Ctrl+K search box and its sidebar button, mounted once in App.tsx (BOS-2192).
   "components/SearchPalette.tsx": "Any screen",
+  // The "?" keyboard shortcuts list, mounted once in App.tsx (BOS-2321).
+  "components/Shortcuts.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
   // The page-intro fold, on four screens (P7, BOS-1278).
   "components/MoreAbout.tsx": "Any screen",
