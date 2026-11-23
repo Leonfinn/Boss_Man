@@ -183,7 +183,7 @@ describe("milestone forecast (points and pace)", () => {
     const a = await c.ticket("Done 5", { milestoneId: ms.id, state: "done" });
     const b = await c.ticket("Open 8", { milestoneId: ms.id, state: "in_progress" });
     const x = await c.ticket("Dropped 20", { milestoneId: ms.id, state: "done", outcome: "cancelled" });
-    for (const [t, size] of [[a, 5], [b, 8], [x, 13]] as const) await c.db.update(tickets).set({ size }).where(eq(tickets.id, t.id));
+    for (const [t, size] of [[a, 5], [b, 8], [x, 3]] as const) await c.db.update(tickets).set({ size }).where(eq(tickets.id, t.id));
     const today = new Date().toISOString().slice(0, 10);
     const burnup = (await c.req("GET", `/api/roadmap?today=${today}`)).json()[0].objectives[0].milestones[0].burnup;
     expect(burnup).toHaveLength(8);
