@@ -928,7 +928,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
                 // (BOS-1691) Touching or typing in a card counts as having it open, so a later close or re-check tells the feed.
-                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} onPointerDown={() => markOpened(d.id)} onFocusCapture={() => markOpened(d.id)} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
+                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} data-shortcut-card tabIndex={-1} onPointerDown={() => markOpened(d.id)} onFocusCapture={() => markOpened(d.id)} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
                   <div className="body">
                     <div className="head-line">
                       {d.step ? (
@@ -1422,7 +1422,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
                             return (
                               <>
                                 {!modelEdits[d.id] && <p className="answer-label" id={`answer-label-${d.id}`}>Your answer</p>}
-                                <div className={`actions${stacked ? " stacked" : d.kind === "question" ? " wide" : ""}`} role="group" aria-labelledby={modelEdits[d.id] ? undefined : `answer-label-${d.id}`} onClickCapture={(e) => {
+                                <div className={`actions${stacked ? " stacked" : d.kind === "question" ? " wide" : ""}`} role="group" data-shortcut-open aria-labelledby={modelEdits[d.id] ? undefined : `answer-label-${d.id}`} onClickCapture={(e) => {
                                   const target = e.target as HTMLElement | null;
                                   if (target && target.tagName === "BUTTON" && (target as HTMLButtonElement).disabled && d.context?.type === "workflow_change" && !notes[d.id]?.trim()) {
                                     reasonBoxes.current.get(d.id)?.focus();
