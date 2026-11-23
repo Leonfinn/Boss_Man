@@ -572,6 +572,71 @@ function RecentlyChanged({ pages, companyId, current, onPick }: { pages: PageRow
   );
 }
 
+type LinkHealthData = { missing: { slug: string; title: string; target: string }[]; missingTotal: number; orphans: { slug: string; title: string }[]; orphansTotal: number };
+
+const more = (shown: number, total: number) => (total > shown ? <p className="muted">and {total - shown} more</p> : null);
+
+/**
+ * The whole wiki's [[links]] to no page (with the page each is on) and pages nothing links to (BOS-2395).
+ * Closed by default and loads only once opened: it reads every page body on the server.
+ */
+export function LinkHealth({ companyId, onPick }: { companyId: string; onPick: () => void }) {
+  const [open, setOpen] = useState(false);
+  const empty: LinkHealthData = { missing: [], missingTotal: 0, orphans: [], orphansTotal: 0 };
+  const health = usePoll((signal) => (open ? api<LinkHealthData>(`/api/companies/${companyId}/wiki-link-health`, { signal }) : Promise.resolve(empty)), 60_000, `wiki-link-health/${companyId}/${open}`);
+  const d = open ? health.data : undefined;
+  const page = (slug: string) => `#/wiki/${companyId}/${slug}`;
+  return (
+    <details className="wiki-link-health" onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary>Link health</summary>
+      {open && health.error && !away(health.error) && <LoadError what="link health" message={health.error.message} onRetry={health.reload} />}
+      {d && (
+        <>
+          <h3 style={{ fontSize: 14, margin: "8px 0 4px" }}>
+            {d.missingTotal} missing-page link{d.missingTotal === 1 ? "" : "s"}
+          </h3>
+          {d.missingTotal === 0 ? (
+            <p className="muted">No broken links</p>
+          ) : (
+            <ul>
+              {d.missing.map((m, i) => (
+                <li key={`${m.slug}\n${m.target}\n${i}`}>
+                  <a href={page(m.slug)} onClick={onPick} title={m.title}>
+                    <span className="t">{m.title}</span>
+                  </a>
+                  {/* The missing slug is plain text: there is no page to open. */}
+                  <small className="muted" style={{ display: "block", overflowWrap: "anywhere" }}>
+                    links to <code>{m.target}</code>
+                  </small>
+                </li>
+              ))}
+            </ul>
+          )}
+          {more(d.missing.length, d.missingTotal)}
+          <h3 style={{ fontSize: 14, margin: "8px 0 4px" }}>
+            {d.orphansTotal} page{d.orphansTotal === 1 ? "" : "s"} nothing links to
+          </h3>
+          {d.orphansTotal === 0 ? (
+            <p className="muted">Every page is linked from somewhere</p>
+          ) : (
+            <ul>
+              {d.orphans.map((o) => (
+                <li key={o.slug}>
+                  <a href={page(o.slug)} onClick={onPick} title={o.title}>
+                    <span className="t">{o.title}</span>
+                    <small>{o.slug}</small>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+          {more(d.orphans.length, d.orphansTotal)}
+        </>
+      )}
+    </details>
+  );
+}
+
 function TreeList({ folder, companyId, current, currentFolder, openAll, over, onToggle, onPick }: { folder: Folder; companyId: string; current: string | undefined; currentFolder: string; openAll: boolean; over: OpenFolders; onToggle: (key: string, open: boolean) => void; onPick: () => void }) {
   return (
     <ul>
@@ -728,6 +793,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               onToggle={onToggleFolder}
               onPick={() => (setCreating(null), closeDrawer())}
             />
+            {!q.trim() && <LinkHealth companyId={company.id} onPick={() => (setCreating(null), closeDrawer())} />}
             <DeletedPages companyId={company.id} go={go} onChanged={list.reload} />
           </nav>
           <div>

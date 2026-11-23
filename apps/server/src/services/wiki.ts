@@ -368,6 +368,37 @@ export function wikilinkSlugs(text: string, max = LINK_LOOKUPS): string[] {
   return out;
 }
 
+// BOS-2395: the wiki-wide "Link health" view lists at most this many rows of each kind, then "and N more".
+export const LINK_HEALTH_CAP = 200;
+const BRIEF_SLUG = /^brief-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type LinkHealth = {
+  missing: { slug: string; title: string; target: string }[];
+  missingTotal: number;
+  orphans: { slug: string; title: string }[];
+  orphansTotal: number;
+};
+
+/**
+ * Every [[slug]] link to no live page (with the page it's on), and every page no other page links
+ * to, in one pass over the bodies (BOS-2395). The Index and project briefs are left out of the
+ * orphans: nothing is meant to link to them. A page linking to itself doesn't count as linked.
+ * Whole bodies are read, as links() does, so a link far down a long page is still found.
+ */
+export function linkHealthOf(pages: { slug: string; title: string; body: string }[], cap = LINK_HEALTH_CAP): LinkHealth {
+  const exists = new Set(pages.map((p) => p.slug));
+  const linkedTo = new Set<string>();
+  const missing: LinkHealth["missing"] = [];
+  for (const p of pages)
+    for (const target of linkedSlugs(p.body)) {
+      if (!target || target === p.slug) continue;
+      linkedTo.add(target);
+      if (!exists.has(target)) missing.push({ slug: p.slug, title: p.title, target });
+    }
+  const orphans = pages.filter((p) => p.slug !== "index" && !BRIEF_SLUG.test(p.slug) && !linkedTo.has(p.slug)).map((p) => ({ slug: p.slug, title: p.title }));
+  return { missing: missing.slice(0, cap), missingTotal: missing.length, orphans: orphans.slice(0, cap), orphansTotal: orphans.length };
+}
+
 /**
  * A short note naming the wiki pages a text links to that don't exist, or null when they all do.
  * The note is advisory: a lookup that fails returns null, so a saved reply or note is never
@@ -585,6 +616,16 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         .orderBy(asc(wikiPages.slug));
       const live = new Set(out.map((o) => o.slug));
       return { links: wanted.filter((l) => live.has(l)), missingLinks: wanted.filter((l) => !live.has(l)), linkedFrom: from.map((r) => r.slug).filter((l) => l !== slug) };
+    },
+
+    /**
+     * The whole wiki's missing-page links and pages nothing links to (BOS-2395): one query for every
+     * live page's body, sorted by slug so the lists read in the page tree's order.
+     * shortcut: reads every body per request; the wiki_links table noted on links() would serve this too.
+     */
+    async linkHealth(companyId: string) {
+      const rows = await db.select({ slug: wikiPages.slug, title: wikiPages.title, body: wikiPages.body }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), liveWikiPage)).orderBy(asc(wikiPages.slug));
+      return linkHealthOf(rows);
     },
 
     /** One page with its history and the tickets it was produced for. */
