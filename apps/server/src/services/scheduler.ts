@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { REAL_USE_LABEL, harnessLoadsSkills, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
+import { REAL_USE_LABEL, OUTGOING_LINE, harnessLoadsSkills, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import { dueChatReport } from "./chat-report-back.js";
@@ -138,7 +138,7 @@ export const PLAIN_SUMMARY_RULE =
 export const TWIN_PATHS_GUIDANCE =
   "For a fix to a fault the owner reported, list its twin paths and states, and for each say \"covered by test X\" or \"follow-up BOS-n\": server and runner, chat and ticket run, every company, after a restart or rebuild, every form of that kind, the state the owner presses it in.";
 /** The usability gate for every company (BOS-1571): not only "is it safe, does it work once", but "does it keep delivering with the owner's real life". */
-export const USABILITY_GATE_GUIDANCE = `Usability gate, for every change, fix or feature: walk the owner's life with it, day 1, after the next update or runner rebuild, after a restart, a week on, the owner away. For anything that comes in from outside (an alert, an issue, a message), who reads it, who acts and who closes it where it came from. A step the owner must repeat routinely, or a feature that works only while someone watches it, fails: request changes. On a feature ticket, one with owner setup steps or one that changes what the owner installs, your code or infra approval needs a "${REAL_USE_LABEL}" paragraph saying this, or Boss Man refuses it.`;
+export const USABILITY_GATE_GUIDANCE = `Usability gate, for every change, fix or feature: walk the owner's life with it, day 1, after the next update or runner rebuild, after a restart, a week on, the owner away. For anything that comes in from outside (an alert, an issue, a message), who reads it, who acts and who closes it where it came from. ${OUTGOING_LINE} A step the owner must repeat routinely, or a feature that works only while someone watches it, fails: request changes. On a feature ticket, one with owner setup steps or one that changes what the owner installs, your code or infra approval needs a "${REAL_USE_LABEL}" paragraph saying this, or Boss Man refuses it.`;
 const WATCH_LINE =/^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
@@ -263,7 +263,7 @@ export function planFirstText(agentKind: string): string {
 }
 
 /** BOS-1571: the plan approver reads how the owner lives with a feature before any code is written. */
-const PLAN_REAL_USE_LINE = `If the ticket has a "Usability gate" criterion, end the plan with a "${REAL_USE_LABEL}" walk-through: day 1, after routine updates and restarts, a week on, the owner away, and every step the owner repeats with how often.`;
+const PLAN_REAL_USE_LINE = `If the ticket has a "Usability gate" criterion, end the plan with a "${REAL_USE_LABEL}" walk-through: day 1, after routine updates and restarts, a week on, the owner away, and every step the owner repeats with how often. ${OUTGOING_LINE}`;
 
 export function schedulerService(
   db: Db,

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { PLAN_REAL_USE_MISSING, SENIOR_DEV_TEMPLATE, USABILITY_CRITERION, type RunnerCommand, type WorkspaceDiff } from "@boss-man/shared";
+import { AGENT_TEMPLATES, OUTGOING_LINE, REAL_USE_ASK, PLAN_REAL_USE_MISSING, SENIOR_DEV_TEMPLATE, USABILITY_CRITERION, type RunnerCommand, type WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, features, reviewRequests, runs, tickets } from "../src/db/schema.js";
@@ -210,6 +210,14 @@ describe("plans and review texts carry the gate", () => {
   it("the review wake's guidance names the lifecycle and the fail rule, for every company", () => {
     for (const s of ["day 1", "after the next update", "after a restart", "a week on", "the owner away", "repeat routinely", "only while someone watches it", "Real use:"]) expect(USABILITY_GATE_GUIDANCE).toContain(s);
     expect(USABILITY_GATE_GUIDANCE).not.toContain("\n");
+    // The outgoing-message line lives in every copy of the gate text, word for word.
+    expect(USABILITY_GATE_GUIDANCE).toContain(OUTGOING_LINE);
+    expect(REAL_USE_ASK).toContain(OUTGOING_LINE);
+    // Every template that carries a "Usability gate:" bullet carries the line too.
+    const gated = JSON.stringify(AGENT_TEMPLATES).split("Usability gate:").length - 1;
+    expect(gated).toBeGreaterThan(0);
+    expect(JSON.stringify(AGENT_TEMPLATES).split(OUTGOING_LINE).length - 1).toBe(gated);
+    expect(OUTGOING_LINE).toContain("who finally receives it and what they see");
   });
 
   it("the review diff shows the gate and the check worker's own duty sentence", () => {
