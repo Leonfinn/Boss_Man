@@ -206,5 +206,10 @@ export function serverAdminRoutes(
     if (r.result === "has_history") return reply.code(409).send({ error: "has_history", field: "has_history", message: `This target has ${r.count} past deploy${r.count === 1 ? "" : "s"}, and removing it would erase ${r.count === 1 ? "it" : "them"} and the target's secret grants.` });
     return reply.code(404).send({ error: "not_found" });
   });
-  owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
+  owner.get("/api/deploys", async (req) => {
+    const q = z.object({ companyId: Uuid.optional(), targetId: Uuid.optional(), limit: z.coerce.number().int().min(1).optional(), before: Uuid.optional() }).parse(req.query);
+    // No paging parameters: the whole list, as before. Any of them: one newest-first page.
+    const paged = q.targetId !== undefined || q.limit !== undefined || q.before !== undefined;
+    return deploysSvc.list(q.companyId, paged ? { targetId: q.targetId, limit: q.limit, before: q.before } : undefined);
+  });
 }

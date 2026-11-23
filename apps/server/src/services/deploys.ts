@@ -7,10 +7,11 @@
 // the runner's daemon moves that tag on the project's remote to the commit the deploy was asked
 // for, with the merge token. No agent ever names the tag, the refspec or the commit pushed.
 import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import { DEPLOY_REF, deployTagNameProblem, findCredential, riskOf, stagingFirst, type ResolveResult, type RUNNER_FEATURES, type RunnerCommand, type TagResult } from "@boss-man/shared";
+import { DEPLOY_REF, deployTagNameProblem, findCredential, riskOf, stagingFirst, ticketRef, type ResolveResult, type RUNNER_FEATURES, type RunnerCommand, type TagResult } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, decisions, deploys, deployTargets, projects, runners as runnersTable, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { olderThan } from "./list-page.js";
 import { readyUrgentFor } from "./priority-group.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { ownerActed } from "./stale-requests.js";
@@ -695,13 +696,32 @@ export function deploysService(
       return inFlight.has(deployId) ? (chains.get(targetId) ?? Promise.resolve()) : Promise.resolve();
     },
 
-    async list(companyId?: string) {
-      return db
-        .select({ deploy: deploys, target: deployTargets.name, isProduction: deployTargets.isProduction })
+    /**
+     * Deploys of a company. With no `page` it is the whole list, oldest first (the original call). With a `page`
+     * (BOS-2318) it is one page, newest first: `limit` rows (default 20, at most 100) older than the deploy `before`,
+     * optionally for one target. Each row also names who asked and the linked ticket's reference.
+     */
+    async list(companyId?: string, page?: { targetId?: string; limit?: number; before?: string }) {
+      const q = db
+        .select({
+          deploy: deploys,
+          target: deployTargets.name,
+          isProduction: deployTargets.isProduction,
+          agentName: agents.name,
+          ticketNumber: tickets.number,
+          ticketPrefix: sql<string | null>`(select ticket_prefix from companies where companies.id = ${deploys.companyId})`,
+        })
         .from(deploys)
         .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
-        .where(companyId ? eq(deploys.companyId, companyId) : undefined)
-        .orderBy(asc(deploys.createdAt));
+        .leftJoin(agents, eq(agents.id, deploys.agentId))
+        .leftJoin(tickets, eq(tickets.id, deploys.ticketId));
+      const rows = page
+        ? await q
+            .where(and(companyId ? eq(deploys.companyId, companyId) : undefined, page.targetId ? eq(deploys.targetId, page.targetId) : undefined, page.before ? olderThan(deploys, deploys, page.before) : undefined))
+            .orderBy(desc(deploys.createdAt), desc(deploys.id))
+            .limit(Math.min(100, Math.max(1, Math.floor(page.limit ?? 20))))
+        : await q.where(companyId ? eq(deploys.companyId, companyId) : undefined).orderBy(asc(deploys.createdAt));
+      return rows.map(({ ticketNumber, ticketPrefix, ...r }) => ({ ...r, ticketRef: ticketRef(ticketPrefix, ticketNumber) }));
     },
   };
 }
