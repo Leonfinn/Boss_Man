@@ -11,7 +11,7 @@ import { Funding, ProjectBudgets } from "./settings/Funding";
 import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
-import { CompanyPause, GoalCheck,StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
+import { CeoApprovals, CompanyPause, GoalCheck,StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
 import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
@@ -64,6 +64,7 @@ export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly Set
         jump: [
           { id: "standing-rules-h", label: "Standing rules" },
           { id: "chapters-h", label: "CEO chapters" },
+          { id: "ceo-approvals-h", label: "What the CEO can do without asking" },
           { id: "advice-timeout-h", label: "Asking the CEO for advice" },
           { id: "nudge-cap-h", label: "Nudges" },
           { id: "run-time-limit-h", label: "Run time limit" },
@@ -103,6 +104,22 @@ export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly Set
 ];
 export const SETTINGS_PAGES = SETTINGS_GROUPS.flatMap((g) => g.items);
 const settingsEntry = (id: string | undefined) => SETTINGS_PAGES.find((p) => p.id === id);
+
+/**
+ * "Find a setting": which pages and jump entries match the words typed. Every word must appear (any case) in the
+ * page's label, hint or help, or in one jump entry's label. A jump match is returned so it can be shown under its page.
+ */
+export function findSettings(query: string): Map<SettingsPage, Array<{ id: string; label: string }>> | null {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  const has = (text: string) => words.every((w) => text.toLowerCase().includes(w));
+  const out = new Map<SettingsPage, Array<{ id: string; label: string }>>();
+  for (const p of SETTINGS_PAGES) {
+    const jumps = (p.jump ?? []).filter((j) => has(j.label));
+    if (jumps.length > 0 || has(`${p.label} ${p.hint} ${p.help}`)) out.set(p.id, jumps);
+  }
+  return out;
+}
 
 /** "On this page" jump links: Tab reaches each one, and Enter moves focus to the section's heading. */
 function JumpLinks({ items: all }: { items: NonNullable<SettingsEntry["jump"]> }) {
@@ -165,6 +182,25 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
       heading.current?.focus?.({ preventScroll: false });
     }
   }, [current]);
+  const [query, setQuery] = useState("");
+  const found = findSettings(query);
+  // A click on a matching jump entry opens its page; once the page has drawn, scroll to the section.
+  const pendingJump = useRef<string | null>(null);
+  useEffect(() => {
+    const id = pendingJump.current;
+    if (!id || !current) return;
+    let tries = 0;
+    const timer = setInterval(() => {
+      const el = document.getElementById(id);
+      if (el || ++tries > 20) {
+        clearInterval(timer);
+        pendingJump.current = null;
+        el?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+        el?.focus?.({ preventScroll: true });
+      }
+    }, 100);
+    return () => clearInterval(timer);
+  }, [current]);
   const wizard = (
     <button type="button" className="btn" onClick={() => go("setup")}>
       Run the setup wizard
@@ -172,7 +208,27 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
   );
   const menu = (
     <nav aria-label="Settings" className={current ? "set-nav" : "set-nav set-nav-index"}>
-      {SETTINGS_GROUPS.map((g) => (
+      <div className="set-find">
+        <label className="label">
+          Find a setting
+          <input
+            type="search"
+            placeholder="Name, hint or help text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setQuery(""); } }}
+          />
+        </label>
+        {found && found.size === 0 && (
+          <p className="muted" role="status">
+            No setting matches "{query.trim()}".{" "}
+            <button type="button" className="linkish" onClick={() => setQuery("")}>
+              Clear
+            </button>
+          </p>
+        )}
+      </div>
+      {SETTINGS_GROUPS.filter((g) => !found || g.items.some((p) => found.has(p.id))).map((g) => (
         <div key={g.label} className={g.items.some((p) => p.id === current?.id) ? "set-group set-group-current" : current ? "set-group set-group-other" : "set-group"}>
           <h2 id={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`} className="set-group-label">
             {g.label}
@@ -185,13 +241,35 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             </a>
           ) : null}
           <ul aria-labelledby={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`}>
-            {g.items.map((p) => (
+            {g.items.filter((p) => !found || found.has(p.id)).map((p) => (
               <li key={p.id}>
                 <a href={`#/${settingsPath(company?.id, p.id)}`} aria-current={current?.id === p.id ? "page" : undefined} onClick={() => { if (p.id === current?.id) heading.current?.focus?.({ preventScroll: false }); }}>
                   <span className="set-item-label">{p.label}</span>
                   <span className="set-item-hint">{p.hint}</span>
                   <span className="set-item-chevron" aria-hidden="true">›</span>
                 </a>
+                {found && (found.get(p.id) ?? []).length > 0 && (
+                  <ul className="set-find-jumps" aria-label={`Matches in ${p.label}`}>
+                    {found.get(p.id)!.map((j) => (
+                      <li key={j.id}>
+                        <a
+                          href={`#/${settingsPath(company?.id, p.id)}`}
+                          onClick={(e) => {
+                            pendingJump.current = j.id;
+                            if (p.id === current?.id) {
+                              e.preventDefault();
+                              document.getElementById(j.id)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+                              document.getElementById(j.id)?.focus?.({ preventScroll: true });
+                              pendingJump.current = null;
+                            }
+                          }}
+                        >
+                          {j.label}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </li>
             ))}
           </ul>
@@ -255,6 +333,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         <CompanyPause company={company} onChanged={onChanged} />
         <StandingRules company={company} onChanged={onChanged} />
         <Chapters company={company} />
+        <CeoApprovals company={company} />
         <AdviceTimeout company={company} onChanged={onChanged} />
         <NudgeCap company={company} onChanged={onChanged} />
         <RunTimeLimit company={company} onChanged={onChanged} />

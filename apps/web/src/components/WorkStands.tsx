@@ -31,7 +31,7 @@ export function goToCard(ticketId: string) {
   el.querySelector<HTMLElement>("a")?.focus({ preventScroll: true });
 }
 
-export function WorkStands({ counts, targets, hrefFor, stuck = 0, stuckTicketId }: { counts: WorkStandsCounts; targets?: WorkStandsTargets; /** Off the Board: where each item goes instead (the Board page). */ hrefFor?: string; /** BOS-1910: tickets the watchdog has handed to the Scrum Master; hidden at 0. */ stuck?: number; /** The first of them, which the item links to. */ stuckTicketId?: string }) {
+export function WorkStands({ counts, targets, hrefFor, stuck = 0, stuckTicketId, onShowStuck }: { /** BOS-2351: on the Board, clicking "looks stuck" calls this to show only the stuck cards, instead of moving to the first. */ onShowStuck?: () => void; counts: WorkStandsCounts; targets?: WorkStandsTargets; /** Off the Board: where each item goes instead (the Board page). */ hrefFor?: string; /** BOS-1910: tickets the watchdog has handed to the Scrum Master; hidden at 0. */ stuck?: number; /** The first of them, which the item links to. */ stuckTicketId?: string }) {
   const quiet = QUIET.filter((i) => counts[i.key] > 0);
   const link = (i: Item | "inProgress", text: string, icon: string) => {
     const key = i === "inProgress" ? "inProgress" : i.key;
@@ -48,7 +48,7 @@ export function WorkStands({ counts, targets, hrefFor, stuck = 0, stuckTicketId 
     <div className="standing" role="group" aria-label="Where work stands" data-testid="work-stands">
       {link("inProgress", "in progress", "●")}
       {stuck > 0 && (
-        <a className="standing-item stuck" href={hrefFor ?? "#"} onClick={stuckTicketId && !hrefFor ? (e) => { e.preventDefault(); goToCard(stuckTicketId); } : undefined} data-testid="standing-stuck">
+        <a className="standing-item stuck" href={hrefFor ?? "#"} onClick={hrefFor ? undefined : onShowStuck ? (e) => { e.preventDefault(); onShowStuck(); } : stuckTicketId ? (e) => { e.preventDefault(); goToCard(stuckTicketId); } : undefined} data-testid="standing-stuck">
           <span aria-hidden="true" className="standing-icon">⚠</span>
           <b>{stuck}</b> looks stuck
         </a>

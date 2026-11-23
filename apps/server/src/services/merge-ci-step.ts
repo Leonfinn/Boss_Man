@@ -7,9 +7,9 @@ import { ticketRef, type MergeResult, type VerifyResult, VERIFY_ASK_TIMEOUT_MS }
 import { agents, checkJobs, checkResults, companies, projects, ticketMessages, tickets } from "../db/schema.js";
 import { RunnerGone } from "./runners.js";
 import { DIFFERENT_APPROACH } from "./loop-guards.js";
-import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, RERUN_REFUSED, type CiOutcome, type CiStop, type FlakeAnswer } from "./ci-publish.js";
+import { CiPublishError, ciStops, publishAndWait as ciPublishAndWait, RERUN_REFUSED, withActionsToken, type CiOutcome, type CiStop, type CiTarget, type FlakeAnswer } from "./ci-publish.js";
 import { BASELINE_RUNS, CANT_RERUN_EXIT, describeSlow, FLAKE_RETRY_KIND, flakeDecision, gateRerunCommand, namedTestFiles, RETRIES_PER_WEEK, RETRY_WINDOW_MS, retryCounts, SLOW_RETRIES_PER_WEEK, SLOW_ROW_PREFIX, slowJobs, slowRetryCounts, type SlowEvidence, type SlowJob } from "./ci-flake.js";
-import type { CiRun, CiStatus, GitHostConfig } from "./git-hosts.js";
+import type { CancelAnswer, CiRun, CiStatus } from "./git-hosts.js";
 import { CHECK_AGAIN } from "./decisions.js";
 import { ensureCiIdentityCard } from "./ci-identity-card.js";
 import { record } from "./activity.js";
@@ -29,7 +29,7 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
   // BOS-1070: with the owner's switch on, a GitHub project's merge also waits for GitHub CI on the exact merge commit.
   // The gate pushes that commit to bossman-ci/<ticket>, reads its Actions runs (BOS-1630), and merges only on green.
   // Everything here sits behind the switch: off, the flow below is unchanged.
-  let ci: { cfg: GitHostConfig; token: string } | null = null;
+  let ci: CiTarget | null = null;
   if (!opts?.skipChecks && landing !== "pull_request" && gitHost === "github" && deps.gitHosts && (await waitForCi())) {
     if (!deps.runners.can(runner.id, "ci-publish")) {
       await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: "Waiting for GitHub CI is on, but this company's runner is too old to push the merge for CI, so this merge goes ahead on Boss Man's own check only. Update the runners: Settings → Server and runner → Updates → Build and update runners." });
@@ -38,7 +38,10 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
         throw new ReviewError(409, `Waiting for GitHub CI is on, but Boss Man can't read GitHub for this project: ${err.message}`);
       });
       // BOS-2285: the gate's CI pushes email whoever's token pushes them; ask once for a second account's token.
-      await ensureCiIdentityCard(db, t.companyId, await deps.gitCiToken?.(t.companyId).catch(() => undefined));
+      const ciToken = await deps.gitCiToken?.(t.companyId).catch(() => undefined);
+      await ensureCiIdentityCard(db, t.companyId, ciToken);
+      // BOS-2345: with that token granted, the gate's Actions writes (the one flake retry, re-run, cancel) go out with it first.
+      if (ciToken) ci = { ...ci, actionsToken: ciToken };
     }
   }
   // The push and the read live in ci-publish.ts (BOS-1664), where the pre-flight run reuses them.
@@ -118,7 +121,10 @@ export async function ciStep(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt) 
     if (!ciPushed || !deps.gitHosts?.cancelRuns) return;
     if (deps.isLeader && !deps.isLeader()) return;
     const because = why ? ` (${why})` : "";
-    const got = await deps.gitHosts.cancelRuns(ci!.cfg, ci!.token, commit).catch((err: Error) => ({ cancelled: 0, still: null, refused: err.message.slice(0, 200) }));
+    const cancel = (token: string): Promise<CancelAnswer> => deps.gitHosts!.cancelRuns(ci!.cfg, token, commit).catch((err: Error) => ({ cancelled: 0, still: null, refused: err.message.slice(0, 200) }));
+    // BOS-2345: the second account's token first; GIT_TOKEN cancels what it left going. Cancelled counts add up.
+    const { got: last, first } = await withActionsToken(ci!, cancel, (r) => r.still === 0);
+    const got: CancelAnswer = first ? { ...last, cancelled: first.cancelled + last.cancelled } : last;
     if (!got.cancelled && got.still === 0) return;
     const sha = commit.slice(0, 12);
     // Activity summaries are cut at 300 characters: what the reader needs comes first, GitHub's own answer last.

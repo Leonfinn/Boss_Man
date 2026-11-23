@@ -479,7 +479,7 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
 
 const FILTERS_KEY = "board-filters";
 type BoardView = "all" | "features" | "tasks";
-type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string };
+type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string; stuckOnly: boolean };
 /** The view, Assigned to, feature and "working now" filters, kept for the browser session like the feature states below. */
 function readFilters(): SavedFilters {
   try {
@@ -489,9 +489,10 @@ function readFilters(): SavedFilters {
       working: saved?.working === true,
       view: saved?.view === "features" || saved?.view === "tasks" ? saved.view : "all",
       assignee: typeof saved?.assignee === "string" && saved.assignee ? saved.assignee : "anyone",
+      stuckOnly: saved?.stuckOnly === true,
     };
   } catch {
-    return { feature: "any", working: false, view: "all", assignee: "anyone" };
+    return { feature: "any", working: false, view: "all", assignee: "anyone", stuckOnly: false };
   }
 }
 
@@ -899,7 +900,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const filterCompany = companies.find((c) => c.id === current?.companyId);
   const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0);
   const clearFilters = () => {
-    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false });
+    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false, stuckOnly: false });
   };
   const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
   const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
@@ -915,6 +916,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) &&
     (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) &&
     (!filters.working || !!t.working?.length) &&
+    (!filters.stuckOnly || !!t.looksStuck) &&
     (!words.length || words.every((w) => [t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w)));
   // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
   // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
@@ -1296,7 +1298,13 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         </div>
       </div>
       {selecting && view !== "features" && <BulkBar count={selected.size} agents={company?.agents ?? []} busy={bulkBusy} result={bulkResult} onRun={(a) => void runBulk(a)} onClear={() => { setSelected(new Set()); setBulkResult(null); lastPicked.current = null; }} />}
-      {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} stuck={stuckCards.length} stuckTicketId={stuckCards[0]?.id} />}
+      {board.data && view !== "features" && <WorkStands counts={standing} targets={standingTargets} stuck={stuckCards.length} stuckTicketId={stuckCards[0]?.id} onShowStuck={() => setFilter({ stuckOnly: true })} />}
+      {board.data && view !== "features" && filters.stuckOnly && (
+        <p className="stuck-filter-line" role="status" data-testid="stuck-filter-line">
+          Showing {stuckCards.length} stuck {stuckCards.length === 1 ? "card" : "cards"} ·{" "}
+          <button type="button" className="chip" onClick={() => setFilter({ stuckOnly: false })}>Show all</button>
+        </p>
+      )}
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
         <div className="segmented state-filter" role="group" aria-label="Show features that are">

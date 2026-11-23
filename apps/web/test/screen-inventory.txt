@@ -24,7 +24,6 @@ reads:
   - /api/agent-templates
   - /api/agents/:id/history
   - /api/agents/:id/notes
-  - /api/companies/:id/agent-approvals
   - /api/companies/:id/agents
   - /api/companies/:id/models
   - /api/companies/:id/review-policy
@@ -323,8 +322,10 @@ sections:
   - Run time limit
   - Standing rules
   - Ticket references
+  - What the CEO can do without asking
   - Workflow retros
 reads: 
+  - /api/companies/:id/agent-approvals
   - /api/companies/:id/chapters
   - /api/companies/:id/retro-settings
   - /api/companies/:id/standing-rules

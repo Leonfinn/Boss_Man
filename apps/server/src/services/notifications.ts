@@ -4,7 +4,7 @@
 // evidence. Pages and asks also go to the owner's phone through their own ntfy server, so
 // Boss Man only ever sends outbound requests and is never exposed at the router.
 import { createHash, randomBytes } from "node:crypto";
-import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -489,9 +489,14 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       return open.length;
     },
 
-    async list(opts: { before?: Date; limit?: number; status?: "unread" | "read"; level?: NotifyLevel; company?: string } = {}) {
+    async list(opts: { before?: Date; limit?: number; status?: "unread" | "read"; level?: NotifyLevel; company?: string; q?: string } = {}) {
       // The read path only reads (BOS-413): a settled card's notification was marked read when it settled.
+      // Text search (BOS-2316): a case-insensitive ILIKE on title and body, run only over the rows the other filters and `before`
+      // leave, newest first, stopping at the limit. % _ and \ in the text match as typed.
+      const text = opts.q?.trim();
+      const like = text ? `%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
       const where = and(
+        like ? or(sql`${notifications.title} ilike ${like}`, sql`${notifications.body} ilike ${like}`) : undefined,
         opts.before ? lt(notifications.createdAt, opts.before) : undefined,
         opts.status === "unread" ? isNull(notifications.readAt) : opts.status === "read" ? isNotNull(notifications.readAt) : undefined,
         opts.level ? eq(notifications.level, opts.level) : undefined,

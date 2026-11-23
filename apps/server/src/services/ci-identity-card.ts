@@ -15,7 +15,7 @@ export const CI_IDENTITY_QUESTION =
 /** Plain steps for the owner; GitHub's screens are not yet confirmed by a real run, and the card says so. */
 export const CI_IDENTITY_STEPS = [
   "Not yet confirmed on GitHub (checked against GitHub's documentation, 22 Nov 2026). Create a second GitHub account for Boss Man, or use a teammate's, and add it as a collaborator with write access to the repo: on GitHub, open the repo's Settings tab, then Collaborators.",
-  "Signed in as that second account, create a fine-grained token: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens. Repository access: only the company's repo. Permissions: Contents read and write (add Workflows read and write if the repo's workflows change).",
+  "Signed in as that second account, create a fine-grained token: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens. Repository access: only the company's repo. Permissions: Contents read and write, and Actions read and write (so Boss Man can re-run a job that failed by chance without your own token needing it). Add Workflows read and write if the repo's workflows change.",
   "In Boss Man open Settings → Secrets, choose Add, then \"Git token for the merge gate (second account)\", paste the token and save.",
   "Grant it to the company on the same screen. Do not add a user name unless your git host needs one (GitHub does not).",
 ];
