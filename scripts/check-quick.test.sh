@@ -294,7 +294,7 @@ logged "@boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.
 logged "@boss-man/web exec vitest run" "gate shared web"
 
 # BOS-2334: a shared change runs the other packages' tests that use the names it exports. BOS-2327 changed OWNER_TABS in
-# packages/shared/src/owner-controls.ts; apps/server/test/owner-screens.test.ts reaches it through src/services/owner-screens.ts,
+# packages/shared/src/owner-controls.ts; the server's owner-screens test reaches it through its owner-screens service,
 # and only GitHub ran it. Types are left to the typecheck; a test that uses none of the names is not picked.
 g checkout -q main
 wr packages/shared/src/tabs.ts 'export const OWNER_TABS = ["a"];
