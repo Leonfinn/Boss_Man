@@ -33,14 +33,25 @@ async function setup() {
   const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Work" })).json() as { id: string };
   await db.update(tickets).set({ assigneeAgentId: agent.id, systemState: "in_progress" }).where(eq(tickets.id, t.id));
   /** A run on the ticket that ends with `error`; waits until the end handling has settled. */
+  const cards = async () => (await db.select().from(decisions)).filter((d) => /passing error|does not know it/.test(d.question));
+  const resumeCount = async () => (await db.select().from(wakes).where(eq(wakes.reason, "resume"))).length;
+  /** Polls until `check` holds, with a deadline: the run.ended chain runs unawaited in the server. */
+  const waitUntil = async (what: string, check: () => Promise<boolean>, deadlineMs = 30_000) => {
+    const end = Date.now() + deadlineMs;
+    while (!(await check())) {
+      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((res) => setTimeout(res, 25));
+    }
+  };
+  /** A run on the ticket that ends with `error`; waits for the event it must cause (a resume wake or a CEO card). */
   const endWith = async (error: string) => {
+    const before = (await resumeCount()) + (await cards()).length;
     const [r] = await db.insert(runs).values({ companyId: company.id, agentId: agent.id, ticketId: t.id, startedAt: new Date(Date.now() - 5 * MIN), lastEventAt: new Date() }).returning();
     await emit({ type: "run.ended", runId: r!.id, stopReason: null, error });
-    await new Promise((res) => setTimeout(res, 150)); // test-lines-ok: the run.ended chain runs unawaited in the server; no event says it finished
+    await waitUntil("a resume wake or a CEO card", async () => (await resumeCount()) + (await cards()).length > before);
     return r!.id;
   };
-  const cards = async () => (await db.select().from(decisions)).filter((d) => /passing error|does not know it/.test(d.question));
-  return { ...built, db, close, endWith, cards, ticketId: t.id, companyId: company.id, agentId: agent.id, projectId: project.id };
+  return { ...built, db, close, endWith, cards, resumeCount, waitUntil, ticketId: t.id, companyId: company.id, agentId: agent.id, projectId: project.id };
 }
 
 describe("classifyRunError", () => {
@@ -129,7 +140,8 @@ describe("a run that ends on an error (BOS-2357)", () => {
     const c = (ctx = await setup());
     const [r] = await c.db.insert(runs).values({ companyId: (await c.db.select().from(tickets))[0]!.companyId, agentId: (await c.db.select().from(tickets))[0]!.assigneeAgentId!, ticketId: c.ticketId, startedAt: new Date() }).returning();
     await c.runners.ingest((await c.db.select().from(runners))[0]!, { seq: 1, at: new Date().toISOString(), event: { type: "run.ended", runId: r!.id, stopReason: "end_turn", error: null } as RunnerEvent });
-    await new Promise((res) => setTimeout(res, 150)); // test-lines-ok: the run.ended chain runs unawaited in the server; no event says it finished
+    // Nothing is expected to happen, so wait for the run row to be marked ended, then assert 0.
+    await c.waitUntil("the run to be marked ended", async () => (await c.db.select().from(runs).where(eq(runs.id, r!.id)))[0]!.endedAt !== null);
     expect(await c.db.select().from(wakes).where(eq(wakes.reason, "resume"))).toHaveLength(0);
     expect(await c.cards()).toHaveLength(0);
   });
