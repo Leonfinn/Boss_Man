@@ -1139,6 +1139,7 @@ export async function buildApp(opts: AppOptions) {
     loops,
     gitHosts,
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
+    gitCiToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_CI_TOKEN,
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
     scanList: () => privateDetails.forRunner(),
