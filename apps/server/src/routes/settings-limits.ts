@@ -271,7 +271,7 @@ export function settingsLimitsRoutes(
     return { ok: true };
   });
   // BOS-2373: each machine's last 7 days of checks (read-only; its own block).
-  owner.get("/api/settings/check-workers/stats", async () => checkMachineStats(db));
+  owner.get("/api/settings/check-workers/stats", async (req) => checkMachineStats(db, new Date(), z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
   // BOS-313: check the merged result before pushing it (off by default while it rolls out).
   owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
   owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));

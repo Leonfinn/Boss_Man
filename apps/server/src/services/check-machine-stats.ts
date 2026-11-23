@@ -28,14 +28,14 @@ const median = (xs: number[]): number | null => {
   return s.length % 2 ? s[m]! : Math.round((s[m - 1]! + s[m]!) / 2);
 };
 
-export async function checkMachineStats(db: Db, now = new Date()): Promise<MachineStats[]> {
+export async function checkMachineStats(db: Db, now = new Date(), companyId?: string): Promise<MachineStats[]> {
   const since = new Date(now.getTime() - STATS_DAYS * 86_400_000);
   const rows = await db
     .select({ job: checkJobs, number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
     .from(checkJobs)
     .innerJoin(tickets, sql`${tickets.id} = ${checkJobs.ticketId}`)
     .innerJoin(companies, sql`${companies.id} = ${checkJobs.companyId}`)
-    .where(and(isNotNull(checkJobs.endedAt), gte(checkJobs.endedAt, since), sql`${checkJobs.state} in ('passed','failed','stuck','cancelled')`, sql`(${checkJobs.workerId} is not null or ${checkJobs.runnerId} is not null)`))
+    .where(and(companyId ? sql`${checkJobs.companyId} = ${companyId}` : undefined, isNotNull(checkJobs.endedAt), gte(checkJobs.endedAt, since), sql`${checkJobs.state} in ('passed','failed','stuck','cancelled')`, sql`(${checkJobs.workerId} is not null or ${checkJobs.runnerId} is not null)`))
     .orderBy(desc(checkJobs.endedAt));
   const by = new Map<string, typeof rows>();
   for (const r of rows) {

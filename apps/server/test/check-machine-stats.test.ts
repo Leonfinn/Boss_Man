@@ -65,6 +65,22 @@ describe("checkMachineStats", () => {
     expect(worker.recent[0]!.result).toBe("stuck");
   });
 
+  it("counts only the asked company's jobs when companyId is given", async () => {
+    const c = (ctx = await setup());
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+    const op = (await c.req("POST", `/api/companies/${other.company.id}/projects`, { name: "Other app" })).json() as { id: string };
+    const ot = (await c.req("POST", `/api/projects/${op.id}/tickets`, { title: "Theirs" })).json() as { id: string };
+    const now = new Date();
+    const base = { kind: "pre_review", scope: "quick", state: "passed", runnerId: c.runnerId, startedAt: new Date(now.getTime() - 120_000), endedAt: new Date(now.getTime() - 60_000) };
+    await c.db.insert(checkJobs).values({ ...base, companyId: c.company.id, projectId: c.project.id, ticketId: c.ticket.id, commit: "a".repeat(40), tree: "a".repeat(40) } as never);
+    await c.db.insert(checkJobs).values({ ...base, companyId: other.company.id, projectId: op.id,ticketId: ot.id, commit: "b".repeat(40), tree: "b".repeat(40) } as never);
+    const mine = await checkMachineStats(c.db, now, c.company.id);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.total).toBe(1);
+    const res = await c.req("GET", `/api/settings/check-workers/stats?companyId=${other.company.id}`);
+    expect((res.json() as { total: number }[])[0]!.total).toBe(1);
+  });
+
   it("is served at the owner route and refused without a session", async () => {
     const c = (ctx = await setup());
     expect((await c.app.inject({ method: "GET", url: "/api/settings/check-workers/stats" })).statusCode).toBe(401);

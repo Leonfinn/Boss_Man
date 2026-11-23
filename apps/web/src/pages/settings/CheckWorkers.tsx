@@ -11,6 +11,7 @@ import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import type { HostFactsView } from "../../host-facts-display";
 import { workerAddressChoices, workerComposeFile, workerSocketUrl } from "./check-worker-compose";
+import { LoadError } from "../../components/LoadError";
 import { SaveButton } from "../../components/SaveButton";
 import { useAction } from "./shared";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type MachineTakes, type SlotPolicy } from "./SlotSplit";
@@ -174,7 +175,7 @@ function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix, machineMb 
   );
 }
 
-export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWorkerView[]; maxSlots: number; reload: () => void }) {
+export function CheckWorkers({ workers, maxSlots, reload, companyId }: { workers: CheckWorkerView[]; maxSlots: number; reload: () => void; companyId?: string }) {
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 60_000, "companies");
   const act = useAction();
   const [adding, setAdding] = useState<Draft | null>(null);
@@ -187,7 +188,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
   const choice = choices.find((c) => c.url === picked) ?? choices[0];
   const workerUrl = choice?.url ?? workerSocketUrl(window.location.origin);
   const list = companies.data ?? [];
-  const statsPoll = usePoll((signal) => api<MachineStatsView[]>("/api/settings/check-workers/stats", { signal }), 60_000, "check-worker-stats");
+  const statsPoll = usePoll((signal) => api<MachineStatsView[]>(`/api/settings/check-workers/stats${companyId ? `?companyId=${companyId}` : ""}`, { signal }), 60_000, `check-worker-stats-${companyId ?? ""}`);
   const statsOf = (machine: string) => (Array.isArray(statsPoll.data) ? statsPoll.data.find((s) => s.machine === machine) : undefined);
 
   return (
@@ -200,6 +201,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
         <strong>Company runner</strong>
         <MachineRecord stats={statsOf("runner")} />
       </div>
+      {statsPoll.error && statsPoll.data === null && <LoadError what="the machines' last 7 days" message={statsPoll.error.message} onRetry={statsPoll.reload} />}
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
       {workers.map((w) => (
         <div key={w.id} className="card" style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }} data-testid="check-worker">
