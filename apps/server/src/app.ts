@@ -1379,7 +1379,9 @@ export async function buildApp(opts: AppOptions) {
         if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     stopTicket: async (ticketId) => {
-      await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
+      const stopped = await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"]))).returning({ id: wakes.id });
+      // BOS-2356: a nudge dropped here is never silent: its sender is told.
+      await scheduler.nudgesDropped(stopped.map((w) => w.id), "the owner stopped work on the ticket it was about");
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
     },
     moveAfterMerge: (ticketId, criteria) => review.moveAfterMerge(ticketId, criteria),
@@ -2461,8 +2463,11 @@ export async function buildApp(opts: AppOptions) {
     // What follows an owner's hand move, for the single route and the bulk one (BOS-2193).
     const afterOwnerMove = async (id: string, state: string, label: string, moved: { assigneeAgentId: string | null }) => {
       // Nobody should start work on a ticket the owner has parked or closed.
-      if (state === "done" || state === "backlog" || state === "blocked")
-        await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
+      if (state === "done" || state === "backlog" || state === "blocked") {
+        const dropped = await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]))).returning({ id: wakes.id });
+        // BOS-2356: a nudge dropped here is never silent: its sender is told.
+        await scheduler.nudgesDropped(dropped.map((w) => w.id), `the owner moved the ticket it was about to ${label}`);
+      }
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
     };
 
