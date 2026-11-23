@@ -463,6 +463,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
+  - Week by week
   - What this shows
   - Workflow report
 reads: 
