@@ -27,6 +27,8 @@ const ROUTES: Array<["GET" | "POST" | "PUT" | "PATCH" | "DELETE", string]> = [
   ["GET", `/api/runs/${ID}/permissions`],
   ["POST", "/api/runs/cancel-all"],
   ["POST", `/api/runs/${ID}/cancel`],
+  ["POST", `/api/companies/${ID}/wakes/${ID}/start-now`],
+  ["POST", `/api/companies/${ID}/wakes/${ID}/cancel`],
 ];
 
 it("every agent, agent-note and run route is registered and answers 401 without the owner's session", async () => {
