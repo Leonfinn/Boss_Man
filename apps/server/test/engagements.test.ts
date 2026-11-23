@@ -282,6 +282,23 @@ describe("engagement list paging", () => {
     expect((await ctx.req("GET", "/api/engagements?status=bogus")).statusCode).toBe(400);
   });
 
+  it("searches by title or either company's name, case-insensitively, with status and paging (BOS-2315)", async () => {
+    ctx = await setup();
+    const t0 = Date.parse("2026-11-01T00:00:00Z");
+    const mk = (i: number, title: string, status: "requested" | "signed_off") => ({ requesterCompanyId: ctx.appCo.company.id, providerCompanyId: ctx.homelab.company.id, title, scope: "s", status, createdAt: new Date(t0 + i * 1000) });
+    await ctx.db.insert(engagements).values([mk(0, "Fix the Printer", "requested"), mk(1, "Paint 100% red", "signed_off"), mk(2, "Printer audit", "signed_off"), mk(3, "Other", "requested")]);
+    const get = async (q: string) => (await ctx.req("GET", `/api/engagements${q}`)).json() as Array<{ id: string; title: string }>;
+    expect((await get("?q=PRINTER")).map((r) => r.title)).toEqual(["Printer audit", "Fix the Printer"]);
+    expect((await get("?q=printer&status=signed_off")).map((r) => r.title)).toEqual(["Printer audit"]);
+    expect((await get(`?q=${encodeURIComponent(ctx.homelab.company.name.toUpperCase())}`))).toHaveLength(4);
+    expect((await get("?q=100%25")).map((r) => r.title)).toEqual(["Paint 100% red"]);
+    expect(await get("?q=%25")).toHaveLength(1);
+    expect(await get("?q=nothing-like-this")).toEqual([]);
+    const p1 = await get("?q=printer&limit=1");
+    expect((await get(`?q=printer&limit=1&before=${p1[0]!.id}`)).map((r) => r.title)).toEqual(["Fix the Printer"]);
+    expect((await ctx.req("GET", `/api/engagements?q=${"x".repeat(201)}`)).statusCode).toBe(400);
+  });
+
   it("gives an agent 50 with a note on how to see older ones", async () => {
     ctx = await setup();
     await seed(ctx);

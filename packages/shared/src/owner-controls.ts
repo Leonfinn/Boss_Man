@@ -231,7 +231,7 @@ export const OWNER_FIELDS = {
   "Any screen": ["New company name"],
   "Log in": ["Username", "Password"],
   // The Engagements list's status filter (BOS-2260).
-  Engagements: ["Show"],
+  Engagements: ["Show", "Search engagements"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
