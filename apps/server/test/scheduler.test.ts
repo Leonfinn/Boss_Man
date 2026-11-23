@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
@@ -526,6 +526,37 @@ describe("scheduler", () => {
     expect(ctx.commands).toHaveLength(0);
   });
 
+  it("a nudge about a reassigned ticket never wakes the old assignee: refused when sent, dropped when queued, and the booked check is cleared (BOS-2309)", async () => {
+    ctx = await setup({ agent: 5 });
+    const a = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer A" })).json();
+    const b = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer B" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Handed over mid-way", assigneeAgentId: a.id })).json();
+    // A has worked the ticket, and booked a check on it.
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, startedAt: new Date(Date.now() - 3_600_000), endedAt: new Date(Date.now() - 3_000_000) });
+    await ctx.db.update(tickets).set({ systemState: "in_progress", monitorAt: new Date(Date.now() + 3_600_000), monitorNote: "A's own wait" }).where(eq(tickets.id, t.id));
+    await ctx.db.delete(wakes);
+    // A was woken as the assignee (a launched "assigned" wake is the record that A held it).
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "assigned", status: "launched", priority: 2 });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "nudge", priority: 2, note: "Queued before the hand-over." });
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { assigneeAgentId: b.id });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.monitorAt).toBeNull();
+
+    // Sent now: refused, and the sender is told who holds it.
+    const sent = await ctx.scheduler.nudge({ runId: randomUUID(), fromAgentId: ctx.ceo.id, to: a.id, ticketId: t.id, why: "Status?" });
+    expect(sent).toMatchObject({ ok: false });
+    expect(sent.ok === false && sent.error).toContain("Engineer B");
+    // The new assignee is reachable.
+    expect(await ctx.scheduler.nudge({ runId: randomUUID(), fromAgentId: ctx.ceo.id, to: b.id, ticketId: t.id, why: "Status?" })).toMatchObject({ ok: true });
+
+    // Queued earlier: dropped, so A starts no run.
+    const before = ctx.commands.length;
+    await ctx.tick();
+    const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, t.id), eq(wakes.agentId, a.id), eq(wakes.reason, "nudge")));
+    expect(w!.status).toBe("dropped");
+    expect(w!.statusReason).toContain("Engineer B");
+    expect(ctx.commands.slice(before).every((c) => !/Queued before the hand-over/.test(c.prompt))).toBe(true);
+  });
+
   it("drops a ticketless nudge that waited over two hours, but starts a fresh one (BOS-1136)", async () => {
     ctx = await setup({ agent: 5 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
@@ -642,6 +673,8 @@ describe("scheduler", () => {
     expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 1 });
     expect(ctx.commands).toHaveLength(1);
     expect(ctx.commands[0]!.prompt).toContain("A nudge came in");
+    // BOS-2309: a run started for a finished ticket is told to end after one turn.
+    expect(ctx.commands[0]!.prompt).toContain("This ticket is already done");
     const [reopenedRow] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, reopened.id));
     expect(reopenedRow!.status).toBe("dropped");
     const [nudgedRow] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, nudgedAfter.id));
