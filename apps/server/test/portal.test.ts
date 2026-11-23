@@ -69,6 +69,32 @@ describe("feedback portal", () => {
     expect(settings.portalAtBareAddress).toBe(false);
   });
 
+  it("BOS-2377: released features carry releasedAt, and the Atom feed lists only portal-shown releases with public text", async () => {
+    const c = await setup();
+    // A released feature kept off the portal, one without a public summary, and one with an internal-looking title.
+    await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "BOS-99 internal secret", portalVisible: false, status: "released", publicSummary: "Hidden & kept off." });
+    await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "No summary here", portalVisible: true, status: "released" });
+    await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Internal title X", portalVisible: true, status: "released", publicTitle: "Faster <boards>", publicSummary: "Boards load in a blink." });
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true, portalAtBareAddress: true });
+    const page = (await t!.app.inject({ method: "GET", url: "/api/portal" })).json();
+    const released = page.features.filter((f: { stage: string }) => f.stage === "released");
+    expect(released.length).toBe(2);
+    for (const f of released) expect(f.releasedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+    expect(page.features.find((f: { stage: string }) => f.stage === "planned").releasedAt).toBeNull();
+    const res = await t!.app.inject({ method: "GET", url: "/api/portal/feed.atom" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("application/atom+xml");
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const xml = res.body;
+    expect(xml.match(/<entry>/g)?.length).toBe(2);
+    expect(xml).toContain("<title>Faster &lt;boards&gt;</title>");
+    expect(xml).toContain("Boards load in a blink.");
+    for (const leak of ["BOS-99", "Hidden", "Internal title X", "No summary", "internal secret"]) expect(xml).not.toContain(leak);
+    // Not at all without a portal at the bare address.
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { portalAtBareAddress: false });
+    expect((await t!.app.inject({ method: "GET", url: "/api/portal/feed.atom" })).statusCode).toBe(404);
+  });
+
   it("is off until the owner turns it on, and answers wrong or old links the same way", async () => {
     const c = await setup();
     expect((await t!.app.inject({ method: "GET", url: "/api/portal" })).statusCode).toBe(404);
