@@ -364,6 +364,14 @@ export type FundingStatus = {
   daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
   /** The last 7 days per company, biggest first. */
   byCompany?: Array<{ companyId: string; name: string; runs: number; tokens: number; costMicros: number }>;
+  /** The last 8 weeks, newest first: plan use at each reset, spend and the times work was held for this source's quota. */
+  weeks?: Array<{
+    start: string;
+    end: string;
+    plans: Array<{ window: string; resets: number; peak: number; limit: number | null }>;
+    spendMicros: number;
+    holds: Array<{ window: string; startedAt: string; endedAt: string | null; ms: number }>;
+  }>;
   totalSpentMicros: number;
   coverage: string;
 };

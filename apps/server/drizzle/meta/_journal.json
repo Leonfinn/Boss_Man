@@ -1212,6 +1212,13 @@
       "when": 1795385728792,
       "tag": "0191_watch_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1795453226220,
+      "tag": "0192_funding_history",
+      "breakpoints": true
     }
   ]
 }

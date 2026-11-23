@@ -66,6 +66,49 @@ function Daily({ s }: { s: FundingStatus }) {
   );
 }
 
+const holdLength = (ms: number) => {
+  const m = Math.max(1, Math.round(ms / 60_000));
+  return m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+};
+
+/** The last 8 weeks of this source: plan use at each reset, spend, and the times work was held for its quota. */
+function Weeks({ s }: { s: FundingStatus }) {
+  const weeks = s.weeks ?? [];
+  const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  const hasData = weeks.some((w) => w.plans.length || w.spendMicros > 0 || w.holds.length);
+  return (
+    <details className="weeks">
+      <summary>Last 8 weeks</summary>
+      {!hasData ? (
+        <p className="muted" style={{ fontSize: 13 }}>Nothing recorded yet. Each reset, week of spend and hold shows here as it happens.</p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0", display: "flex", flexDirection: "column", gap: 10 }}>
+          {weeks.map((w) => (
+            <li key={w.start} style={{ fontSize: 13 }}>
+              <strong>
+                {day(w.start)} to {day(w.end)}
+              </strong>
+              {w.plans.map((p) => (
+                <div key={p.window}>
+                  {pct(p.peak)}
+                  {p.limit ? ` (of ${p.limit.toLocaleString()})` : ""} of {windowLabel(p.window).name}, {p.resets} reset{p.resets === 1 ? "" : "s"}
+                </div>
+              ))}
+              {w.spendMicros > 0 && <div>{usd(w.spendMicros)} spent pay as you go</div>}
+              {w.holds.map((h) => (
+                <div key={h.startedAt}>
+                  Work held for the {windowLabel(h.window).name}: {when(h.startedAt)} to {h.endedAt ? when(h.endedAt) : "now"} ({holdLength(h.ms)})
+                </div>
+              ))}
+              {!w.plans.length && w.spendMicros <= 0 && !w.holds.length && <div className="muted">Nothing recorded</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
+  );
+}
+
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 
 /** Who used this source in the last 7 days: money for paid sources, tokens for a subscription. */
@@ -351,6 +394,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
       {s.source.kind === "subscription" && <QuotaSettings s={s} />}
       <Daily s={s} />
       <ByCompany s={s} />
+      <Weeks s={s} />
       {s.coverage === "boss_man_runs_only" && s.source.kind !== "subscription" && (
         <span className="muted" style={{ fontSize: 12 }}>
           Counted from Boss Man's own runs. Spend outside Boss Man isn't included: see the{" "}
