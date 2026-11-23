@@ -96,6 +96,8 @@ export const API: Record<string, unknown> = {
   "/api/decisions/advised": [],
   "/api/decisions/with-team": [],
   "/api/decisions/closed-notices": [],
+  // The Answered list reads this when it is opened, or by itself for a link to a closed card (BOS-2326).
+  "/api/decisions/answered": { items: [], next: null },
   "/api/runs": [],
   "/api/notifications": { items: [], unread: 0 },
   "/api/maintenance": {},
