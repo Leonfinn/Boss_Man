@@ -9,6 +9,7 @@ export type FeatureForecast = Omit<MilestoneForecast, "daysLate">;
 
 /** Forecast for each of the given features of one company (cancelled tasks excluded). */
 export async function featureForecasts(db: Db, companyId: string, featureIds: string[], today: string): Promise<Map<string, FeatureForecast>> {
+  // lost on restart, harmless because it is built per call from the database and returned, never kept
   const out = new Map<string, FeatureForecast>();
   if (!featureIds.length) return out;
   const rows = await db
@@ -16,6 +17,7 @@ export async function featureForecasts(db: Db, companyId: string, featureIds: st
     .from(tickets)
     .where(and(eq(tickets.companyId, companyId), inArray(tickets.featureId, featureIds), sql`${tickets.outcome} is distinct from 'cancelled'`));
   const pace = (await paceByCompany(db, today)).get(companyId) ?? 0;
+  // lost on restart, harmless because it is a per-call local grouping of the rows just read
   const of = new Map<string, Array<{ size: number | null; done: boolean }>>();
   for (const r of rows) of.set(r.featureId!, [...(of.get(r.featureId!) ?? []), { size: r.size, done: r.done }]);
   for (const id of featureIds) {
