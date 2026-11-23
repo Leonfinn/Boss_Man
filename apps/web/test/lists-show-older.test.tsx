@@ -47,6 +47,34 @@ describe("Show older on paged lists", () => {
     expect(queryByText("Show older")).toBeNull();
   });
 
+  it("Engagements search: typing reloads with q after a pause, Show older keeps it, and an empty result says so (BOS-2315)", async () => {
+    const all = Array.from({ length: 60 }, (_, i) => row(59 - i));
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = new URL(String(input), "http://x");
+        urls.push(url.pathname + url.search);
+        const q = url.searchParams.get("q");
+        if (q === "zzz") return json([]);
+        const before = url.searchParams.get("before");
+        const from = before ? all.findIndex((r) => r.id === before) + 1 : 0;
+        return json(all.slice(from, from + Number(url.searchParams.get("limit"))));
+      }),
+    );
+    const { container, getByLabelText, getByText } = render(<Engagements />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    const box = getByLabelText("Search engagements");
+    expect(box.getAttribute("type")).toBe("search");
+    await act(async () => { fireEvent.change(box, { target: { value: "Job" } }); await vi.advanceTimersByTimeAsync(400); });
+    expect(urls.at(-1)).toBe("/api/engagements?limit=50&status=open&q=Job");
+    await act(async () => { fireEvent.click(getByText("Show older")); await vi.advanceTimersByTimeAsync(50); });
+    expect(urls.at(-1)).toBe(`/api/engagements?limit=50&status=open&q=Job&before=${row(10).id}`);
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(60);
+    await act(async () => { fireEvent.change(box, { target: { value: "zzz" } }); await vi.advanceTimersByTimeAsync(400); });
+    expect(getByText('No engagements match "zzz".')).toBeTruthy();
+  });
+
   it("Skill proposals: the first 50, then Show older loads the page before the last one shown", async () => {
     const prop = (i: number) => ({ id: row(i).id, name: `skill-${i}`, source: "draft", status: "installed", verdict: "recommend", reviewRequired: true, overridden: false, createdAt: "2026-11-01T00:00:00Z" });
     const all = Array.from({ length: 60 }, (_, i) => prop(59 - i));
