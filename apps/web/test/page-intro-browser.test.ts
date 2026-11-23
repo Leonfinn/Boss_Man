@@ -39,6 +39,8 @@ function answer(p: string): unknown {
   if (p === "/api/runner-report") return { live: [], update: null };
   if (p === "/api/companies/c1/agents") return [agent];
   if (p === "/api/companies/c1/projects") return [];
+  // Settings → Team and CEO lists the chapters (an array) beside the approvals setting.
+  if (p === "/api/companies/c1/chapters") return [];
   if (p === "/api/companies/c1/models") return { runner: {}, api: [] };
   if (p === "/api/companies/c1/review-policy") return { levels: {} };
   if (p === "/api/notifications/settings") return { quiet: false, start: "22:00", end: "07:00", phoneAddress: null };
@@ -113,8 +115,8 @@ const saveShot = async (name: string, page: any) => {
 /** The four places, with the lead the owner approved and a phrase only the fold holds. */
 const PLACES = [
   {
-    name: "agents",
-    hash: "#/agents/c1",
+    name: "team",
+    hash: "#/settings/c1/team",
     ready: 'select#ceo-approvals',
     lead: "Choose whether the CEO's changes to an agent's instructions wait for you.",
     held: "Hires and model changes always wait for you",
