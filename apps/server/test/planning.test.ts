@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { activity, decisions, features, ticketDependencies, tickets } from "../src/db/schema.js";
+import { forecastMilestone } from "../src/services/planning.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp | undefined;
@@ -154,5 +155,30 @@ describe("related tickets", () => {
     await c.db.update(tickets).set({ body: `Came from ${ref}.` }).where(eq(tickets.id, b.id));
     const r = (await c.req("GET", `/api/tickets/${b.id}/related`)).json();
     expect(r.mentioned.map((x: { id: string }) => x.id)).toEqual([a.id]);
+  });
+});
+
+describe("milestone forecast (points and pace)", () => {
+  it("splits points, reports unsized separately, and forecasts from the last 28 days", async () => {
+    const c = await setup();
+    const obj = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Launch", priority: 1 })).json();
+    const ms = (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Beta", targetDate: "2026-01-01" })).json();
+    const a = await c.ticket("Done 5", { milestoneId: ms.id, state: "done" });
+    const b = await c.ticket("Open 8", { milestoneId: ms.id, state: "in_progress" });
+    await c.ticket("Open unsized", { milestoneId: ms.id, state: "in_progress" });
+    await c.db.update(tickets).set({ size: 5 }).where(eq(tickets.id, a.id));
+    await c.db.update(tickets).set({ size: 8 }).where(eq(tickets.id, b.id));
+    const today = new Date().toISOString().slice(0, 10);
+    const f = (await c.req("GET", `/api/roadmap?today=${today}`)).json()[0].objectives[0].milestones[0].forecast;
+    // 5 points finished in 28 days = 1.25 a week; 8 left = 6.4 weeks = 45 days.
+    expect(f).toMatchObject({ pointsDone: 5, pointsLeft: 8, unsized: 1, pace: 1.25 });
+    expect(f.expectedFinish > today).toBe(true);
+    expect(f.daysLate).toBeGreaterThan(0);
+  });
+
+  it("has no finish date without pace, and none is late without a target", () => {
+    expect(forecastMilestone([{ size: 3, done: false }], 0, "2026-12-01", "2026-11-23")).toMatchObject({ pointsLeft: 3, expectedFinish: null, daysLate: 0 });
+    expect(forecastMilestone([{ size: 7, done: false }], 7, null, "2026-11-23")).toMatchObject({ expectedFinish: "2026-11-30", daysLate: 0 });
+    expect(forecastMilestone([{ size: 7, done: false }], 7, "2026-11-25", "2026-11-23")).toMatchObject({ daysLate: 5 });
   });
 });
