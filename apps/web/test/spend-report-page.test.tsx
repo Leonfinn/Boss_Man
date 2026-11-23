@@ -56,6 +56,27 @@ describe("Spend page", () => {
     expect(within(screen.getByRole("table")).getByText("Docs")).toBeTruthy();
   });
 
+  it("shows the costliest tickets as links with their share, and follows the period (BOS-2370)", async () => {
+    respond = (url) => {
+      const n = Number(new URL(url, "http://x").searchParams.get("days"));
+      const top = [
+        { ticketId: "t1", ref: "BOS-7", title: "Fix the thing", state: "in_progress", feature: "Search", micros: 3_000_000, runs: 4 },
+        { ticketId: null, ref: null, title: "Not on a ticket", state: null, feature: null, micros: 1_000_000, runs: 0 },
+      ];
+      return { status: 200, body: { ...answer(n), topTickets: n === 7 ? top.slice(0, 1) : top } };
+    };
+    render(<SpendReport company={company} />);
+    const heading = await screen.findByRole("heading", { name: "Costliest tickets" });
+    const table = within(heading.parentElement!).getByRole("table");
+    const link = within(table).getByRole("link", { name: "Fix the thing" });
+    expect(link.getAttribute("href")).toBe("#/tickets/t1");
+    expect(within(table).getByText("75%")).toBeTruthy();
+    expect(within(table).getByText("Not on a ticket").closest("a")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "7 days" }));
+    await waitFor(() => expect(screen.queryByText("Not on a ticket")).toBeNull());
+    expect(screen.getByRole("link", { name: "Fix the thing" })).toBeTruthy();
+  });
+
   it("downloads a CSV whose rows add up to the table's total", async () => {
     let blob: Blob | undefined;
     URL.createObjectURL = vi.fn((b: Blob) => ((blob = b), "blob:x"));

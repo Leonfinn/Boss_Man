@@ -1,7 +1,7 @@
 // Roadmap and plan views (v1.1). The roadmap is each company's objectives with their milestones
 // on a timeline; the plan is a company's tickets and what they wait on, as a graph with blocked
 // chains and their causes worked out on the server, so the browser only draws.
-import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, ne, or, sql } from "drizzle-orm";
 import { layoutPlan, milestoneHorizon, milestoneStatus, ticketRef, type Horizon, type MilestoneStatus } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
@@ -30,6 +30,38 @@ export type PlanNodeView = {
   causes: string[];
   holdingUp: number;
 };
+
+export const PACE_DAYS = 28;
+const dayMs = 86_400_000;
+const addDays = (date: string, n: number) => new Date(Date.parse(`${date}T00:00:00Z`) + n * dayMs).toISOString().slice(0, 10);
+
+export type MilestoneForecast = {
+  pointsDone: number;
+  pointsLeft: number;
+  unsized: number;
+  /** Points the company finished per week over the last 28 days. */
+  pace: number;
+  /** today + left / pace; null when there is no pace. Today when nothing is left. */
+  expectedFinish: string | null;
+  /** Whole days the expected finish falls after the target date; 0 when on time or no target. */
+  daysLate: number;
+};
+
+/** Pure forecast for one milestone: sized points done and left, plus the finish date at the recent pace. */
+export function forecastMilestone(rows: Array<{ size: number | null; done: boolean }>, pace: number, targetDate: string | null, today: string): MilestoneForecast {
+  let pointsDone = 0;
+  let pointsLeft = 0;
+  let unsized = 0;
+  for (const r of rows) {
+    if (r.size == null) {
+      if (!r.done) unsized++;
+    } else if (r.done) pointsDone += r.size;
+    else pointsLeft += r.size;
+  }
+  const expectedFinish = pointsLeft === 0 ? today : pace > 0 ? addDays(today, Math.ceil((pointsLeft / pace) * 7)) : null;
+  const daysLate = expectedFinish && targetDate && expectedFinish > targetDate ? Math.round((Date.parse(expectedFinish) - Date.parse(targetDate)) / dayMs) : 0;
+  return { pointsDone, pointsLeft, unsized, pace, expectedFinish, daysLate };
+}
 
 export function planningService(db: Db, deps: { release: (ticketId: string) => Promise<unknown> }) {
   async function companyOfObjective(id: string) {
@@ -65,6 +97,28 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
             .groupBy(tickets.milestoneId)
         : [];
       const byMs = new Map(counts.map((c) => [c.milestoneId, c]));
+
+      // Forecast: sized points per milestone (direct tickets, or tickets of its features) and each company's 28-day pace.
+      const feats = msIds.length ? await db.select({ id: features.id, milestoneId: features.milestoneId }).from(features).where(inArray(features.milestoneId, msIds)) : [];
+      const msOfFeature = new Map(feats.map((f) => [f.id, f.milestoneId!]));
+      const sized = msIds.length
+        ? await db
+            .select({ milestoneId: tickets.milestoneId, featureId: tickets.featureId, size: tickets.size, done: sql<boolean>`${tickets.systemState} = 'done'` })
+            .from(tickets)
+            .where(and(sql`${tickets.outcome} is distinct from 'cancelled'`, or(inArray(tickets.milestoneId, msIds), feats.length ? inArray(tickets.featureId, feats.map((f) => f.id)) : undefined)))
+        : [];
+      const rowsOf = new Map<string, Array<{ size: number | null; done: boolean }>>();
+      for (const r of sized) {
+        const msId = r.milestoneId && msIds.includes(r.milestoneId) ? r.milestoneId : r.featureId ? msOfFeature.get(r.featureId) : undefined;
+        if (msId) rowsOf.set(msId, [...(rowsOf.get(msId) ?? []), { size: r.size, done: r.done }]);
+      }
+      const since = new Date(Date.parse(`${addDays(today, -PACE_DAYS)}T00:00:00Z`));
+      const paceRows = await db
+        .select({ companyId: tickets.companyId, points: sql<number>`coalesce(sum(${tickets.size}), 0)`.mapWith(Number) })
+        .from(tickets)
+        .where(and(eq(tickets.systemState, "done"), sql`${tickets.outcome} is distinct from 'cancelled'`, gte(tickets.stateChangedAt, since)))
+        .groupBy(tickets.companyId);
+      const paceOf = new Map(paceRows.map((p) => [p.companyId, p.points / (PACE_DAYS / 7)]));
       return cos
         .map((c) => ({
           ...c,
@@ -90,6 +144,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
                     ...counts,
                     active: n.active,
                     status: milestoneStatus(counts, m.targetDate, today) as MilestoneStatus,
+                    forecast: forecastMilestone(rowsOf.get(m.id) ?? [], paceOf.get(c.id) ?? 0, m.targetDate, today),
                     pinned: m.horizon,
                     horizon: milestoneHorizon({ ...counts, active: n.active, targetDate: m.targetDate, horizon: m.horizon }, today),
                   };

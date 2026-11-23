@@ -97,11 +97,9 @@ export function wipExemptKind(t: { planFirst: boolean; planApprovedAt: Date | nu
 export const agentWipCount = (db: Db, agentId: string, exceptId?: string) => countInProgress(db, eq(tickets.assigneeAgentId, agentId), exceptId);
 
 /**
- * BOS-1906: tickets an agent may have in "Being checked" (in review, held for a quick check) before its next start waits. They
- * count toward neither WIP limit (they are not in progress), so this is what keeps BOS-1479's brake: an agent can't keep starting
- * work and adding checks to a long line. A third hand-in is accepted; only the next start waits.
+ * BOS-1906: tickets an agent has in "Being checked" (in review, held for a quick check). They count toward neither WIP limit
+ * (they are not in progress), and since BOS-2385 they no longer hold the agent's next start either; only displays read this.
  */
-export const BEING_CHECKED_CAP = 2;
 export const beingCheckedCount = (db: Db, agentId: string, exceptId?: string) =>
   countWip(db, and(eq(tickets.systemState, "review"), isNotNull(tickets.checkHoldAt), eq(tickets.assigneeAgentId, agentId)), exceptId);
 
@@ -225,11 +223,7 @@ export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect, opts:
       const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId));
       hold = { limit: limits.agent, scope: "agent", reason: `Waiting: ${a?.name ?? "the agent"} is at the limit of ${limits.agent} in-progress ticket${limits.agent === 1 ? "" : "s"}; starts when one finishes.` };
     }
-    // BOS-1906: with no room-limit hit, too many tickets waiting for their check also hold the next start (the owner's "No limit" lifts this too).
-    if (!hold && (await beingCheckedCount(db, t.assigneeAgentId)) >= BEING_CHECKED_CAP) {
-      const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId));
-      hold = { limit: BEING_CHECKED_CAP, scope: "agent", reason: `Waiting: ${a?.name ?? "the agent"} has ${BEING_CHECKED_CAP} tickets being checked; starts when one clears.` };
-    }
+    // BOS-2385: tickets "Being checked" (in review, waiting on a queued quick check) no longer hold the next start: waiting for checks is not in progress.
   }
   if (!hold && limits.company != null) {
     const n = await countInProgress(db, eq(tickets.companyId, t.companyId), t.id, "company");

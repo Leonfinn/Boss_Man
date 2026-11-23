@@ -5,7 +5,8 @@ import type { FastifyInstance } from "fastify";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import { checkJobs, costEvents, projects, runs, tickets } from "../db/schema.js";
+import { firstFailingLine } from "@boss-man/shared";
+import { checkJobs, checkWorkers, costEvents, projects, runs, tickets } from "../db/schema.js";
 import { mergeHistory } from "../services/merge-history.js";
 
 const IdParam = z.object({ id: z.string().uuid() });
@@ -45,6 +46,48 @@ export function ticketRecordRoutes(owner: FastifyInstance, db: Db, deps: { files
       capMicros: t.cap ?? t.projectCap ?? null,
       lastCheck: last ? { result: last.state === "passed" ? "pass" : "fail", scope: last.scope, at: last.at?.toISOString() ?? null } : null,
       filesChanged: await deps.filesChanged(id).catch(() => null),
+    };
+  });
+
+  // BOS-2371: every check the ticket has had, newest first (up to 50), so the owner can read a ticket's bounces
+  // without an agent: what ran, the result, how long, on which machine, and for a failed or stuck one the first
+  // failing line, worked out the same way as check_log's list (the log tail, else the recorded reason).
+  owner.get("/api/tickets/:id/checks", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [t] = await db.select({ id: tickets.id }).from(tickets).where(eq(tickets.id, id));
+    if (!t) return reply.code(404).send({ error: "not_found", message: "No such ticket." });
+    const rows = await db
+      .select({
+        id: checkJobs.id,
+        kind: checkJobs.kind,
+        scope: checkJobs.scope,
+        state: checkJobs.state,
+        queuedAt: checkJobs.queuedAt,
+        startedAt: checkJobs.startedAt,
+        endedAt: checkJobs.endedAt,
+        runnerId: checkJobs.runnerId,
+        workerId: checkJobs.workerId,
+        worker: checkWorkers.name,
+        reason: checkJobs.reason,
+        logTail: checkJobs.logTail,
+      })
+      .from(checkJobs)
+      .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
+      .where(eq(checkJobs.ticketId, id))
+      .orderBy(desc(checkJobs.queuedAt))
+      .limit(50);
+    return {
+      checks: rows.map((r) => ({
+        id: r.id,
+        what: r.kind === "merge" ? "merge" : r.scope === "full" ? "full" : "quick",
+        state: r.state,
+        queuedAt: r.queuedAt.toISOString(),
+        startedAt: r.startedAt?.toISOString() ?? null,
+        endedAt: r.endedAt?.toISOString() ?? null,
+        // A job that never started has no machine; one whose worker was since removed keeps only that it was a worker.
+        machine: r.workerId ? (r.worker ?? "a check worker") : r.runnerId ? "company runner" : null,
+        firstLine: r.state === "failed" || r.state === "stuck" ? (firstFailingLine(r.logTail ?? "") ?? r.reason ?? null) : null,
+      })),
     };
   });
 }

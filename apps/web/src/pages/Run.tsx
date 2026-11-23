@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isInfiniteModel } from "@boss-man/shared";
-import { api, type Company, type Transcript, type TranscriptItem } from "../api";
+import { api, usd, type Company, type Transcript, type TranscriptItem } from "../api";
 import { download } from "../csv";
 import { away } from "../server-watch";
 import { stopRun } from "../stop-run";
@@ -11,7 +11,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
 import { usePoll } from "../hooks";
 import { permissionAnsweredBy, permissionOutcome, permissionRule, type PermissionRow } from "../permissions-in-run";
-import { failureReason, outcomeTag, usage, when } from "./Runs";
+import { failureReason, outcomeTag, tokens, usage, when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { CopyLinkButton } from "../components/CopyLinkButton";
@@ -148,6 +148,23 @@ function PermissionsInRun({ runId, live }: { runId: string; live: boolean }) {
 
 const CUT = 2_000;
 /** One run as Markdown (BOS-2322): what the Run page shows, in order; long text is cut with "(cut)". */
+/**
+ * The run's model, token counts and cost as one line (BOS-2367). A count the agent didn't report reads
+ * "not reported", never 0; a plan (subscription) run costs allowance, so it says "plan use" not money.
+ */
+export function runFigures(run: Pick<Transcript["run"], "model" | "inputTokens" | "outputTokens" | "cachedReadTokens" | "cachedWriteTokens" | "fundingKind" | "costMicros">): string {
+  const part = (n: number | null | undefined, what: string) => (n == null ? `${what} not reported` : `${tokens(n)} ${what}`);
+  const cost = run.fundingKind === "subscription" ? "plan use" : usd(run.costMicros ?? 0);
+  return [
+    run.model ?? "default model",
+    part(run.inputTokens, "in"),
+    part(run.outputTokens, "out"),
+    part(run.cachedReadTokens, "cache read"),
+    part(run.cachedWriteTokens, "cache write"),
+    cost,
+  ].join(" · ");
+}
+
 export function runMarkdown(run: Transcript["run"], ticketRef: string | null, items: TranscriptItem[]): string {
   const utc = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
   const cut = (s: string) => (s.length > CUT ? `${s.slice(0, CUT)} (cut)` : s);
@@ -229,14 +246,13 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               {outcomeTag(run.endedAt ? (run.outcome ?? "end_turn") : null)}
               <span>Started {when(run.startedAt)}</span>
               {run.endedAt && <span>Ended {when(run.endedAt)}</span>}
-              <span className="mono">{run.model ?? "default model"}</span>
               {isInfiniteModel(run.model) && (
                 <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow, in a background run slot.">
                   Infinite mode · free, slow
                 </span>
               )}
-              <span className="mono" title={usage(run).title}>
-                {usage(run).text}
+              <span className="mono" title={usage(run).title} data-testid="run-figures">
+                {runFigures(run)}
               </span>
             </p>
           )}

@@ -4,10 +4,10 @@
 // The requester sees the status and the thread, never the provider's tickets.
 import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { olderThan, pageLimit, type Page } from "./list-page.js";
-import { findCredential, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
+import { findCredential, ticketRef, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { closeCardBySystem } from "./card-validity.js";
-import { agents, companies, costEvents, decisions, engagementMessages, engagements, projects, ticketDependencies } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, engagementMessages, engagements, projects, runs, ticketDependencies, tickets } from "../db/schema.js";
 
 export class EngagementError extends Error {
   constructor(
@@ -69,6 +69,26 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
     const [e] = await db.select().from(engagements).where(eq(engagements.id, id));
     if (!e) throw new EngagementError(404, "No such engagement.");
     return e;
+  }
+
+  /** The provider's tickets doing this engagement's work, oldest first, each with what its runs have cost so far. */
+  async function workTickets(e: Engagement) {
+    const rows = await db
+      .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, assignee: agents.name })
+      .from(tickets)
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(eq(tickets.engagementId, e.id), eq(tickets.companyId, e.providerCompanyId)))
+      .orderBy(asc(tickets.number), asc(tickets.id));
+    if (rows.length === 0) return [];
+    const [prefix] = await db.select({ p: companies.ticketPrefix }).from(companies).where(eq(companies.id, e.providerCompanyId));
+    const spend = await db
+      .select({ ticketId: runs.ticketId, micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+      .from(costEvents)
+      .innerJoin(runs, eq(runs.id, costEvents.runId))
+      .where(inArray(runs.ticketId, rows.map((r) => r.id)))
+      .groupBy(runs.ticketId);
+    const spent = new Map(spend.map((s) => [s.ticketId, Number(s.micros) / 1e6]));
+    return rows.map((r) => ({ id: r.id, ref: ticketRef(prefix?.p, r.number), title: r.title, state: r.state, assignee: r.assignee ?? null, spentUsd: spent.get(r.id) ?? 0 }));
   }
 
   async function companyName(id: string) {
@@ -296,8 +316,12 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
       const theirs = companyId ? (companyId === e.requesterCompanyId ? e.providerCompanyId : e.requesterCompanyId) : null;
       const theirName = theirs ? await companyName(theirs) : null;
       const mark = (text: string, authorCompanyId: string) => (theirs && authorCompanyId === theirs ? untrusted(theirName!, text) : text);
+      // The provider's own tickets (BOS-2368): shown to the provider and the owner's all-companies view, never to the requester.
+      const showWork = !companyId || companyId === e.providerCompanyId;
+      const work = showWork ? await workTickets(e) : [];
       return {
         ...(theirs ? { notice: UNTRUSTED_NOTE } : {}),
+        ...(showWork ? { tickets: work } : {}),
         id: e.id,
         title: mark(e.title, e.requesterCompanyId),
         status: e.status,

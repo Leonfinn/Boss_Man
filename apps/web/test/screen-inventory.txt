@@ -36,6 +36,7 @@ sections:
   - Costliest tasks
   - Filter tasks
   - Merged, watching
+  - Month by month
   - On your subscriptions
   - Passed, held
   - Pay-as-you-go spend
@@ -90,6 +91,7 @@ sections:
   - Engagements
   - Terms
   - Thread
+  - Work
 reads: 
   - /api/engagements
   - /api/engagements/:id
@@ -171,7 +173,9 @@ sections:
   - Permissions in this run
   - Running now
   - Runs
+  - Waiting to start
 reads: 
+  - /api/companies/:id/wakes/waiting
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
@@ -217,6 +221,7 @@ sections:
   - Budgets
   - Costliest tasks
   - Funding sources
+  - Month by month
   - On your subscriptions
   - Pay-as-you-go spend
   - Spending limit
@@ -275,6 +280,7 @@ reads:
   - /api/companies/:id/second-opinion
   - /api/companies/:id/second-opinion/stats
   - /api/policy-rules
+  - /api/policy-rules/usage
   - /api/secrets
 
 ## #/settings/<company>/reviews
@@ -398,16 +404,19 @@ sections:
   - Add a skill
   - Add from another company
   - Files
+  - History
   - Skill proposals
   - Skills
 reads: 
   - /api/companies/:id/skill-proposals
   - /api/companies/:id/skills
   - /api/companies/:id/skills/:id
+  - /api/companies/:id/skills/:id/history
   - /api/companies/:id/skills/elsewhere
 
 ## #/spend
 sections: 
+  - Costliest tickets
   - Spend
 reads: 
   - /api/companies/:id/spend-report
@@ -416,6 +425,7 @@ reads:
 sections: 
   - About
   - Activity
+  - Checks
   - Feature
   - Related
   - Roadmap, feature and dependencies
@@ -431,6 +441,7 @@ reads:
   - /api/runs/:id/transcript
   - /api/tickets/:id
   - /api/tickets/:id/artifacts
+  - /api/tickets/:id/checks
   - /api/tickets/:id/ci
   - /api/tickets/:id/diff
   - /api/tickets/:id/images
@@ -445,6 +456,7 @@ reads:
 ## #/wiki
 sections: 
   - Company brief
+  - Links
   - Wiki
 reads: 
   - /api/companies/:id/brief
@@ -463,6 +475,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
+  - Week by week
   - What this shows
   - Workflow report
 reads: 

@@ -39,14 +39,24 @@ export const CARD_SELECTOR = "[data-shortcut-card]";
 
 /** The current screen's own keys for the "?" list, or null on a screen without any. */
 export function screenKeys(hash: string): { title: string; rows: Array<{ keys: string[]; what: string }> } | null {
-  const on = /^#\/board(\/|$)/.test(hash) ? "Board" : /^#\/decisions(\/|$)/.test(hash) ? "Decisions" : null;
+  const on = /^#\/board(\/|$)/.test(hash)
+    ? "Board"
+    : /^#\/decisions(\/|$)/.test(hash)
+      ? "Decisions"
+      : /^#\/runs\/?(\?|$)/.test(hash)
+        ? "Runs"
+        : /^#\/features(\/[^/?]+)?\/?(\?|$)/.test(hash)
+          ? "Features"
+          : null;
   if (!on) return null;
+  const list = on === "Runs" || on === "Features";
+  const noun = on === "Runs" ? "run" : "feature";
   return {
-    title: `On ${on === "Board" ? "the Board" : "Decisions"}`,
+    title: `On ${on === "Board" ? "the Board" : on}`,
     rows: [
-      { keys: ["j"], what: on === "Board" ? "Next card (down the lane, then the next lane)" : "Next card" },
-      { keys: ["k"], what: "Previous card" },
-      { keys: ["Enter"], what: on === "Board" ? "Open the card's task" : "Go to the card's answer buttons" },
+      { keys: ["j"], what: on === "Board" ? "Next card (down the lane, then the next lane)" : list ? "Next row" : "Next card" },
+      { keys: ["k"], what: list ? "Previous row" : "Previous card" },
+      { keys: ["Enter"], what: on === "Board" ? "Open the card's task" : list ? `Open the ${noun}'s page` : "Go to the card's answer buttons" },
     ],
   };
 }
@@ -176,7 +186,7 @@ export function Shortcuts({ go, hasProjects }: { go: (to: string) => void; hasPr
         <dl className="shortcuts-list">
           <div className="shortcuts-row">
             <dt><kbd>{mod}</kbd> <kbd>K</kbd></dt>
-            <dd>Search tickets, wiki, chats, features, decisions and runs</dd>
+            <dd>Search tickets, wiki, chats, features, decisions, runs, agents and skills</dd>
           </div>
           <div className="shortcuts-row">
             <dt><kbd>?</kbd></dt>

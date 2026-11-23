@@ -15,12 +15,25 @@ type Stage = "considering" | "planned" | "released";
 const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "considering", label: "Under consideration", help: "Ideas we haven't committed to yet. Tell us how much they'd matter to you." },
   { id: "planned", label: "Planned", help: "On the way. Your vote still helps us decide what comes first." },
-  { id: "released", label: "Released", help: "Done recently." },
+  { id: "released", label: "What's new", help: "Features we've released, newest first." },
 ];
+/** The released features grouped under "November 2026" style headings (UTC), newest first. */
+export function groupByMonth<T extends { releasedAt?: string | null }>(items: T[]): Array<{ month: string; items: T[] }> {
+  const sorted = [...items].sort((a, b) => (b.releasedAt ?? "").localeCompare(a.releasedAt ?? ""));
+  const groups: Array<{ month: string; items: T[] }> = [];
+  for (const f of sorted) {
+    const month = f.releasedAt ? new Date(f.releasedAt).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }) : "Earlier";
+    const last = groups[groups.length - 1];
+    if (last && last.month === month) last.items.push(f);
+    else groups.push({ month, items: [f] });
+  }
+  return groups;
+}
+const releaseDate = (iso: string) => new Date(iso).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 // BOS-1921: a summary that only repeats the title is shown once (nothing stored changes).
 const squash = (s: string) => s.toLowerCase().replace(/\s+/g, " ").replace(/[\s.!?…:;,]+$/, "").trim();
 const sameText = (title: string, body: string) => squash(title) === squash(body);
-type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
+type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; releasedAt?: string | null; myVote: { importance: Importance; comment: string | null } | null };
 type Portal = { title: string; intro: string | null; hasLogo: boolean; confirmByEmail?: boolean; rememberedEmail?: string | null; back: { url: string; text: string } | null; features: PortalFeature[] };
 /** BOS-1388: with "Confirm posts by email" on, the address is needed and the reason is said once, next to the box. */
 type Ask = { required: boolean; remembered: string | null };
@@ -88,6 +101,11 @@ function FeatureCard({ f, onChanged, ask }: { f: PortalFeature; onChanged: () =>
   return (
     <li className="card portal-card">
       <h3>{f.title}</h3>
+      {f.releasedAt && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          Released <time dateTime={f.releasedAt}>{releaseDate(f.releasedAt)}</time>
+        </p>
+      )}
       {f.description && !sameText(f.title, f.description) && <p style={{ whiteSpace: "pre-wrap" }}>{f.description}</p>}
       {canVote && (
         <>
@@ -298,7 +316,23 @@ export function PortalApp() {
         <p className="muted" style={{ fontSize: 14 }}>
           {STAGES.find((s) => s.id === stage)!.help}
         </p>
-        {shown.length ? (
+        {stage === "released" && !token() && (
+          <p style={{ fontSize: 14 }}>
+            <a href="/api/portal/feed.atom">Follow new releases (Atom feed)</a>
+          </p>
+        )}
+        {shown.length && stage === "released" ? (
+          groupByMonth(shown).map((g) => (
+            <section key={g.month} aria-label={g.month}>
+              <h2 style={{ fontSize: 18, fontWeight: 600 }}>{g.month}</h2>
+              <ul className="portal-list">
+                {g.items.map((f) => (
+                  <FeatureCard key={f.id} f={f} onChanged={load} ask={ask} />
+                ))}
+              </ul>
+            </section>
+          ))
+        ) : shown.length ? (
           <ul className="portal-list">
             {shown.map((f) => (
               <FeatureCard key={`${f.id}:${ask.remembered ?? ""}`} f={f} onChanged={load} ask={ask} />

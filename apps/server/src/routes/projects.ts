@@ -14,7 +14,8 @@ import type { launcherService } from "../services/launcher.js";
 import { record } from "../services/activity.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
 import { summarizeCostChecks } from "../services/cost-check.js";
-import { monthStartUtc, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
+import { monthStartUtc, projectMonthlyTrend, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
+import { validZone } from "../services/spend-report.js";
 import type { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { runnersService } from "../services/runners.js";
 import type { secretsService } from "../services/secrets.js";
@@ -228,7 +229,10 @@ export function projectRoutes(
     const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
     // The cost sanity check (BOS-1866): runs on this project's tasks whose recorded cost disagrees with their tokens at list price, and runs not checked.
     const costCheck = await summarizeCostChecks(db, sql`${runsTable.ticketId} in (select ${tickets.id} from ${tickets} where ${tickets.projectId} = ${id})` as ReturnType<typeof and>);
-    return { costCheck, tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
+    // Month by month for the last 6 months, in the owner's time zone (the browser sends ?tz=, as the Spend page does; BOS-2369).
+    const tz = (req.query as { tz?: string }).tz;
+    const months = await projectMonthlyTrend(db, id, { timeZone: validZone(typeof tz === "string" ? tz : undefined), now: t });
+    return { months, costCheck, tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
   });
 
   // The setup wizard (R56): where the owner is in it, and what's still to do for a company.
