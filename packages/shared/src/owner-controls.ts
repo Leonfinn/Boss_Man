@@ -314,7 +314,7 @@ export const OWNER_FIELDS = {
   Agents: [
     "Only start", "From", "To", "Time zone",
     "Thinking", "Blank", "Name", "Job title", "Agent", "Model", "Paid from", "Instructions", "Upload a picture", "Title",
-    "Note", "Review by (optional)", "Why (what you said)", "What waits for you from the CEO", "Filter agents",
+    "Note", "Review by (optional)", "Why (what you said)", "What waits for you from the CEO",
   ],
   Skills: [
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
