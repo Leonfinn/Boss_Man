@@ -56,6 +56,28 @@ describe("Spend page", () => {
     expect(within(screen.getByRole("table")).getByText("Docs")).toBeTruthy();
   });
 
+  it("By model: a table with plan use and pay-as-you-go, and a CSV with a model column (BOS-2401)", async () => {
+    const m = { runs: 2, inputTokens: 1500, outputTokens: 20, cacheReadTokens: 3, cacheWriteTokens: 4 };
+    respond = (url) => {
+      const base = answer(Number(new URL(url, "http://x").searchParams.get("days")));
+      const day = base.days.at(-1)!;
+      const modelDays = [
+        { date: day, model: "opus", micros: 3_000_000, planMicros: 2_000_000, payMicros: 1_000_000, ...m },
+        { date: day, model: "Unknown model", micros: 1_000_000, planMicros: 0, payMicros: 1_000_000, ...m },
+      ];
+      return { status: 200, body: { ...base, models: modelDays.map((d) => ({ ...d, date: "" })), modelDays } };
+    };
+    const { container } = render(<SpendReport company={company} />);
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: "By model" }));
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("opus")).toBeTruthy();
+    expect(within(table).getByText("Unknown model")).toBeTruthy();
+    expect(within(table).getByText("75%")).toBeTruthy();
+    expect(within(table).getAllByText("1,500").length).toBe(2);
+    expect(container.querySelectorAll(".dbar .seg.blue").length).toBeGreaterThan(0);
+  });
+
   it("shows the costliest tickets as links with their share, and follows the period (BOS-2370)", async () => {
     respond = (url) => {
       const n = Number(new URL(url, "http://x").searchParams.get("days"));
