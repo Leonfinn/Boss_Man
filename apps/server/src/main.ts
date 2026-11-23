@@ -1,4 +1,5 @@
 import { loadMasterKey, MasterKeyFileError } from "./crypto.js";
+import { databaseUrl } from "./database-url.js";
 import { openPglite, openPostgres } from "./db/client.js";
 import { buildApp } from "./app.js";
 import { createLeader } from "./leader.js";
@@ -13,6 +14,9 @@ import { getHold } from "./services/maintenance.js";
 import { recordTakeover, takeoverCause } from "./services/merge-line.js";
 
 const env = process.env;
+// The password may live in a file (BOS-974); the rest of start-up, including the leader lock, then reads DATABASE_URL as before.
+const resolvedUrl = databaseUrl(env);
+if (resolvedUrl) env.DATABASE_URL = resolvedUrl;
 const master = (() => {
   try {
     return loadMasterKey(env);

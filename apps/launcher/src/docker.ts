@@ -12,7 +12,7 @@ export class DockerError extends Error {
 }
 
 export type ContainerSummary = { Id: string; Names: string[]; Image: string; ImageID?: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
-export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null; Env?: string[] | null }; HostConfig?: { Memory?: number }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } }; NetworkSettings?: { Networks?: Record<string, unknown> | null } };
+export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null; Env?: string[] | null }; HostConfig?: { Memory?: number }; Mounts?: { Type?: string; Source?: string; Destination?: string }[]; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } }; NetworkSettings?: { Networks?: Record<string, unknown> | null } };
 /** One Docker event, as far as the launcher reads it: a container start, a restart or a die (a crash). */
 export type DockerEvent = { Type?: string; Action?: string; Actor?: { ID?: string; Attributes?: Record<string, string> } };
 

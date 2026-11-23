@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Install test for docker-compose.images.yml (BOS-974).
+#
+# Without INSTALL_RELEASE_JSON (the merge check, scripts/test-shell.sh): the compose file is read, never started. It checks what makes
+# the install "pull only": every image named by digest, nothing built, no host folder bound but the Docker socket, nothing
+# on the host (openssl, chown, sudo) mentioned in the steps. Needs the docker CLI and compose plugin; skips with a message without them.
+#
+# With INSTALL_RELEASE_JSON=<release.json> (CI, on x86 and arm64 runners, and by hand on a host with Docker): the real install.
+# It pulls the published images by digest, runs setup twice (the second run must change nothing), starts the stack under its own
+# project name, waits for the server to answer, then asks the launcher to start a runner from the published runner image.
+#   INSTALL_RELEASE_JSON=release.json INSTALL_REGISTRY=ghcr.io/<owner> scripts/install-images.test.sh
+# It removes its own containers and volumes at the end (only those of its project) and touches nothing else on the host.
+# SC2015: ok and bad only print and set a flag, so "test && ok || bad" cannot run both. SC2317: cleanup runs from the EXIT trap.
+# shellcheck disable=SC2015,SC2317
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+fail=0
+ok() { echo "ok   $1"; }
+bad() { echo "FAIL $1"; fail=1; }
+
+command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "skip: no docker CLI with the compose plugin"; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo "skip: no jq"; exit 0; }
+T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT
+unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME
+
+D="sha256:$(printf 'a%.0s' {1..64})"
+cat > "$T/images.env" <<EOF
+BOSSMAN_REGISTRY=registry.invalid/me
+BOSSMAN_SERVER_DIGEST=$D
+BOSSMAN_LAUNCHER_DIGEST=$D
+BOSSMAN_NETGUARD_DIGEST=$D
+BOSSMAN_RUNNER_DIGEST=$D
+EOF
+
+# ---- Static checks: always run ----
+cfg="$(docker compose --env-file "$T/images.env" --profile '*' -f docker-compose.images.yml config --format json 2>&1)" || { echo "$cfg"; bad "compose file is valid"; exit 1; }
+# Every service made by Boss Man is a digest; the one outside image (the database) is a pinned tag.
+unpinned="$(echo "$cfg" | jq -r '.services | to_entries[] | select(.key != "db") | select(.value.image | test("@sha256:[0-9a-f]{64}$") | not) | .key')"
+[ -z "$unpinned" ] && ok "every Boss Man image is pulled by digest" || bad "not pinned by digest: $unpinned"
+echo "$cfg" | jq -e '.services.db.image | test(":[0-9]")' >/dev/null && ok "the database image is pinned to a version" || bad "database image not pinned"
+echo "$cfg" | jq -e '[.services[] | has("build")] | any | not' >/dev/null && ok "nothing is built" || bad "a service has a build section"
+# The only folder from the host is the Docker socket; everything else is a named volume.
+hostbinds="$(echo "$cfg" | jq -r '.services[].volumes[]? | select(.type == "bind") | .source')"
+[ "$hostbinds" = "/var/run/docker.sock" ] && ok "the only host path is the Docker socket" || bad "host paths bound: $hostbinds"
+sock="$(BOSSMAN_DOCKER_SOCK=/run/user/1000/docker.sock docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json | jq -r '.services.launcher.volumes[] | select(.target == "/var/run/docker.sock") | .source')"
+[ "$sock" = "/run/user/1000/docker.sock" ] && ok "BOSSMAN_DOCKER_SOCK picks the socket" || bad "socket setting: $sock"
+echo "$cfg" | jq -e '.services.setup.network_mode == "none" and (.services.setup.cap_add == ["CHOWN"])' >/dev/null && ok "setup has no network and one capability" || bad "setup is not locked down"
+echo "$cfg" | jq -e '.services.launcher.cap_add == ["SETGID","SETUID"] or .services.launcher.cap_add == ["SETUID","SETGID"]' >/dev/null && ok "the launcher keeps only SETUID and SETGID" || bad "launcher capabilities"
+# No host tools in the compose file's own steps (comments excluded).
+if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
+[ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"
+
+# ---- The real install ----
+if [ -z "${INSTALL_RELEASE_JSON:-}" ]; then
+  echo "skip: real install (set INSTALL_RELEASE_JSON to run it)"
+  exit "$fail"
+fi
+docker info >/dev/null 2>&1 || { bad "INSTALL_RELEASE_JSON is set but there is no Docker daemon"; exit 1; }
+scripts/render-image-env.sh "$INSTALL_RELEASE_JSON" ${INSTALL_REGISTRY:+"$INSTALL_REGISTRY"} > "$T/real.env" || { bad "images.env from release.json"; exit 1; }
+P="bminstall$$"
+{
+  cat "$T/real.env"
+  echo "BOSSMAN_HOST_PORT=${INSTALL_HOST_PORT:-31100}"
+  echo "BOSSMAN_PORTAL_HOST_PORT=${INSTALL_PORTAL_PORT:-31101}"
+  echo "BOSSMAN_RUNNER_NETWORK=${P}_default"
+} > "$T/run.env"
+dc() { docker compose -p "$P" --env-file "$T/run.env" -f docker-compose.images.yml --profile images "$@"; }
+cleanup() { dc down -v --remove-orphans >/dev/null 2>&1; docker rm -f "boss-man-runner-smoke" "boss-man-netguard-smoke" >/dev/null 2>&1; rm -rf "$T"; }
+trap cleanup EXIT
+
+dc pull -q || { bad "pull by digest"; exit 1; }
+ok "images pulled by digest ($(uname -m))"
+dc run --rm setup > "$T/setup1.log" 2>&1 || { cat "$T/setup1.log"; bad "setup, first run"; exit 1; }
+grep -q 'Created master.key' "$T/setup1.log" && ok "setup created the keys" || bad "setup output: $(cat "$T/setup1.log")"
+# Read the files as uid 1000, the server's user (root without capabilities cannot read them), and compare only a hash.
+limg="$(grep '^BOSSMAN_REGISTRY=' "$T/run.env" | cut -d= -f2)/boss-man-launcher@$(grep '^BOSSMAN_LAUNCHER_DIGEST=' "$T/run.env" | cut -d= -f2)"
+sums() { docker run --rm --network none --user 1000:1000 -v "${P}_config:/c:ro" -v "${P}_db-secret:/d:ro" --entrypoint sh "$limg" -c 'cat /c/master.key /d/db_password' | sha256sum; }
+sum1="$(sums)"
+[ "$sum1" != "$(printf '' | sha256sum)" ] && ok "uid 1000 can read both key files" || bad "uid 1000 cannot read the key files"
+dc run --rm setup > "$T/setup2.log" 2>&1 || { cat "$T/setup2.log"; bad "setup, second run"; exit 1; }
+sum2="$(sums)"
+grep -q 'Created' "$T/setup2.log" && bad "the second setup created something" || ok "the second setup run changed nothing"
+[ "$sum1" = "$sum2" ] && ok "key files are identical after the second run" || bad "key files changed"
+
+dc up -d || { dc logs --tail 40; bad "up"; exit 1; }
+# Wait for the event (the server answering), with a deadline: a cold pull-and-migrate can take minutes on a slow runner.
+deadline=$((SECONDS + ${INSTALL_WAIT_SECONDS:-300}))
+until curl -fsS "http://127.0.0.1:${INSTALL_HOST_PORT:-31100}/api/health" >/dev/null 2>&1; do
+  [ "$SECONDS" -lt "$deadline" ] || { dc logs --tail 60; bad "the server did not answer /api/health in time"; exit 1; }
+  sleep 3
+done
+ok "the server answers /api/health"
+
+launcher_log="$(dc logs launcher 2>&1)"
+echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
+echo "$launcher_log" | grep -q '"msg":"data folder"' && ok "the launcher found its data volume on the host" || bad "launcher data folder"
+echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up and can reach Docker" || bad "launcher not listening"
+
+# Ask the launcher, from inside its container, to start a runner from the published runner image (it will not get a real token, so it cannot connect; starting is the point).
+tok="bmr_$(printf 'x%.0s' {1..43})"
+call() { dc exec -T --user 1000:1000 launcher node -e '
+const fs=require("fs");const [m,p,b]=process.argv.slice(1);
+fetch("http://127.0.0.1:3105"+p,{method:m,headers:{authorization:"Bearer "+fs.readFileSync("/run/launcher/key","utf8").trim(),"content-type":"application/json"},body:b||undefined})
+ .then(async r=>{console.log(r.status+" "+await r.text());process.exit(r.status<300?0:1)}).catch(e=>{console.log(String(e));process.exit(1)})' "$@"; }
+out="$(call PUT /runners/smoke "{\"token\":\"$tok\"}" 2>&1)" && ok "the launcher started a runner from the published image" || bad "runner start: $out"
+img="$(docker inspect --format '{{.Config.Image}}' boss-man-runner-smoke 2>/dev/null)"
+want="$(grep '^BOSSMAN_REGISTRY=' "$T/run.env" | cut -d= -f2)/boss-man-runner@$(grep '^BOSSMAN_RUNNER_DIGEST=' "$T/run.env" | cut -d= -f2)"
+[ "$img" = "$want" ] && ok "the runner runs the digest from release.json" || bad "runner image is '$img', wanted '$want'"
+call DELETE /runners/smoke >/dev/null 2>&1 || true
+exit "$fail"

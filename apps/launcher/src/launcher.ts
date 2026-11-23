@@ -6,7 +6,7 @@ import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
 import { ensurePack } from "./claude-pack.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, guardImage, LABEL, listLabel, previousRunnerImage, runnerImage, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, MAX_AGENTS, parseAllow, parseTrusted, planChecks, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, guardImageOf, LABEL, listLabel, previousRunnerImage, runnerImageOf, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, MAX_AGENTS, parseAllow, parseTrusted, planChecks, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -128,7 +128,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     try {
       // DR-007 row 3: check the guard can be made at all before taking the old one away. Without the
       // image the old guard stays, and so do the rules it loaded.
-      if (!(await docker.imageId(guardImage(cfg.stack)))) throw new GuardUnavailable(false, `The network guard image ${guardImage(cfg.stack)} is missing on this host; run the runner update to build it.`);
+      if (!(await docker.imageId(guardImageOf(cfg)))) throw new GuardUnavailable(false, `The network guard image ${guardImageOf(cfg)} is missing on this host; ${cfg.netguardImage ? "run `docker compose --env-file images.env --profile images pull` to download it (docs/35-install-from-images.md)" : "run the runner update to build it"}.`);
       const old = await guardOf(slug);
       if (old) await removeSettled(docker, old.Id);
       mkdirSync(netguardDir(cfg, slug), { recursive: true, mode: 0o755 });
@@ -348,7 +348,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
 
     async list(): Promise<RunnerStatus[]> {
       const all = await docker.list(listLabel(cfg.stack));
-      const current = await docker.imageId(runnerImage(cfg.stack));
+      const current = await docker.imageId(runnerImageOf(cfg));
       const mine = all.filter((c) => SLUG.test(c.Labels[COMPANY_LABEL] ?? "") && c.Names.includes(`/${containerName(c.Labels[COMPANY_LABEL]!, cfg.stack)}`));
       return Promise.all(
         mine.map(async (c) => {

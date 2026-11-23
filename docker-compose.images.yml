@@ -1,0 +1,156 @@
+# Boss Man from ready-made images (BOS-974, docs/35-install-from-images.md). Nothing is built on your machine and nothing is
+# needed on the host but Docker: no openssl, no chown, no sudo, no source code.
+#
+# Every Boss Man image is named by digest (the exact bytes), so what you pull is what was published and signed. The digests and the
+# registry come from images.env, which is made from a release's signed release.json (scripts/render-image-env.sh) and downloaded
+# with this file from the release page. To use another registry, change BOSSMAN_REGISTRY in images.env.
+#
+#   docker compose --env-file images.env run --rm setup        # once: master key and database password, in a volume
+#   docker compose --env-file images.env --profile images pull # the runner and network-guard images the launcher starts
+#   docker compose --env-file images.env up -d
+# Then open http://<host>:3100 and create the owner account. Back up the "config" volume: without master.key, stored
+# secrets cannot be read.
+#
+# Settings (all optional, in images.env or the environment): BOSSMAN_DOCKER_SOCK (the Docker socket on this host),
+# BOSSMAN_BIND / BOSSMAN_HOST_PORT, BOSSMAN_RUNNER_MEMORY and the others the build install (docker-compose.yml) documents.
+# The build install is unchanged and still works; do not run both on one host with the same project name.
+
+name: boss-man
+
+services:
+  # Runs once, on its own, with no network: makes the secrets in the config volume. Safe to run again: it never overwrites a file.
+  setup:
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-launcher@${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
+    profiles: ["setup"]
+    restart: "no"
+    command: ["node", "dist/setup.js"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    # Root, but only able to give the files to the server's user.
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - config:/config
+      - db-secret:/db-secret
+      # Only to give the folder to the launcher's user before the server's read-only mount makes it root-owned.
+      - launcher-key:/launcher-key
+
+  db:
+    # Third-party image from Docker Hub (not published by Boss Man). Pinned by tag, like docker-compose.yml.
+    image: ${BOSSMAN_DB_IMAGE:-pgvector/pgvector:0.8.7-pg17-bookworm}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bossman
+      POSTGRES_USER: bossman
+      POSTGRES_PASSWORD_FILE: /run/db/db_password
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Only the database password. The master key is in "config", which this third-party image never gets.
+      - db-secret:/run/db:ro
+    mem_limit: ${BOSSMAN_DB_MEMORY:-0}
+    mem_reservation: ${BOSSMAN_DB_MEMORY_RESERVED:-256m}
+    oom_score_adj: -500
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bossman -d bossman"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-server@${BOSSMAN_SERVER_DIGEST:?Use --env-file images.env}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://bossman@db:5432/bossman
+      BOSSMAN_DATABASE_PASSWORD_FILE: /run/db/db_password
+      BOSSMAN_MASTER_KEY_FILE: /run/config/master.key
+      BOSSMAN_LAUNCHER: "1"
+      BOSSMAN_DRAIN_MINUTES: ${BOSSMAN_DRAIN_MINUTES:-30}
+      BOSSMAN_LAUNCHER_URL: http://launcher:3105
+      BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
+      BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
+      BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}
+      BOSSMAN_PORTAL_PORT: "3101"
+      BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
+      NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
+      BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
+    mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
+    mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
+    oom_score_adj: -500
+    volumes:
+      - config:/run/config:ro
+      - db-secret:/run/db:ro
+      - launcher-key:/run/launcher:ro
+    networks: [default, launcher]
+    ports:
+      # Bound to localhost by default; set BOSSMAN_BIND=0.0.0.0 to reach it from the LAN.
+      - "${BOSSMAN_BIND:-127.0.0.1}:${BOSSMAN_HOST_PORT:-3100}:3100"
+      - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:${BOSSMAN_PORTAL_HOST_PORT:-3101}:3101"
+
+  launcher:
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env (see docs/35-install-from-images.md)}/boss-man-launcher@${BOSSMAN_LAUNCHER_DIGEST:?Use --env-file images.env}
+    restart: unless-stopped
+    environment:
+      # Company data is a named volume. The launcher asks Docker where it is on this host, because Docker starts the runners.
+      BOSSMAN_DATA: /data
+      BOSSMAN_DATA_HOST: auto
+      # The runner and guard images are pulled by `--profile images pull`; the launcher never pulls.
+      BOSSMAN_RUNNER_IMAGE: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
+      BOSSMAN_NETGUARD_IMAGE: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
+      BOSSMAN_RUNNER_NETWORK: ${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
+      BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
+      BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-}
+      BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
+      BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
+      BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
+      BOSSMAN_RESERVED_THREADS: ${BOSSMAN_RESERVED_THREADS:-off}
+      BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
+      BOSSMAN_OPENCODE_SESSION_DAYS: ${BOSSMAN_OPENCODE_SESSION_DAYS:-}
+      PNPM_STORE_DIR: ${PNPM_STORE_DIR:-}
+      BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
+      BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
+      BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
+    volumes:
+      - ${BOSSMAN_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - data:/data
+      - launcher-key:/run/launcher
+    networks: [launcher]
+    read_only: true
+    # Starts as root with two capabilities only, to join the Docker socket's own group and become uid 1000 (apps/launcher/src/startup.ts).
+    # After that it keeps no capability. There is no group number to look up and put in a file.
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
+
+  # Only here so `--profile images pull` fetches the images the launcher starts beside each company's runner. Never started
+  # (the "images" profile is off in `up`), so it leaves no stopped container in your dashboard.
+  runner-image:
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-runner@${BOSSMAN_RUNNER_DIGEST:?Use --env-file images.env}
+    profiles: ["images"]
+    restart: "no"
+  netguard:
+    image: ${BOSSMAN_REGISTRY:?Use --env-file images.env}/boss-man-netguard@${BOSSMAN_NETGUARD_DIGEST:?Use --env-file images.env}
+    profiles: ["images"]
+    restart: "no"
+    command: ["--build-only"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+
+networks:
+  launcher:
+    internal: true
+
+volumes:
+  config:
+  db-secret:
+  data:
+  launcher-key:
+  db-data:

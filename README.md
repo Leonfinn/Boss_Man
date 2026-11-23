@@ -23,7 +23,7 @@ You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS S
 
 > **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).
 
-1. Follow [docs/00-first-time-install.md](docs/00-first-time-install.md) on any host, TrueNAS SCALE included. It takes you from an empty host to a company with an agent working its first ticket.
+1. With only Docker on the host, install from the ready-made images: [docs/35-install-from-images.md](docs/35-install-from-images.md). To build from the source instead, follow [docs/00-first-time-install.md](docs/00-first-time-install.md) on any host, TrueNAS SCALE included. It takes you from an empty host to a company with an agent working its first ticket.
 2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) adds the dataset, snapshots and the optional extras.
 3. Before you update, read [docs/23-updating.md](docs/23-updating.md).
 4. If something goes wrong, or you want to tune memory limits, see [docs/29-tune-and-troubleshoot.md](docs/29-tune-and-troubleshoot.md).

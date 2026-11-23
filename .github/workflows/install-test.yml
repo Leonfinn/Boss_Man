@@ -1,0 +1,109 @@
+name: Install test
+
+# BOS-974: installs Boss Man the way the guide says (docs/35-install-from-images.md) on a real x86 runner and a real arm64 runner:
+# pull by digest, setup twice, start, answer /api/health, start a runner from the published image.
+# It starts by itself when the Release workflow finishes successfully (nobody has to remember), and tests that release.
+# A red run means the release can't be installed: it is reported like any failed workflow. The one skip (green, with a notice)
+# is a release whose release.json lists no runner image, which by design has no install files. It can also be started by hand:
+# Actions > Install test > Run workflow, type the version (like 0.1.0-beta.1).
+# It only reads a published release; it changes nothing in the repository or the registries.
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version to install, like 0.1.0-beta.1 (no leading v)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    name: install (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # After a Release run, only a successful one has a release to test.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Find the version (the release the finished Release run made, when started by the Release workflow)
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          RUN_STARTED: ${{ github.event.workflow_run.run_started_at }}
+        run: |
+          set -euo pipefail
+          # The Release run has no tag in its payload, so take the newest published (not draft) release made since that run
+          # started (by publishedAt: GitHub dates createdAt by the tagged commit, which is older than the run),
+          # not just the newest one: a draft, or an older release that sorts first, is never picked.
+          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName,publishedAt,isDraft \
+            | jq -r --arg s "$RUN_STARTED" '[.[] | select(.isDraft | not) | select(.publishedAt >= $s)] | sort_by(.publishedAt) | last | .tagName // empty')"
+          [ -n "$tag" ] || { echo "The Release run succeeded but no release made since $RUN_STARTED was found to test."; exit 1; }
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+      - name: Check the release can be installed at all
+        # Only a release made before the runner image is published has no images.env (release.yml leaves it out on purpose,
+        # and only then: when release.json lists no boss-man-runner). Skip with a notice for exactly that case.
+        # A release whose release.json lists the runner image but has no images.env is the fault this test exists to catch: fail.
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          if grep -qx 'images.env' <<<"$assets"; then
+            echo "INSTALLABLE=yes" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/probe"
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/probe" --pattern release.json
+          if jq -e '[.. | strings | select(test("boss-man-runner"))] | length > 0' "$RUNNER_TEMP/probe/release.json" >/dev/null; then
+            echo "::error::Release v$VERSION lists the runner image but has no images.env: the Release workflow failed to publish the install files."
+            exit 1
+          fi
+          echo "::notice::Release v$VERSION lists no boss-man-runner image (before the runner image was published), so it has no images.env and nothing to install. Skipping."
+          echo "INSTALLABLE=no" >> "$GITHUB_ENV"
+      - if: ${{ env.INSTALLABLE == 'yes' }}
+        uses: actions/checkout@v7
+      - if: ${{ env.INSTALLABLE == 'yes' }}
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+      - if: ${{ env.INSTALLABLE == 'yes' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download the release files and check their signature
+        if: ${{ env.INSTALLABLE == 'yes' }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Version '$VERSION' is not like 0.1.0-beta.1."; exit 1; }
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release" \
+            --pattern 'release.json*' --pattern 'images.env*' --pattern 'docker-compose.images.yml*'
+          cd "$RUNNER_TEMP/release"
+          for f in release.json images.env docker-compose.images.yml; do
+            cosign verify-blob --bundle "$f.sigstore.json" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
+              "$f"
+          done
+      - name: Install from the images (real Docker, ${{ matrix.arch }})
+        if: ${{ env.INSTALLABLE == 'yes' }}
+        run: |
+          set -euo pipefail
+          # The test reads the signed compose file from the release, not the one in this checkout, so it tests what people download.
+          cp "$RUNNER_TEMP/release/docker-compose.images.yml" docker-compose.images.yml
+          INSTALL_RELEASE_JSON="$RUNNER_TEMP/release/release.json" scripts/install-images.test.sh
