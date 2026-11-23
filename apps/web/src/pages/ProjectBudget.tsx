@@ -5,9 +5,10 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
+import { ProjectMonthlyTrend, type ProjectMonth } from "../components/ProjectMonthlyTrend";
 
 type Tokens = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-type Spend = { costCheck?: { outOfBand: number; checked: number; skipped: { model: string; reason: string; runs: number }[] }; tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
+type Spend = { months?: ProjectMonth[]; costCheck?: { outOfBand: number; checked: number; skipped: { model: string; reason: string; runs: number }[] }; tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
 const PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", synthetic: "Synthetic" };
 
 const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
@@ -46,7 +47,7 @@ export function ProjectLimitForm({ project }: { project: Project }) {
 
 /** What a project has cost on API and credit runs (subscription runs aren't in the dollar figures), the month being the UTC calendar month. */
 export function ProjectBudget({ project }: { project: Project }) {
-  const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend`, { signal }), 30_000, `spend-${project.id}`);
+  const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`, { signal }), 30_000, `spend-${project.id}`);
   const s = spend.data;
   const plan = s?.plan ?? [];
   if (spend.error && !away(spend.error)) return <LoadError what="the budget" message={spend.error.message} onRetry={spend.reload} />;
@@ -92,6 +93,7 @@ export function ProjectBudget({ project }: { project: Project }) {
       ) : (
         <p className="muted">No monthly cap. Set one on the Config tab.</p>
       )}
+      <ProjectMonthlyTrend months={s.months ?? []} capMicros={s.monthlyCapMicros} />
       {s.costCheck && s.costCheck.outOfBand > 0 && (
         <p role="alert" style={{ fontSize: 14, margin: "8px 0" }}>
           Check these figures: {s.costCheck.outOfBand} run{s.costCheck.outOfBand === 1 ? "" : "s"} on this project's tasks recorded a cost that does not match {s.costCheck.outOfBand === 1 ? "its" : "their"} tokens at list price, so the dollar figures here may be wrong. The CEO has been told; you do not need to do anything.
