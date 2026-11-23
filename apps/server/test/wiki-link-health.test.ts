@@ -50,6 +50,24 @@ describe("linkHealthOf (BOS-2395)", () => {
 });
 
 describe("GET /api/companies/:id/wiki-link-health (BOS-2395)", () => {
+  it("A → B and missing-x, B → A, C unlinked: one missing link and C; the Index and a brief are never listed", async () => {
+    const { db, close } = await openPglite();
+    const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+    ctx = { close: async () => (await built.app.close(), await close()) };
+    const cookie = await signedInOwner(db);
+    const req = (method: "GET" | "POST", url: string, payload?: object) => built.app.inject({ method, url, headers: { cookie }, ...(payload ? { payload } : {}) });
+    const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    const page = async (title: string, body: string) => ((await req("POST", `/api/companies/${company.id}/wiki`, { title, body })).json() as { slug: string }).slug;
+    expect(await page("A", "To [[b]] and [[missing-x]].")).toBe("a");
+    expect(await page("B", "Back to [[a]].")).toBe("b");
+    expect(await page("C", "No links in.")).toBe("c");
+    expect(await page("Index", "Nothing links here.")).toBe("index");
+    const brief = "brief-0b6f1a2c-1111-4222-8333-944455556666";
+    expect(await page(brief, "A project brief nothing links to.")).toBe(brief);
+    const h = (await req("GET", `/api/companies/${company.id}/wiki-link-health`)).json();
+    expect(h).toEqual({ missing: [{ slug: "a", title: "A", target: "missing-x" }], missingTotal: 1, orphans: [{ slug: "c", title: "C" }], orphansTotal: 1 });
+  });
+
   it("reports live pages only: a deleted page's links drop out and links to it become missing; owner only", async () => {
     const { db, close } = await openPglite();
     const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });

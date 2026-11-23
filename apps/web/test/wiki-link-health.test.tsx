@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LinkHealth } from "../src/pages/Wiki";
+import type { Company } from "../src/api";
+import { LinkHealth, Wiki } from "../src/pages/Wiki";
 
 // BOS-2395: the page list's "Link health" fold. The route is owner-only on the server (wiki-link-health.test.ts).
 afterEach(() => {
@@ -24,6 +25,15 @@ const open = () => {
 };
 
 describe("Link health fold (BOS-2395)", () => {
+  it("sits in the Wiki page list", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: false, media: "", addEventListener: () => {}, removeEventListener: () => {} }));
+    stub((url) => (url.includes("/wiki-semantic") ? json({ enabled: false, baseUrl: "", model: "", dims: 768, secretId: null }) : json([])));
+    const company = { id: "c1", name: "Co", mission: null, paused: false, agents: [] } as unknown as Company;
+    render(<Wiki companies={[company]} companyId="c1" slug={undefined} go={() => {}} />);
+    const nav = screen.getByRole("navigation", { name: "Pages" });
+    expect(nav.querySelector(".wiki-link-health summary")?.textContent).toBe("Link health");
+  });
+
   it("loads only once opened, then lists missing links (page as a link, slug as text) and orphans with 'and N more'", async () => {
     const fn = stub(() =>
       json({
