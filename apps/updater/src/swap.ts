@@ -242,8 +242,8 @@ export async function soakAndFinish(d: SwapDeps, live: Colour, idle: Colour, com
     }
   }
   state.update({ stage: "stopping-old" });
-  await d.docker.stop(colourName(live), sw(d).stopGraceSeconds);
-  state.finish("done", `Updated to ${version}. The previous version is kept stopped, ready to go back to.`, "info", { currentVersion: version, soakUntil: null, live: idle, idle: live });
+  const stopped = await d.docker.stop(colourName(live), sw(d).stopGraceSeconds).then(() => true, () => false);
+  state.finish("done", stopped ? `Updated to ${version}. The previous version is kept stopped, ready to go back to.` : `Updated to ${version}. The previous version could not be stopped; it no longer serves and the next update will remove it.`, "info", { currentVersion: version, soakUntil: null, live: idle, idle: live });
   return "done";
 }
 

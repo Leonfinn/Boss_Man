@@ -158,6 +158,20 @@ describe("test 11: the updater hands over to the next updater", () => {
     expect(s.state.get().report?.text).toMatch(/Updater update failed/);
   });
 
+  test("the hand-over itself fails on a daemon error: the wait settles, updater-next is removed, the old updater keeps its restart policy and later moves are not blocked", async () => {
+    const s = await start();
+    let status = 0;
+    s.daemon.onStart = (name) => void (name === "updater-next" && s.post(sha("4")).then((c) => (status = c)));
+    s.daemon.failCall = (c) => (c.path.endsWith("/update") && s.daemon.find("updater-next") && (c.body as { RestartPolicy?: { Name: string } })?.RestartPolicy?.Name === "no" ? { status: 500, body: Buffer.from('{"message":"daemon error"}') } : undefined);
+    await runMove(s.deps, { version: "0.2.0", serverDigest: sha("7") });
+    await vi.waitFor(() => expect(status).toBe(500));
+    expect(s.daemon.find("updater-next")).toBeUndefined();
+    expect(s.daemon.find("updater")).toMatchObject({ running: true, restart: "unless-stopped" });
+    expect(s.exited).toEqual([]);
+    expect(s.state.get().stage).toBe("done");
+    expect(s.state.get().report?.text).toMatch(/Updater update failed/);
+  });
+
   test("a hand-over call is refused when none is expected, with a wrong digest or without the key", async () => {
     const s = await start();
     expect(await s.post(sha("4"))).toBe(409);

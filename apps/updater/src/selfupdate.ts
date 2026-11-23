@@ -52,7 +52,7 @@ export async function selfUpdate(d: SwapDeps, release: Release, pending: { versi
     await docker.remove(nextName).catch(() => undefined);
     return failed(d, pending, e instanceof UpdaterError ? e.message : "The new updater could not be started.");
   }
-  const outcome = await new Promise<"called" | "timeout">((resolve) => {
+  const outcome = await new Promise<"called" | "timeout" | "error">((resolve) => {
     let done = false;
     const timer = setTimeout(() => {
       if (done) return;
@@ -65,15 +65,20 @@ export async function selfUpdate(d: SwapDeps, release: Release, pending: { versi
       run: async () => {
         done = true;
         clearTimeout(timer);
-        await docker.remove(oldName).catch(() => undefined);
-        await docker.setRestartNever(self);
-        await docker.rename(self, oldName);
+        // Any daemon error before the swap settles the wait as "error", so the move never hangs in updating-updater.
+        let renamed = false;
         try {
+          await docker.remove(oldName).catch(() => undefined);
+          await docker.setRestartNever(self);
+          await docker.rename(self, oldName);
+          renamed = true;
           await docker.rename(nextName, self);
           await docker.disconnect(cfg.swap.selfNetwork, self);
           await docker.connect(cfg.swap.selfNetwork, self, [self]);
         } catch (e) {
-          await docker.rename(oldName, self).catch(() => undefined);
+          if (renamed) await docker.rename(oldName, self).catch(() => undefined);
+          await docker.setRestartUnlessStopped(self).catch(() => undefined);
+          resolve("error");
           throw e;
         }
         state.update({ stage: "idle", nextUpdater: null, pending, ...(pending ? {} : { report: { level: "info", text: `The updater itself was updated to ${release.version}.`, at: new Date().toISOString(), acknowledged: false } }) });
@@ -81,6 +86,10 @@ export async function selfUpdate(d: SwapDeps, release: Release, pending: { versi
       },
     };
   });
+  if (outcome === "error") {
+    await docker.remove(nextName).catch(() => undefined);
+    return failed(d, pending, "The hand-over to the new updater failed, so it was removed and the current updater keeps running.");
+  }
   if (outcome === "timeout") {
     await docker.remove(nextName).catch(() => undefined);
     return failed(d, pending, "The new updater did not report in within 60 seconds, so it was removed and the current updater keeps running.");

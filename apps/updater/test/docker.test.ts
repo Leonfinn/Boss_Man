@@ -50,7 +50,7 @@ describe("calls outside the list never reach the socket", () => {
   const docker = dockerClient(transport, opts);
   test("every kind of reach the swap or an attacker would want is refused by the guard itself", async () => {
     // The guard function is not exposed: only these named methods exist, each of which goes through it.
-    expect(Object.keys(docker).sort()).toEqual(["arch", "connect", "create", "createServer", "disconnect", "exec", "imageInfo", "inspectOurs", "listByLabel", "logs", "pull", "remove", "removeImage", "rename", "setRestartNever", "signal", "start", "stop", "wait"]);
+    expect(Object.keys(docker).sort()).toEqual(["arch", "connect", "create", "createServer", "disconnect", "exec", "imageInfo", "inspectOurs", "listByLabel", "logs", "pull", "remove", "removeImage", "rename", "setRestartNever", "setRestartUnlessStopped", "signal", "start", "stop", "wait"]);
     for (const [m, p] of [
       ["POST", "/containers/abc/kill"],
       ["POST", "/containers/abc/kill?signal=SIGKILL"],
@@ -204,7 +204,7 @@ describe("what a server colour, the migrate one-shot or the next updater may ask
   test("the colour's label check applies to stop, signal, rename and exec too", async () => {
     const { calls, transport } = fakeTransport(() => ({ json: theirs }));
     const docker = dockerClient(transport, opts);
-    for (const fn of [() => docker.stop("zzz", 5), () => docker.signal("zzz", "SIGUSR1"), () => docker.rename("zzz", "n"), () => docker.exec("zzz", ["true"], "0"), () => docker.setRestartNever("zzz")]) {
+    for (const fn of [() => docker.stop("zzz", 5), () => docker.signal("zzz", "SIGUSR1"), () => docker.rename("zzz", "n"), () => docker.exec("zzz", ["true"], "0"), () => docker.setRestartNever("zzz"), () => docker.setRestartUnlessStopped("zzz")]) {
       expect((await refuse(fn())).code).toBe("docker_refused");
     }
     expect(calls.every((c) => c.method === "GET")).toBe(true);

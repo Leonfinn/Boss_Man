@@ -118,7 +118,11 @@ export async function recover(deps: MoveDeps): Promise<Promise<void> | null> {
   if (s.stage === "backing-up" || s.stage === "migrating" || s.stage === "starting-colour" || s.stage === "handing-over") {
     const cols = await findColours(docker);
     if (s.restore) await docker.stop(colourName(idle), d.cfg.swap.stopGraceSeconds).catch(() => undefined);
-    else await removeNewColour(d, idle);
+    else if (s.stage === "backing-up" || s.stage === "migrating") {
+      // The idle colour here is still the previous release's stopped standby (the rollback target): only the migrate one-shot is ours.
+      await docker.remove(`${cfg.namePrefix}-migrate`).catch(() => undefined);
+    } else if (cols[idle] && releaseOf(cols[idle]) === s.version) await removeNewColour(d, idle);
+    else await docker.remove(`${cfg.namePrefix}-migrate`).catch(() => undefined);
     const liveInfo = cols[live];
     if (liveInfo?.State.Running) await docker.signal(colourName(live), "SIGUSR2").catch(() => undefined);
     interrupted();

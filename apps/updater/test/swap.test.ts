@@ -269,7 +269,20 @@ describe("test 9: a restart in the middle of a move resumes or cleans up", () =>
     return g;
   };
 
-  test.each(["backing-up", "migrating", "starting-colour", "handing-over"] as const)("%s: the new colour and the migrate one-shot are removed, the live colour leads, the move is failed", async (stage) => {
+  test.each(["backing-up", "migrating"] as const)("%s: the stopped standby is kept (it is the rollback target), only the migrate one-shot is removed, the move is failed", async (stage) => {
+    const s = await setup();
+    const g = s.daemon.addLive("green", "0.1.9", { live: false, digestChar: "6" });
+    g.running = false;
+    s.daemon.addPlain("test-updater-migrate");
+    put(s, { stage });
+    await recover(s.deps);
+    expect(s.daemon.names().sort()).toEqual(["server-blue", "server-green"]);
+    expect(s.daemon.find("server-green")).toMatchObject({ running: false });
+    expect(s.daemon.find("server-blue")).toMatchObject({ running: true });
+    expect(s.state.get()).toMatchObject({ stage: "failed", error: { code: "interrupted" } });
+  });
+
+  test.each(["starting-colour", "handing-over"] as const)("%s: the new colour and the migrate one-shot are removed, the live colour leads, the move is failed", async (stage) => {
     const s = await setup();
     withGreen(s);
     s.daemon.addPlain("test-updater-migrate");

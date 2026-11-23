@@ -225,6 +225,11 @@ export function dockerClient(transport: Transport, opts: DockerOptions) {
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/update`, { RestartPolicy: { Name: "no" } });
       if (r.status !== 200) fail(r, "Changing the container's restart policy failed");
     },
+    async setRestartUnlessStopped(id: string) {
+      await ours(id);
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/update`, { RestartPolicy: { Name: "unless-stopped" } });
+      if (r.status !== 200) fail(r, "Changing the container's restart policy failed");
+    },
     /** Attaches a container to one of the install's networks (never another). With aliases, they are the only extra names. */
     async connect(network: string, id: string, aliases: string[]) {
       if (!(opts.networks ?? [opts.network]).includes(network)) throw new UpdaterError("docker_refused", "The updater refused to attach a container to a network that is not part of this install.");
