@@ -244,8 +244,14 @@ export const ALERT_KINDS = {
   },
   // idle-slots-alert.ts (BOS-1881): free run slots outnumbered the startable Ready tickets, with an agent idle, for 30
   // minutes. Stops at the CEO, never the owner; one card per company, closes by itself (idleSlotsGone).
+  // BOS-2358 replaced the rule: no non-chat work run for 15 minutes while a Ready or In-progress ticket of an unpaused
+  // agent waits; the card lists why each isn't running. Still the CEO's card.
   idle_slots: {
     topRung: "ceo",
+  },
+  // The same alert 30 minutes after the CEO's card, if still true: an info notice on the owner's queue (BOS-2358).
+  idle_slots_owner: {
+    topRung: "owner",
   },
   // daily-backup.ts (BOS-2176): the newest automatic database backup is over 36 hours old. Only the owner can start the
   // backup service or free the disk on the host, so it starts with them: one card, closed by itself (backupFresh).

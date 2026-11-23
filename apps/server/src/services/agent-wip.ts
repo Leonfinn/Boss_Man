@@ -2,7 +2,7 @@
 // One counting rule decides what counts as WIP, for a board column and for an agent alike:
 // tickets whose state is in_progress (a ticket that only waits on a queued check still counts;
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
-import { and, asc, eq, inArray, isNotNull, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { figureText, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { openBlockers } from "./ticket-links.js";
@@ -292,11 +292,11 @@ export async function agentBusy(db: Db, agentId: string, ticketId?: string): Pro
   return !!queued;
 }
 
-/** Every busy agent at once (the same rule as `agentBusy`), for sweeps that look at many agents. */
-export async function busyAgentIds(db: Db): Promise<Set<string | null>> {
+/** Every busy agent at once (the same rule as `agentBusy`), for sweeps that look at many agents. A deferred wake not due yet uses no slot (BOS-2358), so it doesn't count. */
+export async function busyAgentIds(db: Db, now: Date = new Date()): Promise<Set<string | null>> {
   const ids = [
     ...(await db.select({ id: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), workingRunSql))).map((r) => r.id),
-    ...(await db.select({ id: wakes.agentId }).from(wakes).where(inArray(wakes.status, ["queued", "deferred"]))).map((w) => w.id),
+    ...(await db.select({ id: wakes.agentId }).from(wakes).where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, now)))))).map((w) => w.id),
   ];
   return new Set(ids.filter((id): id is string => !!id));
 }

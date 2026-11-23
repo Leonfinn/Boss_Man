@@ -201,7 +201,7 @@ export type AlertClearingDeps = {
   release?: (ticketId: string) => Promise<unknown>;
   /** Why a server-health rule's card can go (server-health.ts), or null while it can't; without it those cards stay open. */
   serverCalm?: (rule: "memory" | "freezes") => string | null;
-  /** How many more work runs the company could start now (the scheduler's `freeSlots`); without it the idle-slots card stays open. */
+  /** How many more work runs the company could start now (the scheduler's `freeSlots`). No longer read by the "nothing is running" card's closer (BOS-2358). */
   freeSlots?: (companyId: string) => Promise<number>;
   /** The commit this server was built from (BOSSMAN_COMMIT); without it a "server has commit" condition never clears. */
   liveCommit?: () => string | null;
@@ -319,7 +319,7 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       case "costBackInBand":
         return backInBandReason(db, c.companyId, card.createdAt);
       case "idleSlotsGone":
-        return deps.freeSlots ? idleSlotsGoneReason(db, c.companyId, deps.freeSlots) : null;
+        return idleSlotsGoneReason(db, c.companyId, (deps.now ?? (() => new Date()))());
       case "sweepStepOk":
         return sweepStepOkReason(db, c.step);
       case "mergeFailuresCalm": {
