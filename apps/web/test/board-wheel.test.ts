@@ -306,7 +306,8 @@ describe.skipIf(!browser || !server)("the mouse wheel over the real Kanban board
           await setScroll(page, start);
           const p = await areaPoint(page, area);
           if (!p) {
-            if (start.y === 0 && !(area === "cut-off column at the right edge" && start.left > 0)) failures.push(`${area} not found on screen at ${JSON.stringify(start)}`);
+            // BOS-2337: "Your review" now leads the board, so the empty review lanes sit right of the first screen at left 0.
+            if (start.y === 0 && !(area === "cut-off column at the right edge" && start.left > 0) && !(area === "empty lane text" && start.left === 0)) failures.push(`${area} not found on screen at ${JSON.stringify(start)}`);
             continue;
           }
           for (const ticks of [[{ dx: 0, dy: 100 }], [{ dx: 2, dy: 100 }]]) {
