@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Funding, Settings } from "../src/pages/Settings";
+import { ProjectBudgets } from "../src/pages/settings/Funding";
 
 afterEach(() => {
   cleanup();
@@ -80,5 +81,19 @@ describe("Settings → Funding page", () => {
     const urls = fetchMock.mock.calls.map(([u]) => String(u));
     expect(urls.some((u) => /^\/api\/funding-sources\/f1\/status/.test(u))).toBe(true);
     expect(urls).toContain("/api/budgets");
+  });
+});
+
+describe("Settings → Funding → Budgets load error", () => {
+  it("shows the error with Retry instead of the spinner, and loads the projects after Retry", async () => {
+    let ok = false;
+    vi.stubGlobal("fetch", vi.fn(async () => (ok ? new Response("[]", { status: 200 }) : new Response(JSON.stringify({ error: "boom" }), { status: 500 }))));
+    render(<ProjectBudgets company={{ id: "c1", name: "App Co", mission: null, paused: false, agents: [] }} />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Couldn't load the projects");
+    expect(screen.queryByText("Loading projects")).toBeNull();
+    ok = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/No projects yet/);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
