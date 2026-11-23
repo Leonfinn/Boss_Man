@@ -34,7 +34,7 @@ export function mergePhaseOf(c: Extract<RunnerCommand, { type: "workspace.merge"
     case "unpublish":
       return { phase: "unpublish" };
     case "publish":
-      return c.commit ? { phase: "publish", commit: c.commit } : "invalid";
+      return c.commit ? { phase: "publish", commit: c.commit, ...(c.mainWorkflows ? { mainWorkflows: true } : {}) } : "invalid";
     case "finish":
       return c.commit && c.tree ? { phase: "finish", commit: c.commit, tree: c.tree, ...(c.expectBase ? { expectBase: c.expectBase } : {}), ...(c.carry ? { carry: true } : {}) } : "invalid";
   }

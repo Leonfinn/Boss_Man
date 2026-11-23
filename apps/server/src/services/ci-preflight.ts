@@ -26,7 +26,12 @@ export type PreflightContext = {
   /** workspace.merge phase "prepare": the branch merged with main, kept, not pushed. */
   prepare: () => Promise<MergeResult>;
   /** workspace.merge phase "publish": push that commit to bossman-ci/<ticket>. */
-  publish: (commit: string) => Promise<MergeResult>;
+  publish: (commit: string, needsMainWorkflows?: boolean) => Promise<MergeResult>;
+  /**
+   * BOS-2300: the runner pushes the commit with main's workflow files (feature "ci-publish-main-workflows"), so a branch that
+   * edits workflows can have its early run too. Absent: such a branch gets none before review.
+   */
+  mainWorkflows?: boolean;
   /** Phase "unpublish", best effort. */
   unpublish: () => Promise<unknown>;
 };
@@ -40,6 +45,9 @@ export type PreflightDeps = {
 };
 
 const short = (s: string) => s.slice(0, 8);
+
+/** BOS-2300: kept in a run's row detail ("<agent>|wf", "<agent>|<tree>|wf"): the branch edits workflows, so only main's may be pushed. */
+const WORKFLOW_MARK = "wf";
 
 export function ciPreflightService(db: Db, deps: PreflightDeps) {
   // ticket → head being run and its promise; lost on restart, so a "started" row is kept and recover() restarts the run.
@@ -85,7 +93,7 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     }
   }
 
-  async function run(t: { id: string; companyId: string; projectId: string }, agentId: string, head: string, ctx: PreflightContext) {
+  async function run(t: { id: string; companyId: string; projectId: string }, agentId: string, head: string, ctx: PreflightContext, needsMain = false) {
     let passed = false;
     let text: string;
     try {
@@ -96,7 +104,7 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         text = `GitHub's CI could not be run: the merge with main answered "${prep.status}". Commit everything, then ask again.`;
       } else {
         const outcome = await publishAndWait(
-          { hosts: deps.hosts, target: ctx.target, timing, publish: ctx.publish, announce: async (branch) => void (await record(db, { companyId: t.companyId, ticketId: t.id, kind: PREFLIGHT_ACTIVITY, summary: `Pushed your branch merged with main (${short(prep.commit)}) to ${branch} for GitHub's CI jobs. Nothing to do; you are woken with the result.` })) },
+          { hosts: deps.hosts, target: ctx.target, timing, publish: (commit) => (needsMain ? ctx.publish(commit, true) : ctx.publish(commit)), announce: async (branch) => void (await record(db, { companyId: t.companyId, ticketId: t.id, kind: PREFLIGHT_ACTIVITY, summary: `Pushed your branch merged with main (${short(prep.commit)}) to ${branch} for GitHub's CI jobs. Nothing to do; you are woken with the result.` })) },
           prep,
           { stopped: false },
         );
@@ -117,12 +125,18 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
    * the older head's run on the same ticket, so two runs never share the one bossman-ci/<ticket> branch. The branch is removed
    * whether the run ended or threw.
    */
-  function launch(t: { id: string; companyId: string; projectId: string }, agentId: string, head: string, ctx: PreflightContext) {
+  function launch(t: { id: string; companyId: string; projectId: string }, agentId: string, head: string, ctx: PreflightContext, needsMain = false): boolean {
+    // BOS-2300: a branch that edits workflows is pushed only by a runner that swaps in main's workflow files. Checked again at
+    // every launch (a deferred or recovered run may meet a different runner than the one that accepted the request): fail closed.
+    if (needsMain && !ctx.mainWorkflows) {
+      deps.log?.(`GitHub CI pre-check: not started for ticket ${short(t.id)}: the branch edits workflow files and the runner can't push main's instead`);
+      return false;
+    }
     const before = running.get(t.id)?.done ?? Promise.resolve();
     const done: Promise<void> = before
       .then(async () => {
-        await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: head, kind: PREFLIGHT_STARTED_KIND, passed: false, detail: agentId });
-        await run(t, agentId, head, ctx);
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: head, kind: PREFLIGHT_STARTED_KIND, passed: false, detail: needsMain ? `${agentId}|${WORKFLOW_MARK}` : agentId });
+        await run(t, agentId, head, ctx, needsMain);
       })
       .catch(() => undefined)
       .finally(async () => {
@@ -130,6 +144,7 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         if (running.get(t.id)?.done === done) running.delete(t.id);
       });
     running.set(t.id, { head, done });
+    return true;
   }
 
   /**
@@ -150,8 +165,8 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     return [...rows, ...same.filter((j) => j.state === "passed" || j.ticketId === t.id)];
   };
   const parseWaiting = (detail: string) => {
-    const [agentId = "", tree = ""] = detail.split("|");
-    return { agentId, tree: tree || null };
+    const [agentId = "", tree = "", mark = ""] = detail.split("|");
+    return { agentId, tree: tree || null, needsMain: mark === WORKFLOW_MARK };
   };
 
   /**
@@ -167,13 +182,13 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     }
     const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     if (!t || (t.systemState !== "in_progress" && t.systemState !== "review")) return "none";
-    const { agentId, tree } = parseWaiting(w.detail);
+    const { agentId, tree, needsMain } = parseWaiting(w.detail);
     const jobs = await quickJobs(t, w.sha, tree);
     if (jobs.some((j) => j.state === "passed")) {
       if (running.get(ticketId)?.head === w.sha) return "none";
       const ctx = await deps.context(t).catch(() => null);
       if (!ctx) return "waiting"; // no runner yet: the recovery sweep tries again
-      launch(t, agentId, w.sha, ctx);
+      if (!launch(t, agentId, w.sha, ctx, needsMain)) return "waiting"; // runner without main's workflows: the recovery sweep tries again
       await record(db, { companyId: t.companyId, ticketId, kind: PREFLIGHT_ACTIVITY, summary: `The quick check passed on ${short(w.sha)}, so GitHub's CI jobs were started for it.` }).catch(() => undefined);
       return "started";
     }
@@ -217,7 +232,12 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
           skippedIds.push(t.id); // no runner connected yet (or GitHub CI can't be used): a later try may find one
           continue;
         }
-        launch(t, s.detail, s.sha, ctx);
+        const [startedBy = s.detail, mark = ""] = s.detail.split("|");
+        if (!launch(t, startedBy, s.sha, ctx, mark === WORKFLOW_MARK)) {
+          skipped++;
+          skippedIds.push(t.id);
+          continue;
+        }
         n++;
       }
       // BOS-2284: runs that waited for a quick check whose end this process never saw (a restart in between).
@@ -272,9 +292,9 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     async start(t: { id: string; companyId: string; projectId: string }, agentId: string, d: Pick<WorkspaceDiff, "head" | "tree" | "files">, notApplicable?: string): Promise<string | null> {
       const paths = d.files.map((f) => f.path);
       if (!touchesGithubOnlyJobs(paths)) return null;
-      if (touchesWorkflows(paths)) return "This branch edits GitHub workflow files. Those are not pushed to GitHub before review (GitHub would run an unreviewed workflow with its own token); they run once, at the merge gate, after the reviews. Nothing is held for them.";
       const ctx = await deps.context(t);
       if (!ctx) return null;
+      if (touchesWorkflows(paths) && !ctx.mainWorkflows) return "This branch edits GitHub workflow files. Those are not pushed to GitHub before review (GitHub would run an unreviewed workflow with its own token); they run once, at the merge gate, after the reviews. Nothing is held for them.";
       const reason = notApplicable?.trim();
       if (reason) {
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: d.head, kind: PREFLIGHT_NA_KIND, passed: true, detail: reason.slice(0, 500) });
@@ -288,11 +308,11 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       const tree = d.tree;
       if (!(await quickJobs(t, d.head, tree)).some((j) => j.state === "passed")) {
         const w = await latest(t.id, PREFLIGHT_WAITING_KIND, d.head);
-        if (!w) await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: d.head, kind: PREFLIGHT_WAITING_KIND, passed: false, detail: tree ? `${agentId}|${tree}` : agentId });
+        if (!w) await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: d.head, kind: PREFLIGHT_WAITING_KIND, passed: false, detail: touchesWorkflows(paths) ? `${agentId}|${tree ?? ""}|${WORKFLOW_MARK}` : tree ? `${agentId}|${tree}` : agentId });
         return "This branch changes CI or image files, so GitHub's own CI jobs run on it too, but only after your quick check passes on this exact commit (a red GitHub run on unfinished work only sends the owner a failure notice). If the quick check fails, GitHub's run is skipped and the ticket says so. The ticket can't move to review until both pass. You will be woken with each result; do not poll. If GitHub's jobs truly don't apply, ask again with ciNotApplicable and a reason.";
       }
-      launch(t, agentId, d.head, ctx);
-      return "This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well (this can take a while). The ticket can't move to review until they pass. You will be woken with the result; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.";
+      launch(t, agentId, d.head, ctx, touchesWorkflows(paths));
+      return `This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well${touchesWorkflows(paths) ? " (with main's workflow files, not yours: your workflow edit is first run by the merge gate after the reviews)" : ""} (this can take a while). The ticket can't move to review until they pass. You will be woken with the result; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.`;
     },
 
     /** The move to review: a reason to refuse it (plain words), or null. `diff` reads the branch from the runner. */
@@ -300,14 +320,15 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) return null;
       // Cheap database checks first: a project that can't run GitHub jobs never costs a runner round trip.
-      if (!(await deps.context(t))) return null;
+      const ctx = await deps.context(t);
+      if (!ctx) return null;
       let d: Pick<WorkspaceDiff, "head" | "files">;
       try {
         d = await diff(t);
       } catch {
         return null; // can't tell: carry on, the gate's own run at landing still stands
       }
-      if (!needsEarlyGithubRun(d.files.map((f) => f.path))) return null;
+      if (!needsEarlyGithubRun(d.files.map((f) => f.path), !!ctx.mainWorkflows)) return null;
       // The mark covers this commit only: a later commit re-arms the hold.
       if (await latest(t.id, PREFLIGHT_NA_KIND, d.head)) return null;
       const r = await latest(t.id, PREFLIGHT_KIND, d.head);

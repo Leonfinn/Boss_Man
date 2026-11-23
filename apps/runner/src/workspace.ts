@@ -109,7 +109,7 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
 
 /** A split merge's step (BOS-316; `base` / `expectBase` are the merge train's, BOS-1366), and the git host's CI publish around it (BOS-1070). */
 export type MergeStep = { phase: "prepare"; base?: string; /** BOS-1820: the merge prepared earlier; answer whether its pass would carry. */ carryFrom?: { commit: string; tree: string } } |{ phase: "finish"; commit: string; tree: string; expectBase?: string; carry?: boolean };
-export type MergePhase = MergeStep | { phase: "publish"; commit: string } | { phase: "unpublish" };
+export type MergePhase = MergeStep | { phase: "publish"; commit: string; /** BOS-2300: push the workflows of main (the commit's first parent), not the branch's. */ mainWorkflows?: boolean } | { phase: "unpublish" };
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
 
@@ -2144,7 +2144,7 @@ export class Workspaces {
    * no CI to run, so nothing is pushed and the server is told. "unpublish" deletes that branch once the merge is done.
    * Neither records a refs/remotes/origin ref (unlike pushOrigin): the branch is the host's, not a ticket's.
    */
-  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }, scanList?: string): Promise<MergeResult> {
+  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string; mainWorkflows?: boolean } | { phase: "unpublish" }, scanList?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(ciPushSecrets(secrets));
     const repo = this.repoDir(spec.projectId);
     const branch = ciBranchFor(spec.ticketId);
@@ -2161,14 +2161,19 @@ export class Workspaces {
       // Only the commit this ticket's prepare built: never an arbitrary sha from the request.
       const kept = await this.git(["rev-parse", "--verify", "--quiet", `refs/bossman/merge/${spec.ticketId}^{commit}`], { cwd: repo }).catch(() => "");
       if (kept !== phase.commit) throw new Error(`The commit to publish (${phase.commit.slice(0, 12)}) isn't the one this ticket's merge prepared; prepare it again.`);
-      const workflows = await this.gitCode(["ls-tree", "--name-only", phase.commit, ".github/workflows/"], { cwd: repo });
+      // BOS-2300: the early (before-review) run of a branch that edits workflows. GitHub runs the workflow files of the pushed
+      // commit with its token, so the files pushed are main's (the merge commit's first parent), never the branch's. The code
+      // is the branch's; the workflow edit itself is first run by the gate after the reviews.
+      let commit = phase.commit;
+      if (phase.mainWorkflows) commit = await this.withMainWorkflows(repo, phase.commit);
+      const workflows = await this.gitCode(["ls-tree", "--name-only", commit, ".github/workflows/"], { cwd: repo });
       const hasWorkflows = workflows.code === 0 && /\.ya?ml$/m.test(workflows.stdout);
-      if (!hasWorkflows) return { status: "published", branch, commit: phase.commit, hasWorkflows: false };
+      if (!hasWorkflows) return { status: "published", branch, commit, hasWorkflows: false };
       // BOS-1664: the push makes the commit public (and readable by sha after the branch is deleted), so the secrets scan
       // (BOS-979, the runner's own installed copy) must pass on exactly this commit first. A runner without it skips the scan.
       const scanDir = path.join(this.scratch("ci-scan"), "tree");
       try {
-        await this.git(["worktree", "add", "--quiet", "--detach", scanDir, phase.commit], { cwd: repo });
+        await this.git(["worktree", "add", "--quiet", "--detach", scanDir, commit], { cwd: repo });
         const blocked = await this.scanBeforeCheck(scanDir, spec.projectId, scanList);
         if (blocked) throw new Error(`Not pushed to GitHub: the secrets scan found something in the branch.\n${blocked.slice(0, 800)}`);
       } finally {
@@ -2176,10 +2181,32 @@ export class Workspaces {
         rmSync(path.dirname(scanDir), { recursive: true, force: true });
         await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
       }
-      const r = await this.gitCode(["push", "--quiet", "--force", url, `${phase.commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
+      const r = await this.gitCode(["push", "--quiet", "--force", url, `${commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
       if (r.code !== 0) throw new Error(`Couldn't push the merge commit to ${branch} for the git host's CI: ${r.stderr.slice(0, 500)}`);
-      return { status: "published", branch, commit: phase.commit, hasWorkflows: true };
+      return { status: "published", branch, commit, hasWorkflows: true };
     });
+  }
+
+  /**
+   * BOS-2300: `commit` (a merge commit "prepare" built, first parent main's tip) with `.github/workflows` taken from its first
+   * parent, as a new commit on the same parents. Built in a temporary index, so no ref, worktree or the kept merge changes.
+   * Main with no workflows folder gives a tree with none. Callers hold the repo lock.
+   */
+  private async withMainWorkflows(repo: string, commit: string): Promise<string> {
+    const scratch = this.scratch("ci-main-workflows");
+    // The repo is bare: read-tree --prefix wants a work tree, so an empty one is named (nothing is checked out into it).
+    const env = { GIT_INDEX_FILE: path.join(scratch, "index"), GIT_WORK_TREE: scratch };
+    try {
+      await this.git(["read-tree", commit], { cwd: repo, env });
+      await this.git(["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", ".github/workflows"], { cwd: repo, env });
+      const mainHas = await this.gitCode(["rev-parse", "--verify", "--quiet", `${commit}^1:.github/workflows`], { cwd: repo });
+      if (mainHas.code === 0) await this.git(["read-tree", "--prefix=.github/workflows/", `${commit}^1:.github/workflows`], { cwd: repo, env });
+      const tree = await this.git(["write-tree"], { cwd: repo, env });
+      const parents = (await this.git(["rev-list", "--parents", "-n", "1", commit], { cwd: repo })).split(" ").slice(1);
+      return await this.git(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", "GitHub CI before review (workflows from main)"], { cwd: repo, env: this.authorEnv() });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   }
 
   /**
