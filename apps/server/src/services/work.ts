@@ -848,6 +848,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (updated!.assigneeAgentId !== t.assigneeAgentId) {
         const [to] = updated!.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, updated!.assigneeAgentId)) : [];
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", agentId: patch.byAgentId ?? undefined, summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
+        // BOS-2309: a check the old assignee booked was their plan, not the new assignee's: drop it, and the new assignee books their own.
+        if (updated!.monitorAt) {
+          await db.update(tickets).set({ monitorAt: null, monitorNote: null, monitorAttempts: 0 }).where(eq(tickets.id, t.id));
+          await record(db, { companyId: t.companyId, ticketId: t.id, kind: "monitor", summary: "Cleared the scheduled check: the ticket was reassigned", at: now() });
+        }
       }
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
       if ((updated!.ownerSetup ?? null) !== (t.ownerSetup ?? null))

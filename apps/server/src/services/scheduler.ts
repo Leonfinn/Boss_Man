@@ -15,7 +15,7 @@ import type { Db } from "../db/client.js";
 import { linkedSlugs, liveWikiPage } from "./wiki.js";
 import { checkJobsByCompany, updateWaitCountsRun } from "./runner-busy.js";
 import { pickAccount } from "./claude-accounts.js";
-import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, reviewRequests, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -214,6 +214,8 @@ const CHECK_RESULT_REASON = "check_result";
 const SUPERSEDED_REASONS = [CHECK_RESULT_REASON, "check due", "checking an old card"];
 /** BOS-1791: wakes that hand a ticket to its assignee; dropped when the ticket was parked or reassigned after they were queued. */
 const PARKED_DROP_REASONS = new Set(["assigned", "check due", CHECK_RESULT_REASON, "unblocked", "chased", "idle slot", "idle agents", "spare capacity", "urgent idle"]);
+/** BOS-2309: sent to a run still working a ticket that has just finished, and put in the prompt of a run started for a finished ticket. */
+const FINISHED_TICKET_MESSAGE = "Message from Boss Man (ticket finished): this ticket is now done. Unless you owe a review or hold another ticket, record a one-line note, then end your run now: your run slot is needed for other work.";
 const SUPERSEDED_WAKE_REASON = "replaced by a newer wake for the same ticket";
 /** Wakes that start an agent on a new ticket; they wait while the agent has a check result to pick up (BOS-1555). */
 const NEW_TICKET_REASONS = ["assigned", "idle slot", "idle agents", "spare capacity", "urgent idle"];
@@ -823,6 +825,7 @@ export function schedulerService(
       if (t) {
         const ref = ticketRef(t.prefix, t.t.number);
         lines.push("", `Ticket ${ref ? `${ref} (id ${t.t.id})` : t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
+        if (t.t.systemState === "done" && w.reason !== WATCH_REASON && w.reason !== REVIEW_REASON && !fromOwner(w)) lines.push("", "This ticket is already done. Read its state note once; if nothing on it needs doing, say so in one line and end your run after this one turn: a run on a finished ticket holds a slot for nothing.");
         if (notStarted) lines.push("", `You have NOT started this ticket: ${notStarted} You can read it, reply on it and suggest what it waits for, but don't begin the work.`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
         const note = stateNoteLine(t.t, now());
@@ -1021,12 +1024,34 @@ export function schedulerService(
    * a person's wake, a review, a watch or a card is left to its own handling.
    */
   async function parkedTicketWake(w: typeof wakes.$inferSelect): Promise<string | null> {
+    // BOS-2309: a nudge queued before the ticket was reassigned must not start the old assignee on it.
+    if (w.ticketId && w.reason === "nudge" && !fromOwner(w)) {
+      const holder = await currentHolderInstead(w.agentId, w.ticketId);
+      if (holder) return `the ticket was given to ${holder}, so there was nothing to do`;
+    }
     if (!w.ticketId || !PARKED_DROP_REASONS.has(w.reason) || fromOwner(w)) return null;
     const [t] = await db.select({ state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, w.ticketId));
     if (!t) return null;
     if (!t.assignee && (t.state === "backlog" || t.state === "ready")) return "the ticket was parked or unassigned, so there was nothing to do";
     if (t.assignee && t.assignee !== w.agentId && (t.state === "backlog" || t.state === "ready" || t.state === "in_progress")) return "the ticket was given to another agent, so there was nothing to do";
     return null;
+  }
+
+  /**
+   * BOS-2309: the name of the ticket's current assignee when `agentId` used to work the ticket and no longer holds it
+   * (it has an earlier run on it, is not its assignee now and owes no review of it), else null. A nudge to such an
+   * agent about the ticket would only start a second run on work someone else now has. A colleague who never worked
+   * the ticket (the CEO, an advisor, a reviewer) is not a former assignee and is still reachable.
+   */
+  async function currentHolderInstead(agentId: string, ticketId: string): Promise<string | null> {
+    const [t] = await db.select({ assignee: tickets.assigneeAgentId, state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+    if (!t?.assignee || t.assignee === agentId || t.state === "done") return null;
+    const [review] = await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.reviewerAgentId, agentId))).limit(1);
+    if (review) return null;
+    const [ran] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.ticketId, ticketId), eq(runs.agentId, agentId))).limit(1);
+    if (!ran) return null;
+    const [holder] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assignee));
+    return holder?.name ?? "another agent";
   }
 
   /**
@@ -1678,8 +1703,11 @@ export function schedulerService(
       if (ticketId) {
         const [tk] = await db.select({ id: tickets.id, companyId: tickets.companyId, assigneeAgentId: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
         if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
+        // BOS-2309: a nudge about a ticket goes to whoever holds it now, never to the agent it was reassigned away from.
+        const holder = await currentHolderInstead(to.id, ticketId);
+        if (holder) return { ok: false, error: `${to.name} no longer holds this ticket: ${holder} does now. Nudge ${holder} instead, or write it on the ticket with ticket_reply.` };
         // An open skill-review ticket is a gate: the proposal's author must not nudge the reviewer into a verdict.
-        const refusal = await reviewTicketWriteRefusal(db, tk.companyId, ticketId, from.id);
+        const refusal =await reviewTicketWriteRefusal(db, tk.companyId, ticketId, from.id);
         if (refusal) return { ok: false, error: `${refusal} Don't nudge the reviewer about the verdict.` };
       }
       // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
@@ -2338,6 +2366,15 @@ export function schedulerService(
      */
     async onTicketDone(ticketId: string, causedByRunId?: string | null) {
       await this.releaseWorkspace(ticketId);
+      // BOS-2309: a run still working this ticket (another agent's, or the old assignee's) is told it is finished, so it wraps up and frees its slot.
+      const stillOn = await db
+        .select({ id: runs.id, companyId: runs.companyId })
+        .from(runs)
+        .where(and(eq(runs.ticketId, ticketId), isNull(runs.endedAt), or(isNull(runs.purpose), notInArray(runs.purpose, ["chat", REPLY_PURPOSE])), or(isNull(runs.origin), ne(runs.origin, WATCH_REASON)), causedByRunId ? ne(runs.id, causedByRunId) : undefined));
+      for (const r of stillOn) {
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, r.companyId));
+        if (runner) deps.runners.send(runner.id, { type: "run.message", runId: r.id, text: FINISHED_TICKET_MESSAGE, interrupt: false });
+      }
       // A ticket finishing may make "waiting on it" notes and cards out of date (BOS-123).
       const [finished] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
       if (finished) await ownerActed(db, { companyId: finished.companyId, ticketIds: [ticketId], reason: "a ticket it waited on finished", now: now(), wake: (input) => this.notify(input.agentId, input) });
