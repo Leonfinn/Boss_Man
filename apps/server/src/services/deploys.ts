@@ -337,7 +337,7 @@ export function deploysService(
    * host does the work: the request file is written, the deploy row is "running", and sync (below) records the host's answer
    * and wakes the requester. Staging takes merged commits only; the host checks that again.
    */
-  async function requestHostStaging(actor: { companyId: string; agentId: string | null }, t: Target, input: { ref: string; notes?: string; ticketId?: string }, commit: string | null) {
+  async function requestHostStaging(actor: { companyId: string; agentId: string | null }, t: Target, input: { ref: string; notes?: string; ticketId?: string }, commit: string | null, redeployOf: string | null = null) {
     const lane = deps.staging;
     if (!lane || !(await lane.on())) throw new DeployError(409, "Staging isn't set up on this host yet (the host deployer's staging lane is off). The owner's one-time setup is in docs/22-staging.md. Don't wait for it: say 'not checked' and check live.");
     if (!commit) throw new DeployError(422, `Couldn't read the commit that ${input.ref} names, so it can't go to staging. Name a merged commit or main.`);
@@ -352,7 +352,7 @@ export function deploysService(
       if (busy.length || (await lane.pending())) throw new DeployError(409, "A staging deploy is already queued or running. Staging does one at a time; ask again when you're woken with its result.");
       const [row0] = await db
         .insert(deploys)
-        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, status: "running", createdAt: now(), commit })
+        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, status: "running", createdAt: now(), commit, redeployOf })
         .returning();
       try {
         await lane.submit(row0!.id, commit, "agent-request");
@@ -552,7 +552,12 @@ export function deploysService(
     },
 
     /** An agent asks to ship a ref. Production (or a target that asks for it) waits for the owner (R15). */
-    async request(actor: { companyId: string; agentId: string | null; runId?: string | null }, input: { target: string; ref: string; notes?: string; ticketId?: string }) {
+    async request(
+      actor: { companyId: string; agentId: string | null; runId?: string | null },
+      input: { target: string; ref: string; notes?: string; ticketId?: string },
+      /** BOS-2329: only `redeploy()` below passes this (never an agent): the earlier deploy being repeated and the project its commit lives in. */
+      again?: { of: Deploy; projectId: string | null },
+    ) {
       const all = await db.select().from(deployTargets).where(eq(deployTargets.companyId, actor.companyId));
       const t = all.find((x) => x.id === input.target || x.name.toLowerCase() === input.target.toLowerCase());
       if (!t) throw new DeployError(404, all.length ? `No deploy target called "${input.target}". Targets: ${all.map((x) => x.name).join(", ")}.` : "Your company has no deploy targets; ask the owner to add one.");
@@ -589,11 +594,13 @@ export function deploysService(
         if (!mine.length || (ticketProjectId && !mine.some((p) => p.id === ticketProjectId))) throw new DeployError(403, "Staging is for the repository this install deploys from, and this ticket's project isn't it.");
         ticketProjectId = ticketProjectId ?? mine[0]!.id;
       }
-      const resolved = await resolveFor(t, input.ref, ticketProjectId);
-      if ((t.rules as TargetRules).hostStaging === true) return requestHostStaging(actor, t, input, resolved.commit);
+      const resolved = await resolveFor(t, input.ref, ticketProjectId ?? again?.projectId ?? null);
+      // A redeploy ships exactly the earlier commit: if the repository no longer has it, nothing is created.
+      if (again && resolved.commit !== again.of.commit) throw new DeployError(409, `That commit (${short(again.of.commit)}) is no longer in the repository, or the runner couldn't confirm it, so it can't be deployed again.`);
+      if ((t.rules as TargetRules).hostStaging === true) return requestHostStaging(actor, t, input, resolved.commit, again?.of.id ?? null);
       const [d] = await db
         .insert(deploys)
-        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, createdAt: now(), ...resolved })
+        .values({ companyId: actor.companyId, targetId: t.id, agentId: actor.agentId, ticketId: input.ticketId ?? null, ref: input.ref, notes: input.notes ?? null, createdAt: now(), redeployOf: again?.of.id ?? null, ...resolved })
         .returning();
       const tagNote = resolved.tagName ? (resolved.tagResult ? ` The tag ${resolved.tagName} won't move: ${resolved.tagResult.replace(/^skipped: /, "")}.` : ` After it succeeds, Boss Man moves the tag ${resolved.tagName} to ${short(resolved.commit)}.`) : "";
       if (!needsApproval(t)) return { deploy: await startWhenApproved(d!, t, actor.runId), note: `Approved; you'll be woken in a run that holds the target's secrets.${tagNote}` };
@@ -606,7 +613,7 @@ export function deploysService(
       await db.insert(decisions).values({
         companyId: actor.companyId,
         kind: "approval",
-        question: `${ready ? `${ready.heading}.\n\n` : ""}${agent?.name ?? "An agent"} wants to deploy ${input.ref}${ships} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}${tagNote}`,
+        question: `${ready ? `${ready.heading}.\n\n` : ""}${again ? "You asked to" : `${agent?.name ?? "An agent"} wants to`} ${again ? "deploy again" : "deploy"} ${again ? `${short(resolved.commit)} (the version from ${again.of.finishedAt?.toISOString().slice(0, 10) ?? "earlier"})` : input.ref}${again ? "" : ships} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}${tagNote}`,
         options: ["Approve", "Reject"],
         recommendedOption: "Approve",
         raisedByAgentId: actor.agentId,
@@ -614,6 +621,30 @@ export function deploysService(
         context: { type: "deploy", deployId: d!.id, ...(resolved.commit ? { commit: resolved.commit } : {}), ...(ready ? { urgent: ready } : {}) },
       });
       return { deploy: d!, note: `Waiting for the owner to approve. You'll be woken with the answer; don't wait in this turn.${tagNote}` };
+    },
+
+    /**
+     * BOS-2329: the owner asks to ship an earlier successful deploy's commit again (the way back). It goes down the same
+     * `request` path as every deploy, so approval, the staging lane and the tag step apply unchanged; the only differences
+     * are that the commit is the earlier one (never the branch's tip) and the row links to the deploy it repeats. The agent
+     * who carried out the earlier deploy is woken to carry this one out (an approved deploy needs an agent's run); a staging-lane
+     * deploy needs none. Creates nothing when it refuses.
+     */
+    async redeploy(companyId: string, deployId: string) {
+      const [d] = await db.select().from(deploys).where(and(eq(deploys.id, deployId), eq(deploys.companyId, companyId)));
+      if (!d) throw new DeployError(404, "No such deploy in this company.");
+      if (d.status !== "succeeded") throw new DeployError(409, "Only a deploy that succeeded can be deployed again.");
+      if (!d.commit) throw new DeployError(409, "That deploy didn't record which commit it shipped, so it can't be deployed again.");
+      const t = await target(d.targetId);
+      const hostStaging = (t.rules as TargetRules).hostStaging === true;
+      if (!hostStaging && !d.agentId) throw new DeployError(409, "The agent that carried out that deploy no longer exists, so nobody can carry it out again. Ask your CEO to deploy that commit.");
+      let projectId: string | null = null;
+      if (d.ticketId) {
+        const [tk] = await db.select({ projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, d.ticketId));
+        projectId = tk?.projectId ?? null;
+      }
+      const at = d.finishedAt?.toISOString().slice(0, 10) ?? "earlier";
+      return this.request({ companyId, agentId: d.agentId }, { target: t.id, ref: d.commit, notes: `Redeploy of ${short(d.commit)} from ${at}, asked for by the owner.` }, { of: d, projectId });
     },
 
     /** The owner's answer to a deploy approval. */

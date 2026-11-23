@@ -204,6 +204,8 @@ export const OWNER_CONTROLS = {
     "Remove anyway",
     // The Deploys fold under each deploy target (BOS-2318): the next page of older deploys.
     "Show older",
+    // A past successful deploy in that fold: ship that version again (BOS-2329).
+    "Deploy this version again",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
