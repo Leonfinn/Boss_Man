@@ -38,6 +38,26 @@ describe("runTimeSplit", () => {
     expect(row(items, T0 + 60_000, "tool:execute")).toBe(10_000);
   });
 
+  it("gives the ticket's seeded figures: Bash 14 min, Edit 3 min, permission 6 min, rest thinking", () => {
+    const m = (n: number) => n * 60;
+    const items = [
+      msg(0),
+      call(m(1), "b1", "execute", "in_progress"), call(m(11), "b1", "execute", "completed"),
+      call(m(12), "e1", "edit", "in_progress"), call(m(13), "e1", "edit", "completed"),
+      call(m(14), "b2", "execute", "in_progress"), ask(m(14), "b2"), call(m(20), "b2", "execute", "in_progress"), call(m(24), "b2", "execute", "completed"),
+      call(m(25), "e2", "edit", "in_progress"), call(m(26), "e2", "edit", "completed"),
+      call(m(27), "e3", "edit", "in_progress"), call(m(28), "e3", "edit", "completed"),
+      msg(m(30)),
+    ];
+    const split = runTimeSplit(items, T0 + m(30) * 1000, 0)!;
+    expect(split.rows.find((r) => r.key === "tool:execute")!.ms).toBe(m(14) * 1000);
+    expect(split.rows.find((r) => r.key === "tool:edit")!.ms).toBe(m(3) * 1000);
+    expect(split.rows.find((r) => r.key === "permission")!.ms).toBe(m(6) * 1000);
+    expect(split.rows.find((r) => r.key === "model")!.ms).toBe(m(7) * 1000);
+    expect(split.rows.find((r) => r.key === "model")!.share).toBeCloseTo(7 / 30);
+    expect(split.longest.map((c) => c.ms / 60_000)).toEqual([10, 10, 1, 1, 1]) // wall time: the second Bash call includes its 6 min wait;
+  });
+
   it("keeps the 5 longest calls, longest first", () => {
     const items: TranscriptItem[] = [msg(0)];
     for (let i = 0; i < 7; i++) items.push(call(i * 100, `c${i}`, "read", "in_progress", `file ${i}`), call(i * 100 + 5 + i, `c${i}`, "read", "completed"));
