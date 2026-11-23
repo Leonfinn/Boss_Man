@@ -85,7 +85,7 @@ export function ServerHealth() {
             <li data-testid="health-disk">Data disk: {v.disk ? `${healthGb(v.disk.freeBytes)} free of ${healthGb(v.disk.totalBytes)} (${v.disk.freePercent.toFixed(0)}% free)` : "not available"}</li>
             <li data-testid="health-db">
               Database: {healthGb(v.database.bytes)}. 1 day ago {healthGb(v.database.dayAgoBytes)}, 7 days ago {healthGb(v.database.weekAgoBytes)}
-              {v.database.growthPercent7d !== null ? ` (${v.database.growthPercent7d > 0 ? "+" : ""}${v.database.growthPercent7d}% in 7 days)` : ""}. Earlier days fill in as the server keeps one reading a day.
+              {v.database.growthPercent7d !== null ? ` (growth: ${v.database.growthPercent7d > 0 ? "+" : ""}${v.database.growthPercent7d}% in 7 days)` : " (growth: not enough history yet)"}. Earlier days fill in as the server keeps one reading a day.
             </li>
             <li data-testid="health-limits">Last 24 hours (since the server started, if less): {v.limits.statementTimeouts} queries cut off for running too long, {v.limits.poolFull} times the connection pool was full.</li>
             <li data-testid="health-slow">

@@ -31,7 +31,7 @@ describe("Server health", () => {
     render(<ServerHealth />);
     await screen.findByTestId("health-disk");
     expect(text("health-disk")).toContain("8.0 GB free of 100.0 GB (8% free)");
-    expect(text("health-db")).toContain("3.0 GB. 1 day ago 2.9 GB, 7 days ago 1.5 GB (+100% in 7 days)");
+    expect(text("health-db")).toContain("3.0 GB. 1 day ago 2.9 GB, 7 days ago 1.5 GB (growth: +100% in 7 days)");
     expect(text("health-limits")).toContain("2 queries cut off");
     expect(text("health-limits")).toContain("1 times the connection pool was full");
     expect(text("health-slow")).toContain("75 s: select * from tickets where id = ?");
@@ -47,6 +47,7 @@ describe("Server health", () => {
     await screen.findByTestId("health-disk");
     expect(text("health-disk")).toContain("not available");
     expect(text("health-db")).toContain("1 day ago not available");
+    expect(text("health-db")).toContain("growth: not enough history yet");
     expect(text("health-slow")).toContain("No query is running over 60 seconds.");
   });
 });
