@@ -14,6 +14,7 @@ import { settingsRedirect } from "./pages/settings-redirect";
 import { atTime, drainTiming, waitingFor, wrapUpBannerText, type RunnerCheckView } from "./pages/settings/updates";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { SearchPalette } from "./components/SearchPalette";
+import { Shortcuts } from "./components/Shortcuts";
 
 // BOS-1843: every page below loads when it is first opened. Login, the shell and the banners stay in the entry file.
 const Board = lazyPage(() => import("./pages/Board"), "Board");
@@ -400,6 +401,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <SearchPalette companyId={companyId} go={go} />
+      <Shortcuts go={go} hasProjects={(current?.projects?.length ?? 0) > 0} />
       <main>
         <UpdateBanner m={maintenance.data} />
         <HoldBanner />

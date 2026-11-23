@@ -92,6 +92,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/SaveButton.tsx": "Any screen",
   // The Ctrl+K search box and its sidebar button, mounted once in App.tsx (BOS-2192).
   "components/SearchPalette.tsx": "Any screen",
+  // The "?" keyboard shortcuts list, mounted once in App.tsx (BOS-2321).
+  "components/Shortcuts.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
   // The page-intro fold, on four screens (P7, BOS-1278).
   "components/MoreAbout.tsx": "Any screen",
@@ -100,6 +102,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // "Copy link" in the Ticket and Run headers (BOS-2233). Not "Any screen", so it takes its screens from where
   // it is rendered (screensOf): Ticket and Run.
   "components/CopyLinkButton.tsx": "Ticket",
+  // "Download" in the Ticket header: the ticket as Markdown (BOS-2314).
+  "components/TicketDownloadButton.tsx": "Ticket",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   // The health line's Retry (BOS-2249): shown on the board and on the Scrum Master page, so it takes its screens from where it is rendered.

@@ -57,13 +57,15 @@ export const OWNER_CONTROLS = {
     "Send my answer", "Ask the CEO for advice",
     // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
     "Show fewer",
+    // The Answered list's export button (BOS-2312).
+    "Download CSV", "Preparing",
     // The Answered list's button for the next 50 older cards (BOS-2187).
     "Show older",
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
   Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
-  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Remember this", "Add to standing rules", "Undo", "Cancel"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing","Remember this", "Add to standing rules", "Undo", "Cancel"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
@@ -97,6 +99,8 @@ export const OWNER_CONTROLS = {
     "Undo", "Undoing", "Scrum Master", "Show all …",
     // The header's "Copy link", "Copied" for a moment after a copy (BOS-2233).
     "Copy link", "Copied",
+    // The header's "Download": the ticket as Markdown, "Preparing" while it fetches the conversation (BOS-2314).
+    "Download", "Preparing",
   ],
   // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
@@ -105,7 +109,7 @@ export const OWNER_CONTROLS = {
   // Each project is a collapsed row; "Edit settings" opens its form and "Hide settings" folds it away (BOS-1876).
   Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings"],
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
-  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied"],
+  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
   Engagements: [],
@@ -148,7 +152,7 @@ export const OWNER_CONTROLS = {
   Agents: [
     "Refresh models", "Asking the runner", "Choose from the list", "Hire …", "Use the default", "Replace with the current …",
     "Fill in from the …", "Rehire", "Undo", "Save", "Add note", "Cancel", "Edit", "Delete", "Start", "Pause", "Close",
-    "History", "Retire", "Refresh", "Refreshing",
+    "History", "Retire", "Refresh", "Refreshing", "Clear search",
   ],
   Skills: [
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",
@@ -231,7 +235,7 @@ export const OWNER_FIELDS = {
   "Any screen": ["New company name"],
   "Log in": ["Username", "Password"],
   // The Engagements list's status filter (BOS-2260).
-  Engagements: ["Show"],
+  Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
   Runs: ["Search by ticket"],
   Setup: [

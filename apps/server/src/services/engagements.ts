@@ -325,12 +325,22 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
     },
 
     /** Newest first, one page at a time (BOS-2165): the page polls it and the MCP list puts it in an agent's context. */
-    async list(companyId?: string, page: Page & { status?: Engagement["status"] | "open" } = {}) {
+    async list(companyId?: string, page: Page & { status?: Engagement["status"] | "open"; q?: string } = {}) {
       const statusFilter = !page.status ? undefined : page.status === "open" ? inArray(engagements.status, OPEN) : eq(engagements.status, page.status);
+      // Text search (BOS-2315): the title or either company's name, case-insensitive; % and _ are literal.
+      const text = page.q?.trim();
+      const like = text ? `%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : "";
+      const textFilter = text
+        ? or(
+            sql`${engagements.title} ilike ${like}`,
+            sql`${engagements.requesterCompanyId} in (select id from companies where name ilike ${like})`,
+            sql`${engagements.providerCompanyId} in (select id from companies where name ilike ${like})`,
+          )
+        : undefined;
       const rows = await db
         .select()
         .from(engagements)
-        .where(and(statusFilter, companyId ? or(eq(engagements.requesterCompanyId, companyId), eq(engagements.providerCompanyId, companyId)) : undefined, page.before ? olderThan(engagements, engagements, page.before) : undefined))
+        .where(and(statusFilter, textFilter,companyId ? or(eq(engagements.requesterCompanyId, companyId), eq(engagements.providerCompanyId, companyId)) : undefined, page.before ? olderThan(engagements, engagements, page.before) : undefined))
         .orderBy(desc(engagements.createdAt), desc(engagements.id))
         .limit(pageLimit(page.limit));
       const ids = [...new Set(rows.flatMap((r) => [r.requesterCompanyId, r.providerCompanyId]))];

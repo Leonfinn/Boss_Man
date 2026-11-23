@@ -12,7 +12,8 @@ name: Publish images
 #            (Settings > Environments > publish, limited to main), never ordinary repository secrets
 #   variable PUBLISH_IMAGES    image names, default the server, launcher and netguard. Add boss-man-runner only after the
 #                              Claude pack (BOS-972) has merged: the runner image holds Claude Code until then. It is
-#                              refused here unless scripts/image-tests.sh no-anthropic passes on it.
+#                              refused here unless scripts/image-tests.sh no-anthropic passes on it. Add boss-man-updater
+#                              (BOS-941) before a release the updater should be able to move to.
 on:
   workflow_run:
     workflows: [CI]

@@ -2350,15 +2350,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (at && cid && !Number.isNaN(Date.parse(at))) conds.push(sql`(${when}, ${decisions.id}) < (${new Date(at).toISOString()}::timestamptz, ${cid}::uuid)`);
       }
       const rows = await db
-        .select({ d: decisions, when })
+        .select({ d: decisions, when, companyName: companies.name })
         .from(decisions)
+        .innerJoin(companies, eq(companies.id, decisions.companyId))
         .where(and(...conds))
         .orderBy(desc(when), desc(decisions.id))
         .limit(limit + 1);
       const page = rows.slice(0, limit);
       const items = [];
-      for (const { d, when: at } of page) {
-        const c = d.context as { settled?: { name?: string }; settledByRepeat?: unknown; judge?: unknown };
+      for (const { d, when: at, companyName } of page) {
+        const c = d.context as { settled?: { name?: string; note?: string | null }; settledByRepeat?: unknown; judge?: unknown; answerNote?: string | null };
         const ids = await decisionTicketIds(db, d).catch(() => [] as string[]);
         const ts = ids.length
           ? await db
@@ -2376,6 +2377,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           answer: d.status === "answered" ? d.answer : null,
           by: by as "owner" | "ceo" | "auto" | "withdrawn",
           byName: c.settled?.name ?? null,
+          companyName,
+          note: d.status === "answered" ? c.settled?.note ?? c.answerNote ?? null : null,
           at: new Date(at).toISOString(),
           ticket: t ? { id: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) } : null,
         });

@@ -796,6 +796,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [filter, setFilter] = useState("");
   if (!company) return <NoCompany />;
   const refreshModels = async () => {
     const r = await api<{ probed: Record<string, { ok: boolean; error?: string }> }>(`/api/companies/${company!.id}/models/refresh`, { method: "POST" });
@@ -817,7 +818,12 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
       setNote({ ok: false, text: (err as Error).message });
     }
   };
-  const rows = list.data ?? [];
+  const rows = (list.data ?? []).filter((a) => {
+    const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return true;
+    const hay = [a.name, a.role, a.title, jobOf(a), a.model].filter(Boolean).join(" ").toLowerCase();
+    return words.every((w) => hay.includes(w));
+  });
   const active = rows.filter((a) => !a.retiredAt);
   const retired = rows.filter((a) => a.retiredAt);
   const srcs = sources.data ?? [];
@@ -993,6 +999,17 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
       )}
       {!list.data && list.error && <LoadError what="agents" message={list.error.message} onRetry={list.reload} />}
       {!list.data && !list.error && <Loader label="Loading agents" />}
+      {list.data && list.data.length > 0 && (
+        <input type="search" placeholder="Filter agents" aria-label="Filter agents" value={filter} onChange={(e) => setFilter(e.target.value)} />
+      )}
+      {list.data && filter.trim() && rows.length === 0 && (
+        <p className="muted">
+          No agents match "{filter.trim()}".{" "}
+          <button type="button" className="btn" onClick={() => setFilter("")}>
+            Clear search
+          </button>
+        </p>
+      )}
       {list.data && <ul className="agent-list">{active.map(row)}</ul>}
       {retired.length > 0 && (
         <details>
