@@ -19,7 +19,7 @@ async function setup() {
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
-  return { ...built, close, company, req };
+  return { ...built, db, close, company, req };
 }
 
 describe("BOS-2376: skill history", () => {
