@@ -26,6 +26,7 @@ import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions, checkWorkers } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
+import { watchCiTokenGrant } from "./services/ci-identity-card.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
@@ -361,6 +362,8 @@ export async function buildApp(opts: AppOptions) {
   secretsSvc.onGrantChange(({ companyId, envName }) => {
     if (envName === PENPOT_ENV.url) void launch.syncAllow(companyId);
   });
+  // BOS-2335: the second-account card closes when GIT_CI_TOKEN is granted, not at the next merge.
+  watchCiTokenGrant(secretsSvc, db);
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));

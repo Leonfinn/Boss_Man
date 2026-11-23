@@ -21,9 +21,34 @@ export const CI_IDENTITY_STEPS = [
   "Still signed in as the second account, create a classic token: profile picture → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → Generate new token (classic). Tick the scopes repo and workflow, then copy the token. Not yet confirmed on GitHub for the classic screens.",
   "Why classic: a fine-grained token only reaches repos owned by the resource owner you pick, so for a repo you are only a collaborator on it offers nothing (seen: f2eee874… 23 Nov 2026). The classic token reaches only repos this account was invited to. If an organisation owns the repo, a fine-grained token with the organisation as resource owner works too.",
   "Expiry: pick No expiration for a dedicated account, or set a reminder. When an expiring token lapses, the gate's CI pushes fail until you replace it.",
+  "A classic token can't be limited to one repository: its picker doesn't exist on that screen. Its reach is whatever the account can reach, so keep the limit in the account: a dedicated account that is a collaborator only on this repo, owns no repos of its own and belongs to no organisations.",
   "In Boss Man open Settings → Secrets, choose Add, then \"Git token for the merge gate (second account)\", paste the token and save.",
-  "Grant it to the company on the same screen. Do not add a user name unless your git host needs one (GitHub does not).",
+  "Grant it to the company on the same screen. Do not add a user name unless your git host needs one (GitHub does not). This card closes itself once the token is granted; you don't need to press anything.",
 ];
+
+/** The grant that means "the second account's token is set". */
+export const CI_TOKEN_ENV = "GIT_CI_TOKEN";
+
+/**
+ * Closes the card as soon as GIT_CI_TOKEN is granted, instead of at the next merge that waits for GitHub's checks.
+ * A revoked grant (no value left) leaves the card as it is. Never throws.
+ */
+export function watchCiTokenGrant(
+  secrets: { onGrantChange(l: (c: { companyId: string; envName: string }) => void): void; grantedValue(companyId: string, envName: string): Promise<string | null> },
+  db: Db,
+): void {
+  secrets.onGrantChange(({ companyId, envName }) => {
+    if (envName !== CI_TOKEN_ENV) return;
+    void (async () => {
+      try {
+        const value = await secrets.grantedValue(companyId, CI_TOKEN_ENV);
+        if (value) await ensureCiIdentityCard(db, companyId, value);
+      } catch {
+        // The merge-time clear in ciStep is the backstop.
+      }
+    })();
+  });
+}
 
 /**
  * Called when the gate is about to publish a bossman-ci/* branch on a GitHub project. With a GIT_CI_TOKEN granted, closes
