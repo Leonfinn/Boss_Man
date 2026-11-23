@@ -90,3 +90,26 @@ describe("deploy summary and status filter (BOS-2409)", () => {
     expect(await get(`/api/deploys?targetId=${a.target.id}&status=succeeded`)).toHaveLength(3);
   });
 });
+
+describe("deploy summary: companies and paging (BOS-2409)", () => {
+  it("never counts another company's deploys, and pages within the status filter", async () => {
+    const c = (ctx = await setup());
+    const a = await c.mk("Delta");
+    const b = await c.mk("Epsilon");
+    const at = (n: number) => new Date(Date.now() - n * 60_000);
+    await c.db.insert(deploys).values([
+      ...[1, 2, 3].map((n) => ({ companyId: a.company.id, targetId: a.target.id, ref: `f${n}`, status: "failed" as const, createdAt: at(n) })),
+      { companyId: a.company.id, targetId: a.target.id, ref: "ok", status: "succeeded" as const, createdAt: at(4), finishedAt: at(3) },
+      { companyId: b.company.id, targetId: b.target.id, ref: "other", status: "succeeded" as const, createdAt: at(5), finishedAt: at(4) },
+    ]);
+    const login = await c.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${login.cookies.find((x) => x.name === "bm_session")!.value}`;
+    const get = (url: string) => c.app.inject({ method: "GET", url, headers: { cookie } }).then((r) => r.json());
+    expect(await get(`/api/deploys/summary?targetId=${a.target.id}`)).toMatchObject({ total: 4, succeeded: 1, failedOrRejected: 3 });
+    expect(await get(`/api/deploys/summary?targetId=${b.target.id}`)).toMatchObject({ total: 1, succeeded: 1 });
+    const p1 = await get(`/api/deploys?targetId=${a.target.id}&status=failed&limit=2`);
+    expect(p1.map((r: { deploy: { ref: string } }) => r.deploy.ref)).toEqual(["f1", "f2"]);
+    const p2 = await get(`/api/deploys?targetId=${a.target.id}&status=failed&limit=2&before=${p1[1].deploy.id}`);
+    expect(p2.map((r: { deploy: { ref: string } }) => r.deploy.ref)).toEqual(["f3"]);
+  });
+});
