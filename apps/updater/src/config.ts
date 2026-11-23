@@ -14,7 +14,44 @@ export class UpdaterError extends Error {
 
 export type Arch = "amd64" | "arm64";
 
+/** What setup defines for the server colours and the next updater (design section 5, "the colour spec"): the install's own values. */
+export type SwapConfig = {
+  frontNetwork: string;
+  launcherNetwork: string;
+  /** The database container the backup runs in. */
+  dbContainer: string;
+  /** KEY=value pairs the install sets for a server colour (never a secret value: files are mounted, not passed). */
+  serverEnv: string[];
+  /** Named volumes a colour mounts. */
+  serverMounts: { source: string; target: string; readOnly: boolean }[];
+  /** Named volumes the next updater mounts (its state and key folders). */
+  selfMounts: { source: string; target: string; readOnly: boolean }[];
+  /** The updater's own private network (the server calls it there). */
+  selfNetwork: string;
+  /** This updater's own container name (the next updater takes it over at the hand-over). */
+  selfName: string;
+  /** The Docker socket's path on the host, for the next updater's one bind. */
+  socketHostPath: string;
+  serverMemory: number;
+  serverMemoryReserved: number;
+  /** The colour-spec layout this updater builds. A release with a higher installLayout is refused (or updates the updater first). */
+  layout: number;
+  readySeconds: number;
+  handoverSeconds: number;
+  soakSeconds: number;
+  soakCheckSeconds: number;
+  pollSeconds: number;
+  soakPollSeconds: number;
+  stopGraceSeconds: number;
+  handoverCallSeconds: number;
+  backupsKeep: number;
+};
+
 export type Config = {
+  /** Present when the install defines the swap's names (compose profile `bluegreen`); without it a move stops at ready-to-swap. */
+  swap: SwapConfig | null;
+  /** The UPDATER_* settings this updater started with: the next updater is given the same ones (section 8). */
+  rawEnv: Record<string, string>;
   /** The GitHub repository whose workflow signs releases, `<owner>/<name>`. */
   repo: string;
   /** The registry prefix this install pulls from, e.g. ghcr.io/example. Must be listed in the signed release.json. */
@@ -79,7 +116,47 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const githubBase = (env["UPDATER_GITHUB_BASE"]?.trim() || "https://github.com").replace(/\/$/, "");
   const extraHosts = (env["UPDATER_ALLOWED_HOSTS"] ?? "").split(",").map((h) => h.trim()).filter(Boolean);
   const stateDir = env["UPDATER_STATE_DIR"]?.trim() || "/state";
+  const lines = (name: string): string[] => (env[name] ?? "").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  const mounts = (name: string) =>
+    lines(name).map((l) => {
+      const [source = "", target = "", mode] = l.split(":");
+      if (!NAME_RE.test(source) || !/^\/[A-Za-z0-9_./-]+$/.test(target) || (mode !== undefined && mode !== "ro")) throw new UpdaterError("config", `${name} has a line that is not volume:/path or volume:/path:ro.`);
+      return { source, target, readOnly: mode === "ro" };
+    });
+  let swap: SwapConfig | null = null;
+  if (env["UPDATER_FRONT_NETWORK"]?.trim()) {
+    const serverEnv = lines("UPDATER_SPEC_ENV");
+    for (const l of serverEnv) {
+      if (!/^[A-Z][A-Z0-9_]*=/.test(l)) throw new UpdaterError("config", "UPDATER_SPEC_ENV has a line that is not KEY=value.");
+      if (/^BOSSMAN_(COLOUR|ROLE)=/.test(l)) throw new UpdaterError("config", "UPDATER_SPEC_ENV must not set BOSSMAN_COLOUR or BOSSMAN_ROLE: the updater sets them for each colour.");
+    }
+    swap = {
+      frontNetwork: need("UPDATER_FRONT_NETWORK", NAME_RE, "the private network the proxy and the colours share"),
+      launcherNetwork: need("UPDATER_LAUNCHER_NETWORK", NAME_RE, "the network the server shares with the launcher"),
+      dbContainer: need("UPDATER_DB_CONTAINER", NAME_RE, "the database container's name"),
+      serverEnv,
+      serverMounts: mounts("UPDATER_SPEC_MOUNTS"),
+      selfMounts: mounts("UPDATER_SELF_MOUNTS"),
+      selfNetwork: need("UPDATER_SELF_NETWORK", NAME_RE, "the updater's own network"),
+      selfName: env["UPDATER_SELF_NAME"]?.trim() || "updater",
+      socketHostPath: env["UPDATER_DOCKER_SOCK_HOST"]?.trim() || "/var/run/docker.sock",
+      serverMemory: Number(env["UPDATER_SERVER_MEMORY"] || 0) || 0,
+      serverMemoryReserved: Number(env["UPDATER_SERVER_MEMORY_RESERVED"] || 0) || 0,
+      layout: num("UPDATER_LAYOUT", 1),
+      readySeconds: num("UPDATER_READY_SECONDS", 120),
+      handoverSeconds: num("UPDATER_HANDOVER_SECONDS", 30),
+      soakSeconds: num("UPDATER_SOAK_SECONDS", 900),
+      soakCheckSeconds: num("UPDATER_SOAK_CHECK_SECONDS", 60),
+      pollSeconds: num("UPDATER_POLL_SECONDS", 2),
+      soakPollSeconds: num("UPDATER_SOAK_POLL_SECONDS", 10),
+      stopGraceSeconds: num("UPDATER_STOP_GRACE_SECONDS", 60),
+      handoverCallSeconds: num("UPDATER_HANDOVER_CALL_SECONDS", 60),
+      backupsKeep: num("UPDATER_BACKUPS_KEEP", 3),
+    };
+  }
   return {
+    swap,
+    rawEnv: Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => e[0].startsWith("UPDATER_") && typeof e[1] === "string")),
     repo,
     registry,
     githubBase,

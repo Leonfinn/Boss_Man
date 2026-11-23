@@ -23,6 +23,17 @@ export const ALLOWED_CALLS: readonly Allowed[] = [
   { method: "POST", pattern: new RegExp(`^/images/create\\?fromImage=${IMAGE_REF}$`), what: "pull an image by digest" },
   { method: "GET", pattern: new RegExp(`^/images/${IMAGE_REF}/json$`), what: "read back a pulled image's digest" },
   { method: "DELETE", pattern: new RegExp(`^/images/${IMAGE_REF}$`), what: "delete an image whose digest did not match" },
+  // 941b: the swap.
+  { method: "GET", pattern: /^\/containers\/json\?all=1&filters=[A-Za-z0-9%._=-]{1,300}$/, what: "list this install's containers by label (colours, standby)" },
+  { method: "POST", pattern: new RegExp(`^/containers/${ID}/stop\\?t=[0-9]{1,4}$`), what: "stop a container of this install (the old colour becomes the standby)" },
+  { method: "POST", pattern: new RegExp(`^/containers/${ID}/kill\\?signal=SIG(USR1|USR2)$`), what: "demote (USR1) or promote (USR2) a server colour, as the host deployer does" },
+  { method: "POST", pattern: new RegExp(`^/containers/${ID}/rename\\?name=${ID}$`), what: "name the new updater after the hand-over" },
+  { method: "POST", pattern: new RegExp(`^/containers/${ID}/update$`), what: "set the old updater's restart policy to no at the hand-over" },
+  { method: "POST", pattern: new RegExp(`^/networks/${ID}/connect$`), what: "attach a colour to a network with its aliases (flip: new colour first)" },
+  { method: "POST", pattern: new RegExp(`^/networks/${ID}/disconnect$`), what: "detach a colour from a network (flip)" },
+  { method: "POST", pattern: new RegExp(`^/containers/${ID}/exec$`), what: "create the fixed pg_dump command in the database container" },
+  { method: "POST", pattern: /^\/exec\/[0-9a-f]{64}\/start$/, what: "run that command" },
+  { method: "GET", pattern: /^\/exec\/[0-9a-f]{64}\/json$/, what: "read that command's exit code" },
 ];
 
 export class DockerError extends Error {
@@ -82,10 +93,53 @@ export function assertSafeCreate(spec: unknown, allow: { volume: string; network
   if (m["Type"] !== "volume" || m["Source"] !== allow.volume) refuse("it mounts something other than the pack volume");
 }
 
-export type ContainerInfo = { Id: string; Name?: string; Config: { Labels: Record<string, string> | null }; State: { Status?: string; Running?: boolean; ExitCode?: number } };
+export type ServerKind = "colour" | "migrate" | "updater";
+export type ServerAllow = { labelKey: string; labelValue: string; networks: string[]; volumes: string[]; kind: ServerKind; /** The one bind an updater may have: the Docker socket, `<host path>:/var/run/docker.sock`. */ socketBind?: string };
+
+/**
+ * What a server colour, the migrate one-shot or the next updater may ask for. Everything is built from the colour spec (src/spec.ts),
+ * never from input or an inspect result; this check is the second lock: a digest image, this install's label, no privilege, no
+ * capability beyond the updater's two, only named volumes the install lists, only the install's networks.
+ */
+export function assertSafeServerCreate(spec: unknown, allow: ServerAllow): void {
+  const refuse = (why: string): never => {
+    throw new UpdaterError("docker_refused", `The updater refused to create a container: ${why}.`);
+  };
+  if (!spec || typeof spec !== "object") return refuse("no spec");
+  const s = spec as { Image?: unknown; Labels?: Record<string, string>; HostConfig?: Record<string, unknown>; User?: unknown; Env?: unknown };
+  if (typeof s.Image !== "string" || !/^[a-z0-9.:/_-]+@sha256:[0-9a-f]{64}$/.test(s.Image)) refuse("the image is not named by digest");
+  if (s.Labels?.[allow.labelKey] !== allow.labelValue) refuse("it does not carry this install's label");
+  if (s.Env !== undefined && (!Array.isArray(s.Env) || !s.Env.every((e) => typeof e === "string"))) refuse("its environment is not a list of KEY=value text");
+  if (allow.kind === "updater" ? s.User !== "0:0" : s.User !== undefined && s.User !== "") refuse("it sets a user the spec does not");
+  const h = s.HostConfig ?? {};
+  if (h["Privileged"] !== false) refuse("it is not marked unprivileged");
+  if (Array.isArray(h["Devices"]) && h["Devices"].length > 0) refuse("it asks for a device");
+  const capAdd = Array.isArray(h["CapAdd"]) ? (h["CapAdd"] as string[]) : [];
+  if (allow.kind === "updater" ? capAdd.slice().sort().join() !== "SETGID,SETUID" : capAdd.length > 0) refuse("it asks for an extra capability");
+  if (!Array.isArray(h["CapDrop"]) || !(h["CapDrop"] as string[]).includes("ALL")) refuse("it does not drop all capabilities");
+  if (typeof h["NetworkMode"] !== "string" || !allow.networks.includes(h["NetworkMode"])) refuse("it is not on one of the install's own networks");
+  for (const k of ["PidMode", "UTSMode", "UsernsMode", "CgroupnsMode"]) if (h[k] !== undefined && h[k] !== "" && h[k] !== "private") refuse(`it asks for another ${k}`);
+  if (h["IpcMode"] !== undefined && h["IpcMode"] !== "" && h["IpcMode"] !== "private") refuse("it asks to share another process space");
+  if (Array.isArray(h["Binds"]) && h["Binds"].length > 0) {
+    if (allow.kind !== "updater" || !allow.socketBind || h["Binds"].length !== 1 || h["Binds"][0] !== allow.socketBind) refuse("it asks for a host folder");
+  } else if (allow.kind === "updater" && allow.socketBind) refuse("the next updater would have no Docker socket");
+  const mounts = Array.isArray(h["Mounts"]) ? (h["Mounts"] as Record<string, unknown>[]) : [];
+  for (const m of mounts) if (m["Type"] !== "volume" || typeof m["Source"] !== "string" || !allow.volumes.includes(m["Source"])) refuse("it mounts something the install does not list");
+  if (!(allow.kind === "migrate") && h["RestartPolicy"] === undefined) refuse("it has no restart policy");
+}
+
+export type ContainerInfo = {
+  Id: string;
+  Name?: string;
+  Image?: string;
+  Created?: string;
+  Config: { Labels: Record<string, string> | null; Image?: string };
+  State: { Status?: string; Running?: boolean; ExitCode?: number };
+  NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null }> };
+};
 export type ImageInfo = { Id: string; Architecture?: string; RepoDigests?: string[] };
 
-export type DockerOptions = { installLabel: string; volume: string; network: string };
+export type DockerOptions = { installLabel: string; volume: string; network: string; /** Networks the swap may attach containers to. */ networks?: string[]; /** Named volumes a colour may mount. */ volumes?: string[]; socketBind?: string };
 
 export function dockerClient(transport: Transport, opts: DockerOptions) {
   const [labelKey = "", labelValue = ""] = opts.installLabel.split("=", 2);
@@ -131,6 +185,71 @@ export function dockerClient(transport: Transport, opts: DockerOptions) {
       const r = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
       const j = r.status === 201 ? json<{ Id: string }>(r) : null;
       return j?.Id ?? fail(r, "Creating the container failed");
+    },
+    /** A server colour, the migrate one-shot or the next updater, from the colour spec (checked by assertSafeServerCreate). */
+    async createServer(name: string, spec: { Labels?: Record<string, string> } & Record<string, unknown>, kind: ServerKind): Promise<string> {
+      assertSafeServerCreate(spec, { labelKey, labelValue, networks: opts.networks ?? [opts.network], volumes: opts.volumes ?? [], kind, socketBind: opts.socketBind });
+      const r = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
+      const j = r.status === 201 ? json<{ Id: string }>(r) : null;
+      return j?.Id ?? fail(r, "Creating the container failed");
+    },
+    /** This install's containers that carry a label key (any value). */
+    async listByLabel(key: string): Promise<ContainerInfo[]> {
+      const filters = encodeURIComponent(JSON.stringify({ label: [`${labelKey}=${labelValue}`, key] }));
+      const r = await call("GET", `/containers/json?all=1&filters=${filters}`);
+      const rows = r.status === 200 ? (json<{ Id: string }[]>(r) ?? []) : fail(r, "Listing the containers failed");
+      const out: ContainerInfo[] = [];
+      for (const row of rows) {
+        const info = await inspectOurs(row.Id);
+        if (info) out.push(info);
+      }
+      return out;
+    },
+    async stop(id: string, graceSeconds: number) {
+      await ours(id);
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/stop?t=${Math.min(Math.max(Math.trunc(graceSeconds), 0), 9999)}`);
+      if (r.status !== 204 && r.status !== 304) fail(r, "Stopping the container failed");
+    },
+    async signal(id: string, sig: "SIGUSR1" | "SIGUSR2") {
+      await ours(id);
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/kill?signal=${sig}`);
+      if (r.status !== 204) fail(r, "Signalling the container failed");
+    },
+    async rename(id: string, name: string) {
+      await ours(id);
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/rename?name=${encodeURIComponent(name)}`);
+      if (r.status !== 204) fail(r, "Renaming the container failed");
+    },
+    async setRestartNever(id: string) {
+      await ours(id);
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/update`, { RestartPolicy: { Name: "no" } });
+      if (r.status !== 200) fail(r, "Changing the container's restart policy failed");
+    },
+    /** Attaches a container to one of the install's networks (never another). With aliases, they are the only extra names. */
+    async connect(network: string, id: string, aliases: string[]) {
+      if (!(opts.networks ?? [opts.network]).includes(network)) throw new UpdaterError("docker_refused", "The updater refused to attach a container to a network that is not part of this install.");
+      await ours(id);
+      const r = await call("POST", `/networks/${encodeURIComponent(network)}/connect`, { Container: id, EndpointConfig: { Aliases: aliases } });
+      if (r.status !== 200 && !(r.status === 403 && /already exists/i.test(r.body.toString("utf8")))) fail(r, "Attaching the container to the network failed");
+    },
+    async disconnect(network: string, id: string) {
+      if (!(opts.networks ?? [opts.network]).includes(network)) throw new UpdaterError("docker_refused", "The updater refused to detach a container from a network that is not part of this install.");
+      await ours(id);
+      const r = await call("POST", `/networks/${encodeURIComponent(network)}/disconnect`, { Container: id, Force: false });
+      // "is not connected" (a retry after a restart) is the state we wanted.
+      if (r.status !== 200 && !/is not connected/i.test(r.body.toString("utf8"))) fail(r, "Detaching the container from the network failed");
+    },
+    /** Runs one fixed command in a container of this install (the backup). The command is built by the updater, never from input. */
+    async exec(id: string, cmd: string[], user: string): Promise<{ exitCode: number; output: string }> {
+      await ours(id);
+      const c = await call("POST", `/containers/${encodeURIComponent(id)}/exec`, { AttachStdout: true, AttachStderr: true, Tty: false, User: user, Cmd: cmd });
+      const execId = c.status === 201 ? json<{ Id: string }>(c)?.Id : undefined;
+      if (!execId) return fail(c, "Preparing the command failed");
+      const s = await call("POST", `/exec/${execId}/start`, { Detach: false, Tty: false });
+      if (s.status !== 200) fail(s, "Running the command failed");
+      const i = await call("GET", `/exec/${execId}/json`);
+      const code = i.status === 200 ? json<{ ExitCode?: number }>(i)?.ExitCode : undefined;
+      return { exitCode: typeof code === "number" ? code : -1, output: demux(s.body) };
     },
     async start(id: string) {
       await ours(id);
