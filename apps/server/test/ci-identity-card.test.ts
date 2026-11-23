@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions } from "../src/db/schema.js";
-import { ciIdentityKey, ensureCiIdentityCard } from "../src/services/ci-identity-card.js";
+import { CI_KEEP_EMAILS, ciIdentityKey, ensureCiIdentityCard } from "../src/services/ci-identity-card.js";
 
 describe("ensureCiIdentityCard", () => {
   it("raises one owner card without a GIT_CI_TOKEN, never a second, and closes it once the token is granted", async () => {
@@ -42,7 +42,12 @@ describe("ensureCiIdentityCard", () => {
     try {
       const [co] = await db.insert(companies).values({ name: "Keep Co", slug: "keep-co" } as never).returning();
       expect(await ensureCiIdentityCard(db, co!.id, undefined)).toBe("raised");
-      await db.update(decisions).set({ status: "answered", answer: "A step failed" }).where(eq(decisions.companyId, co!.id));
+      const [card] = await db.select().from(decisions).where(eq(decisions.companyId, co!.id));
+      // "Keep the emails" is its own answer; "A step failed" is not the way to stop the asking.
+      expect(card!.options).toEqual(["Done, it's applied", CI_KEEP_EMAILS, "A step failed"]);
+      expect(card!.question).toContain('answer "Keep the emails"');
+      expect(card!.question).not.toContain('answer "A step failed": Boss Man will not ask again');
+      await db.update(decisions).set({ status: "answered", answer: CI_KEEP_EMAILS }).where(eq(decisions.companyId, co!.id));
       expect(await ensureCiIdentityCard(db, co!.id, undefined)).toBe("none");
       expect(await db.select().from(decisions).where(eq(decisions.companyId, co!.id))).toHaveLength(1);
     } finally {

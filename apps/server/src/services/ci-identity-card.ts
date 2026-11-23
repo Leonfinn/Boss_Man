@@ -9,8 +9,11 @@ import { clearOwnerTodo, raiseOwnerTodo } from "./decisions.js";
 
 export const ciIdentityKey = (companyId: string) => `owner-todo:ci-identity:${companyId}`;
 
+/** The answer that stops the asking. "A step failed" records a step problem and keeps the card open. */
+export const CI_KEEP_EMAILS = "Keep the emails";
+
 export const CI_IDENTITY_QUESTION =
-  "GitHub emails you every time a merge check run fails on a Boss Man gate branch (bossman-ci/...), because Boss Man pushes those branches with your token. To send those emails to a second account instead, give Boss Man that account's token. If you would rather keep the emails, answer \"A step failed\": Boss Man will not ask again. Muting GitHub Actions emails is not offered because it would also hide real failures on main.";
+  "GitHub emails you every time a merge check run fails on a Boss Man gate branch (bossman-ci/...), because Boss Man pushes those branches with your token. To send those emails to a second account instead, give Boss Man that account's token. If you would rather keep the emails, answer \"Keep the emails\": Boss Man will not ask again. If a step does not work on your screen, answer \"A step failed\" and say what you saw: the card stays open and Boss Man looks into it. Muting GitHub Actions emails is not offered because it would also hide real failures on main.";
 
 /** Plain steps for the owner; GitHub's screens are not yet confirmed by a real run, and the card says so. */
 export const CI_IDENTITY_STEPS = [
@@ -44,6 +47,7 @@ export async function ensureCiIdentityCard(db: Db, companyId: string, ciToken: s
       check: "Check it worked: after the next failed gate run, GitHub's run page shows the second account as the one who triggered it, and your own inbox stays quiet.",
       rollback: "Delete the GIT_CI_TOKEN secret in Settings → Secrets: the gate goes back to pushing with your token.",
       ofDecisionId: "system",
+      extraOption: CI_KEEP_EMAILS,
     });
     return row ? "raised" : "none";
   } catch {
