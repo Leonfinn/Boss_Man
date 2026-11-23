@@ -212,10 +212,12 @@ const SCRUM_MASTER_TOOLS: ReadonlySet<string> = new Set(["tickets", "wiki", "wha
 const FEATURE_PAGE = 60;
 
 /** One page of the agents' feature list: non-declined, best priority first, narrowed by q, with the total and range so a cut is never silent. */
-function pageFeatures<T extends { status: string; priority: number; title: string; description?: string | null }>(rows: T[], q: string | undefined, offset: number | undefined) {
+function pageFeatures<T extends { status: string; priority: number; title: string; description?: string | null }>(rows: T[], q: string | undefined, offset: number | undefined, status?: string) {
   const needle = q?.trim().toLowerCase();
+  // status: "open" = not released or declined; one exact status; "all" or nothing = today's list (declined left out).
+  const keep = (s: string) => (!status || status === "all" ? s !== "declined" : status === "open" ? s !== "released" && s !== "declined" : s === status);
   const matching = rows
-    .filter((f) => f.status !== "declined")
+    .filter((f) => keep(f.status))
     .filter((f) => !needle || f.title.toLowerCase().includes(needle) || (f.description ?? "").toLowerCase().includes(needle))
     .sort((a, b) => b.priority - a.priority);
   const start = Math.max(0, offset ?? 0);
@@ -961,7 +963,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand, priority and whether it is on the portal, kept off it or has a public summary; 60 a page, the answer gives total, from, to and a more note: pass q to search title and description, offset to continue), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO and product managers also triage (a product manager gives a reason, kept in the activity log): link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. portalVisible is the one switch that publishes a feature (the feedback portal and its public roadmap); showPublicly is retired and is only accepted as another name for portalVisible. Write the publicSummary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand, priority and whether it is on the portal, kept off it or has a public summary; 60 a page, the answer gives total, from, to and a more note: pass q to search title and description, offset to continue; pass status open (not released or declined), one exact status, or all (the default, declined left out) to filter before paging, and tickets count to get each feature's ticket totals only, without the ticket list, which keeps the answer short), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO and product managers also triage (a product manager gives a reason, kept in the activity log): link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. portalVisible is the one switch that publishes a feature (the feedback portal and its public roadmap); showPublicly is retired and is only accepted as another name for portalVisible. Write the publicSummary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
       inputSchema: {
         action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size", "update_feature"]),
         q: z.string().trim().max(200).optional(),
@@ -969,7 +971,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         effort: z.number().int().min(1).max(5).optional(),
         rank: z.number().int().min(1).max(5).nullable().optional(),
         horizon: z.enum(HORIZONS).nullable().optional(),
-        status: z.enum(FEATURE_STATUSES).optional(),
+        // "open" and "all" only filter the features list; update_feature takes one real status.
+        status: z.enum([...FEATURE_STATUSES, "open", "all"]).optional(),
+        tickets: z.enum(["full", "count"]).optional(),
         scores: z.record(z.string().min(1).max(100), z.number().int().min(0).max(5)).optional(),
         reason: z.string().trim().min(1).max(240).optional(),
         noteId: z.string().uuid().optional(),
@@ -1015,14 +1019,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }
         if (input.action === "features") {
           const all = await feedback.scored(scope.companyId);
-          const { page, range } = pageFeatures(all.features, input.q, input.offset);
-          const list = page.map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, objectiveId: f.objectiveId, milestoneId: f.milestoneId, rank: f.rank, horizon: f.horizon, demand: f.demand, people: f.customerCount, effort: f.effort, scores: Object.fromEntries(all.drivers.map((d) => [d.name, f.driverScores[d.id] ?? null])), value: f.value, priority: f.priority, portalVisible: f.portalVisible, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim(), tickets: f.tickets }));
+          const { page, range } = pageFeatures(all.features, input.q, input.offset, input.status);
+          const list = page.map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, objectiveId: f.objectiveId, milestoneId: f.milestoneId, rank: f.rank, horizon: f.horizon, demand: f.demand, people: f.customerCount, effort: f.effort, scores: Object.fromEntries(all.drivers.map((d) => [d.name, f.driverScores[d.id] ?? null])), value: f.value, priority: f.priority, portalVisible: f.portalVisible, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim(), tickets: input.tickets === "count" ? { total: f.tickets.total, done: f.tickets.done } : f.tickets }));
           return text(JSON.stringify({ ...range, criteria: all.drivers.map((d) => ({ name: d.name, weight: d.weight })), features: list }));
         }
         if (input.action === "update_feature") {
           const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
           if (!me || (me.role !== "ceo" && me.role !== "manager" && me.template !== "product-manager")) return fail("Only the CEO, a manager or a product manager can place features on the roadmap.");
           if (!input.featureId) return fail("Give featureId.");
+          if (input.status === "open" || input.status === "all") return fail(`status "${input.status}" only filters the features list. To change a feature, give one of: ${FEATURE_STATUSES.join(", ")}.`);
+          const newStatus = input.status;
           // update_feature never saves a feature's title or description, so a title/description here would be silently
           // ignored; worse, it could be used as decoy text to slip a security-worded feature onto the portal (BOS-991).
           if (input.title !== undefined || input.description !== undefined) return fail("update_feature does not change a feature's title or description. Leave them out.");
@@ -1035,7 +1041,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             ...(input.milestoneId !== undefined ? { milestoneId: input.milestoneId } : {}),
             ...(input.rank !== undefined ? { rank: input.rank } : {}),
             ...(input.horizon !== undefined ? { horizon: input.horizon } : {}),
-            ...(input.status !== undefined ? { status: input.status } : {}),
+            ...(newStatus !== undefined ? { status: newStatus } : {}),
             ...(input.publicSummary !== undefined ? { publicSummary: input.publicSummary } : {}),
             ...(input.publicTitle !== undefined ? { publicTitle: input.publicTitle } : {}),
             ...(portalVisibleIn !== undefined ? { portalVisible: portalVisibleIn } : {}),
