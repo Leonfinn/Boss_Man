@@ -446,6 +446,7 @@ reads:
   - /api/tickets/:id/related
   - /api/tickets/:id/reviews
   - /api/tickets/:id/runs
+  - /api/tickets/:id/state-history
 
 ## #/wiki
 sections: 
