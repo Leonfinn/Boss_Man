@@ -3,6 +3,7 @@
 // directly. On a phone the list and the conversation take turns.
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { api, type Company } from "../api";
+import { download } from "../csv";
 import { NoCompany } from "../components/NoCompany";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
@@ -44,6 +45,13 @@ export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = 
       </a>
     ),
   );
+}
+
+/** The whole conversation as Markdown (BOS-2313): oldest first, no thinking traces; attachments stay as their links. */
+export function chatMarkdown(agentName: string, date: string, items: Message[]): string {
+  const who = (m: Message) => (m.role === "owner" ? "You" : m.role === "system" ? "System" : agentName);
+  const utc = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
+  return `# Chat with ${agentName}, ${date}\n\n${items.map((m) => `**${who(m)}** · ${utc(m.createdAt)}\n\n${m.text}\n`).join("\n")}`;
 }
 
 const ROLE: Record<Thread["role"], string> = { ceo: "CEO", manager: "Manager", worker: "Worker" };
@@ -212,6 +220,28 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
       setLoadingOlder(false);
     }
   };
+  const [preparing, setPreparing] = useState(false);
+  const downloadChat = async () => {
+    if (!company || !current || preparing) return;
+    setPreparing(true);
+    try {
+      const url = `/api/companies/${company.id}/chat?agentId=${current.id}`;
+      let page = await api<Chat>(url);
+      let all = page.items;
+      while (page.hasMore && all[0]) {
+        page = await api<Chat>(`${url}&before=${all[0].id}`);
+        all = [...page.items, ...all];
+      }
+      const day = new Date().toISOString().slice(0, 10);
+      const slug = current.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
+      download(`chat-${slug}-${day}.md`, chatMarkdown(current.name, day, all), "text/markdown;charset=utf-8");
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPreparing(false);
+    }
+  };
   // After older messages are added above, put the owner back on the message they were reading.
   useLayoutEffect(() => {
     const k = keep.current;
@@ -358,6 +388,9 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
                   <small className="muted">{state !== "idle" ? busyText(state, current.name) : roleOf(current)}</small>
                 </div>
                 {starred && <StarButton agent={starred} onToggle={() => void api(`/api/agents/${current.id}`, { method: "PATCH", body: { starred: !starred.starred } }).then(onChanged, (err: Error) => setError(err.message))} />}
+                <button type="button" className="btn" onClick={() => void downloadChat()} disabled={preparing}>
+                  {preparing ? "Preparing" : "Download"}
+                </button>
               </header>
               <div className="chat-log" role="log" aria-live="polite" ref={logRef}>
                 {hasMore && (
