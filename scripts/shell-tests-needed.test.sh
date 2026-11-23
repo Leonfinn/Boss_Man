@@ -42,8 +42,9 @@ done
 # (Fixture names that merely look like repo files are listed here with a reason.)
 cd "$here/.."
 # Not read from the repo: README.md (squeeze-test.test.sh passes it to prove a file outside apps/ and packages/ is refused) and the
-# four app files check-quick.test.sh commits into a temp repo of its own and expects in hint text.
-ok_unlisted=$'README.md\napps/server/package.json\napps/server/src/mcp.ts\napps/server/src/services/wake-classes.ts\npackages/shared/src/owner-controls.ts\n'
+# app files check-quick.test.sh commits into a temp repo of its own (four expected in hint text; packages/shared/src/index.ts as the
+# barrel of its shared-consumer cases, BOS-2334).
+ok_unlisted=$'README.md\napps/server/package.json\napps/server/src/mcp.ts\napps/server/src/services/wake-classes.ts\npackages/shared/src/index.ts\npackages/shared/src/owner-controls.ts\n'
 git ls-files | sort -u >"$t/tracked"
 git ls-files '*.test.sh' | while IFS= read -r f; do grep -oE '[A-Za-z0-9_./-]+' "$f"; done | sed 's|^\./||' | sort -u >"$t/tokens"
 missed=""
