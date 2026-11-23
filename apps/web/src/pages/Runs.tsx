@@ -168,9 +168,9 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.id}>
+            <tr key={r.id} data-shortcut-card tabIndex={-1}>
               <td className="mono muted">
-                <a href={`#/runs/${r.id}`}>{when(finished ? r.endedAt : r.startedAt)}</a>
+                <a href={`#/runs/${r.id}`} data-shortcut-open>{when(finished ? r.endedAt : r.startedAt)}</a>
               </td>
               <td>
                 {r.agent ?? "An agent"}

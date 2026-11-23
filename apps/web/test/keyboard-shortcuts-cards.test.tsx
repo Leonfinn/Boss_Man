@@ -177,6 +177,19 @@ describe("card shortcuts on Decisions (BOS-2330)", () => {
   });
 });
 
+describe("Runs and Features lists (BOS-2349)", () => {
+  it("lists their keys on the list pages only", () => {
+    expect(screenKeys("#/runs")?.title).toBe("On Runs");
+    expect(screenKeys("#/runs?status=done")?.title).toBe("On Runs");
+    expect(screenKeys("#/runs/abc123")).toBeNull();
+    expect(screenKeys("#/features")?.title).toBe("On Features");
+    expect(screenKeys("#/features/c1")?.title).toBe("On Features");
+    expect(screenKeys("#/features/c1/f1")).toBeNull();
+    expect(screenKeys("#/runs")?.rows.map((r) => r.what)).toContain("Open the run's page");
+    expect(screenKeys("#/features")?.rows.map((r) => r.what)).toContain("Open the feature's page");
+  });
+});
+
 describe("screens without cards (BOS-2330)", () => {
   it("j does nothing and the '?' list has no screen section", () => {
     window.location.hash = "#/dashboard";

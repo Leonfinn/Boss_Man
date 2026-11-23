@@ -429,15 +429,15 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
   const foldable = f.tickets.items.length > 0;
   return (
     <>
-    <tr>
-      <td className="feature-name" style={{ paddingLeft: sub ? 28 : undefined }}>
+    <tr data-shortcut-card tabIndex={-1}>
+      <td className="feature-name"style={{ paddingLeft: sub ? 28 : undefined }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {foldable && (
             <button type="button" className="feature-fold" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} aria-label={`${open ? "Hide" : "Show"} tasks of ${f.title}`} onClick={onToggle}>
               <span className="pl-arrow" aria-hidden="true">{open ? "▾" : "▸"}</span>
             </button>
           )}
-          <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+          <a href={`#/features/${f.companyId}/${f.id}`} data-shortcut-open>{f.title}</a>
         </span>
         <VisitorsWillSee f={f} />
       </td>
@@ -501,10 +501,10 @@ function FeatureCard({ f, drivers, sub, hasSubfeatures, open, onToggle, onPatch 
   const counts = taskCounts(f);
   const foldable = f.tickets.items.length > 0;
   return (
-    <li className={`fcard${sub ? " sub" : ""}`}>
+    <li className={`fcard${sub ? " sub" : ""}`} data-shortcut-card tabIndex={-1}>
       <div className="fcard-top">
         <div className="fcard-title">
-          <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+          <a href={`#/features/${f.companyId}/${f.id}`} data-shortcut-open>{f.title}</a>
           <VisitorsWillSee f={f} />
           <StatusSelect f={f} onPatch={onPatch} />
         </div>
