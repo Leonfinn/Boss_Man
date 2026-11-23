@@ -603,10 +603,19 @@ export function Skills({ company }: { company: Company | undefined }) {
   const [pickedPack, setPickedPack] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
   if (!company) return <NoCompany />;
   const rows = list.data ?? [];
-  const packs = [...new Set(rows.map((r) => r.pack).filter((p): p is string => !!p))].sort();
-  const loose = rows.filter((r) => !r.pack);
+  const needle = filter.trim().toLowerCase();
+  const hits = (s: SkillRow) => s.name.toLowerCase().includes(needle) || (s.description ?? "").toLowerCase().includes(needle);
+  const allPacks = [...new Set(rows.map((r) => r.pack).filter((p): p is string => !!p))].sort();
+  // A pack whose name matches shows all its skills; otherwise only the matching ones.
+  const packRows = (p: string) => {
+    const all = rows.filter((r) => r.pack === p);
+    return !needle || p.toLowerCase().includes(needle) ? all : all.filter(hits);
+  };
+  const packs = allPacks.filter((p) => packRows(p).length > 0);
+  const loose = rows.filter((r) => !r.pack && (!needle || hits(r)));
   const pick = (id: string) => (setPicked(id), setPickedPack(null), setAdding(false));
   const item = (s: SkillRow) => (
     <li key={s.id}>
@@ -644,12 +653,19 @@ export function Skills({ company }: { company: Company | undefined }) {
       <div className="wiki">
         <nav className="card wiki-list" aria-label="Skills">
           {list.data && rows.length === 0 && <p className="muted">No skills yet.</p>}
+          {rows.length > 0 && (
+            <div className="field">
+              <label htmlFor="skills-filter">Filter</label>
+              <input id="skills-filter" type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Name or description" />
+            </div>
+          )}
+          {needle && packs.length === 0 && loose.length === 0 && <p className="muted">No skills match.</p>}
           <ul>
             {packs.map((p) => {
-              const inPack = rows.filter((r) => r.pack === p);
+              const inPack = packRows(p);
               return (
                 <li key={`pack:${p}`}>
-                  <details open={inPack.some((r) => r.id === picked) || undefined}>
+                  <details open={needle ? true : inPack.some((r) => r.id === picked) || undefined}>
                     <summary>
                       <button type="button" className="link mono" aria-current={pickedPack === p && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), setPickedPack(p), setPicked(null), setAdding(false))}>
                         {p}
