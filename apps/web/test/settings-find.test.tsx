@@ -38,7 +38,7 @@ describe("Find a setting box", () => {
   it("narrows the list, shows a no-match note, and Esc shows every page again", () => {
     const c = menu();
     const total = c.querySelectorAll(".set-nav > .set-group li").length;
-    const box = c.querySelector<HTMLInputElement>("input[aria-label='Find a setting']")!;
+    const box = c.querySelector<HTMLInputElement>(".set-find input")!;
     fireEvent.change(box, { target: { value: "email" } });
     const shown = c.querySelectorAll(".set-nav > .set-group > ul > li").length;
     expect(shown).toBeGreaterThan(0);
@@ -46,8 +46,28 @@ describe("Find a setting box", () => {
     fireEvent.change(box, { target: { value: "zzzznomatch" } });
     expect(c.querySelector("[role=status]")!.textContent).toContain("No setting matches");
     expect(c.querySelectorAll(".set-nav > .set-group").length).toBe(0);
+    fireEvent.click(c.querySelector<HTMLButtonElement>("[role=status] button")!);
+    expect(box.value).toBe("");
+    fireEvent.change(box, { target: { value: "zzzznomatch" } });
     fireEvent.keyDown(box, { key: "Escape" });
     expect(box.value).toBe("");
     expect(c.querySelectorAll(".set-nav > .set-group > ul > li")).toHaveLength(16);
+  });
+
+  it("a jump entry match shows under its page and its link opens that page", () => {
+    const page = SETTINGS_PAGES.find((p) => p.jump && p.jump.length > 0)!;
+    const j = page.jump![0]!;
+    const c = menu();
+    fireEvent.change(c.querySelector(".set-find input")!, { target: { value: j.label } });
+    const link = [...c.querySelectorAll<HTMLAnchorElement>(".set-find-jumps a")].find((a) => a.textContent === j.label)!;
+    expect(link.getAttribute("href")).toBe(`#/settings/c1/${page.id}`);
+  });
+
+  it("at a phone width the box is the first thing in the list and works the same", () => {
+    vi.stubGlobal("innerWidth", 375);
+    const c = menu();
+    expect(c.querySelector(".set-nav")!.firstElementChild!.className).toBe("set-find");
+    fireEvent.change(c.querySelector(".set-find input")!, { target: { value: "email" } });
+    expect(c.querySelectorAll(".set-nav > .set-group > ul > li").length).toBeGreaterThan(0);
   });
 });

@@ -208,15 +208,24 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
   const menu = (
     <nav aria-label="Settings" className={current ? "set-nav" : "set-nav set-nav-index"}>
       <div className="set-find">
-        <input
-          type="search"
-          aria-label="Find a setting"
-          placeholder="Find a setting"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setQuery(""); } }}
-        />
-        {found && found.size === 0 && <p className="muted" role="status">No setting matches "{query.trim()}".</p>}
+        <label className="label">
+          Find a setting
+          <input
+            type="search"
+            placeholder="Name, hint or help text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setQuery(""); } }}
+          />
+        </label>
+        {found && found.size === 0 && (
+          <p className="muted" role="status">
+            No setting matches "{query.trim()}".{" "}
+            <button type="button" className="linkish" onClick={() => setQuery("")}>
+              Clear
+            </button>
+          </p>
+        )}
       </div>
       {SETTINGS_GROUPS.filter((g) => !found || g.items.some((p) => found.has(p.id))).map((g) => (
         <div key={g.label} className={g.items.some((p) => p.id === current?.id) ? "set-group set-group-current" : current ? "set-group set-group-other" : "set-group"}>
