@@ -384,12 +384,55 @@ function DeployHistory({ companyId, targetId, name, latestSuccessId }: { company
   );
 }
 
-function DeployHistoryList({ companyId, targetId, name, latestSuccessId }: { companyId: string; targetId: string; name: string; latestSuccessId: string | null }) {
+type DeploySummary = { days: number; total: number; succeeded: number; failedOrRejected: number; medianSeconds: number | null; lastSuccessAt: string | null };
+const DEPLOY_FILTERS = [
+  ["", "All"],
+  ["succeeded", "Succeeded"],
+  ["failed", "Failed or rejected"],
+] as const;
+
+function lengthText(s: number) {
+  if (s < 90) return `${Math.round(s)} s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  return `${Math.round(s / 3600)} h`;
+}
+
+/** The 30-day line and the status filter above one target's list (BOS-2409). */
+function DeployHistoryList(props: { companyId: string; targetId: string; name: string; latestSuccessId: string | null }) {
+  const [status, setStatus] = useState<"" | "succeeded" | "failed">("");
+  const sum = usePoll((signal) => api<DeploySummary>(`/api/deploys/summary?targetId=${props.targetId}`, { signal }), 30_000, `deploy-summary-${props.targetId}`);
+  const s = sum.data;
+  return (
+    <>
+      {s && s.total > 0 && (
+        <p style={{ fontSize: 13, margin: "6px 0" }}>
+          Last {s.days} days: {s.total} deploy{s.total === 1 ? "" : "s"}, {s.succeeded} succeeded, {s.failedOrRejected} failed or refused
+          {s.medianSeconds !== null && <>, median {lengthText(s.medianSeconds)} to finish</>}.{" "}
+          {s.lastSuccessAt ? <>Last success: {when(s.lastSuccessAt)}</> : <span className="error">No successful deploy in {s.days} days</span>}
+        </p>
+      )}
+      <label style={{ fontSize: 13 }}>
+        Show{" "}
+        <select value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
+          {DEPLOY_FILTERS.map(([v, l]) => (
+            <option key={v} value={v}>
+              {l}
+            </option>
+          ))}
+        </select>
+      </label>
+      <DeployRows key={status} {...props} status={status} />
+    </>
+  );
+}
+
+function DeployRows({ companyId, targetId, name, latestSuccessId, status }: { companyId: string; targetId: string; name: string; latestSuccessId: string | null; status: string }) {
   const act = useAction();
-  const first = usePoll((signal) => api<{ deploy: DeployHistoryRow["deploy"]; agentName: string | null; ticketRef: string | null }[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}`, { signal }).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), 30_000, `deploy-history-${targetId}`);
-  const older = useOlder<DeployHistoryRow>(first.data ?? null, DEPLOY_PAGE, (before) => api<Omit<DeployHistoryRow, "id">[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}&before=${before}`).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), `deploy-history-${targetId}`);
+  const filter = status ? `&status=${status}` : "";
+  const first = usePoll((signal) => api<{ deploy: DeployHistoryRow["deploy"]; agentName: string | null; ticketRef: string | null }[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}${filter}`, { signal }).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), 30_000, `deploy-history-${targetId}-${status}`);
+  const older = useOlder<DeployHistoryRow>(first.data ?? null, DEPLOY_PAGE, (before) => api<Omit<DeployHistoryRow, "id">[]>(`/api/deploys?targetId=${targetId}&limit=${DEPLOY_PAGE}&before=${before}${filter}`).then((rows) => rows.map((r) => ({ ...r, id: r.deploy.id }))), `deploy-history-${targetId}-${status}`);
   if (!older.rows) return first.error ? <LoadError what={`the deploys of ${name}`} message={first.error.message} onRetry={first.reload} /> : <Loader label="Loading the deploys" />;
-  if (!older.rows.length) return <p className="muted" style={{ fontSize: 13 }}>No deploys to {name} yet.</p>;
+  if (!older.rows.length) return <p className="muted" style={{ fontSize: 13 }}>{status ? `No ${status === "failed" ? "failed or refused" : "succeeded"} deploys to ${name}.` : `No deploys to ${name} yet.`}</p>;
   return (
     <>
       <ul style={{ listStyle: "none", padding: 0, margin: "6px 0", display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>

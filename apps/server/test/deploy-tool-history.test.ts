@@ -71,3 +71,22 @@ describe("deploy tool: history", () => {
     await client.close();
   });
 });
+
+describe("deploy summary and status filter (BOS-2409)", () => {
+  it("counts the last 30 days, takes the median of succeeded ones, and filters the list", async () => {
+    const c = (ctx = await setup());
+    const a = await c.mk("Gamma");
+    const day = 86_400_000;
+    const ago = (d: number, secs = 0) => new Date(Date.now() - d * day + secs * 1000);
+    const mkRow = (status: string, d: number, secs: number) => ({ companyId: a.company.id, targetId: a.target.id, ref: `r${d}${status}`, status: status as "succeeded", createdAt: ago(d), finishedAt: ago(d, secs) });
+    await c.db.insert(deploys).values([mkRow("succeeded", 1, 60), mkRow("succeeded", 2, 180), mkRow("failed", 3, 30), mkRow("rejected", 4, 0), mkRow("succeeded", 40, 10)]);
+    const base = (await c.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: "correct horse battery" } })).cookies.find((x) => x.name === "bm_session")!.value;
+    const get = (url: string) => c.app.inject({ method: "GET", url, headers: { cookie: `bm_session=${base}` } }).then((r) => r.json());
+    const s = await get(`/api/deploys/summary?targetId=${a.target.id}`);
+    expect(s).toMatchObject({ days: 30, total: 4, succeeded: 2, failedOrRejected: 2, medianSeconds: 120 });
+    expect(typeof s.lastSuccessAt).toBe("string");
+    const failed = await get(`/api/deploys?targetId=${a.target.id}&status=failed`);
+    expect(failed.map((r: { deploy: { status: string } }) => r.deploy.status).sort()).toEqual(["failed", "rejected"]);
+    expect(await get(`/api/deploys?targetId=${a.target.id}&status=succeeded`)).toHaveLength(3);
+  });
+});
