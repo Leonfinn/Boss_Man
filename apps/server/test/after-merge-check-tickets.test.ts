@@ -9,7 +9,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { checkTicketLine, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, features, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { workflowService } from "../src/services/workflow.js";
 import { issueRunToken } from "../src/mcp.js";
 import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict } from "../src/services/after-merge-check-tickets.js";
 import { wakeClass } from "../src/services/wake-classes.js";
@@ -243,7 +244,10 @@ describe("check tickets: split out, then report back", () => {
 
   it("BOS-2417: a merged parent whose only unreported criterion is tied to an open check closes, and its watch moves to the check", async () => {
     const c = await setup();
-    await c.db.update(tickets).set({ watchingFor: "a week of merge checks with no banner shown early", watchTrigger: "gate_ci_failed", liveAt: new Date() }).where(eq(tickets.id, c.parent.id));
+    const [feat] = await c.db.insert(features).values({ companyId: c.co.company.id, title: "Board shows where work stands", status: "in_progress" }).returning();
+    await c.db.update(tickets).set({ featureId: feat!.id, watchingFor: "a week of merge checks with no banner shown early", watchTrigger: "gate_ci_failed", liveAt: new Date() }).where(eq(tickets.id, c.parent.id));
+    const featureRow = async () => (await workflowService(c.db).scorecard(c.co.company.id, 14)).features.find((f) => f.id === feat!.id);
+    expect(await featureRow()).toMatchObject({ tasksDone: 0, tasksTotal: 1 });
     // Before the split the close is refused (BOS-1794's behaviour), and the refusal names the way out.
     const early = await c.setState(c.dev.id, { ticketId: c.parent.id, state: "done", summary: "1 pass; live since this morning" });
     expect(early.isError, early.text).toBe(true);
@@ -260,6 +264,8 @@ describe("check tickets: split out, then report back", () => {
     expect(parent.systemState).toBe("done");
     expect(parent.outcome).toBe("completed");
     expect(parent.watchTrigger).toBeNull();
+    // The feature no longer counts it as an open task.
+    expect(await featureRow()).toMatchObject({ tasksDone: 1, tasksTotal: 1, tail: [] });
     expect([check.watchTrigger, check.watchingFor]).toEqual(["gate_ci_failed", "a week of merge checks with no banner shown early"]);
     // No follow-up for an unreported (not failed) criterion, and the check stays open with its tie.
     expect(check.systemState).toBe("blocked");
@@ -298,6 +304,22 @@ describe("check tickets: split out, then report back", () => {
     expect(ceo[0]!.ticketId).toBe(c.parent.id);
     expect(ceo[0]!.note).toContain("reported fail");
     expect(ceo[0]!.note).toContain("follow-up");
+  });
+
+  it("BOS-2417: an existing parent waiting on its check, with a watch, is left as it is until its assignee closes it", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    await c.db.update(tickets).set({ assigneeAgentId: c.other.id, systemState: "blocked" }).where(eq(tickets.id, made.id!));
+    await c.db.update(tickets).set({ watchingFor: "a week of merge checks", watchTrigger: "gate_ci_failed" }).where(eq(tickets.id, c.parent.id));
+    // Nothing closes it or moves its watch by itself: the trigger still wakes the parent's assignee on the parent.
+    const woken: Array<{ agentId: string; ticketId: string }> = [];
+    await wakeWatchers(c.db, async (agentId, input) => (woken.push({ agentId, ticketId: input.ticketId }), { status: "queued" }), "gate_ci_failed", "test run");
+    expect(woken.filter((w) => w.ticketId === made.id || w.ticketId === c.parent.id)).toEqual([{ agentId: c.dev.id, ticketId: c.parent.id }]);
+    const parent = await c.row(c.parent.id);
+    expect([parent.systemState, parent.watchTrigger]).toEqual(["blocked", "gate_ci_failed"]);
+    expect((await c.row(made.id!)).watchTrigger).toBeNull();
+    // Both are in "Merged, watching", as before.
+    expect((await blockedSplit(c.db, c.co.company.id)).liveCheck).toBe(2);
   });
 
   it("BOS-2417: the tie lets only merged work close, and a criterion with no check ticket still holds it", async () => {
