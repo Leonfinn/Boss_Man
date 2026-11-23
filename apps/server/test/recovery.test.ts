@@ -92,9 +92,18 @@ describe("recovery after a runner restart (R42)", () => {
     const c = (ctx = await setup());
     await c.scheduler.wake({ agentId: c.ceo.id, reason: "start" });
     await c.scheduler.tick();
-    await c.emit({ type: "run.ended", runId: c.starts()[0]!.runId, stopReason: null, error: "model overloaded" });
+    await c.emit({ type: "run.ended", runId: c.starts()[0]!.runId, stopReason: null, error: "the agent gave up on a bad tool answer" });
     await flush();
     expect(await c.db.select().from(wakes).where(eq(wakes.reason, "resume"))).toHaveLength(0);
+  });
+
+  it("a passing error (model overloaded) is resumed by itself (BOS-2357)", async () => {
+    const c = (ctx = await setup());
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "start" });
+    await c.scheduler.tick();
+    await c.emit({ type: "run.ended", runId: c.starts()[0]!.runId, stopReason: null, error: "model overloaded" });
+    await flush();
+    expect(await c.db.select().from(wakes).where(eq(wakes.reason, "resume"))).toHaveLength(1);
   });
 });
 
