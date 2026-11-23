@@ -372,3 +372,95 @@ describe("merge train: a landing cut off after its push (BOS-1604, 15 Nov)", () 
     expect(tr.facts().thrashSince).toBeNull();
   });
 });
+
+// BOS-2360: with GitHub CI gating, each member's stacked commit runs on GitHub, and a pass further back covers the members ahead.
+describe("merge train: GitHub CI coverage (BOS-2360)", () => {
+  /** Three members a, b, c in an unbroken stack on main m: a on m, b on A, c on B. */
+  const three = () => {
+    const tr = train(3);
+    for (const [id, place] of [["a", 1], ["b", 2], ["c", 3]] as const) {
+      tr.join(id, { priority: 1, place });
+      tr.seated(id);
+    }
+    tr.prepared("a", { base: "m", commit: "A", tree: "tA", onMain: true });
+    prep(tr, "b", "A", "B");
+    prep(tr, "c", "B", "C");
+    for (const [id, c] of [["a", "A"], ["b", "B"], ["c", "C"]] as const) tr.ciState(id, c, "pending");
+    return tr;
+  };
+
+  it("a pass on the tail covers every member ahead of it; nothing is cleared before that", () => {
+    const tr = three();
+    expect(["a", "b", "c"].map((id) => tr.ciCleared(id))).toEqual([false, false, false]);
+    tr.ciState("c", "C", "passed");
+    expect(["a", "b", "c"].map((id) => tr.ciCoveredBy(id))).toEqual([{ ticketId: "c", commit: "C" }, { ticketId: "c", commit: "C" }, { ticketId: "c", commit: "C" }]);
+    expect(["a", "b", "c"].map((id) => tr.ciCleared(id))).toEqual([true, true, true]);
+  });
+
+  it("a pass in the middle covers the head and itself, not the tail", () => {
+    const tr = three();
+    tr.ciState("b", "B", "passed");
+    expect(tr.ciCoveredBy("a")).toEqual({ ticketId: "b", commit: "B" });
+    expect(tr.ciCleared("b")).toBe(true);
+    expect(tr.ciCleared("c")).toBe(false);
+  });
+
+  it("a broken stack covers nothing past the break, and a report for an old commit is dropped", () => {
+    const tr = three();
+    tr.restack("b"); // b prepares again: c's base (B) no longer holds
+    tr.ciState("c", "C", "passed");
+    expect(tr.ciCoveredBy("a")).toBeNull();
+    // b's old run passing after its restack says nothing about its new commit.
+    tr.ciState("b", "B", "passed");
+    expect(tr.ciCleared("b")).toBe(false);
+    prep(tr, "b", "A", "B2");
+    expect(tr.ciCoveredBy("a")).toBeNull(); // c is still on B
+  });
+
+  it("a new prepare resets the member's GitHub state; the same commit keeps it", () => {
+    const tr = three();
+    tr.ciState("a", "A", "passed");
+    tr.prepared("a", { base: "m", commit: "A", tree: "tA", onMain: true });
+    expect(tr.ciCleared("a")).toBe(true);
+    tr.prepared("a", { base: "m2", commit: "A2", tree: "tA2", onMain: true });
+    expect(tr.ciCleared("a")).toBe(false);
+  });
+
+  it("accepted (known red, no run) lets a member land but covers nobody ahead", () => {
+    const tr = three();
+    tr.ciState("b", "B", "accepted");
+    expect(tr.ciCleared("b")).toBe(true);
+    expect(tr.ciCleared("a")).toBe(false);
+  });
+
+  it("ciFailure: covered by a pass behind, wait for one ahead, restack once it left, stands when all ahead are through", () => {
+    // The head fails once and the tail passes: covered, it lands.
+    let tr = three();
+    tr.ciState("a", "A", "failed");
+    expect(tr.ciFailure("a")).toBe("stands"); // nobody ahead, nobody behind passed yet
+    tr.ciState("c", "C", "passed");
+    expect(tr.ciFailure("a")).toBe("covered");
+
+    // The tail fails while the head is still running: it waits.
+    tr = three();
+    tr.ciState("c", "C", "failed");
+    expect(tr.ciFailure("c")).toBe("wait");
+    // The head fails for real and leaves: the tail restacks without it (uncharged).
+    tr.ciState("a", "A", "failed");
+    expect(tr.ciFailure("c")).toBe("wait"); // a failed member ahead hasn't left yet
+    tr.leave("a");
+    expect(tr.ciFailure("b")).toBe("restack");
+    expect(tr.ciFailure("c")).toBe("wait"); // b, ahead of it, is still not through
+
+    // The middle fails, the head passed: the failure is the middle's own.
+    tr = three();
+    tr.ciState("a", "A", "passed");
+    tr.ciState("b", "B", "failed");
+    expect(tr.ciFailure("b")).toBe("stands");
+    // A failed tail behind it waits for the middle to leave, then restacks.
+    tr.ciState("c", "C", "failed");
+    expect(tr.ciFailure("c")).toBe("wait");
+    tr.leave("b");
+    expect(tr.ciFailure("c")).toBe("restack");
+  });
+});

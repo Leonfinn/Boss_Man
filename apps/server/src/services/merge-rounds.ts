@@ -9,7 +9,6 @@ import { gateMergeMessage } from "./missed-merges.js";
 import { type MergeResult, type PushResult, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import { checkJobs, checkResults, checkWorkers, projects, tickets } from "../db/schema.js";
 import { RunnerGone } from "./runners.js";
-import type { CiStop } from "./ci-publish.js";
 import { clearMergeCards } from "./decisions.js";
 import { MACHINE_RUNNER, SUPERSEDED_TEXT } from "./check-queue.js";
 import { record } from "./activity.js";
@@ -21,12 +20,13 @@ import { CHECK_JOB_POLL_MS, checkNeverFinished, checkVerdict, MAX_CI_REFRESHES, 
 import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
 import type { MergeAttempt } from "./merge-attempt.js";
-import type { CiStepParts, Early } from "./merge-ci-step.js";
+import { COVERED_WHY, type CiStepParts, type Early } from "./merge-ci-step.js";
+import type { CiOutcome, CiStop } from "./ci-publish.js";
 
 export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt, c: CiStepParts) {
   const { db, deps, gate, queue, phases, clashOnMain, namedTickets, prTarget, mergeCarry, mergeRetarget, mergeTurnMinutes, holdForWaits, refuseIfHeld, turnWaits } = ctx;
   const { t, ticketId, opts, runner, repoUrl, defaultBranch, landing, gitHost, gitApiBase, touch, inReview, leftReview, whileActive, askMerge, checks, combinedCommand, named, kindOf, timedCheck, checkPrio, serverChecks, checkMerged, ci } = a;
-  const { publishAndWait, ciVerdict, alongsideCi, legacyChecks } = c;
+  const { publishAndWait, ciVerdict, alongsideCi, legacyChecks, ciCovered, stopWhy } = c;
   // A pull request: the host must be known and reachable before anything is pushed (R59).
   const pr = landing === "pull_request" ? await prTarget(t.companyId, repoUrl, gitHost, gitApiBase) : null;
   // The runner does one git job per repo at a time, so a merge can queue behind other agents' fetches and
@@ -481,6 +481,101 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
       if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
       return (await leftReview()) ? { status: "left_review" } : null;
     };
+    /**
+     * BOS-2360: GitHub CI for one prepared member, beside its own check (the train's alongsideCi). Each member publishes its
+     * own stacked commit to its own bossman-ci branch. A GitHub pass on a member behind it in an unbroken stack covers it:
+     * its own wait stops (the run is cancelled, "is covered by ..."), and it may land once its own check passed and it is
+     * the head. A failure goes through the gate's flake handling first (publishAndWait), then the train decides whose it is
+     * (ciFailure): covered by a pass behind (a one-off, it lands), wait for those ahead, restack without one that left, or it
+     * stands, and ciVerdict sends it back as on the one-at-a-time path. Every other outcome keeps ciVerdict's meaning.
+     * `ownStop` is the member's own round's stop: set when CI ends the attempt, so the round ends at once.
+     */
+    type TrainCiEnd = { kind: "ok" } | { kind: "restack" } | { kind: "early"; early: Early } | { kind: "stopped" } | { kind: "error"; err: unknown };
+    const trainCi = (prep: Prepared, ownStop: CiStop) => {
+      const ciStop: CiStop = { stopped: false };
+      const side: { end: TrainCiEnd | null } = { end: null };
+      let finished = false;
+      const behind = () => {
+        const c = train.ciCoveredBy(ticketId);
+        return c && c.ticketId !== ticketId ? c : null;
+      };
+      const refOf = async (id: string) => {
+        const [n] = await namedTickets([id]).catch(() => []);
+        return n?.ref ?? (n ? `"${n.title}"` : "a ticket behind it");
+      };
+      // Stops this member's own wait as soon as a pass behind covers it.
+      const watch = (async () => {
+        while (!finished && !ciStop.stopped) {
+          const c = behind();
+          if (c) {
+            ciStop.why ??= `${COVERED_WHY} ${await refOf(c.ticketId)}'s GitHub run, which holds this change`;
+            ciStop.stopped = true;
+            return;
+          }
+          await pause();
+        }
+      })();
+      const covered = async (c: { ticketId: string; commit: string }, failed: Extract<CiOutcome, { kind: "failed" }> | null): Promise<TrainCiEnd> => {
+        await ciCovered(prep, { by: c.ticketId, byRef: await refOf(c.ticketId), byCommit: c.commit }, failed);
+        return { kind: "ok" };
+      };
+      const done = (async (): Promise<TrainCiEnd> => {
+        train.ciState(ticketId, prep.commit, "pending");
+        let o: CiOutcome;
+        try {
+          o = await publishAndWait(prep, ciStop);
+        } finally {
+          finished = true;
+        }
+        if (o.kind === "stopped") {
+          const c = behind();
+          return c && ciStop.why?.startsWith(COVERED_WHY) ? covered(c, null) : { kind: "stopped" };
+        }
+        if (o.kind === "failed") {
+          train.ciState(ticketId, prep.commit, "failed");
+          for (;;) {
+            const v = train.ciFailure(ticketId);
+            if (v === "covered") return covered(train.ciCoveredBy(ticketId)!, o);
+            if (v === "restack") return { kind: "restack" };
+            if (v === "stands") break;
+            if (ciStop.stopped) return { kind: "stopped" };
+            await pause();
+          }
+        }
+        // Before ciVerdict, so the members ahead see the pass (or a no-pass landing) at once.
+        if (o.kind === "passed") train.ciState(ticketId, prep.commit, "passed");
+        else if (o.kind === "known_red" || o.kind === "none" || o.kind === "no_workflows") train.ciState(ticketId, prep.commit, "accepted");
+        const v = await ciVerdict(o, prep);
+        if (!v) return { kind: "ok" };
+        ownStop.why ??= "GitHub CI ended the merge attempt";
+        ownStop.stopped = true;
+        return { kind: "early", early: { status: "early", result: v } };
+      })().then(
+        (e) => (side.end = e),
+        (err: unknown) => {
+          ownStop.why ??= "the GitHub CI wait failed";
+          ownStop.stopped = true;
+          return (side.end = { kind: "error", err });
+        },
+      );
+      return {
+        /** null while undecided; "restack": the member must prepare again; an Early ends the attempt; "ok": it may land. */
+        end: (): "ok" | "restack" | Early | null => {
+          const e = side.end;
+          if (!e || e.kind === "stopped") return null;
+          if (e.kind === "error") throw e.err;
+          return e.kind === "early" ? e.early : e.kind;
+        },
+        /** Stop waiting (the member restacks or its attempt ends), and wait for the wait to end, so its branch delete can't follow a new push. */
+        halt: async (why: string) => {
+          // Also after GitHub answered: a failed member may still be waiting on the members ahead.
+          if (!finished) ciStop.why ??= why;
+          ciStop.stopped = true;
+          await done;
+          await watch;
+        },
+      };
+    };
     let headOnly = false;
     let clash: TrainClash | null = null;
     // BOS-1515 (B2): while it waits, a read-only merge on main after main moves. A clash there is certain (the gate's own
@@ -590,15 +685,33 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
           // onMain: prepared on main, so targetSha is main's tip and can never be a lost commit (BOS-1604).
           train.prepared(ticketId, { base: prep.targetSha, commit: prep.commit, tree: prep.tree, onMain: !b.base });
           const ref = { prep };
+          // BOS-2360: with CI gating, GitHub runs on this member's commit beside its own check; `halt` in `finally` stops
+          // the wait whenever this member restacks or its attempt ends without landing.
+          const ownStop: CiStop = { stopped: false };
+          const side = ci ? trainCi(prep, ownStop) : null;
+          let haltWhy = "the merge train prepared it again on a new base";
+          /**
+           * The member's own side ends the attempt: GitHub's wait stops first (as alongsideCi's `stop`). If GitHub's verdict
+           * was decided meanwhile (it may already have sent the ticket back), that is the answer, so nobody is sent back twice.
+           */
+          const settle = async <R extends object>(r: R): Promise<R | Early> => {
+            if (!side) return r;
+            await side.halt(stopWhy(r));
+            const ce = side.end();
+            return ce && ce !== "ok" && ce !== "restack" ? ce : r;
+          };
+          try {
           const round = () =>
             runRound(ref, {
               // Only the head refreshes on a moved main (BOS-1344): the others are built on the member ahead, not on main.
+              // With CI gating retargetOn is off: GitHub runs on this commit.
               refresh: async () => train.isHead(ticketId) && (await retargetOn()),
               stale: () => train.stale(ticketId),
               // Only the head retargets, and its refresh prepares on main.
               onRetarget: (f) => train.retargeted(ticketId, { base: f.targetSha, commit: f.commit, tree: f.tree, onMain: true }),
               train: seatOf,
               leftReview,
+              ...(side ? { stop: ownStop } : {}),
             });
           let r = await round();
           if (r.status === "check_failed") {
@@ -610,7 +723,10 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
             const stop = await gone();
             if (stop) return stop;
           }
-              verdict = train.failure(ticketId);
+              // BOS-2360: GitHub's own failure, decided meanwhile, is the answer (as alongsideCi's CI-first case).
+              const ce = side?.end();
+              if (ce && ce !== "ok" && ce !== "restack") return ce;
+              verdict = ce === "restack" ? "restack" : train.failure(ticketId);
             }
             if (verdict === "restack") {
               // A member ahead failed or changed: this failure may be theirs. Again without them, nothing charged.
@@ -619,7 +735,7 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
             }
             // The failure stands. Killed, timed out or unanswered keep today's handling; anything else runs once more.
             const infra = r.result.timedOut || (r.result as { noAnswer?: boolean }).noAnswer || checkNeverFinished(r.result) !== null;
-            if (infra || !train.rerun(ticketId)) return r;
+            if (infra || !train.rerun(ticketId)) return settle(r);
             const failedCheck = named(r.command);
             const failedJob = r.result.keptLog?.jobId;
             r = await round();
@@ -631,15 +747,29 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
             if (!(await restack(r.why))) return { status: "main_moved" };
             continue;
           }
-          // The train never runs with CI gating, so nothing stops its rounds; never read "stopped" as a pass.
-          if (r.status === "stopped") throw new Error("A merge-train check round was stopped by a CI wait that the train doesn't run.");
-          // Nor a CI-gated refresh (BOS-1820): the train passes no ciRefresh.
+          // BOS-2360: GitHub CI ended the attempt (its failure stands, a card, a timeout): its verdict is the answer.
+          if (r.status === "stopped") {
+            const ce = side?.end();
+            if (ce === "restack") {
+              if (!(await restack(train.stale(ticketId) ?? "ahead_changed"))) return { status: "main_moved" };
+              continue;
+            }
+            if (ce && ce !== "ok") return ce;
+            // Only CI stops a train round; never read "stopped" as a pass.
+            throw new Error("A merge-train check round was stopped, but GitHub CI gave no verdict.");
+          }
+          // The train passes no ciRefresh (BOS-1820): its members' bases are the train's, not main.
           if (r.status === "refreshed") throw new Error("A merge-train check round was refreshed for a CI wait that the train doesn't run.");
-          if (r.status !== "passed") return r;
+          if (r.status !== "passed") return settle(r);
           train.passed(ticketId);
-          // Land only as the head, on exactly the base this tree was prepared on.
+          // Land only as the head, on exactly the base this tree was prepared on, and (BOS-2360) once GitHub CI lets it: its
+          // own run passed, or a pass behind it covers it.
           let why = train.stale(ticketId);
-          while (!why && !train.isHead(ticketId)) {
+          for (;;) {
+            const ce = side?.end();
+            if (ce === "restack") why ??= train.stale(ticketId) ?? "ahead_changed";
+            else if (ce && ce !== "ok") return ce;
+            if (why || (train.isHead(ticketId) && (!side || ce === "ok"))) break;
             await pause();
             {
             const stop = await gone();
@@ -652,6 +782,7 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
             continue;
           }
           await touch();
+          haltWhy = "the merge attempt ended";
           const fin = await finish(ref.prep, ref.prep.targetSha);
           if (fin.status === "merged") {
             train.landed(ticketId);
@@ -659,10 +790,14 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
           }
           if (fin.status === "main_moved") {
             // Something landed outside the train (a hand merge, a ticket on the old path): prepare again on main.
+            haltWhy = "the merge train prepared it again on a new base";
             if (!(await restack("main_moved"))) return fin;
             continue;
           }
           return fin;
+          } finally {
+            await side?.halt(haltWhy);
+          }
         }
       }
     } finally {
@@ -671,10 +806,10 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
   };
   // Train mode (BOS-1366): the owner's switch, a runner that honours base/expectBase, and a green main. A red main keeps
   // today's path, so the fix for main never waits behind a train whose jobs the red main holds back.
-  // Not with CI gating on (BOS-1070): CI is published only for a commit prepared on main, so with both switches on a
-  // merge takes the one-at-a-time path, where CI runs beside the check job.
+  // BOS-2360: also with CI gating on (BOS-1070). Before, both switches on meant the one-at-a-time path, where every landing
+  // waited for a GitHub run of its own and busy shared files made each one earn the landing turn; now each member's stacked
+  // commit runs on GitHub and a pass further back covers the members ahead (trainCi).
   const trainMode =
-    !ci &&
     serverChecks &&
     queuedChecks.length > 0 &&
     // Only the server in charge builds a train (BOS-1289); a standby's landing keeps today's path.
