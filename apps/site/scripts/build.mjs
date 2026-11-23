@@ -393,7 +393,7 @@ export function installTestText(file) {
   if (!d || !/^[0-9A-Za-z.+-]{1,40}$/.test(String(r.version ?? ""))) return none;
   const date = `${+d[3]} ${MONTHS[+d[2] - 1]} ${d[1]}`;
   if (r.result === "fail") {
-    return { line: `The install test of the newest release (${r.version}) failed on ${date}, so that release may not install. Its last result is on the releases page of the repository.`, time: "" };
+    return { line: `The install test of release ${r.version} failed on ${date}, so that release may not install. Its last result is on the releases page of the repository.`, time: "" };
   }
   const minutes = Number(r.minutes);
   if (r.result !== "pass" || !Number.isFinite(minutes) || minutes <= 0) return none;
