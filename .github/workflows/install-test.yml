@@ -106,4 +106,83 @@ jobs:
           set -euo pipefail
           # The test reads the signed compose file from the release, not the one in this checkout, so it tests what people download.
           cp "$RUNNER_TEMP/release/docker-compose.images.yml" docker-compose.images.yml
-          INSTALL_RELEASE_JSON="$RUNNER_TEMP/release/release.json" scripts/install-images.test.sh
+          # The script writes the seconds from its first command to /api/health answering into this file (BOS-1488).
+          INSTALL_SECONDS_FILE="$RUNNER_TEMP/install-seconds" INSTALL_RELEASE_JSON="$RUNNER_TEMP/release/release.json" scripts/install-images.test.sh
+      - name: Write this machine's result (runs even when the install failed, and a failure never reads as a pass)
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          result=fail
+          seconds=0
+          if [ "$JOB_STATUS" = success ] && [ "${INSTALLABLE:-}" = no ]; then
+            result=skipped
+          elif [ "$JOB_STATUS" = success ] && [ "${INSTALLABLE:-}" = yes ] && [ -s "$RUNNER_TEMP/install-seconds" ]; then
+            result=pass
+            seconds="$(cat "$RUNNER_TEMP/install-seconds")"
+          fi
+          jq -n --arg arch "$ARCH" --arg result "$result" --arg version "${VERSION:-}" --argjson seconds "$seconds" \
+            '{arch: $arch, result: $result, version: $version, minutes: (($seconds / 6 | round) / 10)}' > "$RUNNER_TEMP/out/result-$ARCH.json"
+          cat "$RUNNER_TEMP/out/result-$ARCH.json"
+      - name: Keep the result for the record job
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-result-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/result-${{ matrix.arch }}.json
+          retention-days: 7
+          if-no-files-found: error
+
+  # BOS-1488: joins the two machines' results into install-result.json (date, version, pass or fail, minutes), attaches it to
+  # the release, and marks the release in its title and notes when the test failed. The install guide on the website reads
+  # that file at its next build (apps/site/scripts/build.mjs). Only a pass shows a "last tested" line.
+  record:
+    needs: install
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # attaches a file to the release and edits its title and notes; nothing else
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: install-result-*
+          path: results
+      - name: Join, attach to the release, mark a failure
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS_RESULT: ${{ needs.install.result }}
+        run: |
+          set -euo pipefail
+          files=(results/*/result-*.json)
+          version="$(jq -rs 'map(.version) | map(select(. != "")) | first // empty' "${files[@]}")"
+          if [ -z "$version" ]; then echo "::error::No machine found the release version, so there is no release to record on."; exit 1; fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::'$version' is not a version."; exit 1; }
+          # A machine that left no file (job lost, cancelled before the end) counts as failed: expected is two machines.
+          jq -s --arg version "$version" --arg date "$(date -u +%Y-%m-%d)" --arg url "$RUN_URL" --argjson n "${#files[@]}" '
+            . as $m
+            | ($m | map(.result)) as $r
+            | { version: $version, date: $date, run: $url,
+                result: (if ($n < 2) or ($r | any(. == "fail")) then "fail"
+                         elif ($r | all(. == "skipped")) then "skipped" else "pass" end),
+                minutes: ($m | map(select(.result == "pass") | .minutes) | max // null),
+                machines: ($m | map({arch, result, minutes})) }' "${files[@]}" > install-result.json
+          cat install-result.json
+          result="$(jq -r .result install-result.json)"
+          if [ "$result" = skipped ]; then echo "::notice::Nothing to install in v$version; no result attached."; exit 0; fi
+          gh release upload "v$version" install-result.json --clobber --repo "$GITHUB_REPOSITORY"
+          body="$(gh release view "v$version" --repo "$GITHUB_REPOSITORY" --json body --jq .body | grep -v '^Install test' || true)"
+          if [ "$result" = pass ]; then
+            line="$(jq -r '"Install test passed on \(.date): \(.machines | map("\(.arch) \(.minutes) min") | join(", ")). Result: install-result.json."' install-result.json)"
+            gh release edit "v$version" --repo "$GITHUB_REPOSITORY" --title "Boss Man $version" --notes "$body"$'\n\n'"$line"
+          else
+            line="Install test FAILED on $(jq -r .date install-result.json). This release could not be installed on every machine tested. Run: $RUN_URL"
+            gh release edit "v$version" --repo "$GITHUB_REPOSITORY" --title "Boss Man $version (install test FAILED)" --notes "$body"$'\n\n'"$line"
+            echo "::error::Install test failed for v$version; the release is marked."
+            exit 1
+          fi

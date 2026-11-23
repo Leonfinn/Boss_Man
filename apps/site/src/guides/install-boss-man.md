@@ -4,10 +4,10 @@ description: Take an empty Linux machine to the Boss Man web page: the folders, 
 group: Start here
 order: 2
 lead: This guide takes you from an empty Linux machine to the Boss Man web page in your browser. Every file name and setting below was checked against the code.
-time: About 20 minutes. You need a Linux machine with Docker and a web browser on the same network.
+time: {{install-time}}You need a Linux machine with Docker and a web browser on the same network.
 ---
 
-The full install was not re-run on a fresh machine for this guide, so the exact command output is unverified. The full reference, with TrueNAS notes, is [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) in the repository. Memory limits and other tuning are in [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md). On Proxmox, use a VM, not an LXC container: see [`docs/32-proxmox.md`](@repo/blob/main/docs/32-proxmox.md).
+{{install-test}} The full reference, with TrueNAS notes, is [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) in the repository. Memory limits and other tuning are in [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md). On Proxmox, use a VM, not an LXC container: see [`docs/32-proxmox.md`](@repo/blob/main/docs/32-proxmox.md).
 
 Still deciding? [What can go wrong with AI agent teams](/what-can-go-wrong) matches published failure stories, such as runaway bills and deleted databases, to what Boss Man does about each, and says where it does nothing yet.
 

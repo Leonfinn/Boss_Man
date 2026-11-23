@@ -2,7 +2,7 @@
 
 This is the short path from nothing to a working Boss Man on a Linux host with Docker, building the images from the source. If you would rather pull ready-made images and need nothing on the host but Docker, use [docs/35-install-from-images.md](35-install-from-images.md). This guide has the install steps only. Tuning (memory limits and more) and troubleshooting are in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md). On TrueNAS SCALE, follow this guide too, with the differences in the next section and the extras in [docs/06-install-truenas.md](06-install-truenas.md).
 
-> **Verification:** every file name, setting and button label in this guide was checked against the code. The full install was **not** re-run on a fresh machine for this edit, so treat the exact command output as unverified.
+> **Verification:** every file name, setting and button label in this guide was checked against the code. The build-from-source steps below were **not** re-run on a fresh machine for this edit, so treat their exact command output as unverified. The install from ready-made images ([docs/35](35-install-from-images.md)) is tested on a clean x86 and a clean arm64 machine for every release: the result (date, version, pass or fail, minutes) is attached to the release as `install-result.json`, and the website's install guide shows the newest one.
 
 ## What you'll end up with
 
