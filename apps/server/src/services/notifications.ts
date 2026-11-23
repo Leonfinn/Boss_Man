@@ -414,14 +414,14 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     },
 
     /** BOS-2420: the last 7 days of notices by day in the quiet-hours time zone (UTC when none is set). */
-    async weekSummary() {
+    async weekSummary(companyId: string) {
       const tz = (await getSettings()).quietHours?.timeZone ?? "UTC";
       const t = now();
       const rows = await db
         .select({ n: notifications, agentName: agents.name })
         .from(notifications)
         .leftJoin(agents, eq(agents.id, notifications.agentId))
-        .where(gt(notifications.createdAt, new Date(t.getTime() - 8 * 86_400_000)));
+        .where(and(eq(notifications.companyId, companyId), gt(notifications.createdAt, new Date(t.getTime() - 8 * 86_400_000))));
       return summarizeWeek(
         rows.map((r) => ({ id: r.n.id, createdAt: r.n.createdAt, pushedAt: r.n.pushedAt, demotedBy: r.n.demotedBy, pushError: r.n.pushError, agentId: r.n.agentId, agentName: r.agentName, link: r.n.link, title: r.n.title })),
         tz,

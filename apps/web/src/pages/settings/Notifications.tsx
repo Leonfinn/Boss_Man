@@ -572,8 +572,8 @@ type WeekView = {
 };
 
 /** "Last 7 days" (BOS-2420): what quiet hours and the per-agent cap did, failed pushes, and the noisiest agents. */
-function LastSevenDays() {
-  const week = usePoll((signal) => api<WeekView>("/api/notifications/week", { signal }), 60_000, "notifications-week");
+export function LastSevenDays({ companyId }: { companyId: string }) {
+  const week = usePoll((signal) => api<WeekView>(`/api/notifications/week?company=${encodeURIComponent(companyId)}`, { signal }), 60_000, `notifications-week-${companyId}`);
   const w = week.data;
   return (
     <details className="pushes">
@@ -646,12 +646,12 @@ function LastSevenDays() {
 }
 
 /** Settings → Notifications (BOS-2327): how the owner is told, moved here from the feed page unchanged. */
-export function NotificationSettings({ companies }: { companies: Company[] | null }) {
+export function NotificationSettings({ companies, companyId }: { companies: Company[] | null; companyId?: string }) {
   return (
     <>
       <SettingsForm />
       <RecentPhonePushes />
-      <LastSevenDays />
+      {companyId && <LastSevenDays key={companyId} companyId={companyId} />}
       <AlertDestinations />
       <WeeklySummaryForm companies={companies} />
     </>
