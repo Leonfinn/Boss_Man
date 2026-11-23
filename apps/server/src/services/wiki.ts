@@ -387,6 +387,7 @@ export type LinkHealth = {
  */
 export function linkHealthOf(pages: { slug: string; title: string; body: string }[], cap = LINK_HEALTH_CAP): LinkHealth {
   const exists = new Set(pages.map((p) => p.slug));
+  // not state: a local of this one call, rebuilt each time.
   const linkedTo = new Set<string>();
   const missing: LinkHealth["missing"] = [];
   for (const p of pages)
