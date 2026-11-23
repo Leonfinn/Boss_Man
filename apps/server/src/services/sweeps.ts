@@ -152,7 +152,8 @@ const CHECK_SCRIPT = /(?:^|[\s/"';&|(])scripts\/check-(?:quick|all)\.sh(?![\w.-]
 const CHECK_SCRIPT_SQL = "scripts/check-(quick|all)\\.sh";
 /**
  * A run that ended by itself (BOS-574): not cut off (those get a resume wake), not stopped or
- * cancelled by someone, and not failed (the loop guards and missed work handle failures).
+ * cancelled by someone, and not failed: a failed run is classed once when it ends (run-error-retry.ts,
+ * BOS-2357): resumed by itself if the error passes, a CEO card at once if not. No sweep guesses at it.
  */
 const endedByItself = (outcome: string | null) => !!outcome && endedNormally(outcome) && outcome !== "cancelled" && !outcome.startsWith("stopped") && !outcome.startsWith("error");
 const ago = (ms: number) => ageWords(ms);

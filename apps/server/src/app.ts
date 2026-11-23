@@ -75,6 +75,7 @@ import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { limitRequeue } from "./services/limit-requeue.js";
+import { runErrorRetry } from "./services/run-error-retry.js";
 import { record } from "./services/activity.js";
 import { branchOverlapView } from "./services/branch-overlaps.js";
 import { chooseFence, chooseGuard, closeFenceCard, closeFenceUnavailableCard, featureStates } from "./services/fence-default.js";
@@ -857,6 +858,8 @@ export async function buildApp(opts: AppOptions) {
           }
         })
         .then(() => limitRequeues.releaseReady())
+        // A passing error resumes the run by itself, twice an hour per ticket at most; any other error is a CEO card now (BOS-2357).
+        .then(() => (event.interrupted || !event.error ? null : runErrorRetries.afterRun(event.runId)))
         // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
         .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
@@ -1029,6 +1032,7 @@ export async function buildApp(opts: AppOptions) {
   // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
   // funding source, or the one the run used when it says so.
   const limitRequeues = limitRequeue(db, { now: opts.now ?? (() => new Date()) });
+  const runErrorRetries = runErrorRetry(db, { now: opts.now ?? (() => new Date()), resume: (runId) => recovery.onInterrupted(runId), alert: (input) => alerts.raise(input) });
   const loops = loopGuards(db, {
     limits: opts.loopLimits,
     now: opts.now,
