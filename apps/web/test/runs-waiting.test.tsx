@@ -70,7 +70,7 @@ describe("Runs page: Waiting to start (BOS-2320)", () => {
 
   it("Cancel does nothing when the owner dismisses the confirm", async () => {
     vi.stubGlobal("prompt", vi.fn(() => null));
-    const f = vi.fn(async (url: string) => (url === "/api/companies/co-1/wakes/waiting" ? json([wake]) : json([])));
+    const f = vi.fn(async (url: string, _init?: RequestInit) => (url === "/api/companies/co-1/wakes/waiting" ? json([wake]) : json([])));
     vi.stubGlobal("fetch", f);
     render(<Runs companies={companies} />);
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
