@@ -218,6 +218,83 @@ describe("search route (BOS-2192)", () => {
   }, 120_000);
 });
 
+describe("the Search page's asks: counts, one kind a page at a time, a date filter (BOS-2378)", () => {
+  const ask = async (companyId: string, query: string) => {
+    const res = await t.app.inject({ method: "GET", url: `/api/companies/${companyId}/search?${query}`, headers: { cookie } });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json() as SearchResults;
+  };
+
+  it("counts every match of each kind, not just the few the box shows", async () => {
+    const r = await find(A.company, "osprey");
+    expect(r.counts).toMatchObject({ tickets: 1, wiki: 0, chats: 0, features: 1, decisions: 2, runs: 1 });
+    // Beta holds the same osprey rows: they are never counted for Alpha.
+    await t.db.insert(tickets).values(Array.from({ length: 3 }, (_, i) => ({ companyId: B.company, projectId: B.project, title: `Osprey extra ${i}` })));
+    expect((await find(A.company, "osprey")).counts.tickets).toBe(1);
+    expect((await find(B.company, "osprey")).counts.tickets).toBe(4);
+  });
+
+  it("pages through one kind 25 at a time, every match once, the other kinds empty but counted", async () => {
+    await t.db.insert(tickets).values(Array.from({ length: 30 }, (_, i) => ({ companyId: A.company, projectId: A.project, title: `Albatross task ${i}`, number: 1000 + i })));
+    await t.db.insert(wikiPages).values({ companyId: A.company, slug: "albatross", title: "Albatross notes", body: "Wings." });
+    const first = await ask(A.company, "q=albatross&kind=tickets");
+    expect(first.tickets).toHaveLength(25);
+    expect(first.counts).toMatchObject({ tickets: 30, wiki: 1 });
+    expect(first.wiki).toEqual([]);
+    const second = await ask(A.company, "q=albatross&kind=tickets&offset=25&limit=25");
+    expect(second.tickets).toHaveLength(5);
+    const ids = [...first.tickets, ...second.tickets].map((x) => x.id);
+    expect(new Set(ids).size).toBe(30);
+    // The wiki page on its own: the same hit the box shows.
+    const wiki = await ask(A.company, "q=albatross&kind=wiki");
+    expect(wiki.wiki.map((x) => x.link)).toEqual([`wiki/${A.company}/albatross`]);
+    expect(wiki.tickets).toEqual([]);
+    expect(wiki.counts.tickets).toBe(30);
+    // Without a kind the box's limits hold, whatever limit is sent.
+    expect((await ask(A.company, "q=albatross&limit=100")).tickets).toHaveLength(SEARCH_GROUP_MAX);
+  });
+
+  it("keeps an exact reference first and pages the rest after it without losing or repeating one", async () => {
+    await t.db.insert(tickets).values([
+      { companyId: A.company, projectId: A.project, title: "Puffin chore", number: 5050 },
+      { companyId: A.company, projectId: A.project, title: "Follow-up to BOS-5050", number: 5051 },
+      { companyId: A.company, projectId: A.project, title: "More on BOS-5050", number: 5052 },
+    ]);
+    const p1 = await ask(A.company, "q=BOS-5050&kind=tickets&limit=1");
+    expect(p1.tickets.map((x) => [x.ref, x.exact])).toEqual([["BOS-5050", true]]);
+    expect(p1.counts.tickets).toBe(3);
+    const p2 = await ask(A.company, "q=BOS-5050&kind=tickets&limit=1&offset=1");
+    const p3 = await ask(A.company, "q=BOS-5050&kind=tickets&limit=1&offset=2");
+    expect([...p2.tickets, ...p3.tickets].map((x) => x.ref).sort()).toEqual(["BOS-5051", "BOS-5052"]);
+    expect(p2.tickets[0]!.exact).toBeUndefined();
+  });
+
+  it("keeps only what changed since the date given, in the counts too", async () => {
+    await t.db.insert(tickets).values([
+      { companyId: A.company, projectId: A.project, title: "Gannet old", stateChangedAt: new Date("2026-01-05T00:00:00Z") },
+      { companyId: A.company, projectId: A.project, title: "Gannet new", stateChangedAt: new Date("2026-11-20T00:00:00Z") },
+    ]);
+    await t.db.insert(ownerChatMessages).values([
+      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet then", createdAt: new Date("2026-01-05T00:00:00Z") },
+      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet now", createdAt: new Date("2026-11-20T00:00:00Z") },
+    ]);
+    const all = await find(A.company, "gannet");
+    expect(all.counts).toMatchObject({ tickets: 2, chats: 2 });
+    const recent = await ask(A.company, `q=gannet&since=${encodeURIComponent("2026-11-01T00:00:00.000Z")}`);
+    expect(recent.counts).toMatchObject({ tickets: 1, chats: 1 });
+    expect(recent.tickets.map((x) => x.title)).toEqual(["Gannet new"]);
+    expect(recent.chats.map((x) => x.snippet)).toEqual(["gannet now"]);
+  });
+
+  it("refuses a kind it doesn't know, a limit over the max and a date it can't read", async () => {
+    for (const query of ["q=gannet&kind=emails", "q=gannet&kind=tickets&limit=101", "q=gannet&since=yesterday", "q=gannet&offset=-1"]) {
+      const res = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?${query}`, headers: { cookie } });
+      expect(res.statusCode, query).toBeGreaterThanOrEqual(400);
+      expect(res.statusCode, query).toBeLessThan(500);
+    }
+  });
+});
+
 describe("search helpers", () => {
   it("reads BOS-12 and #12 as references, and nothing else", () => {
     expect(refOf("bos-12")).toEqual({ prefix: "BOS", number: 12 });
