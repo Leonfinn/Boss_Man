@@ -1,10 +1,53 @@
 import { strToU8, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { allTimeouts, GitHostError, gitHostService, MAX_LOG_CHARS, rerunRefusal, summaryCovered } from "../src/services/git-hosts.js";
+import { allTimeouts, GitHostError, gitHostService, logExcerpt, MAX_LINE, MAX_LOG_CHARS, MAX_LINES, rerunRefusal, summaryCovered } from "../src/services/git-hosts.js";
 import { namedTestFiles } from "../src/services/ci-flake.js";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 const cfg = (kind: "github" | "gitea") => ({ kind, apiBase: "https://host/api", owner: "leon", repo: "site" });
+
+describe("logExcerpt: the error lines and the end of a failed job's log (BOS-1667)", () => {
+  it("keeps the error lines, cleans timestamps and colour codes, and drops them from the tail", () => {
+    const log = [
+      "npm run test",
+      "PASS a.test.ts",
+      "FAIL b.test.ts > adds one",
+      "Error: expected 2 to be 3",
+      "at b.test.ts:7:9",
+      "Tests: 1 failed, 1 passed",
+      '2026-11-16T10:00:00.1234567Z \u001b[31m##[error]Process completed with exit code 1\u001b[0m',
+      "done",
+    ].join("\n");
+    expect(logExcerpt(log)).toEqual({
+      errors: ["FAIL b.test.ts > adds one", "Error: expected 2 to be 3", "Tests: 1 failed, 1 passed", "error: Process completed with exit code 1"],
+      tail: ["npm run test", "PASS a.test.ts", "at b.test.ts:7:9", "done"],
+    });
+  });
+
+  it("falls back to the end of the log when nothing looks like an error, leaving the tail empty", () => {
+    expect(logExcerpt("one\ntwo\nthree")).toEqual({ errors: ["one", "two", "three"], tail: [] });
+  });
+
+  it("gives nothing for an empty or blank log", () => {
+    expect(logExcerpt("")).toEqual({ errors: [], tail: [] });
+    expect(logExcerpt("  \n\t\n")).toEqual({ errors: [], tail: [] });
+  });
+
+  it("caps the errors near the failure and the tail at ten lines", () => {
+    const log = [...Array.from({ length: 20 }, (_, i) => `error ${i + 1}`), ...Array.from({ length: 12 }, (_, i) => `note ${i + 1}`)].join("\n");
+    const { errors, tail } = logExcerpt(log);
+    expect(errors).toHaveLength(MAX_LINES);
+    expect(errors[0]).toBe("error 6");
+    expect(errors.at(-1)).toBe("error 20");
+    expect(tail).toEqual(["note 3", "note 4", "note 5", "note 6", "note 7", "note 8", "note 9", "note 10", "note 11", "note 12"]);
+  });
+
+  it("shortens a tail line over the limit", () => {
+    const { errors, tail } = logExcerpt(`error: boom\n${"y".repeat(400)}`);
+    expect(errors).toEqual(["error: boom"]);
+    expect(tail).toEqual([`${"y".repeat(MAX_LINE)}…`]);
+  });
+});
 
 describe("jobLogBlock: a failed job's log for a ticket message (BOS-1667)", () => {
   const withLog = (res: () => Response) => gitHostService({ fetch: (async () => res()) as unknown as typeof fetch });

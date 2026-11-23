@@ -5,7 +5,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, projects, runners, tickets, wakes } from "../src/db/schema.js";
-import { briefCommitLine, briefFolder, briefSlug, briefTitle, parseCommitLine, refreshBriefs } from "../src/services/project-brief.js";
+import { briefCommitLine, briefFolder, briefSlug, briefTicketBody, briefTitle, parseCommitLine, refreshBriefs } from "../src/services/project-brief.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -38,6 +38,32 @@ describe("commit line", () => {
     expect(parseCommitLine(`${briefCommitLine("0123abc", "main")}\n\n## Objectives`)).toEqual({ commit: "0123abc", branch: "main" });
     expect(parseCommitLine("## Objectives\nDescribes commit abc1234 on main.")).toBeNull();
     expect(parseCommitLine("Describes commit xyz on main.")).toBeNull();
+  });
+});
+
+describe("brief ticket body", () => {
+  const project = { id: "p1", name: "Customer app", defaultBranch: "main" };
+
+  it("asks for a new brief and names the page, the commit and every section", () => {
+    const body = briefTicketBody(project, false);
+    expect(body).toContain('Write the project brief for "Customer app"');
+    expect(body).toContain("- slug: brief-p1");
+    expect(body).toContain("- folder: Projects/Customer app\n");
+    expect(body).toContain("- title: Customer app — project brief");
+    expect(body).toContain("- ticketId: this ticket's id");
+    expect(body).toContain(briefCommitLine("<sha>", "main"));
+    expect(body).toContain("## Objectives, ## Architecture, ## Code map, ## Conventions, ## Build and test, ## Gotchas, ## Glossary");
+    expect(body).toContain("Don't change, commit or push anything in the repository");
+    expect(body).not.toContain("only when the page doesn't exist yet");
+    expect(body.endsWith("instead of fixing it here.")).toBe(true);
+  });
+
+  it("asks for a refresh, says to leave the folder out, and appends the reason", () => {
+    const body = briefTicketBody({ ...project, defaultBranch: "release/1.2" }, true, "main moved from abc1234 to def5678");
+    expect(body).toContain('Refresh the project brief for "Customer app"');
+    expect(body).toContain("- folder: Projects/Customer app (only when the page doesn't exist yet; leave it out when updating)");
+    expect(body).toContain(briefCommitLine("<sha>", "release/1.2"));
+    expect(body.endsWith("\n\nmain moved from abc1234 to def5678")).toBe(true);
   });
 });
 
