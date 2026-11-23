@@ -1708,7 +1708,7 @@ export function schedulerService(
         const holder = await currentHolderInstead(to.id, ticketId);
         if (holder) return { ok: false, error: `${to.name} no longer holds this ticket: ${holder} does now. Nudge ${holder} instead, or write it on the ticket with ticket_reply.` };
         // An open skill-review ticket is a gate: the proposal's author must not nudge the reviewer into a verdict.
-        const refusal =await reviewTicketWriteRefusal(db, tk.companyId, ticketId, from.id);
+        const refusal = await reviewTicketWriteRefusal(db, tk.companyId, ticketId, from.id);
         if (refusal) return { ok: false, error: `${refusal} Don't nudge the reviewer about the verdict.` };
       }
       // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
@@ -2367,7 +2367,8 @@ export function schedulerService(
      */
     async onTicketDone(ticketId: string, causedByRunId?: string | null) {
       await this.releaseWorkspace(ticketId);
-      // BOS-2309: a run still working this ticket (another agent's, or the old assignee's) is told it is finished, so it wraps up and frees its slot.
+      // BOS-2309: a run still working this ticket (another agent's, or the old assignee's) is asked to wrap up and free its slot (a request, not a forced end).
+      // The runner is found by company, as the steer path does: the runs table records no runner, and a company has one.
       const stillOn = await db
         .select({ id: runs.id, companyId: runs.companyId })
         .from(runs)
