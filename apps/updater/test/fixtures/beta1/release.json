@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "version": "0.1.0-beta.1",
+  "commit": "a9e5327ba9e38d5e438df196d712db8d96e26755",
+  "registries": [
+    "ghcr.io/leonfinn"
+  ],
+  "images": [
+    {
+      "name": "boss-man-server",
+      "digest": "sha256:7bfc9919f16d65455d3f79ebefdf6b42331b30bb7e59c5e0adc1a3b0f553ad36",
+      "platforms": {
+        "linux/amd64": "sha256:0c9e65b61b6517d216b972bd68cd20a53ba4b064cdd58f71a0206a9e8d61df75",
+        "linux/arm64": "sha256:b01711d61f83b571ccdd42e0cbf9202a7d9abb2bdc123179b6e4613eebcb82ea"
+      }
+    },
+    {
+      "name": "boss-man-launcher",
+      "digest": "sha256:28d368878d6cf1eb77328b0ae7928925671c60c091ff7d5bd444b8c34bbe073e",
+      "platforms": {
+        "linux/amd64": "sha256:46529fd258518a753fe798bac3b92b261505e03296f51d94c7931d4ec00a1ecd",
+        "linux/arm64": "sha256:d4b28a61124338c27c68764d9b751230b84a34692bb63c09cdcaca83222b1e36"
+      }
+    },
+    {
+      "name": "boss-man-netguard",
+      "digest": "sha256:ac40a6b03ca58cf780d6dd079be1e058ead67d4a18c095d6d50f00debfd5b8ba",
+      "platforms": {
+        "linux/amd64": "sha256:829680cdbb56f1d6d31c201b8ed13e86bcc3a74fef94fca180f315ab213b2066",
+        "linux/arm64": "sha256:08c16d94b2e9b17919fccf6f1abf1058216c82ff7c04f4ea30ada1bcaf9084c4"
+      }
+    },
+    {
+      "name": "boss-man-runner",
+      "digest": "sha256:e16bb3afa9650ab1def62f511693695dd6298e3247c2ee38ce71e8d140daebd7",
+      "platforms": {
+        "linux/amd64": "sha256:31591e260c100a9f1e7bb30bbdcd05fcfd3efc01b20393ed614e07496a8aa662",
+        "linux/arm64": "sha256:d24c69d0635dcd11f87f7a580f6e67f4234c64ab0b5c720f8c5aaec12b97014b"
+      }
+    }
+  ]
+}

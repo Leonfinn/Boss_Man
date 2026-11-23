@@ -198,7 +198,7 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
 }
 
 /** Whether the files a branch changed need GitHub's own jobs: workflows or image paths (the changes job's images_paths in ci.yml). */
-export const CI_IMAGES_PATHS = /(^|\/)Dockerfile|^docker-compose|^deploy\/|^scripts\/|^skills\/|^pnpm-lock\.yaml|^\.github\/workflows\/|^apps\/runner\/|check-worker|^packages\/shared\/src\/protocol/;
+export const CI_IMAGES_PATHS = /(^|\/)Dockerfile|^docker-compose|^deploy\/|^scripts\/|^skills\/|^pnpm-lock\.yaml|^\.github\/workflows\/|^apps\/runner\/|^apps\/updater\/|check-worker|^packages\/shared\/src\/protocol/;
 export const touchesGithubOnlyJobs = (files: string[]) => files.some((f) => CI_IMAGES_PATHS.test(f));
 /**
  * BOS-1664 (security, F1): GitHub runs the workflow files of whatever commit is pushed, with a token the workflow can widen, so
