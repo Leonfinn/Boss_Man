@@ -133,20 +133,9 @@ reads:
 
 ## #/notifications
 sections: 
-  - How you're told
   - Notifications
-  - Other places to send alerts
-  - Set up your phone
-  - Weekly summary
 reads: 
-  - /api/alert-destinations
-  - /api/companies/:id/weekly-summary
-  - /api/host-facts
-  - /api/notification-settings
-  - /api/notification-settings/phone-login/:id
   - /api/notifications
-  - /api/notifications/pushes
-  - /api/setup
 
 ## #/plan
 sections: 
@@ -250,6 +239,21 @@ reads:
   - /api/settings/merge-carry
   - /api/settings/wait-for-ci
   - /api/wip-limits
+
+## #/settings/<company>/notifications
+sections: 
+  - How you're told
+  - Other places to send alerts
+  - Set up your phone
+  - Weekly summary
+reads: 
+  - /api/alert-destinations
+  - /api/companies/:id/weekly-summary
+  - /api/host-facts
+  - /api/notification-settings
+  - /api/notification-settings/phone-login/:id
+  - /api/notifications/pushes
+  - /api/setup
 
 ## #/settings/<company>/permissions
 sections: 
@@ -475,6 +479,14 @@ reads:
   keeps section: Deploy targets
   removed on purpose: Funding sources (BOS-1018 moved it to the Funding page)
   removed on purpose: Credentials (BOS-1018 moved it to the Secrets page)
+#/notifications/<anything> -> #/settings/<company>/notifications
+  keeps section: How you're told
+  keeps section: Set up your phone
+  keeps section: Other places to send alerts
+  keeps section: Weekly summary
+  keeps read: /api/notification-settings
+  keeps read: /api/alert-destinations
+  keeps read: /api/notifications/pushes
 #/settings/<company>/workflow -> #/settings/<company>/reviews
   keeps section: Reviews
   keeps section: Did it move the goal?
