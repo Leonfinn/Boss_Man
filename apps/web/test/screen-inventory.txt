@@ -320,7 +320,7 @@ sections:
   - Ticket references
   - What the CEO can do without asking
   - Workflow retros
-reads:
+reads: 
   - /api/companies/:id/agent-approvals
   - /api/companies/:id/chapters
   - /api/companies/:id/retro-settings
