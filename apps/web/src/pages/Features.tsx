@@ -430,7 +430,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
   return (
     <>
     <tr data-shortcut-card tabIndex={-1}>
-      <td className="feature-name"style={{ paddingLeft: sub ? 28 : undefined }}>
+      <td className="feature-name" style={{ paddingLeft: sub ? 28 : undefined }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {foldable && (
             <button type="button" className="feature-fold" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} aria-label={`${open ? "Hide" : "Show"} tasks of ${f.title}`} onClick={onToggle}>

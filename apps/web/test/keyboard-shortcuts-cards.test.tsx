@@ -2,12 +2,14 @@
 // BOS-2330: on the real Board and Decisions screens, j/k move focus between cards (on the Board down a lane, then
 // the next lane), Enter opens the focused card, nothing fires in a text box or over a dialog, and the "?" list
 // has a section for the screen.
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Shortcuts, screenKeys } from "../src/components/Shortcuts";
 import { Board } from "../src/pages/Board";
 import { Decisions } from "../src/pages/Decisions";
+import { Features } from "../src/pages/Features";
+import { Runs } from "../src/pages/Runs";
 
 afterEach(() => {
   cleanup();
@@ -187,6 +189,98 @@ describe("Runs and Features lists (BOS-2349)", () => {
     expect(screenKeys("#/features/c1/f1")).toBeNull();
     expect(screenKeys("#/runs")?.rows.map((r) => r.what)).toContain("Open the run's page");
     expect(screenKeys("#/features")?.rows.map((r) => r.what)).toContain("Open the feature's page");
+  });
+});
+
+describe("card shortcuts on the Runs and Features screens, rendered (BOS-2349)", () => {
+  const runRow = (id: string, ended: string | null) => ({ id, companyId: "c1", agent: "Developer", agentId: "a1", ticketId: null, ticket: null, model: null, startedAt: "2026-11-20T09:00:00Z", endedAt: ended, outcome: ended ? "end_turn" : null });
+  const clickedHrefs = () => {
+    const clicked: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      clicked.push(this.getAttribute("href")!);
+    });
+    return clicked;
+  };
+  const rowText = () => (document.activeElement as HTMLElement).closest("[data-shortcut-card]")?.querySelector("a[data-shortcut-open]")?.getAttribute("href");
+
+  async function openRuns() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/runs/recent")) return json([runRow("r2", "2026-11-20T10:00:00Z"), runRow("r3", "2026-11-20T09:30:00Z")]);
+        if (url.startsWith("/api/runs")) return json([runRow("r1", null)]);
+        return json([]);
+      }),
+    );
+    window.location.hash = "#/runs";
+    render(<><Runs companies={[company]} /><Shortcuts go={() => {}} hasProjects /></>);
+    await waitFor(() => expect(document.querySelectorAll("tbody tr[data-shortcut-card]").length).toBe(3));
+  }
+
+  it("Runs: j goes down the active then the finished list, and Enter opens that run's page", async () => {
+    await openRuns();
+    const clicked = clickedHrefs();
+    press("j");
+    expect(rowText()).toBe("#/runs/r1");
+    press("j");
+    expect(rowText()).toBe("#/runs/r2");
+    press("k");
+    expect(rowText()).toBe("#/runs/r1");
+    press("j");
+    press("j");
+    expect(rowText()).toBe("#/runs/r3");
+    expect(press("Enter", document.activeElement!)).toBe(false);
+    expect(clicked).toEqual(["#/runs/r3"]);
+  });
+
+  it("Runs: j does nothing while the search box has focus", async () => {
+    await openRuns();
+    const box = screen.getByLabelText("Search by ticket");
+    box.focus();
+    expect(press("j", box)).toBe(true);
+    expect(document.activeElement).toBe(box);
+  });
+
+  const feature = (id: string, title: string) => ({ id, companyId: "c1", areaId: null, parentId: null, title, description: null, status: "planned", effort: 3, driverScores: {}, portalVisible: true, createdAt: "2026-10-19T09:00:00Z", demand: 0, value: 0, priority: 0, tickets: { total: 0, done: 0, items: [] } });
+  async function openFeatures(phone: boolean) {
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: phone && query.includes("max-width: 640px"), media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/features")) return json({ settings: { demandWeight: 1, ceoTriage: false }, drivers: [{ id: "d1", name: "Reach", weight: 1 }], maxDemand: 0, features: [feature("f1", "Gift cards"), feature("f2", "Refunds")] });
+        if (url.includes("/feedback-settings")) return json({ drivers: [], areas: [] });
+        return json([]);
+      }),
+    );
+    window.location.hash = "#/features/c1";
+    render(<><Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} /><Shortcuts go={() => {}} hasProjects /></>);
+    await waitFor(() => expect(document.querySelectorAll("[data-shortcut-card]").length).toBe(2));
+  }
+
+  for (const phone of [false, true]) {
+    it(`Features (${phone ? "phone cards" : "table rows"}): j/k move between features and Enter opens the feature's page`, async () => {
+      await openFeatures(phone);
+      expect(document.querySelectorAll(phone ? "li[data-shortcut-card]" : "tr[data-shortcut-card]").length).toBe(2);
+      const clicked = clickedHrefs();
+      press("j");
+      expect(rowText()).toBe("#/features/c1/f1");
+      press("j");
+      expect(rowText()).toBe("#/features/c1/f2");
+      press("j");
+      expect(rowText()).toBe("#/features/c1/f2");
+      press("k");
+      expect(rowText()).toBe("#/features/c1/f1");
+      expect(press("Enter", document.activeElement!)).toBe(false);
+      expect(clicked).toEqual(["#/features/c1/f1"]);
+    });
+  }
+
+  it("Features: j does nothing while the search box has focus", async () => {
+    await openFeatures(false);
+    const box = screen.getByRole("searchbox", { name: "Search features" });
+    box.focus();
+    expect(press("j", box)).toBe(true);
+    expect(document.activeElement).toBe(box);
   });
 });
 
