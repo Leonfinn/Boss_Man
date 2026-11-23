@@ -1009,11 +1009,13 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger .chat-form textarea { flex: 1 1 220px; }
 @media (max-width: 760px) {
   .messenger { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; }
-  .messenger .chat-log { max-height: 55dvh; min-height: 160px; }
+  .messenger .chat-log { max-height: 55dvh; min-height: 100px; }
   .messenger[data-picked="no"] .messenger-chat { display: none; }
   .messenger[data-picked="yes"] .messenger-list { display: none; }
   .messenger-list { border-right: 0; }
   .messenger-head { padding: 10px 12px; }
+  /* The find bar (BOS-2411) takes room from the log, so the log may shrink further and the bar is tighter. */
+  .messenger .chat-find { padding: 6px 12px; gap: 6px; }
   .messenger-head .back { display: inline-grid; }
   /* An open thread fills the phone, so the message box is on screen: the page intro is only
      for the team list, and dvh keeps the box above the keyboard. */
