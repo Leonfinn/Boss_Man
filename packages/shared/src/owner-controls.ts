@@ -238,6 +238,8 @@ export const OWNER_FIELDS = {
   "Log in": ["Username", "Password"],
   // The Engagements list's status filter (BOS-2260).
   Engagements: ["Show", "Search engagements"],
+  // The Runs page's search box (BOS-2317).
+  Runs: ["Search by ticket"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.

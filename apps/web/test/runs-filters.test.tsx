@@ -73,6 +73,28 @@ describe("Runs page filters and Show more (BOS-1888)", () => {
     expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   });
 
+  it("BOS-2317: the ticket search is sent after a pause, kept with the filter, and used by Show more", async () => {
+    const page1 = Array.from({ length: 50 }, (_, i) => run(i));
+    const urls = stub((url) => (url.includes("before=") ? [run(50)] : page1));
+    const first = render(<Runs companies={companies} />);
+    fireEvent.change(await screen.findByLabelText("Search by ticket"), { target: { value: " bos-2250 " } });
+    expect(urls.some((u) => u.includes("q="))).toBe(false);
+    await waitFor(() => expect(urls.at(-1)).toBe("/api/runs/recent?limit=50&q=bos-2250"));
+    fireEvent.click(await screen.findByRole("button", { name: "Show more" }));
+    await waitFor(() => expect(urls.at(-1)).toContain("q=bos-2250&before="));
+    expect(JSON.parse(localStorage.getItem("bm.runs.filter")!).q).toBe("bos-2250");
+    first.unmount();
+    render(<Runs companies={companies} />);
+    expect(((await screen.findByLabelText("Search by ticket")) as HTMLInputElement).value).toBe("bos-2250");
+  });
+
+  it("BOS-2317: a search with no match says so", async () => {
+    stub(() => []);
+    render(<Runs companies={companies} />);
+    fireEvent.change(await screen.findByLabelText("Search by ticket"), { target: { value: "nothing here" } });
+    expect(await screen.findByText("No finished runs match these filters.")).toBeTruthy();
+  });
+
   it("shows no Show more when fewer than a page came back", async () => {
     stub(() => [run(1), run(2)]);
     render(<Runs companies={companies} />);
