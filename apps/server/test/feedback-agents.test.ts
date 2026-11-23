@@ -128,6 +128,10 @@ describe("agents and feedback", () => {
     expect(full.features[0].tickets).toHaveProperty("items");
     const short = await list({ status: "open", tickets: "count" });
     expect(short.features[0].tickets).toEqual({ total: 0, done: 0 });
+    const withQ = await list({ status: "open", q: "planned", offset: 0 });
+    expect(withQ).toMatchObject({ total: 1, from: 1, to: 1 });
+    const pastEnd = await list({ status: "open", offset: 1 });
+    expect(pastEnd).toMatchObject({ total: 2, from: 2, to: 2 });
     const refused = await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: open.features[0].id, status: "open", reason: "test" } });
     expect(textOf(refused)).toContain("only filters");
     await ceo.close();
