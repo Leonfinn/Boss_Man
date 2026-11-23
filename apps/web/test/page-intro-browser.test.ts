@@ -133,7 +133,7 @@ const PLACES = [
   },
   {
     name: "notifications",
-    hash: "#/notifications",
+    hash: "#/settings/c1/notifications",
     ready: "#notify-settings-h",
     lead: "Choose how loudly Boss Man tells you about things, and whether it reaches your phone.",
     held: "In quiet hours, each notification is one step quieter",

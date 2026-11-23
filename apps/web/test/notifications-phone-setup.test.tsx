@@ -2,9 +2,12 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NotifySettings } from "../src/api";
-import { Notifications } from "../src/pages/Notifications";
+import { NotificationSettings } from "../src/pages/settings/Notifications";
 
-// BOS-995: the "Set up your phone" box on the Notifications page. jsdom does no layout, so this checks what the
+// BOS-2327: the settings moved off the feed page; the old calls below render Settings → Notifications.
+const Notifications = (_: { feed: unknown; onChanged: () => void }) => <NotificationSettings companies={null} />;
+
+// BOS-995: the "Set up your phone" box on Settings → Notifications. jsdom does no layout, so this checks what the
 // box says at a 360px phone window and that its long strings are set to wrap rather than push the page wide.
 
 afterEach(() => {

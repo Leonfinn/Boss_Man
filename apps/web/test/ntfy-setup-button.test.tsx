@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NtfySetupButton } from "../src/pages/Notifications";
+import { NtfySetupButton } from "../src/pages/settings/Notifications";
 
 // BOS-1581: the "Set up ntfy for me" button. The host makes the publish user and token; the page never gets the token.
 

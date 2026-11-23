@@ -133,6 +133,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Funding.tsx": "Funding",
   "pages/MergeQueue.tsx": "Merge queue",
   "pages/Notifications.tsx": "Notifications",
+  // The notification settings moved here from the feed page (BOS-2327); Settings → Notifications is the same screen in the list.
+  "pages/settings/Notifications.tsx": "Notifications",
   // The "Other places to send alerts" card on the Notifications page (BOS-2199).
   "components/AlertDestinations.tsx": "Notifications",
   "pages/Plan.tsx": "Plan",
@@ -205,6 +207,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
   "pages/Settings.tsx>Account": "Account",
+  "pages/Settings.tsx>NotificationSettings": "Notifications",
   "pages/Settings.tsx>ToolServers": "Tools and deploys",
   "pages/Settings.tsx>DeployTargets": "Tools and deploys",
   "pages/Settings.tsx>PenpotSettings": "Tools and deploys",

@@ -6,10 +6,10 @@ import { SETTINGS_GROUPS, SETTINGS_PAGES, settingsPath, settingsRedirect } from 
 const route = (hash: string) => hash.replace(/^#\/?/, "").split("/");
 
 describe("Settings pages", () => {
-  it("has the 15 approved pages in 3 groups, in order (BOS-1492, Account added in BOS-2159)", () => {
+  it("has the 16 approved pages in 3 groups, in order (BOS-1492, Account added in BOS-2159, Notifications in BOS-2327)", () => {
     expect(SETTINGS_GROUPS.map((g) => g.label)).toEqual(["Money and access", "How the team works", "Server and runner"]);
     expect(SETTINGS_PAGES.map((p) => p.label)).toEqual([
-      "Funding", "Secrets", "Account", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+      "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
       "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
     ]);
   });

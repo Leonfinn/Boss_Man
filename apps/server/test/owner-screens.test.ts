@@ -36,10 +36,10 @@ describe("R8: the screen a step sends the owner to", () => {
       expect(all([s]), s).toEqual([]);
   });
 
-  it("refuses the 7 Nov ntfy card: Notifications isn't a Settings tab", () => {
-    const [f] = r8(["Open Settings → Notifications and tick Send to my phone through my own ntfy server."]);
-    expect(f?.problem).toMatch(/Notifications isn't under Settings: it is Notifications/);
-    expect(all(["Open Notifications and tick Send to my phone through my own ntfy server."])).toEqual([]);
+  it("refuses a menu entry written as a Settings tab (Wiki), and passes Notifications since BOS-2327", () => {
+    const [f] = r8(["Open Settings → Wiki and tick Send to my phone through my own ntfy server."]);
+    expect(f?.problem).toMatch(/Wiki isn't under Settings: it is Wiki/);
+    expect(all(["Open Settings → Notifications and tick Send to my phone through my own ntfy server."])).toEqual([]);
   });
 
   it("sends the owner to Funding for a funding source (it moved there in BOS-1019)", () => {
@@ -128,8 +128,8 @@ describe("R13: a field the owner fills in has its value", () => {
 describe("R8 and R13 in checkAsk", () => {
   it("refuse a card, and the CEO can override them with a reason", () => {
     const base = { triedFirst: "Read the Secrets page in the web app code.", why: "The owner finds the right screen.", minutes: 2 };
-    const steps = ["Open Settings → Notifications and fill in Topic."];
-    expect(checkAsk({ ...base, steps }).error).toMatch(/Notifications isn't under Settings/);
+    const steps = ["Open Settings → Wiki and fill in Topic."];
+    expect(checkAsk({ ...base, steps }).error).toMatch(/Wiki isn't under Settings/);
     const ceo = checkAsk({ ...base, steps, lintOverride: "Checked the screen by hand; the list is behind.", byCeo: true });
     expect(ceo.error).toBeNull();
     expect(ceo.lint?.override?.findings.map((x) => x.rule).sort()).toEqual(["R13", "R8"]);
@@ -224,6 +224,6 @@ describe("walkingMenuRoot: the menu entry a walking path starts from (BOS-2117)"
   });
 
   it("gives null for a menu entry whose path the walker refuses", () => {
-    expect(walkingMenuRoot("Open Settings → Notifications and tick the box.")).toBeNull();
+    expect(walkingMenuRoot("Open Settings → Wiki and tick the box.")).toBeNull();
   });
 });

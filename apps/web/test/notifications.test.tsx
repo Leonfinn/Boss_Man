@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Notice } from "../src/api";
 import { Notifications } from "../src/pages/Notifications";
+import { NotificationSettings } from "../src/pages/settings/Notifications";
 
 afterEach(() => {
   cleanup();
@@ -160,9 +161,16 @@ describe("notifications", () => {
 
     it("folds the phone-push history shut, with a line saying how many", async () => {
       vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } }))));
-      const { container } = render(<Notifications feed={feed} onChanged={() => {}} companies={companies} />);
+      const { container } = render(<NotificationSettings companies={companies} />);
       await screen.findByText("Recent phone pushes");
       expect((container.querySelector("details.pushes") as HTMLDetailsElement).open).toBe(false);
+    });
+
+    it("links to the notification settings and no longer holds them (BOS-2327)", () => {
+      stubFetch([]);
+      render(<Notifications feed={feed} onChanged={() => {}} companies={companies} />);
+      expect(screen.getByRole("link", { name: "Notification settings" }).getAttribute("href")).toBe("#/settings/notifications");
+      expect(screen.queryByText("Recent phone pushes")).toBeNull();
     });
   });
 });
