@@ -36,6 +36,7 @@ sections:
   - Costliest tasks
   - Filter tasks
   - Merged, watching
+  - Month by month
   - On your subscriptions
   - Passed, held
   - Pay-as-you-go spend
@@ -213,6 +214,7 @@ sections:
   - Budgets
   - Costliest tasks
   - Funding sources
+  - Month by month
   - On your subscriptions
   - Pay-as-you-go spend
   - Spending limit
