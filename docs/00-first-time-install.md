@@ -26,6 +26,20 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
 - **Read access from the host to the Boss Man code repo** (step 2): internet access to its https address if the repo is public, or a read-only deploy key if it is private.
 
+## The short way: one script
+
+Once the host has Docker and you have the code on it (step 2 below), one script does steps 3, 4 and 5 for you. Run it from the repo folder, as root (or with `sudo`), with `<install-dir>/src` as the checkout so the folders land where the update scripts expect them.
+
+```sh
+sudo scripts/install.sh
+```
+
+It asks which address the web page should listen on (your host's address on your home network, for example `192.168.1.50`, or press Enter to keep it to this machine). To skip the question, add `--host <address>`. On TrueNAS add `--truenas`. Then it makes the folders, the master key and `.env`, builds everything, runs the runner safety check, starts Boss Man and waits until the server answers. It ends by printing the web address and a reminder to copy `secrets/master.key` somewhere safe; do that.
+
+Running it again later is safe: it keeps your master key and your `.env` and only rebuilds and restarts, so it never touches your data. For updates, keep using `scripts/deploy.sh` ([docs/23](23-updating.md)).
+
+Not yet confirmed on a real host (tested with a stand-in Docker only, 23 Nov 2026). If it stops with a message, fix what it names and run it again. Steps 3, 4 and 5 below are what it does, for when you want to do one by hand.
+
 ## A note on commands
 
 - The commands are written for a **root shell**. On a normal Linux host, either run them as root, or put `sudo` in front of each command (a redirect such as `> file` then needs `sudo sh -c '...'`), or add your user to the `docker` group. On TrueNAS there is no `sudo`: use the root shell.
