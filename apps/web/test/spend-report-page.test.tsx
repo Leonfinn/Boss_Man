@@ -76,6 +76,20 @@ describe("Spend page", () => {
     expect(within(table).getByText("75%")).toBeTruthy();
     expect(within(table).getAllByText("1,500").length).toBe(2);
     expect(container.querySelectorAll(".dbar .seg.blue").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "7 days" }));
+    await waitFor(() => expect(container.querySelectorAll(".dbar")).toHaveLength(7));
+    expect(within(screen.getByRole("table")).getByText("opus")).toBeTruthy();
+    let blob: Blob | undefined;
+    URL.createObjectURL = vi.fn((b: Blob) => ((blob = b), "blob:x"));
+    URL.revokeObjectURL = vi.fn();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    const lines = (await blob!.text()).trim().split("\r\n");
+    expect(lines[0]).toBe("date,model,runs,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,plan_usd,pay_as_you_go_usd,cost_usd");
+    expect(lines[1]).toContain(",opus,2,1500,20,3,4,2.0000,1.0000,3.0000");
+    fireEvent.click(screen.getByRole("button", { name: "By agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    expect((await blob!.text()).split("\r\n")[0]).toBe("date,agent,feature,project,tickets,cost_usd");
   });
 
   it("shows the costliest tickets as links with their share, and follows the period (BOS-2370)", async () => {
