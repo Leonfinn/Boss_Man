@@ -80,12 +80,13 @@ export function smSummary(groups: Array<{ issueKey: string | null; status: SmAct
 }
 
 /** What the Scrum Master and the watchdog did, each with its one-line reason and an undo while one is possible. */
-export function ScrumMasterLog({ companyId, ticketId, heading, folded }: { companyId: string; ticketId?: string; heading?: string; folded?: boolean }) {
+export function ScrumMasterLog({ companyId, ticketId, heading, folded, filterable }: { companyId: string; ticketId?: string; heading?: string; folded?: boolean; filterable?: boolean }) {
   // Folded, every action is listed so an older open issue can still be found, so take more than a screenful.
   const log = usePoll((signal) => api<SmAction[]>(`/api/companies/${companyId}/watchdog/actions?limit=${folded ? 500 : 100}${ticketId ? `&ticketId=${ticketId}` : "&excludeKind=sweep_wake"}`, { signal }), 15_000, `sm-log-${companyId}-${ticketId ?? "all"}-${folded ? "folded" : "full"}`);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [all, setAll] = useState(false);
+  const [filter, setFilter] = useState("");
   const undo = async (id: string) => {
     setBusy(id);
     setError(null);
@@ -98,8 +99,15 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded }: { compa
       setBusy(null);
     }
   };
-  const rows = Array.isArray(log.data) ? log.data : [];
-  if (ticketId && log.data && !rows.length) return null;
+  const loaded = Array.isArray(log.data) ? log.data : [];
+  if (ticketId && log.data && !loaded.length) return null;
+  const words = filterable && !folded ? filter.toLowerCase().split(/\s+/).filter(Boolean) : [];
+  const rows = words.length
+    ? loaded.filter((a) => {
+        const text = [a.ticketRef, a.targetName, a.actorName, actionHeading(a), a.reason].join(" ").toLowerCase();
+        return words.every((w) => text.includes(w));
+      })
+    : loaded;
 
   // One group per issue, newest first; rows without an issue stand on their own.
   const groups: Array<{ key: string; issueKey: string | null; status: SmAction["issueStatus"]; label: string | null; ticketRef: string | null; ticketId: string | null; rows: SmAction[] }> = [];
@@ -190,8 +198,14 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded }: { compa
   return (
     <section aria-label="Scrum Master activity">
       {heading && <h2 className="section-label">{heading}</h2>}
+      {filterable && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+          <label htmlFor="sm-log-filter">Filter</label>
+          <input id="sm-log-filter" type="search" placeholder="Ticket, agent or reason" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ maxWidth: 320 }} />
+        </div>
+      )}
       {error && <p role="alert" className="error">{error}</p>}
-      {!log.data ? log.error ? <LoadError what="the log" message={log.error.message} onRetry={log.reload} /> : <Loader label="Loading the log" /> : !rows.length ? <p className="muted">Nothing yet. The Scrum Master's actions appear here with the reason for each.</p> : null}
+      {!log.data ? log.error ? <LoadError what="the log" message={log.error.message} onRetry={log.reload} /> : <Loader label="Loading the log" /> : !rows.length ? <p className="muted">{loaded.length ? "Nothing in the loaded log matches." : "Nothing yet. The Scrum Master's actions appear here with the reason for each."}</p> : null}
       <ul style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
         {groups.map((g) =>
           g.issueKey ? (
