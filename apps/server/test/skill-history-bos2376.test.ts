@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { record } from "../src/services/activity.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -39,6 +40,22 @@ describe("BOS-2376: skill history", () => {
 
     const o = (await c.req("GET", `${base}/${other}/history`)).json() as unknown[];
     expect(o).toHaveLength(1);
+  });
+
+  it("includes a retro revert, newest first, and refuses another company's skill", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const id = ((await c.req("POST", base, { from: "written", name: "tidy", description: "Does it.", body: "one" })).json() as Array<{ id: string }>)[0]!.id;
+    await c.req("PUT", `${base}/${id}`, { name: "tidy", description: "Does it.", body: "two" });
+    const detail = { skillId: id, skillMd: { before: "two", after: "one" } };
+    await record(c.db, { companyId: c.company.id, kind: "skill.reverted_by_retro", summary: "Workflow Revert put the playbook tidy back.", detail, at: new Date(Date.now() + 60_000) });
+    const h = (await c.req("GET", `${base}/${id}/history`)).json() as Array<{ what: string; who: string; change: { before: string; after: string } | null }>;
+    expect(h.map((x) => x.what)).toEqual(["Put back by a workflow retro", "Edited by you", "Added by you"]);
+    expect(h[0]!.who).toBe("Boss Man");
+    expect(h[0]!.change).toEqual({ before: "two", after: "one" });
+
+    const other = ((await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } }).company.id;
+    expect((await c.req("GET", `/api/companies/${other}/skills/${id}/history`)).statusCode).toBe(404);
   });
 
   it("is a 404 for a skill that does not exist", async () => {
