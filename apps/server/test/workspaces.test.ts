@@ -51,7 +51,8 @@ describe("git workspaces on the server (R38)", () => {
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]).toMatchObject({ branch: `bossman/${t.id}`, baseCommit: "abc123" });
 
     await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
-    expect(c.sent.at(-1)).toEqual({ type: "workspace.release", projectId: c.project.id, ticketId: t.id });
+    // The release must be sent; the "ticket finished" message to the live run (BOS-2309) may come before or after it.
+    expect(c.sent).toContainEqual({ type: "workspace.release", projectId: c.project.id, ticketId: t.id });
   });
 
   it("gives a reviewer its own copy of the first ticket's work", async () => {

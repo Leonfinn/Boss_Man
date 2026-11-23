@@ -1039,7 +1039,7 @@ export function schedulerService(
 
   /**
    * BOS-2309: the name of the ticket's current assignee when `agentId` used to work the ticket and no longer holds it
-   * (it has an earlier run on it, is not its assignee now and owes no review of it), else null. A nudge to such an
+   * (it was once woken as its assignee, is not its assignee now and owes no review of it), else null. A nudge to such an
    * agent about the ticket would only start a second run on work someone else now has. A colleague who never worked
    * the ticket (the CEO, an advisor, a reviewer) is not a former assignee and is still reachable.
    */
@@ -1048,8 +1048,9 @@ export function schedulerService(
     if (!t?.assignee || t.assignee === agentId || t.state === "done") return null;
     const [review] = await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.reviewerAgentId, agentId))).limit(1);
     if (review) return null;
-    const [ran] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.ticketId, ticketId), eq(runs.agentId, agentId))).limit(1);
-    if (!ran) return null;
+    // Held the ticket once: it was woken as its assignee. A colleague who only worked on it (a helper, a nudged peer) was not.
+    const [held] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.ticketId, ticketId), eq(wakes.agentId, agentId), eq(wakes.reason, "assigned"))).limit(1);
+    if (!held) return null;
     const [holder] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assignee));
     return holder?.name ?? "another agent";
   }

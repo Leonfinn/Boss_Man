@@ -535,6 +535,8 @@ describe("scheduler", () => {
     await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, startedAt: new Date(Date.now() - 3_600_000), endedAt: new Date(Date.now() - 3_000_000) });
     await ctx.db.update(tickets).set({ systemState: "in_progress", monitorAt: new Date(Date.now() + 3_600_000), monitorNote: "A's own wait" }).where(eq(tickets.id, t.id));
     await ctx.db.delete(wakes);
+    // A was woken as the assignee (a launched "assigned" wake is the record that A held it).
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "assigned", status: "launched", priority: 2 });
     await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: a.id, ticketId: t.id, reason: "nudge", priority: 2, note: "Queued before the hand-over." });
     await ctx.req("PATCH", `/api/tickets/${t.id}`, { assigneeAgentId: b.id });
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.monitorAt).toBeNull();
@@ -549,7 +551,7 @@ describe("scheduler", () => {
     // Queued earlier: dropped, so A starts no run.
     const before = ctx.commands.length;
     await ctx.tick();
-    const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, t.id), eq(wakes.agentId, a.id)));
+    const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, t.id), eq(wakes.agentId, a.id), eq(wakes.reason, "nudge")));
     expect(w!.status).toBe("dropped");
     expect(w!.statusReason).toContain("Engineer B");
     expect(ctx.commands.slice(before).every((c) => !/Queued before the hand-over/.test(c.prompt))).toBe(true);
