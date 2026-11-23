@@ -71,7 +71,8 @@ if [ -z "${INSTALL_RELEASE_JSON:-}" ]; then
   exit "$fail"
 fi
 docker info >/dev/null 2>&1 || { bad "INSTALL_RELEASE_JSON is set but there is no Docker daemon"; exit 1; }
-scripts/render-image-env.sh "$INSTALL_RELEASE_JSON" ${INSTALL_REGISTRY:+"$INSTALL_REGISTRY"} > "$T/real.env" || { bad "images.env from release.json"; exit 1; }
+# test-shell.sh scrubs the environment, so GITHUB_REPOSITORY is not set here; the updater's compose needs BOSSMAN_UPDATER_REPO.
+GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-example/boss-man}" scripts/render-image-env.sh "$INSTALL_RELEASE_JSON" ${INSTALL_REGISTRY:+"$INSTALL_REGISTRY"} > "$T/real.env" || { bad "images.env from release.json"; exit 1; }
 P="bminstall$$"
 {
   cat "$T/real.env"
