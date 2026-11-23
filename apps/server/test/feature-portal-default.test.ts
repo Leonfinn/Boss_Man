@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
+import { portalHoldQuestion, type HeldOffFeature } from "../src/services/feature-portal.js";
 
 let t: TestApp | undefined;
 afterEach(async () => {
@@ -139,6 +140,33 @@ describe("features go on the portal by default (BOS-957)", () => {
     expect((await c.req("PATCH", `/api/features/${f.id}`, { keepOffPortal: true })).statusCode).toBe(200);
     await t!.db.execute(sql`update "features" set "portal_visible" = true where "id" = ${f.id}`);
     expect((await visitor()).json().features).toEqual([]);
+  });
+});
+
+describe("portalHoldQuestion (BOS-2267)", () => {
+  const held = (over: Partial<HeldOffFeature> = {}): HeldOffFeature => ({
+    id: "f-1",
+    title: "Rotate API keys",
+    reason: "it reads as security work",
+    hasPublicSummary: true,
+    ...over,
+  });
+
+  it("names the feature and why it is held, and asks Keep off or Publish", () => {
+    expect(portalHoldQuestion(held())).toBe('The feature "Rotate API keys" is held off the feedback portal: it reads as security work.\n\nKeep it off, or publish it to the portal?');
+  });
+
+  it("adds the needs-a-public-summary paragraph only when there is no public summary", () => {
+    const without = portalHoldQuestion(held({ hasPublicSummary: false }));
+    expect(without).toContain("Publishing needs a public summary first");
+    // The internal title is still safe to show the owner; visitors never see it.
+    expect(without).toContain('The feature "Rotate API keys" is held off the feedback portal: it reads as security work.');
+    expect(without.split("\n\n").at(-1)).toBe("Publishing needs a public summary first: visitors see that, never the internal title. The CEO or a product manager can write one; until then a feature set to publish stays hidden.");
+    expect(portalHoldQuestion(held())).not.toContain("Publishing needs a public summary first");
+  });
+
+  it("carries a hand-kept reason through unchanged", () => {
+    expect(portalHoldQuestion(held({ title: "Internal: vault rework", reason: "kept off by hand: customer asked us to wait" }))).toContain('The feature "Internal: vault rework" is held off the feedback portal: kept off by hand: customer asked us to wait.');
   });
 });
 
