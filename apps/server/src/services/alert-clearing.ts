@@ -79,6 +79,8 @@ export type ClearWhen =
   | { kind: "idleSlotsGone"; companyId: string }
   /** The daily-backup card (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
   | { kind: "backupFresh" }
+  /** The landing-turn-late card (BOS-2359): that ticket no longer holds its project's landing turn. */
+  | { kind: "landingTurnEnded"; companyId: string; ticketId: string }
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
   | { kind: "sweepStepOk"; step: string };
 
@@ -153,6 +155,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "sweepStepOk":
         if (typeof c.step === "string") out.push({ kind: "sweepStepOk", step: c.step });
         break;
+      case "landingTurnEnded":
+        if (typeof c.companyId === "string" && typeof c.ticketId === "string") out.push({ kind: "landingTurnEnded", companyId: c.companyId, ticketId: c.ticketId });
+        break;
       case "mergeFailuresCalm":
         if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
         break;
@@ -203,6 +208,8 @@ export type AlertClearingDeps = {
   serverCalm?: (rule: "memory" | "freezes") => string | null;
   /** How many more work runs the company could start now (the scheduler's `freeSlots`); without it the idle-slots card stays open. */
   freeSlots?: (companyId: string) => Promise<number>;
+  /** BOS-2359: whether the ticket still holds a landing turn in the company; without it the landing-turn-late card stays open. */
+  landingTurnHeld?: (companyId: string, ticketId: string) => Promise<boolean>;
   /** The commit this server was built from (BOSSMAN_COMMIT); without it a "server has commit" condition never clears. */
   liveCommit?: () => string | null;
   now?: () => Date;
@@ -322,6 +329,9 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         return deps.freeSlots ? idleSlotsGoneReason(db, c.companyId, deps.freeSlots) : null;
       case "sweepStepOk":
         return sweepStepOkReason(db, c.step);
+      case "landingTurnEnded":
+        if (!deps.landingTurnHeld) return null;
+        return (await deps.landingTurnHeld(c.companyId, c.ticketId)) ? null : "that ticket no longer holds the landing turn";
       case "mergeFailuresCalm": {
         // Calm for the whole window, and the card itself is at least that old.
         const since = new Date(now().getTime() - FAILURE_WINDOW_MS);
