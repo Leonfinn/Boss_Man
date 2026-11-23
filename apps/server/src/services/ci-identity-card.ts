@@ -24,6 +24,7 @@ export const CI_IDENTITY_STEPS = [
   "A classic token can't be limited to one repository: its picker doesn't exist on that screen. Its reach is whatever the account can reach, so keep the limit in the account: a dedicated account that is a collaborator only on this repo, owns no repos of its own and belongs to no organisations.",
   "In Boss Man open Settings → Secrets, choose Add, then \"Git token for the merge gate (second account)\", paste the token and save.",
   "Grant it to the company on the same screen. Do not add a user name unless your git host needs one (GitHub does not). This card closes itself once the token is granted; you don't need to press anything.",
+  "Last, stop the second account's own emails: signed in as it, open GitHub profile picture → Settings → Notifications → System → Actions and untick Email (not yet confirmed on GitHub's current screen). This is safe: runs on main are pushed with your own token, so you still get those. Without this, GitHub emails the second account about failed gate runs and the address can still reach you.",
 ];
 
 /** The grant that means "the second account's token is set". */
