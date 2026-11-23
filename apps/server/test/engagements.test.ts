@@ -218,6 +218,24 @@ describe("charge-back (R26)", () => {
     expect((await ctx.engagements.view(e.id)).scope).toMatch(/^Deploy v1\.4/);
   });
 
+  it("lists the provider's engagement tickets for the provider and the owner, never the requester (BOS-2368)", async () => {
+    ctx = await setup();
+    const e = await ctx.request();
+    await ctx.db.insert(tickets).values([
+      { companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Deploy step", engagementId: e.id, systemState: "done" },
+      { companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Verify step", engagementId: e.id, systemState: "in_progress", assigneeAgentId: ctx.homelab.ceo.id },
+      { companyId: ctx.homelab.company.id, projectId: ctx.opsProject.id, title: "Unrelated" },
+    ]);
+    const asProvider = await ctx.engagements.view(e.id, ctx.homelab.company.id);
+    expect(asProvider.tickets!.map((t) => [t.title, t.state, t.spentUsd])).toEqual([["Deploy step", "done", 0], ["Verify step", "in_progress", 0]]);
+    expect(asProvider.tickets![1]!.assignee).toBeTruthy();
+    expect(asProvider.tickets![0]!.ref).toMatch(/-\d+$/);
+    expect((await ctx.engagements.view(e.id)).tickets).toHaveLength(2);
+    const asRequester = await ctx.engagements.view(e.id, ctx.appCo.company.id);
+    expect(asRequester).not.toHaveProperty("tickets");
+    expect(JSON.stringify(asRequester)).not.toContain("Deploy step");
+  });
+
   it("shows an agent the last 20 messages and all of them on request", async () => {
     ctx = await setup();
     const e = await ctx.request();

@@ -421,6 +421,8 @@ export type EngagementView = EngagementRow & {
   deliverables: string | null;
   acceptanceCriteria: string[];
   spentUsd: number;
+  /** The provider's tickets doing the work; absent in the requester's view. */
+  tickets?: Array<{ id: string; ref: string | null; title: string; state: string; assignee: string | null; spentUsd: number }>;
   counterTerms: unknown;
   delivery: { summary?: string; refs?: string[] } | null;
   thread: Array<{ from: string; fromCompanyId: string; kind: string; body: string; at: string }>;
