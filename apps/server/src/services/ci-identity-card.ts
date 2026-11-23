@@ -14,8 +14,10 @@ export const CI_IDENTITY_QUESTION =
 
 /** Plain steps for the owner; GitHub's screens are not yet confirmed by a real run, and the card says so. */
 export const CI_IDENTITY_STEPS = [
-  "Not yet confirmed on GitHub (checked against GitHub's documentation, 22 Nov 2026). Create a second GitHub account for Boss Man, or use a teammate's, and add it as a collaborator with write access to the repo: on GitHub, open the repo's Settings tab, then Collaborators.",
-  "Signed in as that second account, create a fine-grained token: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens. Repository access: only the company's repo. Permissions: Contents read and write (add Workflows read and write if the repo's workflows change).",
+  "Create a second GitHub account for Boss Man, or use a teammate's, and add it as a collaborator with write access to the repo: on GitHub, open the repo's Settings tab, then Collaborators. Signed in as that second account, accept the invitation; the repo then shows under Your repositories.",
+  "Still signed in as the second account, create a classic token: profile picture → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token → Generate new token (classic). Tick the scopes repo and workflow, then copy the token. Not yet confirmed on GitHub for the classic screens.",
+  "Why classic: a fine-grained token only reaches repos owned by the resource owner you pick, so for a repo you are only a collaborator on it offers nothing (seen: f2eee874… 23 Nov 2026). The classic token reaches only repos this account was invited to. If an organisation owns the repo, a fine-grained token with the organisation as resource owner works too.",
+  "Expiry: pick No expiration for a dedicated account, or set a reminder. When an expiring token lapses, the gate's CI pushes fail until you replace it.",
   "In Boss Man open Settings → Secrets, choose Add, then \"Git token for the merge gate (second account)\", paste the token and save.",
   "Grant it to the company on the same screen. Do not add a user name unless your git host needs one (GitHub does not).",
 ];
