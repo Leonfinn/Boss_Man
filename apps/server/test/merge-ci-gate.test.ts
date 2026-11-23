@@ -1250,7 +1250,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
           expect(finishes(c).map((f) => f.commit)).toEqual([commit(2)]);
           const ev = await lineEvents(c);
           expect(ev.filter((e) => e.event === "rebuilt").map((e) => e.rebuilds)).toEqual([1, 2]);
-          expect(ev.filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual(["queued", "ended"]);
+          expect(ev.filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual(["queued", "taken", "ended"]);
           expect(landingTurns.check(c.project.id).holder).toBeNull();
         } finally {
           spy.mockRestore();
@@ -1348,7 +1348,7 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
           landingTurns.done(c.project.id, x.id);
           await finished(c);
           expect(landingTurns.holds(c.project.id, y.id)).toBe(true);
-          expect((await lineEvents(c)).filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual(["queued", "ended"]);
+          expect((await lineEvents(c)).filter((e) => e.event === "landing_turn").map((e) => e.action)).toEqual(["queued", "taken", "ended"]);
         } finally {
           cleanUp(c, x.id, y.id);
         }
