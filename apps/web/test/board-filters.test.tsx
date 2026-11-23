@@ -7,12 +7,14 @@ import { Board, workingFor } from "../src/pages/Board";
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  stuckIds = [];
   vi.unstubAllGlobals();
 });
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [{ id: "a1", name: "Developer" }] } as Company;
-const card = (over: Record<string, unknown>) => ({ systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...over });
+let stuckIds: string[] = [];
+const card = (over: Record<string, unknown>) => ({ ...(stuckIds.includes(String(over.id)) ? { looksStuck: { idleMs: 3_600_000 } } : {}), systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...over });
 const feat = (id: string, title: string) => ({ id, companyId: "c1", areaId: null, parentId: null, title, description: null, status: "in_progress", effort: null, driverScores: {}, milestoneId: null, portalVisible: false, createdAt: "2026-10-19T09:00:00Z", updatedAt: "2026-10-19T09:00:00Z", releasedAt: null, demand: 0, insightCount: 0, customerCount: 0, value: 0, demandPart: 0, priority: 0, tickets: { total: 0, done: 0, items: [] } });
 
 function stub(extra: Record<string, unknown> = {}) {
@@ -150,6 +152,25 @@ describe("board filters", () => {
     expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
     expect((screen.getByRole("searchbox", { name: "Search tasks" }) as HTMLInputElement).value).toBe("task");
     expect(screen.getByRole("button", { name: "Filter" })).toBeTruthy();
+  });
+
+  it("BOS-2351: clicking N looks stuck shows only the stuck cards, keeps it for the session, and Show all clears it", async () => {
+    stuckIds = ["t2", "t4"];
+    stub();
+    const first = open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    expect(screen.queryByTestId("stuck-filter-line")).toBeNull();
+    fireEvent.click(screen.getByTestId("standing-stuck"));
+    expect(shown()).toEqual(["Beta", "Delta"]);
+    expect(screen.getByTestId("stuck-filter-line").textContent).toContain("Showing 2 stuck cards");
+    expect(JSON.parse(sessionStorage.getItem("board-filters") ?? "{}").stuckOnly).toBe(true);
+    first.unmount();
+    open();
+    await screen.findByText("Beta task", { selector: "h3 a" });
+    expect(shown()).toEqual(["Beta", "Delta"]);
+    fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+    expect(screen.queryByTestId("stuck-filter-line")).toBeNull();
   });
 
   it("says why a column is empty when filters emptied it, with a way out", async () => {
