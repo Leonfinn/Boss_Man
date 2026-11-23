@@ -692,7 +692,8 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
         ) : s.hasInstructions === false ? (
           <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>
         ) : null}
-        <UpstreamTag u={upstream[s.id]} />
+        {/* A pack shows "newer" once, on the pack; its skills show only their own read errors. */}
+        <UpstreamTag u={s.pack && upstream[s.id]?.status === "newer" ? undefined : upstream[s.id]} />
         <small>
           {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => (company.agents.find((c) => c.id === a.id) && !harnessLoadsSkills(company.agents.find((c) => c.id === a.id)!.agentKind) ? `${a.name} (can't load skills)` : a.name)).join(", ") : "nobody yet"}
         </small>
