@@ -21,6 +21,11 @@ export type CheckHoldDeps = {
   now?: () => Date;
   /** The head commit of a ticket's branch (null when it can't be read). Without it the standing sweep (BOS-2114) does nothing and a pass is released as before. */
   branchHead?: (ticketId: string) => Promise<string | null>;
+  /**
+   * BOS-2303: starts the merge of a ticket approved while its quick check ran (Boss Man's hold, review-holds releaseReadyHolds).
+   * The merge itself then sends it back if the check failed. Without it the release sweep does the same a little later.
+   */
+  releaseHolds?: (ticketId: string) => Promise<unknown>;
 };
 
 export function checkHoldService(db: Db, deps: CheckHoldDeps) {
@@ -126,6 +131,7 @@ export function checkHoldService(db: Db, deps: CheckHoldDeps) {
     onEnded: async (job: CheckJob) => {
       if (job.kind !== "pre_review") return;
       await settle(job.ticketId);
+      await Promise.resolve(deps.releaseHolds?.(job.ticketId)).catch(() => undefined);
     },
     /** Every held ticket, for the sweep that catches an end this process never saw (a restart, a crash between the job and here). */
     sweepProgress,

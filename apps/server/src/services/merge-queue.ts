@@ -788,6 +788,12 @@ export function mergeQueueService(
         // R28: what holds this row is only waits on other tickets (Boss Man's own hold, or none yet): note them for the line's one verdict.
         const waitIds = holds.find((h): h is Extract<typeof h, { kind: "waits" }> => h.kind === "waits")?.ids ?? [];
         if (waitIds.length && holds.every((h) => h.kind === "waits" || (h.kind === "hold" && hold?.system))) heldWaits.set(r.id, { ids: waitIds, since: hold?.createdAt ?? r.lastActivityAt.toISOString() });
+        const checking = holds.some((h) => h.kind === "check");
+        // BOS-2303: approved while its own quick check runs; with or without Boss Man's hold yet, it is not next in line.
+        if (checking && (!hold || hold.system)) {
+          waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold?.label ?? "waits for its quick check"}`, stuck: false, next: "It merges by itself once its quick check passes; a failure sends it back to its agent.", actor: "system", decisionId: null });
+          continue;
+        }
         if (hold) {
           // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
           if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
