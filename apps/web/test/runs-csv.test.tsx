@@ -62,4 +62,27 @@ describe("Download CSV button", () => {
     expect(saved).not.toBeNull();
     expect(await (saved as unknown as Blob).text()).toContain("2026-11-08T12:00:00.000Z,App Co,Engineer");
   });
+
+  it("BOS-2317: with a ticket search plus company and result filters, asks for all of them and exports only what came back", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/runs/recent")) urls.push(url);
+        // Only a request carrying the search gets the one matching run.
+        return new Response(JSON.stringify(url.startsWith("/api/runs/recent") ? (url.includes("q=BOS-2250") ? [run({ id: "match", ticketId: "t1", ticket: "Matching ticket" })] : [run({ id: "other", ticketId: "t2", ticket: "Other ticket" })]) : []), { status: 200 });
+      }),
+    );
+    let saved: Blob | null = null;
+    URL.createObjectURL = ((b: Blob) => ((saved = b), "blob:x")) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = () => {};
+    localStorage.setItem("bm.runs.filter", JSON.stringify({ companyId: "co-1", agentId: "", result: "failed", q: "BOS-2250" }));
+    render(<Runs companies={companies} />);
+    await screen.findByText("Matching ticket");
+    expect(urls.at(-1)).toBe("/api/runs/recent?limit=50&companyId=co-1&result=failed&q=BOS-2250");
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    const text = await (saved as unknown as Blob).text();
+    expect(text).toContain("Matching ticket");
+    expect(text).not.toContain("Other ticket");
+  });
 });
