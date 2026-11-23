@@ -75,6 +75,15 @@ describe("mergeLineHealth", () => {
     expect(mergeLineHealth(base, { now: NOW })).toMatchObject({ state: "over_capacity", advice: null });
   });
 
+  it("BOS-2361: every merge waiting for another ticket's landing turn still counts as no landing", () => {
+    const waiting = queue(3, { state: "waiting_for_turn", label: "waiting for X-1 to land", stuck: false });
+    const line = mergeLineHealth(input({ waiting, recent: [merged(100, 1)] }), { now: NOW });
+    expect(line).toMatchObject({ state: "stuck", cause: "no_landing", others: 2 });
+    expect((line as { reason: string }).reason).toContain("3 wait for another ticket's landing turn");
+    // Landing within 45 minutes is not stuck.
+    expect(mergeLineHealth(input({ waiting, recent: [merged(10, 1)] }), { now: NOW }).state).not.toBe("stuck");
+  });
+
   it("nothing landed for 45+ minutes while work waits: stuck, with the step that fixes it", () => {
     const line = mergeLineHealth(input({ waiting: queue(3), recent: [merged(100, 1)] }), { now: NOW });
     expect(line).toMatchObject({ state: "stuck", cause: "no_landing", title: "Nothing has merged for 1 h 40 min", others: 2 });

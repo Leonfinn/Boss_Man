@@ -2,6 +2,7 @@
 // other tickets' pushes wait for it, but never longer than the cap. The clock is injected: no test waits on the wall clock.
 import { describe, expect, it } from "vitest";
 import { LandingTurns, REBUILDS_FOR_TURN } from "../src/services/landing-turn.js";
+import { holderPhase } from "../src/services/merge-status.js";
 
 const P = "project-1";
 const HOUR = 60 * 60_000;
@@ -128,5 +129,71 @@ describe("landing turns (BOS-1762)", () => {
     expect(t.queued(P, "d")).toBe(false);
     t.done(P, "c");
     expect(t.snapshot()).toEqual([]);
+  });
+});
+
+// BOS-2361: a promotion is recorded like a direct take, and snapshot() releases a turn past its cap.
+describe("landing turn events (BOS-2361)", () => {
+  const earn = (t: LandingTurns, id: string, cap = HOUR) => {
+    t.rebuilt(P, id, cap);
+    return t.rebuilt(P, id, cap).turn;
+  };
+
+  it("promoting the next in line reports a taken event (done and expiry); a direct take reports none itself", () => {
+    const { t, advance } = turns();
+    const seen: unknown[] = [];
+    t.onEvent = (e) => seen.push(e);
+    expect(earn(t, "a")).toBe("taken");
+    expect(earn(t, "b", 2 * HOUR)).toBe("queued");
+    expect(earn(t, "c")).toBe("queued");
+    expect(seen).toEqual([]);
+    t.done(P, "a");
+    expect(seen).toEqual([{ action: "taken", projectId: P, ticketId: "b", capMs: 2 * HOUR }]);
+    advance(2 * HOUR);
+    t.check(P);
+    expect(seen[1]).toEqual({ action: "taken", projectId: P, ticketId: "c", capMs: HOUR });
+  });
+
+  it("snapshot releases a turn past its cap, reports it expired, and shows the next in line as holder", () => {
+    const { t, advance } = turns();
+    const seen: Array<{ action: string; ticketId: string }> = [];
+    t.onEvent = (e) => seen.push(e);
+    earn(t, "a");
+    earn(t, "b");
+    advance(HOUR);
+    const snap = t.snapshot();
+    expect(snap).toEqual([{ projectId: P, holder: expect.objectContaining({ ticketId: "b" }), line: [] }]);
+    expect(seen.map((e) => `${e.action}:${e.ticketId}`)).toEqual(["taken:b", "expired:a"]);
+    // A second look reports nothing more.
+    t.snapshot();
+    expect(seen).toHaveLength(2);
+  });
+
+  it("snapshot with no one in line drops an expired turn entirely", () => {
+    const { t, advance } = turns();
+    const seen: Array<{ action: string; ticketId: string }> = [];
+    t.onEvent = (e) => seen.push(e);
+    earn(t, "a");
+    advance(HOUR);
+    expect(t.snapshot()).toEqual([]);
+    expect(seen).toEqual([{ action: "expired", projectId: P, ticketId: "a", capMs: HOUR }]);
+  });
+});
+
+describe("holderPhase (BOS-2361)", () => {
+  const ctx = (p: { running?: boolean; phase?: string; ci?: number; turn?: boolean }) =>
+    ({
+      landings: new Map(p.running === false ? [] : [["a", { state: "running" }]]),
+      phases: new Map(p.phase ? [["a", p.phase]] : []),
+      ciWaits: new Map(p.ci ? [["a", { since: p.ci, waiting: [] }]] : []),
+      turnWaits: new Map(p.turn ? [["a", {}]] : []),
+    }) as never;
+
+  it("says what the holder's merge is doing", () => {
+    expect(holderPhase(ctx({ phase: "checking" }), "a")).toBe("merge check");
+    expect(holderPhase(ctx({ phase: "merging" }), "a")).toBe("building the merge copy or pushing");
+    expect(holderPhase(ctx({ ci: Date.parse("2026-11-23T14:05:30Z") }), "a")).toBe("waiting for GitHub CI since 14:05 UTC");
+    expect(holderPhase(ctx({ turn: true }), "a")).toBe("waiting for another ticket's landing turn");
+    expect(holderPhase(ctx({ running: false }), "a")).toBe("no merge running");
   });
 });
