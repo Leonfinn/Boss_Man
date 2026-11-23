@@ -383,6 +383,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
             </div>
           </div>
         )}
+        {list.data && usageList.error && <LoadError what="how often each rule matched" message={usageList.error.message} onRetry={usageList.reload} />}
         {list.data && <FilterCount shown={shownRules.length} total={rules.length} f={filter} />}
         {list.data && <RuleRows
           rules={shownRules}

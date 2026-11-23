@@ -269,4 +269,13 @@ describe("decision rules", () => {
     expect(screen.getAllByText("Not used in 30 days")).toHaveLength(1);
     expect(screen.getByText(/1 this week · 1 in 30 days · last matched today/)).toBeTruthy();
   });
+
+  it("keeps the rule list working and shows Retry when the usage load fails", async () => {
+    const list = { company: [{ id: "r1", companyId: "c1", name: "Busy rule", match: { commandPattern: "^ls" }, outcome: "allow", position: 0 }], global: [], defaults: [] };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (url.includes("/usage") ? new Response(JSON.stringify({ error: "Boom" }), { status: 500 }) : new Response(JSON.stringify(list), { status: 200 }))));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    expect(await screen.findByRole("button", { name: /retry/i })).toBeTruthy();
+    expect(screen.getByText("Busy rule")).toBeTruthy();
+    expect(screen.queryByText("Not used in 30 days")).toBeNull();
+  });
 });
