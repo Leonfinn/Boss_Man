@@ -20,6 +20,12 @@ describe("ensureCiIdentityCard", () => {
       expect(open[0]!.dedupeKey).toBe(ciIdentityKey(co!.id));
       const steps = (open[0]!.context as { steps: string[] }).steps.join("\n");
       expect(steps).toContain("Settings → Secrets");
+      // BOS-2335: a collaborator can't make a fine-grained token for the repo, so the card asks for a classic one.
+      expect(steps).toContain("Tokens (classic) → Generate new token → Generate new token (classic)");
+      expect(steps).toContain("scopes repo and workflow");
+      expect(steps).toContain("Why classic");
+      expect(steps).toContain("No expiration");
+      expect(steps).not.toContain("Fine-grained tokens. Repository access");
       expect(JSON.stringify(open[0])).not.toMatch(/ghp_|github_pat_/);
 
       expect(await ensureCiIdentityCard(db, co!.id, "made-up-token")).toBe("cleared");
