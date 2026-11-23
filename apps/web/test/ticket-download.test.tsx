@@ -72,6 +72,24 @@ describe("ticket Markdown (BOS-2314)", () => {
     expect(urls).toEqual(["/api/tickets/t1/messages", "/api/tickets/t1/messages?before=m3"]);
   });
 
+  it("holds every message of a 1,203-message ticket: the newest 500 and every older page", async () => {
+    // Like the server: pages of up to 500, newest first page, `before=` the oldest id shown.
+    const all = Array.from({ length: 1203 }, (_, i) => msg(`m${String(i).padStart(4, "0")}`, new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const before = /before=([^&]+)/.exec(url)?.[1];
+        const end = before ? all.findIndex((m) => m.id === before) : all.length;
+        return Promise.resolve(json({ items: all.slice(Math.max(0, end - 500), end), hasMore: end > 500 }));
+      }),
+    );
+    const got = await fetchAllMessages("t1");
+    expect(got.map((m) => m.id)).toEqual(all.map((m) => m.id));
+    const md = ticketMarkdown(TICKET, got, null);
+    expect(md.match(/^\*\*Sam\*\* · /gm)).toHaveLength(1203);
+    expect(md.indexOf("text m0000")).toBeLessThan(md.indexOf("text m1202"));
+  });
+
   it("stops when a page brings nothing new, so a server slip can't loop forever", async () => {
     const f = vi.fn(() => Promise.resolve(json({ items: [msg("m1", "2026-01-01T00:00:01Z")], hasMore: true })));
     vi.stubGlobal("fetch", f);
