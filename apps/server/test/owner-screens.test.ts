@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkAsk } from "../src/services/decisions.js";
+import { hasWalkingSettingsPath, walkingMenuRoot } from "../src/services/owner-screens.js";
 import { THIS_HOST_POINTER, lintOwnerSteps } from "../src/services/steps.js";
 
 // R8 (the screen a step sends the owner to) and R13 (the value of a field a step tells them to fill in), BOS-442.
@@ -183,5 +184,46 @@ describe("R17 counts a Settings path only if it walks (BOS-1649)", () => {
   it("accepts Boss Man's own This server pointer", () => {
     expect(r17(`Remove the NTFY_IMAGE line from the .env file the stack starts with (${THIS_HOST_POINTER} shows it).`)).toEqual([]);
     expect(r8([`Open ${THIS_HOST_POINTER}.`])).toEqual([]);
+  });
+});
+
+// BOS-2266: the two path-reading helpers behind R8/R17/R21, tested directly so a break in them can't hide behind
+// lintOwnerSteps. hasWalkingSettingsPath is walkingMenuRoot limited to the Settings menu entry.
+describe("hasWalkingSettingsPath: a Settings path that walks (BOS-2266)", () => {
+  it("is true for a Settings path that reaches a real page, tab or heading", () => {
+    for (const s of [
+      "Open Settings → Secrets and press Save.",
+      "Restart the ntfy service (Settings → Server and runner → Updates).",
+      "Settings → Reviews should look as expected.",
+    ])
+      expect(hasWalkingSettingsPath(s), s).toBe(true);
+  });
+
+  it("is false for a refused path, a non-Settings path, or no path at all", () => {
+    for (const s of [
+      "Open Settings → Network settings.",
+      "Open Projects → Development → Config and press Save.",
+      "Open the dashboard → Overview.",
+      "Open Settings and look around.",
+    ])
+      expect(hasWalkingSettingsPath(s), s).toBe(false);
+  });
+});
+
+describe("walkingMenuRoot: the menu entry a walking path starts from (BOS-2117)", () => {
+  it("names the menu entry on the normal case, and finds a path that follows a plain sentence", () => {
+    expect(walkingMenuRoot("Open Settings → Secrets and press Save.")).toBe("Settings");
+    expect(walkingMenuRoot("Open Wiki → Deleted pages and check the list.")).toBe("Wiki");
+    expect(walkingMenuRoot("Open the log first. Then Settings → Secrets.")).toBe("Settings");
+  });
+
+  it("only limits it to the given menu entry, and a path starting at a tab (not the menu) gives null", () => {
+    expect(walkingMenuRoot("Open Settings → Secrets.", "settings")).toBe("Settings");
+    expect(walkingMenuRoot("Open Settings → Secrets.", "wiki")).toBeNull();
+    expect(walkingMenuRoot("Open Secrets → Add and choose Claude token.", "secrets")).toBeNull();
+  });
+
+  it("gives null for a menu entry whose path the walker refuses", () => {
+    expect(walkingMenuRoot("Open Settings → Notifications and tick the box.")).toBeNull();
   });
 });
