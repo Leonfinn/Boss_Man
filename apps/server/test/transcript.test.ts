@@ -67,6 +67,24 @@ describe("run transcripts (R43)", () => {
     ]);
   });
 
+  it("returns the run's model, four token counts and summed cost for the Run page header (BOS-2367)", async () => {
+    const c = await setup();
+    const fs = (await c.app.inject({ method: "POST", url: "/api/funding-sources", headers: { cookie: c.cookie }, payload: { name: "API", kind: "api_payg", provider: "anthropic" } })).json();
+    const id = randomUUID();
+    const bare = randomUUID();
+    await c.db.insert(runs).values([
+      { id, companyId: c.company.id, agentId: c.ceo.id, model: "opus", inputTokens: 41_000, outputTokens: 3_000, cachedReadTokens: 1_200_000, cachedWriteTokens: 80_000 },
+      { id: bare, companyId: c.company.id, agentId: c.ceo.id },
+    ]);
+    await c.db.insert(costEvents).values([
+      { fundingSourceId: fs.id, companyId: c.company.id, runId: id, costMicros: 300_000 },
+      { fundingSourceId: fs.id, companyId: c.company.id, runId: id, costMicros: 120_000 },
+    ]);
+    expect((await c.get(`/api/runs/${id}/transcript`)).json().run).toMatchObject({ model: "opus", inputTokens: 41_000, outputTokens: 3_000, cachedReadTokens: 1_200_000, cachedWriteTokens: 80_000, costMicros: 420_000 });
+    // No figures reported: null, so the page can say "not reported" rather than 0.
+    expect((await c.get(`/api/runs/${bare}/transcript`)).json().run).toMatchObject({ inputTokens: null, outputTokens: null, cachedReadTokens: null, cachedWriteTokens: null });
+  });
+
   it("filters finished runs by agent and result, and pages older ones with before", async () => {
     const c = await setup();
     const [other] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Helper", role: "worker", agentKind: "claude" }).returning();
