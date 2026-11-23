@@ -81,10 +81,20 @@ grep -q "SBOM for linux/arm64" "$S/err" || fail "the missing SBOM must be named"
 
 # release.json: digest per image and per architecture, both registries agree.
 for n in server launcher netguard; do echo "$D1" >"$S/state/ghcr.io_me_boss-man-${n}_sha-0123456789ab"; echo "$D1" >"$S/state/docker.io_me2_boss-man-${n}_sha-0123456789ab"; done
-json=$(run "$V" DOCKERHUB_PUBLISH=true DOCKERHUB_USERNAME=u DOCKERHUB_TOKEN=t $P release-json 0.1.0-beta.1 0123456789abcdef0123456789abcdef01234567 sha-0123456789ab)
+REAL_COMMIT=$(git rev-parse HEAD) # release-json reads the Claude pack lockfile at the commit being released
+WANT_PACK=$(sha256sum apps/runner/claude-pack/package-lock.json | cut -c1-24)
+json=$(run "$V" DOCKERHUB_PUBLISH=true DOCKERHUB_USERNAME=u DOCKERHUB_TOKEN=t $P release-json 0.1.0-beta.1 "$REAL_COMMIT" sha-0123456789ab)
+# BOS-1225: the signed release also names the Claude pack hash (same rule as the runner's lockHash) and the install layout.
+echo "$json" | jq -e --arg h "$WANT_PACK" '.packHash == $h and (.packHash | test("^[0-9a-f]{24}$")) and .installLayout == 1' >/dev/null || fail "release.json must carry packHash and installLayout: $json"
+if run "$V" DOCKERHUB_PUBLISH=true DOCKERHUB_USERNAME=u DOCKERHUB_TOKEN=t $P release-json 0.1.0-beta.1 0123456789abcdef0123456789abcdef01234567 sha-0123456789ab 2>"$S/err"; then fail "a commit without the pack lockfile must fail"; fi
+grep -q "Claude pack" "$S/err" || fail "the missing lockfile must be explained"
+# The updater image is a known name with its own Dockerfile, and is not published until PUBLISH_IMAGES lists it.
+[ "$(run $P dockerfile boss-man-updater)" = apps/updater/Dockerfile ] || fail "updater dockerfile path"
+run PUBLISH_IMAGES="boss-man-server boss-man-updater" $P images | grep -qx boss-man-updater || fail "the updater image must be publishable"
+run $P images | grep -qx boss-man-updater && fail "the updater must not be published until PUBLISH_IMAGES lists it"
 echo "$json" | jq -e --arg d "$D1" --arg a "$DA" --arg b "$DB" '.schema == 1 and .version == "0.1.0-beta.1" and (.images | length) == 3 and .images[0].digest == $d and .images[0].platforms["linux/amd64"] == $a and .images[0].platforms["linux/arm64"] == $b and (.images[0].platforms | length) == 2 and (.registries | length) == 2' >/dev/null || fail "release.json shape: $json"
 echo "$D2" >"$S/state/docker.io_me2_boss-man-launcher_sha-0123456789ab"
-if run "$V" DOCKERHUB_PUBLISH=true DOCKERHUB_USERNAME=u DOCKERHUB_TOKEN=t $P release-json 0.1.0 0123456789abcdef0123456789abcdef01234567 sha-0123456789ab 2>/dev/null; then fail "registries that disagree must fail"; fi
+if run "$V" DOCKERHUB_PUBLISH=true DOCKERHUB_USERNAME=u DOCKERHUB_TOKEN=t $P release-json 0.1.0 "$REAL_COMMIT" sha-0123456789ab 2>/dev/null; then fail "registries that disagree must fail"; fi
 if run "$V" $P release-json latest 0123456789abcdef0123456789abcdef01234567 sha-0123456789ab 2>/dev/null; then fail "a bad version must fail"; fi
 # resolve-commit: blank = main's head; a typed commit must be 40 hex and on main (a branch-only commit is refused).
 G="$S/repo"; mkdir -p "$G"

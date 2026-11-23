@@ -56,6 +56,23 @@ describe("answered cards list (BOS-2187)", () => {
     expect(third.next).toBeNull();
   });
 
+  it("returns the company name and the owner's note (BOS-2312), and no note on a withdrawn card", async () => {
+    ctx = await setup();
+    const at = new Date("2026-11-03T09:00:00.000Z");
+    const base = { companyId: ctx.companyId, kind: "question" as const, options: [], recommendedOption: "a" };
+    await ctx.db.insert(decisions).values([
+      { ...base, question: "Noted", status: "answered", answer: "a", answeredAt: at, context: { answerNote: "Because of cost" } },
+      { ...base, question: "CEO noted", status: "answered", answer: "a", answeredAt: new Date(at.getTime() - 1000), context: { settled: { name: "Casey", note: "CEO says so", at: "x" } } },
+      { ...base, question: "Gone", status: "withdrawn", answer: null, answeredAt: new Date(at.getTime() - 2000), context: { answerNote: "stale" } },
+    ]);
+    const r = (await ctx.get("/api/decisions/answered")).json() as { items: Array<{ question: string; companyName: string; note: string | null }> };
+    expect(r.items.map((i) => [i.question, i.companyName, i.note])).toEqual([
+      ["Noted", "App Co", "Because of cost"],
+      ["CEO noted", "App Co", "CEO says so"],
+      ["Gone", "App Co", null],
+    ]);
+  });
+
   it("filters by text in the question, and a malformed cursor is ignored rather than failing", async () => {
     ctx = await setup();
     await ctx.db.insert(decisions).values([

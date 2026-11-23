@@ -9,7 +9,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const item = (n: number, over: Record<string, unknown> = {}) => ({ id: `d${n}`, question: `Question ${n}`, status: "answered", answer: "Stripe", by: "owner", byName: null, at: "2026-11-01T10:00:00.000Z", ticket: { id: `t${n}`, title: `Ticket ${n}`, ref: `BOS-${n}` }, ...over });
+const item = (n: number, over: Record<string, unknown> = {}) => ({ id: `d${n}`, question: `Question ${n}`, status: "answered", answer: "Stripe", by: "owner", byName: null, companyName: "App Co", note: n === 1 ? "Use the test key, please" : null, at: "2026-11-01T10:00:00.000Z", ticket: { id: `t${n}`, title: `Ticket ${n}`, ref: `BOS-${n}` }, ...over });
 const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 
 describe("Answered list", () => {
@@ -32,6 +32,44 @@ describe("Answered list", () => {
     await screen.findByText("Question 2");
     expect(container.textContent).toContain("Casey");
     expect(screen.queryByText("Show older")).toBeNull();
+  });
+
+  it("Download CSV follows every next cursor with the search and company, and saves one row per card", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      urls.push(String(url));
+      if (String(url).includes("cursor=c1")) return reply({ items: [item(2, { by: "ceo", byName: "Casey", answer: "Yes, ship it" })], next: null });
+      return reply({ items: [item(1, { question: "Pay, now?" })], next: "c1" });
+    }));
+    let saved: Blob | null = null;
+    URL.createObjectURL = ((b: Blob) => ((saved = b), "blob:x")) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = () => {};
+    const click = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {};
+    try {
+      const { container } = render(<AnsweredList companyId="11111111-1111-4111-8111-111111111111" />);
+      const details = container.querySelector("details")!;
+      details.open = true;
+      fireEvent(details, new Event("toggle"));
+      await screen.findByText("Pay, now?");
+      fireEvent.change(screen.getByLabelText("Search answered cards"), { target: { value: "pay" } });
+      await waitFor(() => expect(urls.some((u) => u.includes("q=pay"))).toBe(true));
+      urls.length = 0;
+      fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+      await waitFor(() => expect(saved).not.toBeNull());
+      expect(urls).toHaveLength(2);
+      expect(urls[0]).toContain("limit=100");
+      expect(urls[0]).toContain("q=pay");
+      expect(urls[0]).toContain("companyId=11111111");
+      const lines = (await (saved as unknown as Blob).text()).trim().split("\r\n");
+      expect(lines[0]).toBe("Answered at,Company,Ticket,Question,Answer,Note,Answered by");
+      expect(lines).toHaveLength(3);
+      expect(lines[1]).toBe('2026-11-01T10:00:00.000Z,App Co,BOS-1,"Pay, now?",Stripe,"Use the test key, please",owner');
+      expect(lines[2]).toContain("Yes");
+      expect(lines[2]).toContain("Casey");
+    } finally {
+      HTMLAnchorElement.prototype.click = click;
+    }
   });
 
   it("says so when nothing has been answered, and shows an error when the read fails", async () => {

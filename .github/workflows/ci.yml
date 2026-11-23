@@ -55,7 +55,7 @@ jobs:
           WEEKLY: "47 4 * * 0"
         run: |
           # images_paths: Docker builds and container tests, which the runner can't do (it has no Docker socket).
-          images_paths='(^|/)Dockerfile|^docker-compose|^deploy/|^scripts/|^skills/|^pnpm-lock\.yaml|^\.github/workflows/|^apps/runner/|check-worker|^packages/shared/src/protocol'
+          images_paths='(^|/)Dockerfile|^docker-compose|^deploy/|^scripts/|^skills/|^pnpm-lock\.yaml|^\.github/workflows/|^apps/runner/|^apps/updater/|check-worker|^packages/shared/src/protocol'
           # The nightly run builds no images; the weekly run and a run by hand build everything.
           if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$SCHEDULE" != "$WEEKLY" ]; then
             printf 'check=true\nimages=false\nhoststeps=true\nweb=true\n' >>"$GITHUB_OUTPUT"; exit 0
@@ -251,6 +251,8 @@ jobs:
         run: docker build -f apps/launcher/Dockerfile -t boss-man-launcher:current .
       - name: Build the netguard image
         run: docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
+      - name: Build the updater image (BOS-1225)
+        run: docker build -f apps/updater/Dockerfile -t boss-man-updater:ci .
       - name: Runner image has git, OpenCode and the runner, and NO Anthropic code (DR-050)
         run: |
           # The runner image may be published, so it must carry no Anthropic code: no @anthropic-ai package,
@@ -269,6 +271,8 @@ jobs:
         run: scripts/image-tests.sh netguard
       - name: Runner image holds no Anthropic code (DR-050)
         run: scripts/image-tests.sh no-anthropic
+      - name: Updater image - group 0 writes nothing, settings are required, /status needs the key (BOS-1225)
+        run: scripts/image-tests.sh updater
       - name: Server image ships the separate migrate step
         run: docker run --rm --entrypoint sh boss-man-server:ci -c 'test -f dist/migrate.js && DATABASE_URL= node dist/migrate.js 2>&1 | grep -q "DATABASE_URL is required"'
       - name: Server image serves the web UI
