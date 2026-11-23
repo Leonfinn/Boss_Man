@@ -39,6 +39,8 @@ function answer(p: string): unknown {
   if (p === "/api/runner-report") return { live: [], update: null };
   if (p === "/api/companies/c1/agents") return [agent];
   if (p === "/api/companies/c1/projects") return [];
+  // Settings → Team and CEO lists the chapters (an array) beside the approvals setting.
+  if (p === "/api/companies/c1/chapters") return [];
   if (p === "/api/companies/c1/models") return { runner: {}, api: [] };
   if (p === "/api/companies/c1/review-policy") return { levels: {} };
   if (p === "/api/notifications/settings") return { quiet: false, start: "22:00", end: "07:00", phoneAddress: null };
