@@ -57,6 +57,8 @@ export const OWNER_CONTROLS = {
     "Send my answer", "Ask the CEO for advice",
     // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
     "Show fewer",
+    // The Answered list's export button (BOS-2312).
+    "Download CSV", "Preparing",
     // The Answered list's button for the next 50 older cards (BOS-2187).
     "Show older",
     // Under each command in a step (the label is set in code, so the test can't read it).

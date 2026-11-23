@@ -19,6 +19,7 @@ const ALWAYS_TTLS: [AlwaysTtl, string][] = [
 import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { buildCsv, download } from "../csv";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -1618,6 +1619,14 @@ type AnsweredItem = { id: string; question: string; status: "answered" | "withdr
 const answeredBy = (i: AnsweredItem) => (i.by === "owner" ? "You" : i.by === "ceo" ? i.byName ?? "The CEO" : i.by === "auto" ? "Automatically" : "Withdrawn by the team");
 const answeredWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
+/** (BOS-2312) The Answered list as CSV: when, ticket, question, answer, who answered. The route returns no note or company, so those are not columns. */
+export function answeredToCsv(rows: AnsweredItem[]): string {
+  return buildCsv(
+    ["Answered at", "Ticket", "Question", "Answer", "Answered by"],
+    rows.map((i) => [i.at, i.ticket?.ref ?? "", i.question, i.status === "answered" ? i.answer ?? "" : "(withdrawn)", i.by === "owner" ? "owner" : i.by === "ceo" ? i.byName ?? "CEO" : i.by === "auto" ? "automatic" : "withdrawn"]),
+  );
+}
+
 /**
  * (BOS-2187) Past answers, newest first, 50 at a time. Read when the owner opens it, so the page costs nothing until then.
  * A search box narrows it to questions containing the text.
@@ -1630,6 +1639,30 @@ export function AnsweredList({ companyId }: { companyId?: string | null }) {
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [done, setDone] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const exportCsv = async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const all: AnsweredItem[] = [];
+      let cursor: string | null = null;
+      do {
+        const params = new URLSearchParams({ limit: "100" });
+        if (cursor) params.set("cursor", cursor);
+        if (text.trim()) params.set("q", text.trim());
+        if (companyId) params.set("companyId", companyId);
+        const r: { items: AnsweredItem[]; next: string | null } = await api(`/api/decisions/answered?${params.toString()}`);
+        all.push(...r.items);
+        cursor = r.next;
+      } while (cursor);
+      download(`answered-cards-${new Date().toISOString().slice(0, 10)}.csv`, answeredToCsv(all));
+    } catch {
+      setExportError("Could not fetch every answered card. Try again.");
+    } finally {
+      setExporting(false);
+    }
+  };
   const load = async (cursor: string | null, q: string) => {
     setBusy(true);
     setError(null);
@@ -1658,7 +1691,11 @@ export function AnsweredList({ companyId }: { companyId?: string | null }) {
     <details data-testid="answered-list" style={{ marginTop: 16 }} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
       <summary style={{ fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Answered</summary>
       <div style={{ marginTop: 8 }}>
-        <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />
+        <input type="search" aria-label="Search answered cards" placeholder="Search the questions" value={text} onChange={(e) => setText(e.target.value)} style={{ maxWidth: 320, marginBottom: 8 }} />{" "}
+        <button type="button" className="btn small" disabled={exporting || (done && items.length === 0)} onClick={() => void exportCsv()}>
+          {exporting ? "Preparing…" : "Download CSV"}
+        </button>
+        {exportError && <p role="alert" className="muted">{exportError}</p>}
         {error && (
           <LoadError what="answered cards" message={error} onRetry={() => void load(null, text)} />
         )}
