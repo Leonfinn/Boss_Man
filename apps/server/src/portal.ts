@@ -65,7 +65,9 @@ export function sendLogo(reply: FastifyReply, logo: { bytes: Buffer; type: strin
   return reply.type(logo.type).header("x-content-type-options", "nosniff").header("content-disposition", "inline").header("cache-control", "private, no-cache").send(logo.bytes);
 }
 
-type Feedback = ReturnType<typeof feedbackService>;
+const xmlEscape = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]!);
+
+type Feedback =ReturnType<typeof feedbackService>;
 
 export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number; counterMaxKeys?: number; clientAddress?: (req: FastifyRequest) => string; mailer?: PortalMailer; portalUrl?: string }) {
   const limits = { ...DEFAULT_PORTAL_LIMITS, ...deps.limits };
@@ -181,7 +183,32 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
     };
   });
 
-  app.get("/api/portal/logo", async (req, reply) => {
+  // The Atom feed of new releases. A feed reader can't send the link secret header, so this answers for the portal at the
+  // bare public address only (the same one `GET /api/portal` shows with no secret); any other request gets the usual 404.
+  app.get("/api/portal/feed.atom", async (req, reply) => {
+    if (!counter.take(`read:${addressOf(req)}`, limits.readsPerIpPerMinute, 60_000)) return reply.code(429).send({ error: "too_many", message: "Please slow down a little." });
+    const p = await portalOf(req, reply);
+    if (!p) return;
+    reply.header("cache-control", "no-store");
+    const title = p.title ?? `${p.company}: what's next`;
+    const base = (deps.portalUrl ?? `${req.protocol}://${req.headers.host ?? "localhost"}`).replace(/\/+$/, "");
+    const entries = await deps.feedback.portalFeed(p.companyId);
+    const home = `${base}/portal.html`;
+    const xml = [
+      `<?xml version="1.0" encoding="utf-8"?>`,
+      `<feed xmlns="http://www.w3.org/2005/Atom">`,
+      `<title>${xmlEscape(`${title}: what's new`)}</title>`,
+      `<id>urn:uuid:${p.companyId}</id>`,
+      `<updated>${(entries[0]?.releasedAt ?? new Date(0)).toISOString()}</updated>`,
+      `<link rel="self" type="application/atom+xml" href="${xmlEscape(`${base}/api/portal/feed.atom`)}"/>`,
+      `<link rel="alternate" type="text/html" href="${xmlEscape(home)}"/>`,
+      ...entries.map((e) => `<entry><title>${xmlEscape(e.title)}</title><id>urn:uuid:${e.id}</id><updated>${e.releasedAt.toISOString()}</updated><link rel="alternate" type="text/html" href="${xmlEscape(home)}"/><summary>${xmlEscape(e.summary)}</summary></entry>`),
+      `</feed>`,
+    ].join("\n");
+    return reply.type("application/atom+xml; charset=utf-8").send(xml);
+  });
+
+  app.get("/api/portal/logo",async (req, reply) => {
     if (!counter.take(`read:${addressOf(req)}`, limits.readsPerIpPerMinute, 60_000)) return reply.code(429).send({ error: "too_many", message: "Please slow down a little." });
     const p = await portalOf(req, reply);
     const logo = p && p.hasLogo ? await deps.feedback.portalLogo(p.companyId) : null;
