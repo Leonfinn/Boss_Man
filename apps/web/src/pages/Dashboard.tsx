@@ -53,7 +53,7 @@ function NoData({ children }: { children: string }) {
   return <span className="chart-empty muted">{children}</span>;
 }
 
-function Chart({ title, days, series, emptyText, failedLink }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string; failedLink?: string }) {
+export function Chart({ title, days, series, emptyText, failedLink }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string; failedLink?: string }) {
   const totals = days.map((d) => series.reduce((n, s) => n + Number(d[s.key] ?? 0), 0));
   const max = Math.max(1, ...totals);
   const label = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;

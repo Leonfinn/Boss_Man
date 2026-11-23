@@ -28,4 +28,9 @@ it("reads result from the link, over a saved filter, and saves it", async () => 
   expect((await screen.findByRole("button", { name: "Failed" })).getAttribute("aria-pressed")).toBe("true");
   await waitFor(() => expect(urls.at(-1)).toBe("/api/runs/recent?limit=50&result=failed"));
   expect(JSON.parse(localStorage.getItem("bm.runs.filter") ?? "{}").result).toBe("failed");
+  // A later visit without the link keeps Failed (it was saved).
+  cleanup();
+  window.location.hash = "#/runs";
+  render(<Runs companies={[] as Company[]} />);
+  expect((await screen.findByRole("button", { name: "Failed" })).getAttribute("aria-pressed")).toBe("true");
 });
