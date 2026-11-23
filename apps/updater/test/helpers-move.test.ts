@@ -166,6 +166,7 @@ describe("test 14: first start, adoption and convergence", () => {
     expect(blue.networks["test_front"]).toEqual(["server-blue-front", "server-live"]);
     expect(blue.labels["com.bossman.release"]).toBe("0.0.9");
     expect(s.daemon.calls.some((c) => c.path.endsWith("/exec") || c.path.includes("-migrate"))).toBe(false);
+    // test-lines-ok: daemon.time is the fake daemon's virtual clock, not wall time; it catches a retry loop that never ends
     expect(s.daemon.time).toBeLessThan(60_000);
     expect(s.state.get().live).toBe("blue");
     expect(s.state.get().currentVersion).toBe("0.0.9");
