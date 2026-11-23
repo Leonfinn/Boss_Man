@@ -30,6 +30,7 @@ export const LEFT_OUT_SETTING_KEYS: Record<string, string> = {
   "fence-unavailable": "an alert marker",
   "guard-unavailable": "an alert marker",
   "idle-slots": "an alert marker",
+  "idle-slots-owner": "an alert marker",
   "runner-hand": "how this server's runner is started",
   merge_brake_off: "an alert marker",
   merge_jam: "an alert marker",
