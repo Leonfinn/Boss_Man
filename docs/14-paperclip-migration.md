@@ -21,19 +21,54 @@ Paperclip's `cancelled` has no Boss Man state, so those tickets arrive as done w
 
 1. **Export the company from Paperclip.** Its company export gives a folder with `COMPANY.md`, `.paperclip.yaml`, `agents/`, `projects/` and `skills/`.
 
-2. **Export the issues** with the read-only query below. Paperclip's built-in database listens on `127.0.0.1:54329` (user and password `paperclip`, database `paperclip`), so run it wherever `psql` can reach that address, usually inside the Paperclip container. Change `'HOL'` to your company's issue prefix. `default_transaction_read_only=on` makes the session refuse any write.
+2. **Export the issues to `paperclip-issues.json`.** Don't skip this step: the company export holds no issues, so without this file the import brings no tickets, no conversations and no wiki pages, and it doesn't warn you.
+
+   Paperclip's built-in database listens on `127.0.0.1:54329` inside the Paperclip container's network (user and password `paperclip`, database `paperclip`). The standard Paperclip image has no `psql`, so running the query inside that container fails with `sh: 1: psql: not found`. Instead, run `psql` from a throwaway Postgres container that joins the Paperclip container's network. It changes nothing in Paperclip: the session is read-only and the container deletes itself when it ends.
+
+   > **Confirmed on TrueNAS SCALE, 22 Nov 2026.** An owner ran this method there and got `paperclip-issues.json`. If a step fails on your host, note the error and the step letter.
+
+   **You need:** a shell on the machine that runs Paperclip's Docker container, as root or as a user allowed to run `docker` (otherwise put `sudo` in front of each `docker` command). The machine needs internet access the first time, to pull the `postgres:17-alpine` image.
+
+   > **Per-host notes.**
+   > - **Plain Linux:** use any shell on the host.
+   > - **Proxmox:** run these inside the VM or LXC container where Docker runs, not on the Proxmox host itself.
+   > - **TrueNAS SCALE:** use System → Shell (or SSH), and work in a folder on one of your pools.
+
+   a. **Make a working folder and go into it.** Everything below reads and writes files in the current folder.
 
 ```sh
-PGPASSWORD=paperclip PGOPTIONS='-c default_transaction_read_only=on' psql -At -v ON_ERROR_STOP=1 \
-  "postgres://paperclip@127.0.0.1:54329/paperclip" \
-  -f paperclip-issues.sql > paperclip-issues.json
+mkdir paperclip-export && cd paperclip-export
 ```
 
-   `paperclip-issues.sql`:
+   b. **Find the Paperclip container.**
 
-```sql
+```sh
+docker ps --filter name=paperclip --format '{{.Names}}  {{.Image}}'
+```
+
+   This lists running containers with `paperclip` in their name, with their images. If it prints nothing, list every running container and find Paperclip's by its image:
+
+```sh
+docker ps --format '{{.Names}}  {{.Image}}'
+```
+
+   Pick the Paperclip **app** container (the one running the Paperclip image), not a database container. If your install has a separate database container, such as `paperclip-db` running a `postgres` image, Paperclip uses that database rather than the built-in one: follow "Paperclip uses an external database" below.
+
+   Then put the app container's name into `CONTAINER`, typing it yourself, and check it:
+
+```sh
+CONTAINER=paperclip-server-1
+echo "$CONTAINER"
+```
+
+   Replace `paperclip-server-1` with the name from the list. Don't go on until `echo` prints that name: with an empty name, step d fails.
+
+   c. **Create `paperclip-issues.sql`.** Copy the whole block, from `cat` to the final `SQL` line, and paste it into the shell. The one value to change is `HOL` on the marked line: replace it with your company's issue prefix (the letters before the number in an issue ID such as `HOL-123`), keeping the quotes.
+
+```sh
+cat > paperclip-issues.sql <<'SQL'
 -- Boss Man: export one Paperclip company's issues, comments and issue documents as one JSON list.
--- Read-only: it only selects. Change 'HOL' to your company's issue prefix.
+-- Read-only: it only selects.
 SELECT coalesce(json_agg(x ORDER BY x.created_at), '[]'::json)
 FROM (
   SELECT
@@ -56,14 +91,70 @@ FROM (
   JOIN companies co ON co.id = i.company_id
   LEFT JOIN issues parent ON parent.id = i.parent_id
   LEFT JOIN projects p ON p.id = i.project_id
+  -- ▼▼▼ CHANGE 'HOL' ON THE NEXT LINE TO YOUR COMPANY'S ISSUE PREFIX ▼▼▼
   WHERE co.issue_prefix = 'HOL' AND i.identifier IS NOT NULL
 ) x;
+SQL
 ```
 
-3. **Put `paperclip-issues.json` next to `COMPANY.md`** in the export folder, then zip the folder.
+   `ls paperclip-issues.sql` should now list the file.
 
-4. **In Boss Man:** Settings → **Import and export** → pick the zip. Read the preview: the notes say what was left out or renamed. Press **Import as a new company**.
+   d. **Run the query from a throwaway Postgres container.** `--network container:"$CONTAINER"` puts it on the Paperclip container's network, so `127.0.0.1:54329` reaches Paperclip's database. `default_transaction_read_only=on` makes the session refuse any write, and `--rm` deletes the container when the query ends. Don't add `-t` to `docker run`: it would mix terminal codes into the JSON.
 
-5. **Afterwards**, work through the checklist decision: add each secret and grant it, give agents a funding source, read any skill scripts it lists, then unpause agents one at a time.
+```sh
+docker run --rm -i --network container:"$CONTAINER" \
+  -v "$PWD":/work -w /work \
+  -e PGPASSWORD=paperclip -e PGOPTIONS='-c default_transaction_read_only=on' \
+  postgres:17-alpine \
+  psql -At -v ON_ERROR_STOP=1 "postgres://paperclip@127.0.0.1:54329/paperclip" \
+  -f paperclip-issues.sql > paperclip-issues.json
+```
+
+   e. **Check the result.**
+
+```sh
+ls -lh paperclip-issues.json && head -c 300 paperclip-issues.json
+```
+
+   The file should start with `[{"identifier":"HOL-` (with your prefix in place of `HOL`). If it shows only `[]`, the prefix in `paperclip-issues.sql` is wrong: fix it in step c and run step d again. If the file is empty, read the error `docker run` printed: `connection refused` usually means the container name in step b is wrong, or Paperclip uses an external database (see below).
+
+   **Other setups.**
+   - **The Paperclip image has `psql`.** Check with `docker exec "$CONTAINER" which psql`. If that prints a path, you can instead copy `paperclip-issues.sql` into the container and run the query there:
+
+```sh
+docker cp paperclip-issues.sql "$CONTAINER":/tmp/paperclip-issues.sql
+docker exec -i -w /tmp -e PGPASSWORD=paperclip -e PGOPTIONS='-c default_transaction_read_only=on' "$CONTAINER" \
+  psql -At -v ON_ERROR_STOP=1 "postgres://paperclip@127.0.0.1:54329/paperclip" \
+  -f paperclip-issues.sql > paperclip-issues.json
+```
+
+   - **Paperclip uses an external database** (a separate database container such as `paperclip-db`, or its own Postgres server, not the built-in one on `127.0.0.1:54329`). Point `psql` at that database instead: in step d, replace the `postgres://…` address and `PGPASSWORD` with that database's own host, port, user, password and database name, for example `postgres://paperclip@192.168.1.50:5432/paperclip`. If the database is reachable from the host, you can drop `--network container:"$CONTAINER"`.
+
+3. **Copy `paperclip-issues.json` to the computer that holds the export folder.** Skip this if it is the same machine as the Docker host.
+
+   > **Not yet confirmed.** This step has not yet been run on an owner's machine.
+
+   You copy the file with `scp`, run from the computer that holds the export folder (on Windows 10 and later, `scp` works in PowerShell). The Docker host needs SSH turned on. SSH usually refuses a `root` login, so log in as an ordinary user, and first put the file in that user's home folder, owned by them. On the Docker host, in the working folder, run this, replacing `alex` with that user's login:
+
+```sh
+sudo cp paperclip-issues.json ~alex/
+sudo chown alex: ~alex/paperclip-issues.json
+```
+
+   (Leave out `sudo` if you are already root.) Then, on the computer that holds the export folder, go into that folder (the one with `COMPANY.md`) and run this, replacing `alex` with the login and `192.168.1.50` with the Docker host's address:
+
+```sh
+scp alex@192.168.1.50:paperclip-issues.json .
+```
+
+   It asks for that user's password, unless you use an SSH key. `ls paperclip-issues.json` in the export folder should then list the file. If `scp` says `Connection refused`, SSH is off on the Docker host; if it says `Permission denied`, check the login and password, and that the file is in that user's home folder.
+
+   > **Worked example: TrueNAS SCALE.** Turn SSH on in System → Services → SSH. Log in as the admin user `truenas_admin`, not `root`: in the commands above, replace `alex` with `truenas_admin`.
+
+4. **Make sure `paperclip-issues.json` is next to `COMPANY.md`** in the export folder, then zip the folder.
+
+5. **In Boss Man:** Settings → **Import and export** → pick the zip. Read the preview: the notes say what was left out or renamed. Press **Import as a new company**.
+
+6. **Afterwards**, work through the checklist decision: add each secret and grant it, give agents a funding source, read any skill scripts it lists, then unpause agents one at a time.
 
 **Rotate any secret that ever appeared in a Paperclip run log or issue before adding it to Boss Man.** The issues export carries comments verbatim, so a key pasted into a comment comes across too.

@@ -156,6 +156,42 @@ describe("Paperclip issues (docs/11, step 5)", () => {
   });
 });
 
+describe("Paperclip fields over Boss Man's limits are split or moved, never refused", () => {
+  it("splits a 250,000-character comment, moves a 250,000-character description to a wiki page and shortens a long title", async () => {
+    const log = "L".repeat(250_000);
+    const issues = [{ identifier: "ACM-1", title: "T".repeat(700), status: "todo", project: "Site", description: "D".repeat(250_000), comments: [{ at: "2026-10-01T10:00:00Z", by: "user-abc123", body: log }], documents: [] }];
+    const zip = Buffer.from(zipSync(Object.fromEntries([...Object.entries(FILES), ["paperclip-issues.json", JSON.stringify(issues)] as [string, string]].map(([p, t]) => [`acme/${p}`, strToU8(t)])))).toString("base64");
+    const req = await setup();
+    const imported = await req("POST", "/api/companies/import", { zip });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const id = imported.json().companyId as string;
+    const { unzipSync, strFromU8 } = await import("fflate");
+    const out = unzipSync(new Uint8Array((await req("GET", `/api/companies/${id}/export?wiki=1&tickets=all`)).rawPayload));
+    const ticket = JSON.parse(strFromU8(out["tickets.jsonl"]!).trim().split("\n")[0]!);
+    expect(ticket.title.length).toBeLessThanOrEqual(500);
+    expect(ticket.conversation).toHaveLength(3);
+    // No text is lost: every L comes back, across the parts.
+    const parts = ticket.conversation.map((m: { text: string }) => m.text);
+    expect(parts[0]).toContain("(part 1 of 3)");
+    expect(parts.join("").replace(/\(part \d of 3\)\n\n/g, "").split("L").length - 1).toBe(250_000);
+    const page = Object.keys(out).filter((p) => p.startsWith("wiki/imported/acm-1/ticket-description"));
+    expect(page.length).toBeGreaterThan(0);
+    expect(page.map((p) => strFromU8(out[p]!).split("D").length - 1).reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(250_000);
+    expect(ticket.body).toContain("ticket-description");
+  });
+
+  it("reports every bad ticket line at once", async () => {
+    // A Boss Man package (not Paperclip's), so the oversized bodies reach the importer's own check unchanged.
+    const lines = [1, 2, 3].map((n) => JSON.stringify({ ref: `ACM-${n}`, project: "site", title: "t", body: "b".repeat(100_001) })).join("\n");
+    const zip = Buffer.from(zipSync({ "manifest.json": strToU8('{"format":"bossman-company/1"}'), "company.json": strToU8('{"name":"X"}'), "tickets.jsonl": strToU8(lines) })).toString("base64");
+    const req = await setup();
+    const res = await req("POST", "/api/companies/import", { zip });
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toContain("line 1");
+    expect(res.body).toContain("line 3");
+  });
+});
+
 describe("skipped secret names give advice the owner can act on (BOS-884)", () => {
   const withSecrets = (...env: string[]) => {
     const lines = FILES[".paperclip.yaml"]!.split("\n");

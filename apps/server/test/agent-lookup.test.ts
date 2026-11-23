@@ -123,7 +123,7 @@ describe("agents look tickets up (R77)", () => {
     expect(c.starts()[0]!.prompt).toContain(`Ticket APP-2 (id ${second.id})`);
 
     const client = await c.mcp(c.starts()[0]!.runId);
-    expect(JSON.parse(textOf(await client.callTool({ name: "tickets", arguments: { action: "find", q: "app-1" } })))).toEqual([expect.objectContaining({ id: first.id, ref: "APP-1" })]);
+    expect(JSON.parse(textOf(await client.callTool({ name: "tickets", arguments: { action: "find", q: "app-1" } })).split("\n\n")[0]!)).toEqual([expect.objectContaining({ id: first.id, ref: "APP-1" })]);
     expect(textOf(await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: "APP-2" } }))).toContain(`Ticket APP-2 (id ${second.id})`);
     expect(textOf(await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: "APP-9" } }))).toContain("No ticket APP-9 in your company.");
     await client.close();
@@ -144,7 +144,7 @@ describe("agents look tickets up (R77)", () => {
     await c.scheduler.tick();
     const client = await c.mcp(c.starts()[0]!.runId);
 
-    const found = JSON.parse(textOf(await client.callTool({ name: "tickets", arguments: { action: "find", q: "orchestration" } })));
+    const found = JSON.parse(textOf(await client.callTool({ name: "tickets", arguments: { action: "find", q: "orchestration" } })).split("\n\n")[0]!);
     expect(found).toEqual([expect.objectContaining({ id: research.id, title: "Research orchestration apps", state: "backlog" })]);
     const read = textOf(await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: research.id } }));
     expect(read).toContain("# Research orchestration apps");

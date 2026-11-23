@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { api, type EngagementRow, type EngagementView } from "../api";
 import { useOlder, usePoll } from "../hooks";
 
@@ -23,10 +24,32 @@ const statusTag = (s: string) => <span className={`tag ${STATUS[s]?.tone ?? ""}`
 const STEPS = ["requested", "accepted", "in_progress", "delivered", "signed_off"] as const;
 const STEP_LABEL: Record<(typeof STEPS)[number], string> = { requested: "Requested", accepted: "Accepted", in_progress: "In progress", delivered: "Delivered", signed_off: "Signed off" };
 
+const SHOW_KEY = "bm.engagements.show";
+
+/** The owner's last choice, so a reload keeps it. Anything unknown falls back to Open. */
+function savedShow(): string {
+  try {
+    const v = localStorage.getItem(SHOW_KEY);
+    return v === "all" || (v && v in STATUS) ? v : "open";
+  } catch {
+    return "open";
+  }
+}
+
 export function Engagements() {
-  // The server sends the newest PAGE; older ones come on "Show older" (BOS-2165).
-  const list = usePoll((signal) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}`, { signal }), 15_000, "engagements");
-  const older = useOlder(list.data, PAGE, (before) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}&before=${before}`), "engagements");
+  const [show, setShow] = useState(savedShow);
+  const pick = (v: string) => {
+    try {
+      localStorage.setItem(SHOW_KEY, v);
+    } catch {
+      /* private mode: the choice just isn't remembered */
+    }
+    setShow(v);
+  };
+  const filter = show === "all" ? "" : `&status=${show}`;
+  // The server filters and sends the newest PAGE; older ones come on "Show older" (BOS-2165), under the same filter.
+  const list = usePoll((signal) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}`, { signal }), 15_000, `engagements:${show}`);
+  const older = useOlder(list.data, PAGE, (before) => api<EngagementRow[]>(`/api/engagements?limit=${PAGE}${filter}&before=${before}`), `engagements:${show}`);
   const rows = older.rows ?? [];
   return (
     <>
@@ -36,6 +59,18 @@ export function Engagements() {
           <p className="sub">Work one company does for another, with agreed terms and a cost cap charged to the requester.</p>
         </div>
       </header>
+      <label className="label" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        Show
+        <select value={show} onChange={(e) => pick(e.target.value)}>
+          <option value="open">Open</option>
+          <option value="all">All</option>
+          {Object.entries(STATUS).map(([k, s]) => (
+            <option key={k} value={k}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
       {!list.data ? (
         list.error && !away(list.error) ? (
           <LoadError what="engagements" message={list.error.message} onRetry={list.reload} />
@@ -43,7 +78,13 @@ export function Engagements() {
           <Loader label="Loading engagements" />
         )
       ) : rows.length === 0 ? (
-        <p className="muted">No engagements yet. A CEO asks another company for work, and you approve it in Decisions.</p>
+        <p className="muted">
+          {show === "all"
+            ? "No engagements yet. A CEO asks another company for work, and you approve it in Decisions."
+            : show === "open"
+              ? "No open engagements."
+              : "No engagements with this status."}
+        </p>
       ) : (
         <div className="table-wrap">
           <table>
@@ -82,7 +123,7 @@ export function Engagements() {
 export function Engagement({ id }: { id: string }) {
   const view = usePoll((signal) => api<EngagementView>(`/api/engagements/${id}`, { signal }), 15_000, id);
   const e = view.data;
-  if (view.error && !away(view.error)) return view.error.status === 404 ? <NotFoundBlock title="Engagement not found" backHref="#/engagements" backLabel="Back to Engagements">This engagement doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{view.error.message}</p>;
+  if (view.error && !away(view.error)) return view.error.status === 404 ? <NotFoundBlock title="Engagement not found" backHref="#/engagements" backLabel="Back to Engagements">This engagement doesn't exist any more, or the link is wrong.</NotFoundBlock> : <LoadError what="the engagement" message={view.error.message} onRetry={view.reload} />;
   if (!e) return <Loader label="Loading the engagement" />;
   const reached = e.status === "countered" ? 0 : e.status === "rejected" ? -1 : STEPS.indexOf(e.status as (typeof STEPS)[number]);
   const capFraction = e.budgetCapUsd ? Math.min(1, e.spentUsd / e.budgetCapUsd) : 0;

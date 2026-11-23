@@ -18,9 +18,18 @@ dest="${COSIGN_INSTALL_DIR:-${RUNNER_TEMP:-/tmp}/cosign-bin}"
 mkdir -p "$dest"
 url="https://github.com/sigstore/cosign/releases/download/$version/cosign-linux-amd64"
 
-# --retry-all-errors also retries HTTP 4xx/5xx (curl 7.71+; ubuntu-24.04 has 8.x). Up to 6 tries, 5 s apart.
-curl --fail --silent --show-error --location --retry 5 --retry-delay 5 --retry-all-errors \
-  --connect-timeout 20 --max-time 120 --output "$dest/cosign.part" "$url"
+# --retry-all-errors also retries HTTP 4xx/5xx (curl 7.71+; ubuntu-24.04 has 8.x). Each round is up to 6 tries, 5 s apart.
+# A bad minute outlasts one round (BOS-2299: Publish images run 863 failed after about 25 s), so wait and try again:
+# up to 4 rounds, pausing 30, 60 and 90 s between them (COSIGN_ROUND_PAUSE scales the pause; tests set 0).
+pause="${COSIGN_ROUND_PAUSE:-30}"
+round=1
+until curl --fail --silent --show-error --location --retry 5 --retry-delay 5 --retry-all-errors \
+  --connect-timeout 20 --max-time 120 --output "$dest/cosign.part" "$url"; do
+  if (( round >= 4 )); then echo "install-cosign.sh: download failed after $round rounds" >&2; exit 1; fi
+  echo "install-cosign.sh: download round $round failed; waiting $((pause * round)) s" >&2
+  sleep $((pause * round))
+  round=$((round + 1))
+done
 got="$(sha256sum "$dest/cosign.part" | cut -d' ' -f1)"
 if [[ $got != "$want" ]]; then
   rm -f "$dest/cosign.part"

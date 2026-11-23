@@ -21,9 +21,10 @@ import { checkGate } from "./check-gate.js";
 import { checkQueue } from "./check-queue.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { record } from "./activity.js";
+import { wakeWatchers, type WatchNotify } from "./watch-triggers.js";
 import { leftLineSince, lineEvent, type HoldReason } from "./merge-line.js";
 import { priorityGroup } from "./priority-group.js";
-import { createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold } from "./review-holds.js";
+import { CHECK_WAIT_LABEL, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, type TurnWait } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
@@ -36,6 +37,8 @@ export type ReviewDeps = {
     /** Pull requests on the git host (R59), with the company's GIT_TOKEN. */
     gitHosts?: ReturnType<typeof gitHostService>;
     gitToken?: (companyId: string) => Promise<string | undefined>;
+    /** BOS-2285: the company's optional GIT_CI_TOKEN (a second account for the gate's bossman-ci pushes); undefined means ask the owner once. */
+    gitCiToken?: (companyId: string) => Promise<string | undefined>;
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
     /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
     isLeader?: () => boolean;
@@ -464,6 +467,12 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     });
   }
 
+  /** BOS-2288: wakes the tickets watching for "a gate CI wait failed" (any ticket's). Never stops the merge. */
+  async function wakeCiWatchers(t: { id: string; title: string }, outcome: string) {
+    if (!state.wake) return;
+    await wakeWatchers(db, state.wake as WatchNotify, "gate_ci_failed", `${t.title}: GitHub CI wait ended as ${outcome}`, { exceptTicketId: t.id }).catch(() => undefined);
+  }
+
   /** Wakes the company's CEO about a ticket, with a note; nothing when the company has no CEO. */
   async function tellCeo(t: { id: string; companyId: string }, reason: string, note: string) {
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
@@ -622,6 +631,23 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     return new ReviewHeldError(`This ticket's merge waits on ${refs}, so nothing was checked or merged. It stays approved in "Passed, held" and merges by itself once ${refs} is merged and live; leave it in review.`);
   }
 
+  /**
+   * BOS-2303: approved (or overruled) while its own quick check is queued or running, with no pass on that commit yet.
+   * Boss Man's own hold, with no waits, puts it in "Passed, held" with the approvals kept; the check's end starts the
+   * merge again (checkHold.onEnded, or the release sweep after a restart), and a failure there sends it back.
+   */
+  async function holdForCheck(ticketId: string, commit: string): Promise<ReviewHeldError> {
+    const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+    const text = `Its quick check of ${commit.slice(0, 8)} hasn't finished, so nothing was merged and no merge copy went to GitHub. It stays approved in "Passed, held": a pass starts the merge by itself, and a failure sends it back to its agent. Leave it in review.`;
+    if (!t) return new ReviewHeldError(text);
+    const { added } = await ensureSystemHold(db, t.id, [], `Approved while its quick check of ${commit.slice(0, 8)} was running: it merges by itself once that check passes.`);
+    if (added) {
+      await lineEvent(db, t, { event: "hold_started", hold: "quick_check", note: `${CHECK_WAIT_LABEL} (${commit.slice(0, 8)})` });
+      await record(db, { companyId: t.companyId, ticketId: t.id, kind: "review_hold_started", summary: `Approved and held: its quick check of ${commit.slice(0, 8)} is still running, so nothing was merged yet. A pass starts the merge by itself; a failure sends it back to its agent. The reviews and any sign-off stand.` });
+    }
+    return new ReviewHeldError(text);
+  }
+
   /** True while the owner's "Merge it, or send it back?" sign-off card for this ticket is open (BOS-471). */
   async function ownerSignoffOpen(ticketId: string): Promise<boolean> {
     return !!(await openSignoffCard(db, ticketId));
@@ -632,11 +658,19 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
    * then a hold, then a holding card, then a wait on another ticket (which also puts it in "Passed, held").
    */
   async function refuseIfHeld(ticketId: string): Promise<void> {
-    const [first] = await mergeHolds(db, ticketId);
+    const holds = await mergeHolds(db, ticketId);
+    const [first] = holds;
     if (!first) return;
     if (first.kind === "signoff") throw new SignoffPendingError();
+    // BOS-2303: Boss Man's own hold placed for the quick check says so, not the reviewer's wording.
+    const check = holds.find((h): h is Extract<typeof h, { kind: "check" }> => h.kind === "check");
+    if (first.kind === "hold" && check) {
+      const h = await openHold(db, ticketId);
+      if (h && !h.reviewerAgentId && !h.reviewRequestId) throw await holdForCheck(ticketId, check.commit);
+    }
     if (first.kind === "hold") throw new ReviewHeldError();
     if (first.kind === "card") throw cardHeld(first.id);
+    if (first.kind === "check") throw await holdForCheck(ticketId, first.commit);
     const waiting = await holdForWaits(ticketId);
     if (waiting) throw waiting;
   }
@@ -676,6 +710,7 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     tellCeoLiveFix,
     pagePriorityMerge,
     tellCeo,
+    wakeCiWatchers,
     mergeStuck,
     checkStuck,
     setGitNote,

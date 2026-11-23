@@ -14,7 +14,8 @@
 //   restacked      merge train (BOS-1366): prepared again on a new base (why: ahead_left | ahead_changed | main_moved)
 //   rerun          merge train: a failed check that stood ran once more on the same tree (passed: true is a flaky pass)
 //   hold_started   the line held it: hold carried | sign_off | card | host | unchecked | waits_on | train (waiting for a seat)
-//                  | turn (BOS-1762: waiting to push while another ticket has the landing turn), with carried/note/decisionId
+//                  | turn (BOS-1762: waiting to push while another ticket has the landing turn)
+//                  | quick_check (BOS-2303: approved while its own first quick check runs), with carried/note/decisionId
 //   hold_ended     the hold ended (hold, since, heldMs); written by the next event that moves the line (a check,
 //                  a merge, leaving, another hold), so a hold always closes. A retry ("attempt") or a repeat
 //                  approval that is held again doesn't end it, so one jam reads as one hold, not many short ones.
@@ -55,7 +56,7 @@ import { record } from "./activity.js";
 
 export const MERGE_LINE_KIND = "merge_line";
 
-export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on" | "train" | "turn";
+export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on" | "train" | "turn" | "quick_check";
 export type CheckWay = "gate" | "merged" | "queue";
 
 export type MergeLineEvent =

@@ -406,6 +406,8 @@ export const tickets = pgTable(
     /** BOS-1907: what a merged ticket still watches for after go-live (one line) and until when. Null date: 14 days after go-live (watchEndsAt, shared). */
     watchingFor: text("watching_for"),
     watchUntil: timestamp("watch_until", { withTimezone: true }),
+    /** BOS-2288: the event (WATCH_TRIGGERS) that wakes this watching ticket's assignee; null = daily re-read. */
+    watchTrigger: text("watch_trigger"),
     liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),

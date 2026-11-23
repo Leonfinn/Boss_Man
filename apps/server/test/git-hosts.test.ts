@@ -1,6 +1,7 @@
 import { strToU8, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { allTimeouts, GitHostError, gitHostService, logExcerpt, MAX_LINE, MAX_LOG_CHARS, MAX_LINES } from "../src/services/git-hosts.js";
+import { allTimeouts, GitHostError, gitHostService, logExcerpt, MAX_LINE, MAX_LOG_CHARS, MAX_LINES, rerunRefusal, summaryCovered } from "../src/services/git-hosts.js";
+import { namedTestFiles } from "../src/services/ci-flake.js";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 const cfg = (kind: "github" | "gitea") => ({ kind, apiBase: "https://host/api", owner: "leon", repo: "site" });
@@ -250,6 +251,62 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     expect(await host.failures(cfg("github"), "t", [{ id: 5, name: "web-browser", url: "" }])).toEqual([{ run: { id: 5, name: "web-browser", url: "" }, lines: ["apps/web/test/a.test.ts:3: a > renders: expected 1 to be 2"], billing: false, paths: ["apps/web/test/a.test.ts"], timeoutsOnly: false }]);
   });
 
+  describe("a job's own summary note (BOS-2082)", () => {
+    // Real annotations, copied from GitHub's run pages. Run 44899835927 (21 Nov 11:35), job web-browser: one test failed by
+    // chance, and the job wrote only its summary, which has no file, so nothing could be re-run.
+    const SUMMARY_44899835927 =
+      "page-intro-browser.test.ts: safari-1550x1611: each place shows its lead and folds the rest away until pressed: AssertionError: server: the lead is on the page: expected 'Boss Man\\nBoss Man Co\\n0 agents\\n▾\\nS…' to contain 'Stops every company from starting new…'";
+    const exit = { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." };
+    const summary = { annotation_level: "failure", path: ".github", title: "web tests failed", message: SUMMARY_44899835927 };
+    // What ci.yml's web-browser job now writes beside the summary: the failed file on its repo path.
+    const onFile = { annotation_level: "failure", path: "apps/web/test/page-intro-browser.test.ts", title: "web test failed", message: "safari-1550x1611: each place shows its lead…" };
+    const read = async (rows: unknown[]) => (await github([], {}, { 5: rows }).host.failures(cfg("github"), "t", [{ id: 5, name: "web-browser", url: "" }]))[0]!;
+
+    it("a summary alone (the old web-browser job) still names no test file, so nothing is re-run", async () => {
+      const f = await read([exit, summary]);
+      expect(f.paths).toEqual([""]);
+      expect(namedTestFiles([{ job: "web-browser", paths: f.paths }]).unnamed).toEqual(["web-browser"]);
+    });
+
+    it("a summary whose every entry a file note names is left out, so the job names its file (failed on the old code)", async () => {
+      const f = await read([exit, summary, onFile]);
+      expect(f.paths).toEqual(["apps/web/test/page-intro-browser.test.ts"]);
+      expect(namedTestFiles([{ job: "web-browser", paths: f.paths }])).toEqual({ files: ["apps/web/test/page-intro-browser.test.ts"], unnamed: [], unsafe: [] });
+      // The summary is still shown to the agent.
+      expect(f.lines.some((l) => l.startsWith("web tests failed: page-intro-browser.test.ts"))).toBe(true);
+    });
+
+    it("a summary naming a file no note names, or a note with no file names at all, keeps the job unnamed", async () => {
+      const other = { ...summary, message: `${SUMMARY_44899835927} | board-wheel.test.ts: wheels: page.waitForSelector: Timeout 15000ms exceeded.` };
+      expect((await read([exit, other, onFile])).paths).toEqual(["", "apps/web/test/page-intro-browser.test.ts"]);
+      const noReport = { annotation_level: "failure", path: ".github", title: "web tests failed", message: "no JSON report was written" };
+      expect((await read([exit, noReport, onFile])).paths).toEqual(["", "apps/web/test/page-intro-browser.test.ts"]);
+    });
+
+    it("run 44943053114 (BOS-2119's flake, check job): the notice-level 'no runner test failed' never counted, and still doesn't", async () => {
+      const f = await read([
+        { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
+        {
+          annotation_level: "failure",
+          path: "apps/web/test/self-deploy-waiting-changes.test.tsx",
+          start_line: 121,
+          title: "test/self-deploy-waiting-changes.test.tsx > Settings → Updates lists the changes waiting to go live (BOS-875) > shows no waiting list when main is up to date",
+          message: "AssertionError: expected 'Checking…' to be 'Up to date' // Object.is equality\n\nExpected: \"Up to date\"\nReceived: \"Checking…\"\n\n ❯ test/self-deploy-waiting-changes.test.tsx:121:67",
+        },
+        { annotation_level: "notice", path: ".github", title: "no runner test failed", message: "the runner report shows no failed test; look at the other packages' test output" },
+      ]);
+      expect(f.paths).toEqual(["apps/web/test/self-deploy-waiting-changes.test.tsx"]);
+    });
+
+    it("summaryCovered reads base names only from entry starts, and a cut entry is not covered", () => {
+      const named = ["apps/runner/test/a.test.ts", "apps/runner/test/b.test.ts"];
+      expect(summaryCovered("a.test.ts: waits: boom | b.test.ts: x: y", named)).toBe(true);
+      expect(summaryCovered("a.test.ts: waits: boom | b.te", named)).toBe(false);
+      expect(summaryCovered("the runner report says it failed (or has no test files) but names no failed test", named)).toBe(false);
+      expect(summaryCovered("a.test.ts: waits", [])).toBe(false);
+    });
+  });
+
   it("a token refused the annotations asks once more without it (a public repo's need none), and a private repo stays refused (BOS-1733)", async () => {
     const seen: Array<{ url: string; auth: boolean }> = [];
     const host = (publicRepo: boolean) =>
@@ -266,14 +323,61 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     expect((await host(false).failures(cfg("github"), "t", [{ id: 5, name: "check", url: "", step: "Run tests" }]))[0]).toMatchObject({ lines: ['failed at step "Run tests"'], paths: null });
   });
 
-  it("re-runs only a run's failed jobs, and reads a refusal or another host as false (BOS-1733)", async () => {
+  it("re-runs only a run's failed jobs, and reads a refusal or another host as not ok (BOS-1733)", async () => {
     const calls: Array<{ url: string; method: string }> = [];
-    const host = (status: number) => gitHostService({ fetch: (async (u: string, init?: RequestInit) => (calls.push({ url: u, method: String(init?.method) }), json(status, {}))) as unknown as typeof fetch });
-    expect(await host(201).rerunFailedJobs(cfg("github"), "t", 9)).toBe(true);
+    const host = (status: number, body: unknown = {}) => gitHostService({ fetch: (async (u: string, init?: RequestInit) => (calls.push({ url: u, method: String(init?.method) }), json(status, body))) as unknown as typeof fetch });
+    expect(await host(201).rerunFailedJobs(cfg("github"), "t", 9)).toEqual({ ok: true });
     expect(calls).toEqual([{ url: "https://host/api/repos/leon/site/actions/runs/9/rerun-failed-jobs", method: "POST" }]);
-    expect(await host(403).rerunFailedJobs(cfg("github"), "t", 9)).toBe(false);
-    expect(await host(201).rerunFailedJobs(cfg("gitea"), "t", 9)).toBe(false);
-    expect(await host(201).rerunFailedJobs(cfg("github"), "t", 0)).toBe(false);
+    expect((await host(403).rerunFailedJobs(cfg("github"), "t", 9)).ok).toBe(false);
+    expect((await host(201).rerunFailedJobs(cfg("gitea"), "t", 9)).ok).toBe(false);
+    expect((await host(201).rerunFailedJobs(cfg("github"), "t", 0)).ok).toBe(false);
+  });
+
+  it("a refused re-run keeps GitHub's own status and message, so the cause is on record (BOS-2082)", async () => {
+    const host = (status: number, body: unknown) => gitHostService({ fetch: (async () => json(status, body)) as unknown as typeof fetch });
+    // GitHub's answer to a fine-grained token with Actions: Read-only.
+    const perm = await host(403, { message: "Resource not accessible by personal access token" }).rerunFailedJobs(cfg("github"), "t", 9);
+    expect(perm).toEqual({ ok: false, status: 403, why: "the git token can't re-run GitHub jobs (it needs Actions: Read and write); GitHub answered 403: Resource not accessible by personal access token" });
+    // Anything else is not blamed on the token.
+    const other = await host(409, { message: "This workflow is already running" }).rerunFailedJobs(cfg("github"), "t", 9);
+    expect(other).toEqual({ ok: false, status: 409, why: "GitHub refused to re-run the failed jobs (HTTP 409: This workflow is already running)" });
+    expect(rerunRefusal(0, "fetch failed")).toBe("GitHub refused to re-run the failed jobs (no answer: fetch failed)");
+  });
+
+  it("cancels only a commit's unfinished runs, keeps GitHub's answer when refused, and counts a just-finished one as gone (BOS-2301)", async () => {
+    const SHA = "e".repeat(40);
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = (cancel: (id: number) => number, list: number | Array<Record<string, unknown>>) =>
+      gitHostService({
+        fetch: (async (u: string, init?: RequestInit) => {
+          calls.push({ url: u, method: String(init?.method) });
+          const m = /\/actions\/runs\/(\d+)\/cancel$/.exec(u);
+          if (m) {
+            const status = cancel(Number(m[1]));
+            return json(status, status === 202 ? {} : { message: status === 409 ? "Cannot cancel a workflow run that is completed." : "Resource not accessible by personal access token" });
+          }
+          return typeof list === "number" ? json(list, { message: "Bad credentials" }) : json(200, { total_count: list.length, workflow_runs: list });
+        }) as unknown as typeof fetch,
+      });
+    const runs = [
+      { id: 1, head_sha: SHA, status: "in_progress", conclusion: null },
+      { id: 2, head_sha: SHA, status: "queued", conclusion: null },
+      { id: 3, head_sha: SHA, status: "completed", conclusion: "failure" },
+      { id: 4, head_sha: "f".repeat(40), status: "in_progress", conclusion: null },
+    ];
+    // Runs 1 and 2 are still going and get cancelled; the finished one and another commit's run are never touched.
+    expect(await host(() => 202, runs).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 2, still: 0 });
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual(["https://host/api/repos/leon/site/actions/runs/1/cancel", "https://host/api/repos/leon/site/actions/runs/2/cancel"]);
+    expect(calls[0]!.url).toContain(`/actions/runs?head_sha=${SHA}`);
+    // A run that finished between the read and the cancel (409) is not left going.
+    expect(await host((id) => (id === 1 ? 409 : 202), runs).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 1, still: 0 });
+    // Actions: Read-only: refused, and the refusal names the permission and GitHub's own words.
+    expect(await host(() => 403, runs).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 0, still: 2, refused: "the git token can't cancel GitHub runs (it needs Actions: Read and write); GitHub answered 403: Resource not accessible by personal access token" });
+    // The runs can't be read: unknown, not "nothing to cancel".
+    expect(await host(() => 202, 401).cancelRuns(cfg("github"), "t", SHA)).toMatchObject({ cancelled: 0, still: null });
+    // Nothing still going: nothing to do.
+    expect(await host(() => 202, [runs[2]!]).cancelRuns(cfg("github"), "t", SHA)).toEqual({ cancelled: 0, still: 0 });
+    expect((await host(() => 202, runs).cancelRuns(cfg("gitea"), "t", SHA)).cancelled).toBe(0);
   });
 
   it("the token check probes Actions runs and names only Actions: Read-only (and Metadata), never Checks", async () => {

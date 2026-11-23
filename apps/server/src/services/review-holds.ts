@@ -2,10 +2,10 @@
 // approved (so nothing re-asks for a review); the hold is a separate fact that every path into a merge checks,
 // that the sweeps and the watchdog skip, and that the board shows as "Held". It ends by release (the normal
 // approve path runs next) or cancel (the reviewer's pass is withdrawn and the work is reviewed again).
-import { and, eq, inArray, isNotNull, isNull, ne } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne } from "drizzle-orm";
 import { deploysNothing, ticketRef, touchesRunnerCode } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, projects, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, checkJobs, companies, decisions, projects, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { mainCiFailures } from "./main-ci.js";
@@ -113,7 +113,9 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
   const waits = await waitsOf(db, h.id);
   const [reviewer] = h.reviewerAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, h.reviewerAgentId)) : [];
   const open = waits.filter((w) => !w.closed).map((w) => w.label);
-  const parts = [open.length ? `waits on ${open.join(", ")}` : "", h.releaseAt ? `until ${shortDate(h.releaseAt)}` : ""].filter(Boolean);
+  const system = !h.reviewerAgentId && !h.reviewRequestId;
+  const checking = system && (await pendingQuickCheck(db, ticketId));
+  const parts = [checking ? CHECK_WAIT_LABEL : "", open.length ? `waits on ${open.join(", ")}` : "", h.releaseAt ? `until ${shortDate(h.releaseAt)}` : ""].filter(Boolean);
   return {
     id: h.id,
     ticketId,
@@ -125,7 +127,7 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
     waits,
     ready: holdReady(h, waits, now),
     label: parts.join(" / ") || "ready to re-check",
-    system: !h.reviewerAgentId && !h.reviewRequestId,
+    system,
   };
 }
 
@@ -210,17 +212,45 @@ export async function mergeWaits(db: Db, t: { id: string; projectId: string; fix
   return out;
 }
 
+/** The wording a hold on the ticket's own quick check shows (BOS-2303). */
+export const CHECK_WAIT_LABEL = "waits for its quick check";
+
+/**
+ * BOS-2303 (BOS-2283 P6): the ticket's newest quick check (pre_review) while it is queued or running and no quick check of
+ * that commit has passed yet. An approval that comes now waits for it, so no merge copy goes to GitHub with code
+ * nobody has checked once. BOS-2285 merged 54 s into its first check, whose failure GitHub then found first.
+ * A re-run of a commit that already passed holds nothing. Null: nothing to wait for.
+ */
+export async function pendingQuickCheck(db: Db, ticketId: string): Promise<{ id: string; commit: string; state: string } | null> {
+  const [last] = await db.select({ id: checkJobs.id, commit: checkJobs.commit, state: checkJobs.state }).from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "pre_review"))).orderBy(desc(checkJobs.queuedAt)).limit(1);
+  if (!last || (last.state !== "queued" && last.state !== "running")) return null;
+  const [passed] = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "pre_review"), eq(checkJobs.commit, last.commit), eq(checkJobs.state, "passed"))).limit(1);
+  return passed ? null : last;
+}
+
+/**
+ * BOS-2303: the ticket's newest quick check of `head` failed, and no quick check of that commit passed. The merge sends
+ * the ticket back instead of building a merge copy. Only for the branch head: a failure on code the author has since
+ * replaced says nothing about what would merge (the gate's own check covers that).
+ */
+export async function failedQuickCheck(db: Db, ticketId: string, head: string): Promise<{ id: string; commit: string; reason: string | null; logTail: string | null } | null> {
+  const jobs = await db.select({ id: checkJobs.id, state: checkJobs.state, reason: checkJobs.reason, logTail: checkJobs.logTail, commit: checkJobs.commit }).from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "pre_review"), eq(checkJobs.commit, head))).orderBy(desc(checkJobs.queuedAt));
+  if (!jobs.length || jobs[0]!.state !== "failed" || jobs.some((j) => j.state === "passed")) return null;
+  return jobs[0]!;
+}
+
 /** One thing that holds an approved ticket's merge (DR-061 Q2b). */
 export type MergeHold =
   | { kind: "signoff"; id: string }
   | { kind: "hold"; id: string }
   | { kind: "card"; id: string }
+  | { kind: "check"; id: string; commit: string }
   | { kind: "waits"; ids: string[] };
 
 /**
  * Everything that holds this ticket's merge, in the order the merge paths refuse it (DR-061 Q2b): the owner's open
- * sign-off card, a reviewer's or Boss Man's open hold, an open card that holds the merge (holdsMergeSql), and waits on
- * tickets not yet in force (mergeWaits). Empty: nothing holds it. A read only: it records nothing and raises nothing.
+ * sign-off card, a reviewer's or Boss Man's open hold, an open card that holds the merge (holdsMergeSql), the ticket's own
+ * quick check still queued or running (pendingQuickCheck, BOS-2303), and waits on tickets not yet in force (mergeWaits). Empty: nothing holds it. A read only: it records nothing and raises nothing.
  * The one answer startLanding, land, approvedAndWaiting, the unmerged-approvals sweep and the Merge queue use.
  */
 export async function mergeHolds(db: Db, ticketId: string): Promise<MergeHold[]> {
@@ -231,6 +261,8 @@ export async function mergeHolds(db: Db, ticketId: string): Promise<MergeHold[]>
   if (hold) out.push({ kind: "hold", id: hold.id });
   const card = await openHoldingCard(db, ticketId);
   if (card) out.push({ kind: "card", id: card });
+  const check = await pendingQuickCheck(db, ticketId);
+  if (check) out.push({ kind: "check", id: check.id, commit: check.commit });
   const [t] = await db.select({ id: tickets.id, projectId: tickets.projectId, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
   if (t) {
     const ids = await mergeWaits(db, t);
@@ -315,6 +347,8 @@ export async function releaseReadyHolds(db: Db, start: (ticketId: string) => Pro
     // Boss Man's own hold is ready when what it waits on now is (systemHoldWaits, BOS-1694). A reviewer's hold waits
     // on exactly what the reviewer named, so its stored list decides.
     const system = !h.reviewerAgentId && !h.reviewRequestId;
+    // BOS-2303: Boss Man's hold for the ticket's own quick check stays until that check has ended; its end starts this again.
+    if (system && (await pendingQuickCheck(db, h.ticketId))) continue;
     let ready = true;
     if (!system) for (const id of a.ticketWaits) if (!(await ticketInForce(db, id))) ready = false;
     if (!ready) continue;

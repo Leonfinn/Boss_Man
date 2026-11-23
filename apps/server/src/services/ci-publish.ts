@@ -47,8 +47,14 @@ export type CiOutcome =
   | { kind: "cancelled"; runs: string[]; rerunTried: boolean };
 /** Outcomes that end a merge attempt without merging: the other side (the gate's own check) need not finish. */
 export const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout" || o.kind === "superseded" || o.kind === "cancelled";
-/** Shared by the gate's own check and the CI wait running beside it: set by whichever ends the attempt first. */
-export type CiStop = { stopped: boolean };
+/**
+ * Shared by the gate's own check and the CI wait running beside it: `stopped` is set by whichever ends the attempt first.
+ * BOS-2301: `undecided` is set by the CI wait from its first sight of a failure until the wait ends (the gate's re-run of
+ * the failed tests and GitHub's one retry included), so the gate's own side doesn't rebuild the merge on a newer main and
+ * push a fresh copy meanwhile: on 21 Nov that swallowed two of BOS-2196's failures and gave three red runs for one fault.
+ * `why` (set with `stopped` by the side that stopped) says in a few words why, for the ticket.
+ */
+export type CiStop = { stopped: boolean; undecided?: boolean; why?: string };
 
 /** The runner answered the publish with something other than "published". */
 export class CiPublishError extends Error {}
@@ -105,7 +111,7 @@ export type PublishDeps = {
    */
   flakeRetry?: (s: CiStatus, stop: CiStop) => Promise<FlakeAnswer>;
   /** Says in the ticket's activity that GitHub was asked to re-run the failed jobs, or refused. */
-  announceFlakeRetry?: (answer: { files: string[]; slow?: SlowJob[] }, accepted: boolean) => Promise<void>;
+  announceFlakeRetry?: (answer: { files: string[]; slow?: SlowJob[] }, accepted: boolean, refused?: string) => Promise<void>;
 };
 
 /** BOS-1733: the token couldn't re-run the failed jobs. */
@@ -120,6 +126,8 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
   const pub = await deps.publish(prep.commit);
   if (pub.status !== "published") throw new CiPublishError(`The runner answered the CI publish with "${pub.status}"; nothing was merged.`);
   if (!pub.hasWorkflows) return { kind: "no_workflows" };
+  // BOS-2300: the pre-review push may be a rebuilt commit (main's workflows); GitHub's run is on the commit pushed.
+  const pushed = pub.commit || prep.commit;
   await deps.announce(pub.branch);
   const since = Date.now();
   deps.onWait?.({ since, waiting: [] });
@@ -134,12 +142,13 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
   try {
     for (;;) {
       if (stop.stopped) return { kind: "stopped" };
-      const s = await readCi(deps.hosts, deps.target, prep.commit, stop, deps.timing);
+      const s = await readCi(deps.hosts, deps.target, pushed, stop, deps.timing);
       if ("kind" in s) return s;
       if (s.state === "passed") return flaky ? { kind: "passed", flaky, ...(slow ? { slow } : {}), ...(retryRunUrl ? { retryRunUrl } : {}) } : { kind: "passed" };
       // Right after the retry GitHub may still show the old failed attempt for a moment: read it as pending, as for rerunAt.
       const inGrace = flakeAt !== null && Date.now() - flakeAt < deps.timing.pollMs * 3;
       if (s.state === "failed" && !inGrace) {
+        stop.undecided = true;
         if (flaky) return { kind: "failed", status: s, retried: true };
         if (!deps.flakeRetry || !deps.hosts.rerunFailedJobs) return { kind: "failed", status: s };
         const a = await deps.flakeRetry(s, stop);
@@ -147,10 +156,15 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
         if (stop.stopped) return { kind: "stopped" };
         if (!a.retry) return { kind: "failed", status: s, why: a.why, ...(a.gateOutput ? { gateOutput: a.gateOutput } : {}) };
         const runIds = [...new Set(s.failed.map((r) => r.runId).filter((id): id is number => !!id))];
-        let accepted = runIds.length > 0;
-        for (const id of runIds) if (!(await deps.hosts.rerunFailedJobs(deps.target.cfg, deps.target.token, id))) accepted = false;
-        await deps.announceFlakeRetry?.({ files: a.files, ...(a.slow ? { slow: a.slow } : {}) }, accepted);
-        if (!accepted) return { kind: "failed", status: s, why: RERUN_REFUSED };
+        // BOS-2082: GitHub's own answer is kept, so a refusal says whether it was the token's permission or something else.
+        let refused: string | null = runIds.length ? null : "GitHub named no workflow run to re-run";
+        for (const id of runIds) {
+          const r = await deps.hosts.rerunFailedJobs(deps.target.cfg, deps.target.token, id);
+          if (!r.ok) refused ??= r.why;
+        }
+        const accepted = refused === null;
+        await deps.announceFlakeRetry?.({ files: a.files, ...(a.slow ? { slow: a.slow } : {}) }, accepted, refused ?? undefined);
+        if (!accepted) return { kind: "failed", status: s, why: refused ?? RERUN_REFUSED };
         flaky = a.files;
         slow = a.slow;
         flakeAt = Date.now();
@@ -161,13 +175,13 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
         const branchRuns = await deps.hosts.workflowRuns(deps.target.cfg, deps.target.token, pub.branch).catch(() => []);
         const own = branchRuns.find((r) => r.id === mine.id);
         // A run for another commit, started after this one: the branch was pushed again and that push replaced this run.
-        const newer = branchRuns.find((r) => r.headSha !== prep.commit && (!own || r.createdAt > own.createdAt));
+        const newer = branchRuns.find((r) => r.headSha !== pushed && (!own || r.createdAt > own.createdAt));
         if (newer) return { kind: "superseded", newerSha: newer.headSha };
         const runs = s.cancelled!.map((r) => r.name);
         if (rerunAt !== null) return { kind: "cancelled", runs, rerunTried: true };
         if (!(await deps.hosts.rerunRun(deps.target.cfg, deps.target.token, mine.id))) return { kind: "cancelled", runs, rerunTried: false };
         rerunAt = Date.now();
-        await deps.announceRerun?.(prep.commit);
+        await deps.announceRerun?.(pushed);
       }
       const waited = Date.now() - since;
       if (s.state === "none" && waited >= deps.timing.graceMs) return { kind: "none" };
@@ -178,6 +192,7 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
       await sleep(deps.timing.pollMs);
     }
   } finally {
+    stop.undecided = false;
     deps.onWait?.(null);
   }
 }
@@ -187,8 +202,10 @@ export const CI_IMAGES_PATHS = /(^|\/)Dockerfile|^docker-compose|^deploy\/|^scri
 export const touchesGithubOnlyJobs = (files: string[]) => files.some((f) => CI_IMAGES_PATHS.test(f));
 /**
  * BOS-1664 (security, F1): GitHub runs the workflow files of whatever commit is pushed, with a token the workflow can widen, so
- * a branch that edits workflows is NOT pushed before review: its GitHub run happens only at the gate, after the reviews.
+ * a branch that edits workflows is NOT pushed before review with its own workflows. BOS-2300: when the runner can push the
+ * commit with main's workflows ("ci-publish-main-workflows", `mainWorkflows`), the early run happens on the branch's code under
+ * main's workflow files, which are already trusted; the branch's own workflow edit still runs first at the gate, after the reviews.
  */
 export const touchesWorkflows = (files: string[]) => files.some((f) => /^\.github\/workflows\//.test(f));
 /** Whether the pre-review GitHub run (and the hold on the move to review) applies to these changed files. */
-export const needsEarlyGithubRun = (files: string[]) => touchesGithubOnlyJobs(files) && !touchesWorkflows(files);
+export const needsEarlyGithubRun = (files: string[], mainWorkflows = false) => touchesGithubOnlyJobs(files) && (mainWorkflows || !touchesWorkflows(files));

@@ -25,8 +25,14 @@ COPY apps/launcher/package.json ./
 COPY NOTICE /NOTICE
 # The key folder is a volume shared with the server; owned by uid 1000 so a new volume is too.
 RUN mkdir -p /run/launcher && chown 1000:1000 /run/launcher
+# BOS-974: the image install keeps company data in a named volume mounted here; a new volume copies this folder's owner.
+RUN mkdir -p /data /config && chown 1000:1000 /data
 USER 1000:1000
 # BOS-562: fail the build if the launcher could not read a file it was given.
 RUN bad="$(find /app \( ! -type l ! -readable \) -o \( -type d ! -executable \) 2>/dev/null | head -10)"; [ -z "$bad" ] || { echo "Files uid 1000 cannot read (fix the checkout: chmod go+r on tracked files):"; echo "$bad"; exit 1; }
+# BOS-974: on Docker Desktop the socket's group is 0, so the launcher runs as uid 1000 WITH group 0. Fail the build if group 0 could
+# write any file the image ships (it would then be able to change the launcher's own code). /run/launcher, /data and /config are
+# owned by uid 1000, not group 0, so they must not be group-0-writable either.
+RUN bad="$(find /app /NOTICE /run/launcher /data /config ! -type l -group 0 -perm -g+w 2>/dev/null | head -10)"; [ -z "$bad" ] || { echo "Files group 0 could write (a Docker Desktop socket gives the launcher group 0):"; echo "$bad"; exit 1; }
 ENV NODE_ENV=production
 CMD ["node", "dist/main.js"]

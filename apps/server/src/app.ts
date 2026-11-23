@@ -396,6 +396,8 @@ export async function buildApp(opts: AppOptions) {
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
   let checkHold: ReturnType<typeof checkHoldService> | undefined;
+  // BOS-2284: set where the GitHub-CI pre-flight is built (below); the check that ended starts or drops the run that waited for it.
+  let ciPreflightLate: { onQuickEnded: (job: { kind: string; ticketId: string }) => Promise<void> } | undefined;
   // BOS-1093: a set private-details list that can't be read says so once, in the log and to the owner, and the scan runs its secret rules only.
   const scanListWarning: ScanListWarning = {
     log: (m) => app.log.warn(m),
@@ -421,7 +423,10 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     can: (id) => runners.can(id, "check-jobs"),
     wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
-    onEnded: (job) => checkHold?.onEnded(job),
+    onEnded: async (job) => {
+      await ciPreflightLate?.onQuickEnded(job).catch(() => undefined);
+      return checkHold?.onEnded(job);
+    },
     workers: checkWorkersSvc,
     bundles: {
       store: bundleStore,
@@ -1134,6 +1139,7 @@ export async function buildApp(opts: AppOptions) {
     loops,
     gitHosts,
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
+    gitCiToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_CI_TOKEN,
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
     scanList: () => privateDetails.forRunner(),
@@ -1169,6 +1175,8 @@ export async function buildApp(opts: AppOptions) {
     wake: (agentId, w) => scheduler.notify(agentId, w),
     now: opts.now,
     branchHead: opts.branchHead ?? ((ticketId) => review.diff(ticketId).then((d) => d.head)),
+    // BOS-2303: a ticket approved while this check ran merges (or goes back) as soon as the check ends.
+    releaseHolds: (ticketId) => review.releaseHolds(ticketId),
   });
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
@@ -1400,21 +1408,29 @@ export async function buildApp(opts: AppOptions) {
       if (!runner || !runners.can(runner.id, "ci-publish") || !runners.can(runner.id, "ci-publish-scan")) return null;
       const token = (await secretsSvc.resolveCompanyEnv(t.companyId, "pull_request")).GIT_TOKEN;
       if (!token) return null;
+      const mainWorkflows = runners.can(runner.id, "ci-publish-main-workflows");
       const merge = (phase: "prepare" | "publish" | "unpublish", extra: Record<string, unknown> = {}) =>
         runners.request<MergeResult>(runner.id, (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId: t.id, target: p.defaultBranch, message: phase === "prepare" ? "GitHub CI before review" : phase === "publish" ? "publish for CI" : "unpublish", phase, ...extra }) as never, MERGE_WAIT_MS);
       return {
         target: { cfg: { kind: "github" as const, apiBase: p.gitApiBase, owner: repo.owner, repo: repo.repo }, token },
         prepare: () => merge("prepare"),
-        publish: async (commit) => {
+        publish: async (commit, needsMainWorkflows) => {
+          // Read again at send time: the runner may have reconnected without the feature since the context was built.
+          const canSwap = runners.can(runner.id, "ci-publish-main-workflows");
+          if (needsMainWorkflows && !canSwap) throw new Error("Not pushed to GitHub: this branch edits workflow files and the runner can't push main's workflow files instead.");
           const scanList = await preflightScanList.forScan();
           // A list that is set but can't be read is not skipped: the push can't be taken back.
           if (!scanList && (await privateDetails.isSet().catch(() => true))) throw new Error("Not pushed to GitHub: the owner's private-details list couldn't be read, so the scan before the push couldn't run in full. Saving the list again in Settings fixes it.");
-          return merge("publish", { commit, ...(scanList ? { scanList } : {}) });
+          // BOS-2300: the early run always pushes main's workflow files (the branch's are the same unless it edits them), so an
+          // edit to a workflow never reaches GitHub before review. Only a runner that says so honours the field.
+          return merge("publish", { commit, ...(scanList ? { scanList } : {}), ...(canSwap ? { mainWorkflows: true } : {}) });
         },
+        mainWorkflows,
         unpublish: () => merge("unpublish"),
       };
     },
   });
+  ciPreflightLate = ciPreflight;
   const checkRequests = checkRequestService(db, { preflight: ciPreflight, command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
   // A restart loses the in-memory GitHub-CI pre-flight runs; start those again once runners have had time to reconnect.
   // Runners may come back later than 60 s after an update, so tickets skipped for want of one are retried every 2 minutes for 30 minutes.
@@ -2738,7 +2754,9 @@ export async function buildApp(opts: AppOptions) {
       if (err instanceof EngagementError) return reply.code(err.status).send({ error: "engagement", message: err.message });
       throw err;
     };
-    owner.get("/api/engagements", async (req) => engagementsSvc.list(undefined, PageQuery.parse(req.query)));
+    // ?status= is one engagement status or "open" (not yet signed off or declined); anything else is a 400.
+    const EngagementListQuery = PageQuery.extend({ status: z.enum(["open", "requested", "countered", "accepted", "rejected", "in_progress", "delivered", "signed_off"]).optional() });
+    owner.get("/api/engagements", async (req) => engagementsSvc.list(undefined, EngagementListQuery.parse(req.query)));
     owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id, undefined, true).catch(engagementErrors(reply)));
     owner.post("/api/engagements", async (req, reply) => {
       const b = z

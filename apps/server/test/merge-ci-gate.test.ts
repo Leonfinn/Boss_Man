@@ -80,6 +80,9 @@ function fakeGitHub() {
     ciBranches: new Map<string, number>(),
     /** BOS-2082: the workflow's recent green runs (`/actions/workflows/<id>/runs?status=success`) and their jobs. */
     greenRuns: [] as Array<{ id: number; jobs: Job[] }>,
+    /** BOS-2301: "cancel this run" requests, and the status GitHub answers them with. */
+    cancels: [] as string[],
+    cancelStatus: 202,
   };
   const last = new Map<number, WorkflowRun>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -107,6 +110,10 @@ function fakeGitHub() {
     const runs = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(url);
     const jobs = /\/actions\/runs\/(\d+)\/jobs/.exec(url);
     const notes = /\/check-runs\/(\d+)\/annotations/.exec(url);
+    if (/\/actions\/runs\/\d+\/cancel$/.test(url)) {
+      state.cancels.push(url);
+      return state.cancelStatus === 202 ? json(202, {}) : json(state.cancelStatus, { message: "Resource not accessible by personal access token" });
+    }
     if (/\/actions\/runs\/\d+\/rerun$/.test(url)) {
       state.reruns.push(url);
       return state.rerunStatus === 201 ? json(201, {}) : json(state.rerunStatus, { message: "Resource not accessible by personal access token" });
@@ -133,7 +140,7 @@ function fakeGitHub() {
   return { fetch, calls, state, reads };
 }
 
-async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRed?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; prepare?: (c: Extract<RunnerCommand, { type: "workspace.merge" }>) => unknown; changed?: string[] } = {}) {
+async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRed?: boolean; workflows?: boolean; switchOn?: boolean; finishes?: unknown[]; prepares?: unknown[]; prepare?: (c: Extract<RunnerCommand, { type: "workspace.merge" }>) => unknown; changed?: string[]; noCiToken?: boolean } = {}) {
   const gh = fakeGitHub();
   const { db, close } = await openPglite();
   // In charge until a test hands over (BOS-1752): `lead.on = false` plays the blue/green switch on this copy.
@@ -149,6 +156,12 @@ async function setup(opts: { features?: string[]; holdVerify?: boolean; verifyRe
   await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/leon/site.git", verifyCommand: "pnpm test" });
   const { secret } = (await req("POST", "/api/secrets", { name: "GitHub", kind: "generic", value: "github-token-value" })).json();
   await req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "GIT_TOKEN" });
+  // BOS-2285: with no second account's token the gate raises the "CI identity" owner card; the tests below that count
+  // open cards run with one granted, and noCiToken tests that card itself.
+  if (!opts.noCiToken) {
+    const { secret: ciSecret } = (await req("POST", "/api/secrets", { name: "GitHub CI", kind: "generic", value: "made-up-ci-token-value" })).json();
+    await req("POST", `/api/secrets/${ciSecret.id}/grants`, { companyId: company.id, envName: "GIT_CI_TOKEN" });
+  }
   if (opts.switchOn !== false) expect((await req("PUT", "/api/settings/wait-for-ci", { on: true })).json()).toEqual({ on: true });
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   const sent: RunnerCommand[] = [];
@@ -216,6 +229,13 @@ const ciWaitRows = async (c: Awaited<ReturnType<typeof setup>>) =>
     .filter((e) => e.event.startsWith("ci_wait_"));
 
 describe("merge gate waits for GitHub CI (BOS-1070)", () => {
+  it("BOS-2285: with no second account's token the gate raises one CI identity card and still merges", async () => {
+    const c = (ctx = await setup({ noCiToken: true }));
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    const open = await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"));
+    expect(open).toEqual([{ dedupeKey: expect.stringContaining("owner-todo:ci-identity:") }]);
+  });
+
   it("publishes the merge commit, merges once CI passes on it, records the pass and deletes the CI branch", async () => {
     const c = (ctx = await setup());
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
@@ -660,6 +680,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
         expect((await c.state()).systemState).toBe("review");
         expect(c.merges()).not.toContain("finish");
+        // BOS-2301: nor cancels a GitHub run: the server now in charge may be waiting on the same commit.
+        expect(c.gh.state.cancels).toEqual([]);
       };
 
       it("the new leader's CI push supersedes this copy's run: no check_ended, no retry, and the job is left queued for the leader", async () => {
@@ -919,6 +941,8 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
         expect(cmds.filter((m) => m.phase === "prepare")[1]).toMatchObject({ carryFrom: { commit: MERGE, tree: TREE } });
         const steps = cmds.filter((m) => m.phase !== "prepare").map((m) => (m.phase === "publish" ? `publish ${m.commit!.slice(0, 1)}` : m.phase));
         expect(steps).toEqual(["publish e", "unpublish", "publish d", "finish", "unpublish"]);
+        // BOS-2301: the old copy's run, still going, was cancelled rather than left to finish with nobody waiting.
+        expect(c.gh.state.cancels).toEqual([`${API}/actions/runs/9/cancel`]);
         expect(cmds.find((m) => m.phase === "finish")).toMatchObject({ commit: MERGE2, tree: TREE2, carry: true });
         expect(c.gh.reads.get(MERGE2)).toBeGreaterThan(0);
         // Recorded as a refresh, never as a rebuild, and it earned no landing turn.
@@ -1572,6 +1596,102 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
           expect(await retryRows(c)).toEqual([]);
           expect((await authorWake(c))!.note).toContain("Boss Man didn't ask GitHub for a retry: the failure in web-browser doesn't name a test file");
         });
+      });
+    });
+
+    // BOS-2301 (BOS-2283 P4): the gate and its GitHub runs stay in step. On 21 Nov main moved twice while GitHub's failure on
+    // BOS-2196's merge copy waited for the gate's re-run of the failed test; each refresh stopped the re-run, swallowed the
+    // failure and pushed a fresh copy with the same fault (three red runs, three emails). On 22 Nov the gate stopped waiting
+    // for BOS-2285's run 3 s after pushing it (the ticket wasn't in review), and the run went on for 17 minutes and went red.
+    describe("the gate and its GitHub runs stay in step (BOS-2301)", () => {
+      const REFRESH = ["carried-check", "ci-publish", "merge-carry", "merge-refresh"];
+      const MERGE2 = "d".repeat(40);
+      const TREE2 = "9".repeat(40);
+      const FILE = "apps/server/test/fence.test.ts";
+      const isRerun = (j: { command: string | null }) => !!j.command?.startsWith(GATE_RERUN_MARK);
+      const jobs = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      const lineEvents = async (c: Awaited<ReturnType<typeof setup>>) =>
+        (await c.db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, c.ticket.id), eq(activity.kind, MERGE_LINE_KIND)))).map((r) => (r.detail as { event: string }).event);
+      const landing = async (c: Awaited<ReturnType<typeof setup>>) => (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing as { state?: string; outcome?: string; text?: string } | undefined;
+
+      it("main moves while GitHub's failure waits for the gate's re-run: no fresh copy is pushed, and the real failure goes back once", async () => {
+        // Until `moved`, every refresh prepare finds the same merge; after it, main changed files the carry refuses.
+        const s = { moved: false, refreshAsks: 0 };
+        const c = (ctx = await setup({
+          features: REFRESH,
+          prepare: (cmd) => {
+            if (!cmd.carryFrom) return { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN };
+            if (!s.moved) return { status: "prepared", commit: MERGE, tree: TREE, targetSha: MAIN, carry: { ok: true } };
+            s.refreshAsks++;
+            return { status: "prepared", commit: MERGE2, tree: TREE2, targetSha: "8".repeat(40), carry: { ok: false, why: "main changed dependencies, build, CI or migration files", files: ["apps/server/src/app.ts"] } };
+          },
+        }));
+        await serverMode(c);
+        c.gh.state.publicRepo = true;
+        c.gh.state.ci = (sha) => (sha === MERGE ? red([job("check", "success", 1), { ...job("check (server)", "failure", 4, "Run tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/4" }]) : green());
+        c.gh.state.annotations.set(4, [{ annotation_level: "failure", path: FILE, start_line: 42, title: "fence > blocks a write", message: "AssertionError: expected 0 to be 1" }]);
+        const res = approveAndWait(c.req, c.ticket.id);
+        // GitHub's failure was seen and the gate queued its re-run of the named test, which waits for a slot.
+        const rerun = await vi.waitFor(
+          async () => {
+            const j = (await jobs(c)).find(isRerun);
+            if (!j) throw new Error("no re-run queued yet");
+            return j;
+          },
+          { timeout: 5_000, interval: 20 },
+        );
+        s.moved = true;
+        // A check that nothing happens: 300 ms is 15 refresh intervals here (BOSSMAN_MERGE_RETARGET_MS = 20); before BOS-2301
+        // the refresh came within the first two (10 asks in this window), stopped the re-run and published MERGE2.
+        // test-lines-ok: a negative check over many refresh intervals, not a wait for the other side to be ready
+        await new Promise((r) => setTimeout(r, 300));
+        expect(s.refreshAsks).toBe(0);
+        expect(c.merges().filter((p) => p === "publish")).toHaveLength(1);
+        // The re-run fails: the failure is real, and this copy sends the ticket back.
+        await c.db.update(checkJobs).set({ state: "failed", exitCode: 1, endedAt: new Date(), logTail: "FAIL test/fence.test.ts > blocks a write" }).where(eq(checkJobs.id, rerun.id));
+        expect((await res).json()).toMatchObject({ outcome: "verify_failed" });
+        expect(c.merges().filter((p) => p === "publish")).toHaveLength(1);
+        expect(await lineEvents(c)).not.toContain("refreshed");
+        expect(c.gh.reads.get(MERGE2)).toBeUndefined();
+        expect((await c.state()).systemState).toBe("in_progress");
+      });
+
+      /** Approves, waits until the merge copy is pushed and its GitHub run read, then moves the ticket out of review. */
+      const approveThenLeave = async (c: Awaited<ReturnType<typeof setup>>) => {
+        await serverMode(c);
+        c.gh.state.ci = (sha) => (sha === MERGE ? running() : green());
+        await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+        await vi.waitFor(() => expect(c.gh.reads.get(MERGE) ?? 0).toBeGreaterThan(0), { timeout: 5_000 });
+        await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, c.ticket.id));
+        return vi.waitFor(
+          async () => {
+            const l = await landing(c);
+            if (l?.state !== "finished") throw new Error("landing still running");
+            return l;
+          },
+          { timeout: 5_000, interval: 20 },
+        );
+      };
+
+      it("the gate stops waiting (the ticket left review): it cancels the run still going on the copy and says so", async () => {
+        const c = (ctx = await setup());
+        const l = await approveThenLeave(c);
+        await vi.waitFor(() => expect(c.gh.state.cancels).toEqual([`${API}/actions/runs/9/cancel`]), { timeout: 5_000 });
+        await vi.waitFor(async () => expect((await c.events()).join("\n")).toContain(`Stopped waiting for GitHub CI on ${MERGE.slice(0, 12)} (the ticket left review) and cancelled its GitHub run, so no result comes for a merge copy Boss Man dropped. Nothing to do.`), { timeout: 5_000 });
+        // The ticket says what happened: no merge card was raised, so it doesn't claim one is open.
+        expect(l).toMatchObject({ outcome: "check_stuck" });
+        expect(l.text).toContain("left review");
+        expect(l.text).not.toContain("merge card");
+        expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+      });
+
+      it("a token that can't cancel runs: says on the ticket the run is still going, that its result doesn't count, and why", async () => {
+        const c = (ctx = await setup());
+        c.gh.state.cancelStatus = 403;
+        await approveThenLeave(c);
+        const sha = MERGE.slice(0, 12);
+        await vi.waitFor(async () => expect((await c.events()).join("\n")).toContain(`Stopped waiting for GitHub CI on ${sha} (the ticket left review). Its GitHub run is still going and no longer counts: ignore a GitHub email about ${sha}. Couldn't cancel: the git token can't cancel GitHub runs (it needs Actions: Read and write)`), { timeout: 5_000 });
+        expect((await c.events()).join("\n")).not.toContain("cancelled its GitHub run");
       });
     });
   });

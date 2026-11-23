@@ -291,7 +291,9 @@ export const RunnerCommand = z.discriminatedUnion("type", [
      */
     carryFrom: z.object({ commit: z.string().min(7), tree: z.string().min(7) }).optional(),
     /** BOS-1664 (runner feature "ci-publish-scan"): the owner's private-details list, applied to the secrets scan that runs before the "publish" push makes the commit public. */
-    scanList: z.string().max(60_000).optional() }),
+    scanList: z.string().max(60_000).optional(),
+    /** BOS-2300 (runner feature "ci-publish-main-workflows"): on publish, push the commit with .github/workflows taken from main (its first parent). The server sends it only to a runner that says the feature: an older one drops the field and would push the branch's own workflows. */
+    mainWorkflows: z.boolean().optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -437,7 +439,7 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
 /** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "ci-publish": workspace.merge's "publish" and "unpublish" phases and its expectTree (BOS-1070); an older runner would read an unknown phase as a plain merge, so the server only sends them to a runner that says this. "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. "ci-publish-scan" (BOS-1664): runs the secrets scan, with the owner's private-details list from workspace.merge's scanList, before a "publish" push; the early GitHub run (pre-flight) is offered only to a runner that says this. "main-log": answers workspace.mainLog (BOS-1645). "merge-carry" (BOS-1762): honours workspace.merge's carry on finish; the server sends it only to a runner that says this. "merge-refresh" (BOS-1820): honours prepare's carryFrom and answers prepared.carry; without it the gate never refreshes a queued merge while GitHub CI gates. "secret-scan" (BOS-1932): answers workspace.secretScan. */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan", "main-log", "merge-carry", "merge-refresh", "secret-scan"] as const;
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan", "main-log", "merge-carry", "merge-refresh", "secret-scan", "ci-publish-main-workflows"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [

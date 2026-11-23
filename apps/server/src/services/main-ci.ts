@@ -9,6 +9,7 @@ import { parseRepoUrl } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, projects, settings, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { wakeWatchers } from "./watch-triggers.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
 import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
@@ -16,7 +17,8 @@ import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, ty
 export const MAIN_CI_SWITCH = "main_ci_watch";
 const STATE_KEY = (projectId: string) => `main_ci:${projectId}`;
 /** Only these run events are about main itself; a pull request's run is the gate's business. */
-const EVENTS = new Set(["push", "schedule", "workflow_dispatch"]);
+/** "workflow_run" (BOS-2299): a workflow that follows main's CI, such as Publish images, is main's business too. */
+const EVENTS = new Set(["push", "schedule", "workflow_dispatch", "workflow_run"]);
 const BAD = new Set(["failure", "timed_out", "startup_failure"]);
 /** How many older runs are read to find the first one that broke. */
 const LOOK_BACK = 10;
@@ -447,6 +449,7 @@ export function mainCiService(
         await writeState(p.id, state);
         await record(db, { companyId: p.companyId, ticketId: t.id, kind: "main_ci_failure", summary: `Opened for a failing step on ${p.defaultBranch}`, at: now() });
         if (who.agentId && deps.notify) await deps.notify(who.agentId, { ticketId: t.id, reason: "main CI failed", note: `Main's CI failed at ${f.job} → ${f.step}. ${NEVER_WEAKEN}`, priority: 2 }).catch(() => undefined);
+        await wakeWatchers(db, deps.notify, "github_main_failed", `${f.job} → ${f.step} on ${p.defaultBranch}, ticket ${t.id}`, { exceptTicketId: t.id }).catch(() => undefined);
       }
       state.seen[workflow] = seenKey;
       }

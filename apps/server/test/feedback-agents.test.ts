@@ -89,6 +89,24 @@ describe("agents and feedback", () => {
     expect(w[0]!.note).toContain("Use the feedback tool");
   });
 
+  it("pages the feature lists past 60, says the total, and takes q and offset", async () => {
+    const c = await setup();
+    await c.db.insert(features).values(Array.from({ length: 62 }, (_, i) => ({ companyId: c.company.id, title: `Feature ${i + 1}`, description: i === 61 ? "Needle inside" : "plain" })));
+    const ceo = await c.mcp(c.ceo.id);
+    const first = JSON.parse(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "features" } })));
+    expect(first).toMatchObject({ total: 62, from: 1, to: 60, more: "continue with offset=60" });
+    expect(first.features).toHaveLength(60);
+    expect(first.features[0]).toMatchObject({ keepOffPortal: false, hasPublicSummary: false });
+    expect(typeof first.features[0].portalVisible).toBe("boolean");
+    const second = JSON.parse(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "features", offset: 60 } })));
+    expect(second).toMatchObject({ total: 62, from: 61, to: 62 });
+    expect(second.more).toBeUndefined();
+    expect(second.features).toHaveLength(2);
+    const found = JSON.parse(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "features", q: "NEEDLE" } })));
+    expect(found).toMatchObject({ total: 1, from: 1, to: 1 });
+    await ceo.close();
+  });
+
   it("lets anyone log and read feedback, and only the CEO triage it", async () => {
     const c = await setup();
     const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "CSV export" })).json();

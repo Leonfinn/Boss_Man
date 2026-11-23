@@ -50,7 +50,7 @@ describe("tickets: 8-character id prefix (BOS-435)", () => {
 
     expect(await call({ action: "read", ticketId: "2b45038c" })).toContain("# Alpha ticket");
     expect(await call({ action: "read", ticketId: "2B45038C" })).toContain("# Alpha ticket");
-    expect(JSON.parse(await call({ action: "find", q: "2b45038c" })).map((r: { title: string }) => r.title)).toEqual(["Alpha ticket"]);
+    expect(JSON.parse((await call({ action: "find", q: "2b45038c" })).split("\n\n")[0]!).map((r: { title: string }) => r.title)).toEqual(["Alpha ticket"]);
 
     const ambiguous = await call({ action: "read", ticketId: "aaaaaaaa" });
     expect(ambiguous).toContain("2 tickets start with aaaaaaaa");

@@ -1,7 +1,7 @@
 // R31 (BOS-1666): owner-card steps that run docker compose, checked against the host's reported compose files and
 // blue/green state. Every host value is a made-up example: real ones only come from the host deployer's report.
 import { describe, expect, it } from "vitest";
-import { composeFactsFrom } from "../src/services/compose-steps.js";
+import { type ComposeFacts, type ComposeStep, composeFactsFrom, composeFindings } from "../src/services/compose-steps.js";
 import { checkOwnerSetup } from "../src/services/owner-setup-check.js";
 import { lintOwnerSteps } from "../src/services/steps.js";
 
@@ -25,6 +25,113 @@ describe("composeFactsFrom", () => {
   });
   it("reads files, blue/green and the live colour", () => {
     expect(composeFactsFrom(bg)).toMatchObject({ files: ["docker-compose.yml", "deploy/bluegreen.yml"], bluegreen: true, liveColour: "blue" });
+  });
+});
+
+describe("composeFactsFrom: the edges", () => {
+  it("stays undefined when only the command is reported, or nothing is", () => {
+    expect(composeFactsFrom({ "compose.cmd": "docker compose" })).toBeUndefined();
+    expect(composeFactsFrom({})).toBeUndefined();
+  });
+  it("trims files, drops empty entries and lowercases the live colour", () => {
+    expect(composeFactsFrom({ "compose.files": " docker-compose.yml , ,deploy/blue.yml ", "compose.liveColour": "  Green " })).toEqual({
+      files: ["docker-compose.yml", "deploy/blue.yml"],
+      bluegreen: false,
+      liveColour: "green",
+    });
+  });
+  it("keeps the host's command only when it gave one", () => {
+    expect(composeFactsFrom({ "compose.files": "docker-compose.yml" })).not.toHaveProperty("cmd");
+    expect(composeFactsFrom({ "compose.files": "docker-compose.yml", "compose.cmd": "docker compose" })).toMatchObject({ cmd: "docker compose" });
+  });
+  it("reads blue/green only from the exact string true", () => {
+    expect(composeFactsFrom({ "compose.bluegreen": "true" })).toMatchObject({ bluegreen: true });
+    expect(composeFactsFrom({ "compose.bluegreen": "yes" })).toMatchObject({ bluegreen: false });
+  });
+});
+
+const FACTS: ComposeFacts = {
+  files: ["docker-compose.yml", "deploy/bluegreen.yml"],
+  bluegreen: true,
+  liveColour: "blue",
+  cmd: "cd /opt/example/src && docker compose -f docker-compose.yml -f deploy/bluegreen.yml",
+};
+const step = (prose: string, ...code: string[]): ComposeStep => ({ prose, code });
+
+describe("composeFindings: the check called on its own", () => {
+  it("is quiet without compose facts", () => {
+    expect(composeFindings([step("", "docker compose up -d")], undefined)).toEqual([]);
+  });
+  it("names the rule and the step number", () => {
+    const f = composeFindings([step("Start everything", "cd /opt/example/src && docker compose up -d")], FACTS);
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ step: 1, rule: "R31" });
+    expect(f[0]!.problem).toContain("R31b");
+  });
+  it("reports a step's problem once even when two commands repeat it", () => {
+    const f = composeFindings([step("", "docker compose up -d", "docker compose up -d")], FACTS);
+    expect(f.filter((x) => x.problem.startsWith("R31b"))).toHaveLength(1);
+  });
+});
+
+describe("R31a: direct -f and filled-command cases", () => {
+  it("refuses the filled command after a COMPOSE_FILE edit, and passes it without an edit", () => {
+    const facts: ComposeFacts = { files: ["docker-compose.yml"], bluegreen: false, liveColour: "", cmd: "docker compose -f docker-compose.yml" };
+    const f = composeFindings([step("", "COMPOSE_FILE=docker-compose.yml:deploy/tunnel.yml"), step("Start it", "docker compose -f docker-compose.yml up -d")], facts);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.step).toBe(2);
+    expect(f[0]!.problem).toContain("R31a");
+    expect(f[0]!.problem).toContain("after step 1 changes COMPOSE_FILE");
+    expect(composeFindings([step("Start it", "docker compose -f docker-compose.yml up -d")], facts)).toEqual([]);
+  });
+  it("refuses a -f file the host doesn't report and names the reported files", () => {
+    const f = composeFindings([step("", "docker compose -f docker-compose.yml -f deploy/tunnel.yml up -d cloudflared")], FACTS);
+    expect(f.map((x) => x.problem).join("\n")).toContain("names the compose file deploy/tunnel.yml");
+    expect(f.map((x) => x.problem).join("\n")).toContain("docker-compose.yml, deploy/bluegreen.yml");
+  });
+  it("accepts a reported file by another path, quoted, and through --file=", () => {
+    expect(composeFindings([step("", "docker compose -f ./deploy/bluegreen.yml ps")], FACTS)).toEqual([]);
+    expect(composeFindings([step("", 'docker compose -f "/opt/example/src/deploy/bluegreen.yml" ps')], FACTS)).toEqual([]);
+    expect(composeFindings([step("", "docker compose --file=deploy/bluegreen.yml ps")], FACTS)).toEqual([]);
+  });
+  it("ignores a -f value that isn't a compose YAML file", () => {
+    expect(composeFindings([step("", "docker compose -f Dockerfile up -d web")], FACTS)).toEqual([]);
+  });
+  it("accepts a file an earlier step adds to COMPOSE_FILE", () => {
+    expect(composeFindings([step("Add deploy/tunnel.yml to COMPOSE_FILE"), step("Start it", "docker compose -f deploy/tunnel.yml up -d cloudflared")], FACTS)).toEqual([]);
+  });
+});
+
+describe("composeFindings: reading docker compose's arguments", () => {
+  it("does not mistake -p or --scale values for service names", () => {
+    expect(composeFindings([step("", "docker-compose up -d --scale web=2 web")], FACTS)).toEqual([]);
+    expect(composeFindings([step("", "docker compose -p example up -d --no-deps cloudflared")], FACTS)).toEqual([]);
+    expect(composeFindings([step("", "docker compose up -d --profile tunnel cloudflared")], FACTS)).toEqual([]);
+  });
+  it("leaves a bare up with only an option value bare", () => {
+    expect(composeFindings([step("", "docker compose up -t 10")], FACTS).some((x) => x.problem.startsWith("R31b"))).toBe(true);
+  });
+  it("refuses restart or up of the parked server, but not a service starting with 'server'", () => {
+    expect(composeFindings([step("", "docker compose restart server")], FACTS).some((x) => x.problem.startsWith("R31d"))).toBe(true);
+    expect(composeFindings([step("", "docker compose up -d --no-deps server-tools")], FACTS)).toEqual([]);
+  });
+});
+
+describe("R31c: direct colour cases", () => {
+  it("refuses a colour when the live one is unknown or it is the standby, and passes the live one", () => {
+    const unknown = composeFindings([step("", "docker compose logs --tail 5 server-blue")], { ...FACTS, liveColour: "" });
+    expect(unknown[0]!.problem).toContain("hasn't reported which colour is live");
+    expect(composeFindings([step("", "docker compose logs --tail 5 server-green")], FACTS).some((x) => x.problem.includes("the standby colour"))).toBe(true);
+    expect(composeFindings([step("", "docker compose logs --tail 5 server-blue-front")], FACTS)).toEqual([]);
+  });
+  it("refuses a colour in a URL, a .env value or a bookmark, and passes the proxy alias", () => {
+    for (const prose of ["Point the tunnel at http://server-blue:3100", "Set BOSSMAN_UPSTREAM=server-green in {{host.env.file}}", "Bookmark server-blue for the phone"]) {
+      expect(composeFindings([step(prose)], FACTS).some((x) => x.problem.includes("lasts")), prose).toBe(true);
+    }
+    expect(composeFindings([step("Point the tunnel at http://server:3100")], FACTS)).toEqual([]);
+  });
+  it("leaves a colour that says nothing about anything that lasts alone", () => {
+    expect(composeFindings([step("Check server-blue by hand")], FACTS)).toEqual([]);
   });
 });
 

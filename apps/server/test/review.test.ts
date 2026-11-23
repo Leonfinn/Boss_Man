@@ -251,7 +251,7 @@ describe("approval lands in the background (B)", () => {
     const ctx = { branch: "main", assignee: "Engineer" };
     const output = "PASS  merge check\nFAIL  related tests (exit 1)\n       FAIL  test/foo.test.ts > foo > does the thing\ncheck-quick: FAILED\n";
     const failed = landingText({ outcome: "verify_failed", detail: { exitCode: 1, output } }, ctx);
-    expect(failed).toContain('exit code 1; step that failed: "related tests (exit 1)"');
+    expect(failed).toContain('exit code 1; 1 failed test file: test/foo.test.ts. step that failed: "related tests (exit 1)"');
     expect(failed).toContain("first failing test: test/foo.test.ts > foo > does the thing");
     // The migration-number bounce is also verify_failed and has no exit code or log.
     const migration = landingText({ outcome: "verify_failed", detail: { why: ["0123 is taken by main"] } }, ctx);

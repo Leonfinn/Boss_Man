@@ -275,7 +275,10 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
           // BOS-1820: GitHub CI gates this merge. Ask whether the queued merge's pass could still be carried onto a fresh one;
           // only a refusal retargets the job (keeping its place) and ends the round, so the caller restarts GitHub on the new
           // commit. Carry ok or the same tree: nothing changes, the running GitHub run stands and finish carries.
-          if (refreshDue && o.ciRefresh && (await o.ciRefresh())) {
+          // BOS-2301: never while GitHub's failure on this copy is undecided (the gate's re-run of the failed tests, or GitHub's
+          // one retry, still to answer): a real failure sends the ticket back once from this copy, instead of a fresh copy with
+          // the same fault going red again (BOS-2196, 21 Nov). The refresh is asked again once the CI wait has ended.
+          if (refreshDue && o.ciRefresh && !o.stop?.undecided && (await o.ciRefresh())) {
             lastRefresh = Date.now();
             const fresh = await prepare(undefined, { commit: prep.commit, tree: prep.tree }).catch(() => null);
             if (fresh?.status === "branch_moved") return fresh;

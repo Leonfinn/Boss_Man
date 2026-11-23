@@ -47,13 +47,13 @@ Start with the CEO and one or two agents. All of them share one plan's allowance
 
 ## What do I need to run it?
 
-A 64-bit Linux machine with Docker and Docker Compose v2, a GitHub or Gitea account, and an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. You need to be comfortable copying commands into a shell. Plan on 16 GB of memory for one company with the default settings, or 8 GB if fewer agents run at once: see [What machine do I need](/guides/install-boss-man#what-machine-do-i-need).
+A 64-bit Linux machine (x86-64 or arm64) with Docker and Docker Compose v2, a GitHub or Gitea account, and an AI account: a Claude or ChatGPT plan, or an API key from Anthropic, OpenAI, OpenRouter, Ollama Cloud or Synthetic. You need to be comfortable copying commands into a shell. Plan on 16 GB of memory for one company with the default settings, or 8 GB if fewer agents run at once: see [What machine do I need](/guides/install-boss-man#what-machine-do-i-need).
 
-Why Linux? The install and update scripts expect it, and two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.
+The main install uses ready-made images: you download two files from a release and run three Docker commands, with nothing built on your machine. See [Install from ready-made images](/guides/install-boss-man#install-from-ready-made-images). You can still build from source instead.
 
-Mac and Windows: not supported yet, but we're testing Docker Desktop. On a Mac with Apple silicon, the agent fence already works under Docker Desktop. The network guard isn't proven there yet, and Windows hasn't been tested. For now, use a Linux machine.
+Why Linux? Two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.
 
-Ready-made images for x86 and ARM machines come after the alpha.
+Mac and Windows: Docker Desktop 4.60 or newer is a preview for the image install. It is not yet proven on a real machine, so for now use a Linux machine. The [platform list](/guides/install-boss-man#which-platforms-work) says what works today.
 
 ## Is my code safe?
 
@@ -77,7 +77,7 @@ No. Boss Man is self-hosted only.
 
 ## How is it different from Paperclip?
 
-Boss Man was inspired by Paperclip and written from scratch. It does not depend on Paperclip. You can move a company over from Paperclip: see [`docs/14-paperclip-migration.md`](@repo/blob/main/docs/14-paperclip-migration.md).
+Boss Man was inspired by Paperclip and written from scratch. It does not depend on Paperclip. You can move a company over from Paperclip: see [Moving a company from Paperclip](/guides/move-from-paperclip).
 
 ## Is it ready to use?
 

@@ -12,6 +12,7 @@ import { openPglite } from "../src/db/client.js";
 import { decisions, runners, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { agentWipCount } from "../src/services/agent-wip.js";
+import { wakeWatchers } from "../src/services/watch-triggers.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -118,6 +119,44 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
     // test-lines-ok: a date one second in the past is refused however slow the machine is
     expect(await c.block(agent, t.id, { watching_for: "x", watch_until: new Date(Date.now() - 1000).toISOString() })).toMatch(/must be in the future/);
     expect(await c.block(agent, t.id, { watch_until: until })).toMatch(/goes with watching_for/);
+  });
+
+  // BOS-2288: a watch names the event that wakes it, or gets a daily re-read; the event wakes only the matching watchers.
+  it("a watch with no trigger books a daily re-read and says so; a named trigger is stored and wakes its watchers", async () => {
+    const c = await setup();
+    const agent = await c.mcp(c.worker.id);
+    const merged = { systemState: "in_progress" as const, mergeCommit: "d".repeat(40), mergedAt: new Date(), acceptanceCriteria: [{ text: "A week of real use shows no new alerts", after: "merge" as const }] };
+    const none = await c.ticket();
+    await c.put(none.id, merged);
+    const reply = await c.block(agent, none.id, { watching_for: "a week of real use" });
+    expect(reply).toMatch(/booked a re-read of this watch once a day/);
+    const r = await c.row(none.id);
+    expect(r.watchTrigger).toBeNull();
+    expect(r.monitorNote).toMatch(/Daily re-read of your watch: a week of real use/);
+    // test-lines-ok: the booking is a day ahead, so a 23 h margin holds on any machine speed
+    expect(r.monitorAt!.getTime()).toBeGreaterThan(Date.now() + 23 * 3_600_000);
+
+    const ci = await c.ticket();
+    await c.put(ci.id, merged);
+    const reply2 = await c.block(agent, ci.id, { watching_for: "no failed GitHub runs", watch_trigger: "gate_ci_failed" });
+    expect(reply2).toMatch(/Watch trigger: gate_ci_failed/);
+    expect(reply2).not.toMatch(/booked a re-read/);
+    expect((await c.row(ci.id)).watchTrigger).toBe("gate_ci_failed");
+    expect((await c.row(ci.id)).monitorAt).toBeNull();
+    expect(await c.block(agent, ci.id, { watch_trigger: "gate_ci_failed" })).toMatch(/goes with watching_for/);
+
+    const main = await c.ticket();
+    await c.put(main.id, merged);
+    await c.block(agent, main.id, { watching_for: "main stays green", watch_trigger: "github_main_failed" });
+
+    const woken: Array<{ agentId: string; ticketId: string; reason: string }> = [];
+    const notify = async (agentId: string, input: { ticketId: string; reason: string; note: string }) => (woken.push({ agentId, ticketId: input.ticketId, reason: input.reason }), { status: "queued" });
+    expect(await wakeWatchers(c.db, notify, "gate_ci_failed", "ticket X")).toBe(1);
+    expect(woken).toEqual([{ agentId: c.worker.id, ticketId: ci.id, reason: "watch trigger" }]);
+    woken.length = 0;
+    expect(await wakeWatchers(c.db, notify, "gate_ci_failed", "ticket X", { exceptTicketId: ci.id })).toBe(0);
+    expect(await wakeWatchers(c.db, notify, "github_main_failed", "build")).toBe(1);
+    expect(woken[0]!.ticketId).toBe(main.id);
   });
 
   it("accepts a merged ticket waiting to go live, but not a live one whose after-merge checks are all that is left (R36)", async () => {

@@ -1,8 +1,8 @@
 # 00 — First-time install
 
-This is the short path from nothing to a working Boss Man on a Linux host with Docker. It has the install steps only. Tuning (memory limits and more) and troubleshooting are in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md). On TrueNAS SCALE, follow this guide too, with the differences in the next section and the extras in [docs/06-install-truenas.md](06-install-truenas.md).
+This is the short path from nothing to a working Boss Man on a Linux host with Docker, building the images from the source. If you would rather pull ready-made images and need nothing on the host but Docker, use [docs/35-install-from-images.md](35-install-from-images.md). This guide has the install steps only. Tuning (memory limits and more) and troubleshooting are in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md). On TrueNAS SCALE, follow this guide too, with the differences in the next section and the extras in [docs/06-install-truenas.md](06-install-truenas.md).
 
-> **Verification:** every file name, setting and button label in this guide was checked against the code. The full install was **not** re-run on a fresh machine for this edit, so treat the exact command output as unverified.
+> **Verification:** every file name, setting and button label in this guide was checked against the code. The build-from-source steps below were **not** re-run on a fresh machine for this edit, so treat their exact command output as unverified. The install from ready-made images ([docs/35](35-install-from-images.md)) is tested on a clean x86 and a clean arm64 machine for every release: the result (date, version, pass or fail, minutes) is attached to the release as `install-result.json`, and the website's install guide shows the newest one.
 
 ## What you'll end up with
 
@@ -25,6 +25,20 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
 - **Read access from the host to the Boss Man code repo** (step 2): internet access to its https address if the repo is public, or a read-only deploy key if it is private.
+
+## The short way: one script
+
+Once the host has Docker and you have the code on it (step 2 below), one script does steps 3, 4 and 5 for you. Run it from the repo folder, as root (or with `sudo`), with `<install-dir>/src` as the checkout so the folders land where the update scripts expect them.
+
+```sh
+sudo scripts/install.sh
+```
+
+It asks which address the web page should listen on (your host's address on your home network, for example `192.168.1.50`, or press Enter to keep it to this machine). To skip the question, add `--host <address>`. On TrueNAS add `--truenas`. Then it makes the folders, the master key and `.env`, builds everything, runs the runner safety check, starts Boss Man and waits until the server answers. It ends by printing the web address and a reminder to copy `secrets/master.key` somewhere safe; do that.
+
+Running it again later is safe: it keeps your master key and your `.env` and only rebuilds and restarts, so it never touches your data. For updates, keep using `scripts/deploy.sh` ([docs/23](23-updating.md)).
+
+Not yet confirmed on a real host (tested with a stand-in Docker only, 23 Nov 2026). If it stops with a message, fix what it names and run it again. Steps 3, 4 and 5 below are what it does, for when you want to do one by hand.
 
 ## A note on commands
 
@@ -291,17 +305,17 @@ claude setup-token
 Sign in with your Claude Pro or Max account. It prints a long-lived token. Paste it into the box and choose **Save the token**. Boss Man refuses a token with stray spaces or quotes and says why. Saving also makes the funding source and sets the CEO to run on it, so you skip "What pays for the CEO". The step then shows **Connected**; to change it later, use **Settings → Money and access → Secrets**, in the section named after your company (for example "Acme's variables"). If you use an API key instead, open **Use an API key instead** and choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
 
 **A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Boss Man's runner uses it as `GIT_TOKEN` for git; agents' own sessions never see it.
-- **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Actions read-only, so Boss Man can read CI runs.
+- **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Actions read and write: read so Boss Man can read CI runs, write so the merge gate can run a job again once when a test failed by chance in a file the branch doesn't change (with Actions read-only GitHub refuses that, and the ticket goes back to its agent instead).
 - **Gitea:** Settings > Applications > Generate New Token, with repository scope **Read and Write** (`write:repository`).
 
 Paste it and save. Then choose **Check the token against <project>**.
 
 Check it worked: the message says "The token can read and push to the repo." If it says it can read but not push, add write permission to the token.
 
-**Optional: a second account for the merge gate's CI branches.** GitHub emails the account that pushed a branch whenever a GitHub Actions run on it fails. Boss Man's merge gate pushes a `bossman-ci/<ticket>` branch for every merge, so with one token a failed run there emails the token's owner. To send those emails elsewhere, use a second (bot) account:
+**Optional: a second account for the merge gate's CI branches.** The first time the gate pushes a CI branch with no `GIT_CI_TOKEN` set, Boss Man puts one card in your queue asking for it (once; answering "A step failed" keeps the emails and it never asks again, and adding the token closes the card by itself). The GitHub steps below are not yet confirmed on a real account (checked against GitHub's documentation, 22 Nov 2026). GitHub emails the account that pushed a branch whenever a GitHub Actions run on it fails. Boss Man's merge gate pushes a `bossman-ci/<ticket>` branch for every merge, so with one token a failed run there emails the token's owner. To send those emails elsewhere, use a second (bot) account:
 1. Create the account (or use a teammate's) and add it as a collaborator with write access to the repo.
 2. As that account, create a fine-grained token with Contents read and write (and Workflows read and write if the repo's workflows change).
-3. In Boss Man, add a secret named `GIT_CI_TOKEN` with that token and grant it to the company. Add `GIT_CI_USERNAME` only if your git host needs a user name (GitHub does not).
+3. In Boss Man, open Settings → Money and access → Secrets, choose **Add**, then **Git token for the merge gate (second account)** (secret name `GIT_CI_TOKEN`), paste the token and grant it to the company. Add `GIT_CI_USERNAME` only if your git host needs a user name (GitHub does not).
 
 Only the two pushes to `bossman-ci/*` use it; everything else keeps `GIT_TOKEN`. Without it nothing changes: the pushes use `GIT_TOKEN` and its owner gets the emails. Agents never see either token. The other way is to mute those emails on the owner's account: GitHub, Settings > Notifications > System > Actions, choose "Don't notify". That also mutes real failures of the owner's own pushes.
 

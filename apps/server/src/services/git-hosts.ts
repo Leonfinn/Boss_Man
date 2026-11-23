@@ -58,6 +58,41 @@ export function allTimeouts(message: string): boolean {
   const cut = parts.length > 1 && message.length >= SUMMARY_CUT_AT;
   return parts.every((p, i) => TIMEOUT_MESSAGE.test(p) || (cut && i === parts.length - 1));
 }
+/**
+ * BOS-2082: whether a job's own summary annotation (no file, or ".github": ci.yml's "web tests failed" and
+ * annotate-vitest-failures.mjs's "runner tests failed", entries `file.test.ts: test: first line` joined by " | ") only repeats
+ * failures that the job's file annotations already name. Each entry must start with a test file's base name that one of
+ * `named` ends with; a note that names no file ("no JSON report was written"), or an entry cut before its name ends, is not
+ * covered, so the job stays unnamed and the gate re-runs nothing. Without this every job that writes a summary was "unnamed"
+ * (BOS-2119's flake, 21 Nov), whatever its file annotations said.
+ */
+export function summaryCovered(message: string, named: string[]): boolean {
+  const entries = message.split(" | ").filter((p) => p.trim());
+  if (!entries.length) return false;
+  const bases = new Set(named.map((p) => p.split("/").pop()!));
+  return entries.every((e) => {
+    const m = /^([A-Za-z0-9_@.-]+\.(?:test|spec)\.[a-z]+): /.exec(e.trim());
+    return !!m && bases.has(m[1]!);
+  });
+}
+/** BOS-2082: GitHub's answer to a re-run of failed jobs; `why` is said on the ticket when it refused. */
+export type RerunAnswer = { ok: true } | { ok: false; status?: number; why: string };
+/** The refusal in plain words, with GitHub's own status and message (redacted, cut) so the cause is on record. */
+export function rerunRefusal(status: number, message: string): string {
+  const said = redactForModel(message).replace(/\s+/g, " ").slice(0, 200);
+  if (status === 401 || status === 403 || /not accessible by|must have admin|permission/i.test(message))
+    return `the git token can't re-run GitHub jobs (it needs Actions: Read and write); GitHub answered ${status}: ${said}`;
+  return `GitHub refused to re-run the failed jobs (${status ? `HTTP ${status}` : "no answer"}: ${said})`;
+}
+/** BOS-2301: what cancelling a commit's unfinished runs did. `still` null: the runs couldn't be read, so it isn't known. */
+export type CancelAnswer = { cancelled: number; still: number | null; refused?: string };
+/** BOS-2301: a refused cancel in plain words, with GitHub's own status and message (redacted, cut). */
+export function cancelRefusal(status: number, message: string): string {
+  const said = redactForModel(message).replace(/\s+/g, " ").slice(0, 200);
+  if (status === 401 || status === 403 || /not accessible by|must have admin|permission/i.test(message))
+    return `the git token can't cancel GitHub runs (it needs Actions: Read and write); GitHub answered ${status}: ${said}`;
+  return `GitHub refused to cancel the run (${status ? `HTTP ${status}` : "no answer"}: ${said})`;
+}
 /** Seconds between two GitHub timestamps, or null when either is missing or they make no sense. */
 export function stepSeconds(start: unknown, end: unknown): number | null {
   if (typeof start !== "string" || typeof end !== "string") return null;
@@ -330,6 +365,32 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
     },
 
     /**
+     * BOS-2301: cancels every Actions run on a commit that hasn't finished, for a merge copy the gate stopped waiting for
+     * (needs Actions: Read and write). `still`: runs left going, with `refused` saying why in GitHub's own words (status and
+     * message) when a cancel was refused. A failed read of the runs counts as unknown (`still` null). GitHub only.
+     */
+    async cancelRuns(cfg: GitHostConfig, token: string, sha: string): Promise<CancelAnswer> {
+      if (cfg.kind !== "github") return { cancelled: 0, still: null, refused: "only GitHub's runs can be cancelled" };
+      const res = await call(cfg, token, "GET", `/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`).catch(() => null);
+      const all = (res?.json && !Array.isArray(res.json) ? res.json.workflow_runs : null) as Array<Record<string, unknown>> | null;
+      if (!res?.ok || !Array.isArray(all)) return { cancelled: 0, still: null, refused: `couldn't read the runs on ${sha.slice(0, 8)} (${res ? `HTTP ${res.status}` : "no answer"})` };
+      const open = all.filter((r) => (r.head_sha === undefined || r.head_sha === sha) && r.status !== "completed" && Number(r.id) > 0);
+      let cancelled = 0;
+      let still = 0;
+      let refused: string | undefined;
+      for (const r of open) {
+        const c = await call(cfg, token, "POST", `/actions/runs/${Number(r.id)}/cancel`).catch((e: unknown) => ({ status: 0, ok: false, json: { message: String((e as Error)?.message ?? e) } }));
+        if (c.ok) cancelled++;
+        // 409: GitHub can't cancel it because it has just finished, so nothing of it is left going.
+        else if (c.status !== 409) {
+          still++;
+          refused ??= cancelRefusal(c.status, messageOf(c.json, c.status));
+        }
+      }
+      return refused ? { cancelled, still, refused } : { cancelled, still };
+    },
+
+    /**
      * BOS-1749: the merge gate's CI branches (bossman-ci/*) on the host with the time of the commit each points at, newest
      * first. GitHub only: other hosts get an empty list. Reads at most 5 pages of 100 refs.
      */
@@ -384,7 +445,11 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         const rows = res.json;
         const failing = rows.filter((a) => a.annotation_level === "failure");
         // The files the failures point at (BOS-1733), without GitHub's own job-level line (".github", "Process completed").
-        const paths = failing.filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? ""))).map((a) => (typeof a.path === "string" && a.path && a.path !== ".github" ? a.path : ""));
+        const fileOf = (a: Record<string, unknown>) => (typeof a.path === "string" && a.path && a.path !== ".github" ? a.path : "");
+        const own = failing.filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? "")));
+        const onFiles = own.map(fileOf).filter(Boolean);
+        // BOS-2082: the job's own summary note is left out of the naming when its file notes already name every entry in it.
+        const paths = own.filter((a) => fileOf(a) || !summaryCovered(String(a.message ?? ""), onFiles)).map(fileOf);
         // Only GitHub's account-level note counts (no file, or ".github"): a test's annotation always names its file.
         const billing = failing.some((a) => (!a.path || a.path === ".github") && billingRefusal(`${String(a.title ?? "")} ${String(a.message ?? "")}`)) || (!failing.length && !!run.unstarted);
         const lines = failing
@@ -404,13 +469,17 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
     },
 
     /**
-     * BOS-1733: ask GitHub to run only the failed jobs of a workflow run again (needs Actions: Read and write). False when it
-     * refuses or off GitHub; the gate then sends the ticket back as before and says why.
+     * BOS-1733: ask GitHub to run only the failed jobs of a workflow run again (needs Actions: Read and write). Not ok when it
+     * refuses or off GitHub; the gate then sends the ticket back as before and says why. BOS-2082: `why` carries GitHub's own
+     * answer (status and message), so a refusal says whether it was the token's permission or something else: on 21 Nov the
+     * gate only said "can't", and nobody could tell which.
      */
-    async rerunFailedJobs(cfg: GitHostConfig, token: string, runId: number): Promise<boolean> {
-      if (cfg.kind !== "github" || !runId) return false;
-      const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun-failed-jobs`).catch(() => null);
-      return !!res?.ok;
+    async rerunFailedJobs(cfg: GitHostConfig, token: string, runId: number): Promise<RerunAnswer> {
+      if (cfg.kind !== "github") return { ok: false, why: "only GitHub can re-run failed jobs" };
+      if (!runId) return { ok: false, why: "GitHub named no workflow run to re-run" };
+      const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun-failed-jobs`).catch((e: unknown) => ({ status: 0, ok: false, json: { message: String((e as Error)?.message ?? e) } }));
+      if (res.ok) return { ok: true };
+      return { ok: false, status: res.status, why: rerunRefusal(res.status, messageOf(res.json, res.status)) };
     },
 
     /**

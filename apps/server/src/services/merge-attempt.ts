@@ -23,6 +23,7 @@ import type { ReviewCtx } from "./review-ctx.js";
 import type { ReviewSelf } from "./review.js";
 import { ciStep } from "./merge-ci-step.js";
 import { recordBranchFiles } from "./branch-overlaps.js";
+import { failedQuickCheck } from "./review-holds.js";
 import { mergeRounds } from "./merge-rounds.js";
 
 type TicketRepo = Awaited<ReturnType<ReviewCtx["ticketWithRepo"]>>;
@@ -218,6 +219,16 @@ export async function landOnce(this: ReviewSelf, ctx: ReviewCtx, ticketId: strin
     }
   }
   const pinHead = reviewedHead ?? changed?.head;
+  // BOS-2303 (BOS-2283 P6): the quick check of the commit about to merge failed, and none of it passed. Send it back
+  // now, before the gate builds a merge copy and pushes it to GitHub, which would only find the same failure later.
+  // The usual way here is the hold for a check that was still running at approval (refuseIfHeld) ending in a failure.
+  const failed = pinHead ? await failedQuickCheck(db, ticketId, pinHead).catch(() => null) : null;
+  if (failed && pinHead) {
+    const tail = failed.logTail ? `\n\nEnd of the log:\n${failed.logTail.slice(-1500)}` : "";
+    const delivered = await sendBack(`The review was approved, but the quick check of ${pinHead.slice(0, 8)} failed (${failed.reason ?? "no reason recorded"}), so nothing was merged and no merge copy went to GitHub. Fix it, commit, and move the ticket back to review.${tail}`, "quick check failed", `its quick check of ${pinHead.slice(0, 8)} failed`);
+    await keepBounce(`Boss Man sent this back before merging: the quick check of ${pinHead.slice(0, 8)} failed (${(failed.reason ?? "no reason recorded").slice(0, 300)}). No merge copy was pushed.`);
+    return { outcome: "verify_failed", delivered, detail: { quickCheck: failed.id, commit: pinHead } };
+  }
   let pin: string | null = pinHead && /^[0-9a-f]{7,64}$/.test(pinHead) && deps.runners.can(runner.id, "merge-pin") ? pinHead : null;
   // Also used for the pull-request push (workspace.push), whose answer carries the same branch_moved status.
   const askMerge = async <R extends MergeResult | PushResult = MergeResult>(build: (requestId: string) => Record<string, unknown>, timeoutMs: number): Promise<R> => {

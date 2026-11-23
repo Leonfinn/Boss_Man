@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { REAL_USE_LABEL, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
+import { REAL_USE_LABEL, harnessLoadsSkills, currentReportSamples, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, nextWorkingStart, parkedOnPurpose, WORKING_HOURS_REASON, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import { dueChatReport } from "./chat-report-back.js";
@@ -1129,7 +1129,7 @@ export function schedulerService(
     // (CEO, Scrum Master, PA) have no built-in tools to use them. An ordinary agent's chat has the same set as its ticket runs (BOS-1300).
     const caps = runCapabilities(agent, !!chat);
     const withTools = caps.skillsAndToolServers;
-    let { give: skillSet, withheld } = withTools && agent.agentKind === "claude" ? await skillsForRun(db, agent.id, runner.addons) : { give: [], withheld: [] };
+    let { give: skillSet, withheld } = withTools && harnessLoadsSkills(agent.agentKind) ? await skillsForRun(db, agent.id, runner.addons) : { give: [], withheld: [] };
     // A skill held back on the stored add-on report is checked once more against the runner now: a report that is stale or was never taken
     // would otherwise drop the skill (Penpot) from a run that could have used it (BOS-1300).
     if (withheld.length && deps.runners.isConnected(runner.id)) {
@@ -1142,8 +1142,8 @@ export function schedulerService(
       const list = withheld.map((h) => `"${h.name}" (needs the ${h.missing.join(" and ")} add-on)`).join(", ");
       withheldNote = `\n\nHeads-up: ${withheld.length === 1 ? "one of your skills is" : "some of your skills are"} NOT loaded in this run: ${list}. This runner doesn't report ${withheld.length === 1 ? "that add-on" : "those add-ons"} as working. Say so plainly to the owner if you needed it, and don't pretend it is there.`;
       deps.log?.(`${agent.name}'s run started without ${list}: the runner doesn't report the add-on as working.`, w.companyId);
-    } else if (withTools && agent.agentKind !== "claude") {
-      // Only Claude Code loads skills; an agent on another harness that was given some would otherwise find them missing mid-task.
+    } else if (withTools && !harnessLoadsSkills(agent.agentKind)) {
+      // Only Claude Code and OpenCode load skills (BOS-2264); an agent on another harness that was given some would otherwise find them missing mid-task.
       const [given] = await db.select({ n: sql<number>`count(*)::int` }).from(agentSkills).where(eq(agentSkills.agentId, agent.id));
       if (given && given.n > 0) {
         withheldNote = `\n\nHeads-up: your ${given.n} assigned skill${given.n === 1 ? " is" : "s are"} NOT loaded in this run: this agent's harness (${agent.agentKind}) can't load skills. Say so plainly to the owner if you needed one.`;

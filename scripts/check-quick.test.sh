@@ -10,7 +10,7 @@ t="$(mktemp -d)"; holder=""; trap '[ -z "$holder" ] || kill "$holder" 2>/dev/nul
 fail() { echo "FAIL: $*"; exit 1; }
 
 repo="$t/repo"; mkdir -p "$repo/scripts" "$t/bin"
-cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$repo/scripts/"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$here/test-shell.sh" "$repo/scripts/"
 cat >"$repo/scripts/check-shell.sh" <<'S'
 #!/usr/bin/env bash
 echo "check-shell" >>"$LOG"
@@ -292,6 +292,84 @@ g checkout -q -B wr3 origin/main; commit packages/shared/src/other.ts
 run 0 "a shared change at the gate" env BOSSMAN_MERGE_CHECK=1
 logged "@boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "gate shared server"
 logged "@boss-man/web exec vitest run" "gate shared web"
+
+# BOS-2286 gap 1: a change outside the packages (a compose file) touches no package, but a whole-repo test that names that file
+# by its repo path runs, in the slot, at the gate and in a queued check; one that names another file does not (BOS-2161 changed
+# deploy/check-worker/compose.yaml with no web change, and the web test that compares it ran first on GitHub, and failed).
+g checkout -q main
+# A compose change also runs the compose validator (BOS-1036, tested further down): a passing stub here.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/scripts/check-compose.sh"; chmod +x "$repo/scripts/check-compose.sh"
+wr apps/web/test/worker-compose.test.ts 'import { readFileSync } from "node:fs"; readFileSync(new URL("../../../deploy/check-worker/compose.yaml", import.meta.url));'
+wr apps/server/test/ntfy-compose.test.ts 'import { readFileSync } from "node:fs"; readFileSync(new URL("../../../deploy/ntfy.yml", import.meta.url));'
+wr apps/runner/test/helpers/compose.ts 'import { readFileSync } from "node:fs"; export const C = readFileSync(new URL("../../../../docker-compose.yml", import.meta.url));'
+wr apps/runner/test/caps.test.ts 'import { C } from "./helpers/compose"; it("x", () => C);'
+g add -A; g commit -q -m "compose readers"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B wr4 origin/main; commit deploy/check-worker/compose.yaml docker-compose.yml
+run 0 "a compose-only change at the gate" env BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/web exec vitest run test/worker-compose.test.ts" "the web test that names the changed compose file"
+logged "exec vitest run test/caps.test.ts" "a test whose helper names the changed root compose file"
+notlogged "ntfy-compose.test.ts" "a test that names an unchanged compose file"
+notlogged "typecheck" "compose-only change: no package typecheck"
+notlogged "pnpm --filter @boss-man/web build" "no browser test picked: no web build"
+# A hand run leaves whole-repo tests out, as before; it takes no check slot for them.
+run 0 "a compose-only hand run" env
+notlogged "worker-compose.test.ts" "hand run, compose-only"
+# A browser test picked only by the path it names gets the web build first, so it does not skip.
+g checkout -q main
+wr apps/web/test/worker-page.test.ts 'import { launch } from "./real-page"; import { readFileSync } from "node:fs"; readFileSync(new URL("../../../deploy/check-worker/compose.yaml", import.meta.url)); await launch();'
+g add -A; g commit -q -m "browser reader"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B wr5 origin/main; commit deploy/check-worker/compose.yaml
+run 0 "a compose-only change picks a browser test" env BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/web exec vitest run test/worker-compose.test.ts test/worker-page.test.ts" "browser test picked by path"
+[ "$(grep -nF "pnpm --filter @boss-man/web build" "$LOG" | head -n 1 | cut -d: -f1)" -lt "$(grep -nF "test/worker-page.test.ts" "$LOG" | head -n 1 | cut -d: -f1)" ] 2>/dev/null || fail "web build before a browser test picked by path: $(cat "$LOG")"
+run 1 "a failing test picked by path fails the gate" env BOSSMAN_MERGE_CHECK=1 FAIL_ON=worker-compose.test
+grep -q "^FAIL  whole-repo tests (apps/web" "$t/out" || fail "path-picked failure: no FAIL line: $(cat "$t/out")"
+
+# BOS-2286 gap 2: the shell tests whose subject changed run in a queued check and at the gate, through scripts/test-shell.sh (the
+# real one: these tests run for real). They leave a mark in $TMPDIR, the one variable test-shell.sh passes on besides PATH and HOME.
+mkdir -p "$t/marks"
+g checkout -q main
+st() { # st <test path> <body>: a shell test that marks that it ran, then runs body
+  mkdir -p "$repo/$(dirname "$1")"
+  # shellcheck disable=SC2016  # $0, $here and $TMPDIR are for the test to expand when it runs
+  printf '#!/usr/bin/env bash\nhere="$(cd "$(dirname "$0")" && pwd)"\n[ "${TMPDIR##*/}" != marks ] || : >"$TMPDIR/ran-%s"\n%s\n' "$(basename "$1")" "$2" >"$repo/$1"; chmod +x "$repo/$1"
+}
+printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/scripts/subject.sh"; chmod +x "$repo/scripts/subject.sh"
+# shellcheck disable=SC2016  # test bodies: expanded when the test runs
+st scripts/subject.test.sh '"$here/subject.sh"'
+st scripts/reads-ntfy.test.sh 'test -n "deploy/ntfy.yml"'
+# shellcheck disable=SC2016
+st scripts/whole.test.sh 'git -C "$here/.." ls-files >/dev/null'
+# shellcheck disable=SC2016
+st scripts/own-temp.test.sh 'T="$(mktemp -d)"; (cd "$T" && git ls-files >/dev/null 2>&1) || true'
+st scripts/check-x.test.sh 'test -n "check-x.sh"'
+# Only a code line counts as reading the repo: one in a quoted string (a fixture) or a comment does not.
+st scripts/quoted.test.sh "echo 'git ls-files' # git ls-files"
+g add -A; g commit -q -m "shell tests"; g update-ref refs/remotes/origin/main HEAD
+marks() { find "$t/marks" -maxdepth 1 -name 'ran-*' -printf '%f\n' | sed 's/^ran-//' | sort | tr '\n' ' '; }
+g checkout -q -B sh1 origin/main; commit scripts/subject.sh
+rm -f "$t/marks"/*; run 0 "a queued check runs the shell test of a changed script" env BOSSMAN_MERGE_CHECK=1 TMPDIR="$t/marks"
+[ "$(marks)" = "subject.test.sh whole.test.sh " ] || fail "shell tests for a changed script: ran $(marks): $(cat "$t/out")"
+grep -q "^PASS  shell tests (2: scripts/subject.test.sh scripts/whole.test.sh)" "$t/out" || fail "shell tests PASS line: $(cat "$t/out")"
+# A hand run leaves them to the queued check, like the whole-repo tests.
+rm -f "$t/marks"/*; run 0 "a hand run of a changed script" env TMPDIR="$t/marks"
+[ -z "$(marks)" ] || fail "hand run ran shell tests: $(marks)"
+# A planted failure in the subject fails the check, and names the test.
+printf '#!/usr/bin/env bash\necho planted failure; exit 1\n' >"$repo/scripts/subject.sh"; g add -A; g commit -q -m "planted"
+rm -f "$t/marks"/*; run 1 "a planted failure in a changed script's test" env BOSSMAN_MERGE_CHECK=1 TMPDIR="$t/marks"
+grep -q "^FAIL  shell tests (2: scripts/subject.test.sh scripts/whole.test.sh)" "$t/out" || fail "planted: no FAIL line: $(cat "$t/out")"
+grep -qF "test-shell: FAILED scripts/subject.test.sh" "$t/out" || fail "planted: failing test not named: $(cat "$t/out")"
+# A changed compose file runs the shell test that names it by path, and a server change only the whole-repo one.
+g checkout -q -B sh2 origin/main; commit deploy/ntfy.yml
+rm -f "$t/marks"/*; run 0 "a queued check runs the shell test naming a changed compose file" env BOSSMAN_MERGE_CHECK=1 TMPDIR="$t/marks"
+[ "$(marks)" = "reads-ntfy.test.sh whole.test.sh " ] || fail "shell tests for a compose change: ran $(marks)"
+g checkout -q -B sh3 origin/main; commit apps/server/src/s.ts scripts/x.sh
+rm -f "$t/marks"/*; run 0 "x.sh does not pick check-x.test.sh" env BOSSMAN_MERGE_CHECK=1 TMPDIR="$t/marks"
+[ "$(marks)" = "whole.test.sh " ] || fail "shell tests for a server change: ran $(marks)"
+# The full check that runs next runs every shell test itself: none here.
+g checkout -q sh1
+rm -f "$t/marks"/*; run 0 "full check next runs no shell tests" env BOSSMAN_MERGE_CHECK=1 BOSSMAN_FULL_CHECK_NEXT=1 TMPDIR="$t/marks"
+[ -z "$(marks)" ] || fail "full check next ran shell tests: $(marks)"
 g checkout -q -B feature origin/main
 
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.

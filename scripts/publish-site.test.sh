@@ -37,7 +37,7 @@ cat >"$t/bin/node" <<'FAKE'
 echo "node $*" >>"$FAKE_LOG"
 script="${1:-}"; shift || true
 case "$script" in
-  *build.mjs) mkdir -p "${SITE_OUT:?}"; printf '<urlset><url><loc>%s/a</loc></url></urlset>\n' "${SITE_URL}" >"$SITE_OUT/sitemap.xml" ;;
+  *build.mjs) echo "install_result=${INSTALL_RESULT_FILE:-}" >>"$FAKE_LOG"; mkdir -p "${SITE_OUT:?}"; printf '<urlset><url><loc>%s/a</loc></url></urlset>\n' "${SITE_URL}" >"$SITE_OUT/sitemap.xml" ;;
   *indexnow.mjs)
     case "${1:-}" in
       --fetch-previous) echo '<urlset><url><loc>x/old</loc></url></urlset>' >"$2" ;;
@@ -66,7 +66,21 @@ echo "wrangler $*" >>"$FAKE_LOG"
 [ -z "${DEPLOY_FAIL:-}" ] || { echo "fake wrangler: deploy failed" >&2; exit 1; }
 echo "Deployment complete"
 FAKE
-chmod +x "$t/bin/node" "$t/bin/wrangler"
+# Fake curl for the install test result (BOS-1488): the release listing, then the file. CURL_FAIL makes it fail. It never
+# touches the network, so the test is the same on every machine.
+cat >"$t/bin/curl" <<'FAKE'
+#!/usr/bin/env bash
+[ -z "${CURL_FAIL:-}" ] || exit 22
+out=""; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac; done
+case "$url" in
+  */releases\?*) echo '[{"draft":false,"assets":[{"name":"images.env","browser_download_url":"https://example.test/images.env"},{"name":"install-result.json","browser_download_url":"https://example.test/install-result.json"}]}]' ;;
+  */install-result.json) echo '{"version":"0.1.0","date":"2026-11-23","result":"pass","minutes":6}' >"$out" ;;
+  *) exit 22 ;;
+esac
+FAKE
+chmod +x "$t/bin/node" "$t/bin/wrangler" "$t/bin/curl"
+unset GITHUB_REPOSITORY INSTALL_RESULT_FILE
 export PATH="$t/bin:$PATH" FAKE_LOG="$t/calls.log"
 
 # Run the publish script. Where the sandbox can't run a new file by path, the fake `node` reads the stub hook's text
@@ -82,7 +96,7 @@ default_hook="sh $repo/scripts/request-ceo-ticket.sh"
 # 1. The happy path: build, fetch previous, deploy, notice — in that order, with the right values.
 CF_PAGES_PROJECT=site INDEXNOW_KEY=k12345678 WRANGLER=wrangler DIST_TMP="$t/run1" SITE_URL="https://example.test/" \
   run || fail "publish should succeed"
-order="$(sed -e 's/ .*//' "$FAKE_LOG" | grep -v '^on_failure=' | tr '\n' ' ')"
+order="$(sed -e 's/ .*//' "$FAKE_LOG" | grep -v '^on_failure=\|^install_result=' | tr '\n' ' ')"
 [[ "$order" == "node node wrangler node " ]] || fail "wrong call order: $order"
 grep -qxF "on_failure=$default_hook" "$FAKE_LOG" || fail "the notice should run the CEO-ticket hook by default: $(grep on_failure "$FAKE_LOG")"
 grep -q "build.mjs" "$FAKE_LOG" || fail "no build step"
@@ -133,5 +147,17 @@ grep -q wrangler "$FAKE_LOG" && fail "must not deploy a bad project name"
 if env -u SITE_URL CF_PAGES_PROJECT=site "$s" >"$t/out" 2>&1; then fail "missing SITE_URL should be refused"; fi
 grep -q "Settings → Secrets" "$t/out" || fail "missing SITE_URL error should say where to set it"
 [ -s "$FAKE_LOG" ] && fail "nothing should run with no SITE_URL"
+
+# 8. The newest release's install test result is saved and handed to the build (BOS-1488).
+: >"$FAKE_LOG"
+GITHUB_REPOSITORY=owner/repo CF_PAGES_PROJECT='' DIST_TMP="$t/run8" SITE_URL="https://example.test" "$s" >"$t/out" 2>&1 || fail "publish with a result should succeed: $(cat "$t/out")"
+grep -qx "install_result=$t/run8/install-result.json" "$FAKE_LOG" || fail "the build did not get the saved result: $(grep install_result "$FAKE_LOG")"
+grep -q '"result":"pass"' "$t/run8/install-result.json" || fail "the saved result is not the release's file"
+
+# 9. No result to fetch (GitHub unreachable): the publish still builds, with no file, and says so.
+: >"$FAKE_LOG"
+CURL_FAIL=1 GITHUB_REPOSITORY=owner/repo CF_PAGES_PROJECT='' DIST_TMP="$t/run9" SITE_URL="https://example.test" "$s" >"$t/out" 2>&1 || fail "a failed fetch must not fail the publish"
+grep -qx "install_result=" "$FAKE_LOG" || fail "the build should get no result file: $(grep install_result "$FAKE_LOG")"
+grep -q "no install test result found" "$t/out" || fail "the missing result should be said"
 
 echo "publish-site.test.sh: all passed"

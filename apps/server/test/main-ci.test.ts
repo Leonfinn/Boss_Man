@@ -165,6 +165,18 @@ describe("knownRedOnly (R40, BOS-1685): the gate takes a branch's GitHub failure
 });
 
 describe("the main-CI watcher", () => {
+  it("BOS-2299: a failed run that follows main's CI (Publish images) opens a ticket", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(41, "failure", sha("d"), { event: "workflow_run", name: "Publish images" })];
+    c.gh.jobs[41] = [job("launcher", [["Install cosign", "failure"]])];
+    c.gh.log = "curl: (22) The requested URL returned error: 503";
+    await c.service.run();
+    const made = await c.failingTickets();
+    expect(made).toHaveLength(1);
+    expect(made[0]!.body).toContain("Publish images");
+  });
+
   it("BOS-1641's case: says where main was and the last green commit, and 'no suspect' when no commit since touched the failing test", async () => {
     ctx = await setup();
     const c = ctx;

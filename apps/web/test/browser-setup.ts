@@ -78,6 +78,20 @@ const wantsBrowser = (file: string | undefined) => {
   }
 };
 
+// One shared default wait for every findBy* and waitFor (BOS-2298). Testing Library's own default is 1 s, and 1,060
+// calls in 140 test files used it; GitHub's runners are 2.5 to 5 times slower than a dev machine, so a screen that
+// draws in 300 ms here could miss 1 s there (BOS-2168, BOS-2234). A passing test is no slower: these calls return as
+// soon as the thing shows up, the limit is only the longest they will wait. 5 s is 5 times the old default, and still
+// well under the 30 s test timeout, so a screen that never draws still fails with Testing Library's message
+// (what was missing and the page's HTML), not a bare timeout. A call that passes its own `timeout` keeps it.
+export const ASYNC_UTIL_TIMEOUT_MS = 5_000;
+try {
+  const { configure } = await import("@testing-library/react");
+  configure({ asyncUtilTimeout: ASYNC_UTIL_TIMEOUT_MS });
+} catch {
+  /* a file that doesn't use Testing Library needs no wait */
+}
+
 beforeAll(async () => {
   const file = expect.getState().testPath;
   if (!wantsBrowser(file)) return;

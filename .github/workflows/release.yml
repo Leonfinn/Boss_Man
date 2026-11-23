@@ -22,8 +22,11 @@ on:
 
 permissions: {}
 
+# Its own group (BOS-2302): it used to share publish-images, where GitHub cancels a waiting run when a third arrives,
+# so a main publish could silently drop the owner's Release press. It needs no publish to be running: the check step
+# below fails loudly, saying what to wait for, when the commit's images are not there yet.
 concurrency:
-  group: publish-images
+  group: release-images
   cancel-in-progress: false
 
 jobs:
@@ -32,7 +35,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     # BOS-2097: no green run yet to time. It builds nothing, only re-tags, signs and uploads (publish.yml's similar
-    # "publish" job: longest 1.3 min), so 15 minutes; a hung step would otherwise hold the publish-images group for 6 hours.
+    # "publish" job: longest 1.3 min), so 15 minutes; a hung step would otherwise hold the release-images group for 6 hours.
     timeout-minutes: 15
     # The Docker Hub secrets live in this environment, which only main may use (see docs/25-published-images.md).
     environment: publish
@@ -140,10 +143,33 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
             release.json
+      - name: Make the image install files from the signed release.json, and sign them too (BOS-974)
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The image install needs all four images. Until the runner image is published (BOS-972) a release has no images.env;
+          # say so and carry on, so the existing beta release is not held up.
+          if ! jq -e '[.. | strings | select(test("boss-man-runner"))] | length > 0' release.json >/dev/null; then
+            echo "::warning::release.json lists no boss-man-runner image, so this release has no images.env or docker-compose.images.yml."
+            exit 0
+          fi
+          # images.env is only release.json's digests in the form docker-compose.images.yml reads.
+          scripts/render-image-env.sh release.json > images.env
+          # The compose file is the one checked out at this commit, signed as it is.
+          for f in images.env docker-compose.images.yml; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+            cosign verify-blob --bundle "$f.sigstore.json" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
+              "$f"
+          done
       - name: Publish release.json as a pre-release (beta)
         env:
           SHA: ${{ steps.s.outputs.sha }}
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" release.json release.json.sigstore.json --prerelease --target "$SHA" \
+          assets=(release.json release.json.sigstore.json)
+          if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json); fi
+          gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$SHA" \
             --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)."

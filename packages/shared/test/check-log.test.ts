@@ -5,8 +5,17 @@ const LOG = "PASS  merge check\nFAIL  typecheck (exit 2)\n      error TS1\nFAIL 
 
 describe("check log facts (BOS-1220)", () => {
   it("finds the failed steps and the first failing test", () => {
-    expect(checkLogFacts(LOG)).toEqual({ steps: ["typecheck (exit 2)", "related tests (exit 1)"], test: "test/a.test.ts > suite > first" });
-    expect(checkFailureFacts(LOG)).toBe('steps that failed: "typecheck (exit 2)"; "related tests (exit 1)". first failing test: test/a.test.ts > suite > first');
+    expect(checkLogFacts(LOG)).toEqual({ steps: ["typecheck (exit 2)", "related tests (exit 1)"], test: "test/a.test.ts > suite > first", files: ["test/a.test.ts", "test/b.test.ts"] });
+    expect(checkFailureFacts(LOG)).toBe('2 failed test files: test/a.test.ts; test/b.test.ts. steps that failed: "typecheck (exit 2)"; "related tests (exit 1)". first failing test: test/a.test.ts > suite > first');
+  });
+
+  // BOS-2304
+  it("names every failed test file first, with the count, even when the tail shows only the last one", () => {
+    const log = ["FAIL  test/a.test.ts > x", "FAIL  test/b.test.ts > y", "FAIL  test/b.test.ts > z", "FAIL  test/c.test.ts [ test/c.test.ts ]", "x".repeat(20_000), "FAIL  test/c.test.ts > last"].join("\n");
+    expect(checkLogFacts(log).files).toEqual(["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"]);
+    const out = withCheckFacts(log, 8192);
+    expect(out.startsWith("[Earlier in the log: 3 failed test files: test/a.test.ts; test/b.test.ts; test/c.test.ts")).toBe(true);
+    expect(checkFailureFacts("nothing here")).toBe("");
   });
 
   it("ignores colour codes", () => {

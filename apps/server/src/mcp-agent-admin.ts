@@ -5,7 +5,7 @@ import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { PAGE_DEFAULT } from "./services/list-page.js";
-import { AGENT_TEMPLATES, FUNDING_PROVIDERS, HARNESSES, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, FUNDING_PROVIDERS, HARNESSES, harnessLabel, harnessLoadsSkills, untrusted } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, tickets, type SkillFinding } from "./db/schema.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
@@ -108,7 +108,7 @@ export function registerAgentAdminTools(server: McpServer, db: Db, { notes, skil
       }
       if (!isCeo) return fail("Only your company's CEO can give or take skills.");
       if (!skill || !agent) return fail("Give the skill's name and the agent's name.");
-      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`));
+      const [who] = await db.select({ id: agents.id, name: agents.name, agentKind: agents.agentKind }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`));
       if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
       try {
         if (action === "give") await skills.give(scope.companyId, skill, who.id, scope.agentId);
@@ -118,7 +118,9 @@ export function registerAgentAdminTools(server: McpServer, db: Db, { notes, skil
         throw err;
       }
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title: action === "give" ? `The CEO gave ${who.name} the ${skill} skill` : `The CEO took the ${skill} skill from ${who.name}`, body: null, link: "#/skills" });
-      return text(action === "give" ? `${who.name} has the ${skill} skill from their next run.` : `${who.name} no longer has the ${skill} skill.`);
+      // A harness that can't load skills (Codex) would hold the skill and never use it: say so now (BOS-2264).
+      const unloadable = action === "give" && !harnessLoadsSkills(who.agentKind) ? ` Warning: ${who.name} runs on ${harnessLabel(who.agentKind)}, which can't load skills, so it will have no effect until they move to Claude Code or OpenCode.` : "";
+      return text(action === "give" ? `${who.name} has the ${skill} skill from their next run.${unloadable}` :`${who.name} no longer has the ${skill} skill.`);
     },
   );
 

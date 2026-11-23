@@ -17,6 +17,15 @@ const TEMPLATE: Record<string, string> = { engineer: "engineer", researcher: "re
 /** The import's own rule for a secret name (company-import.ts's Secret). */
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 
+/**
+ * The import's own length limits (company-import.ts): a field over one is split or moved to a wiki page here, so the zip
+ * this adapter makes never fails the importer's check. TEXT is a little under the 100,000 limit to leave room for a
+ * "part 1 of 3" line or a note, and for the "Imported from" line the importer adds to a body.
+ */
+const TEXT = 99_000;
+const PAGE = 190_000; // a wiki page holds at most 200,000 characters
+const cut = (s: string | null, max: number) => (s && s.length > max ? `${s.slice(0, max - 1)}…` : s);
+
 type Files = Map<string, Uint8Array>;
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {});
@@ -55,7 +64,10 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
 
   const company = frontmatter(text("COMPANY.md")!);
   json("manifest.json", { format: EXPORT_FORMAT, from: str(company.meta.schema) ?? "agentcompanies" });
-  json("company.json", { name: str(company.meta.name) ?? "Imported company", mission: str(company.body) });
+  const missionFull = str(company.body);
+  const mission = fitWithPage(out, missionFull, 2000, "imported/company-description", "Company description (imported)", "Imported");
+  if (mission !== missionFull) notes.push("The company description was over 2,000 characters; its start is the mission and the full text is on the wiki page imported/company-description.");
+  json("company.json", { name: cut(str(company.meta.name), 80) ?? "Imported company", mission });
 
   // Skills: one per folder holding a SKILL.md, keyed by its path under skills/ (as AGENTS.md refers to them).
   const dirs = [...files.keys()].filter((p) => p.startsWith("skills/") && p.endsWith("/SKILL.md")).map((p) => p.slice("skills/".length, -"/SKILL.md".length));
@@ -100,16 +112,21 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
     const kind = KIND[str(adapter.type) ?? ""];
     if (adapter.type && !kind) notes.push(`${slug} ran on "${String(adapter.type)}", which Boss Man doesn't have; it's set to Claude.`);
     json(`agents/${slug}/agent.json`, {
-      name: str(md.meta.name) ?? slug,
+      name: cut(str(md.meta.name) ?? slug, 80),
       role: role === "ceo" ? "ceo" : "worker",
-      title: str(md.meta.title),
+      title: cut(str(md.meta.title), 120),
       template: TEMPLATE[role] ?? null,
       duty: role === "knowledge-maintainer" ? "wiki" : null,
       agentKind: kind ?? "claude",
       model: str(obj(adapter.config).model),
       reportsTo: str(md.meta.reportsTo),
     });
-    if (md.body.trim()) out.set(`agents/${slug}/INSTRUCTIONS.md`, strToU8(md.body.trim()));
+    const instructions = md.body.trim();
+    if (instructions) {
+      const fitted = fitWithPage(out, instructions, TEXT, `imported/${slug}-instructions`, `${str(md.meta.name) ?? slug} instructions (imported)`, "Imported");
+      if (fitted !== instructions) notes.push(`${str(md.meta.name) ?? slug}'s instructions were over 100,000 characters; the agent has the start and the full text is on the wiki page imported/${slug}-instructions.`);
+      out.set(`agents/${slug}/INSTRUCTIONS.md`, strToU8(fitted!));
+    }
     // A picture saved beside AGENTS.md comes across as the agent's avatar.
     for (const [p, bytes] of files) {
       const pic = p.startsWith(`agents/${slug}/`) ? /^avatar\.(png|jpe?g|webp)$/i.exec(p.slice(`agents/${slug}/`.length)) : null;
@@ -169,9 +186,12 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
       notes.push(`${name}'s repo address (${findCredential(repoUrl) ? "it holds a credential" : "Boss Man doesn't accept it"}) was left out; add it on the Projects page.`);
       repoUrl = null;
     }
-    json(`projects/${slug}/project.json`, { name, repoUrl, defaultBranch: str(repo?.defaultRef) ?? "main", columns: DEFAULT_COLUMNS });
+    json(`projects/${slug}/project.json`, { name: cut(name, 80), repoUrl, defaultBranch: str(repo?.defaultRef) ?? "main", columns: DEFAULT_COLUMNS });
     const about = md.body.trim() || str(md.meta.description);
-    if (about) out.set(`wiki/imported/${slug}.md`, strToU8(`---\n${JSON.stringify({ slug: `imported/${slug}`, title: `${name} (imported)`, folder: "Imported" })}\n---\n${about}\n`));
+    if (about) {
+      if (about.length <= PAGE) out.set(`wiki/imported/${slug}.md`, strToU8(`---\n${JSON.stringify({ slug: `imported/${slug}`, title: `${name} (imported)`.slice(0, 300), folder: "Imported" })}\n---\n${about}\n`));
+      else savePages(out, `imported/${slug}`, `${name} (imported)`, "Imported", about);
+    }
   }
   issues(files, out, notes, Object.fromEntries(projectDirs.map((slug) => [str(frontmatter(text(`projects/${slug}/PROJECT.md`)!).meta.name) ?? slug, slug])), agentDirs.map((slug) => [str(frontmatter(text(`agents/${slug}/AGENTS.md`)!).meta.name) ?? slug, slug]));
   return { files: out, notes };
@@ -179,7 +199,25 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
 
 /** Paperclip issue states → Boss Man ticket states; "cancelled" has none, so it lands as done with an outcome. */
 const STATE: Record<string, string> = { backlog: "backlog", todo: "ready", in_progress: "in_progress", in_review: "review", blocked: "blocked", done: "done", cancelled: "done" };
-const PAGE = 190_000;
+
+/** Saves a long text as wiki pages (split at the page limit, so nothing is cut); returns the slugs. */
+function savePages(out: Files, slug: string, title: string, folder: string, body: string, ticket?: string): string[] {
+  const slugs: string[] = [];
+  for (let i = 0; i * PAGE < body.length; i++) {
+    const s = i ? `${slug}-${i + 1}` : slug;
+    const meta = { slug: s, title: `${title}${i ? ` (part ${i + 1})` : ""}`.slice(0, 300), folder, ...(ticket ? { ticket } : {}) };
+    out.set(`wiki/${s}.md`, strToU8(`---\n${JSON.stringify(meta)}\n---\n${body.slice(i * PAGE, (i + 1) * PAGE)}`));
+    slugs.push(s);
+  }
+  return slugs;
+}
+
+/** A text over the limit stays whole: its start is kept and the rest is on a wiki page the note points to. */
+function fitWithPage(out: Files, text: string | null, max: number, slug: string, title: string, folder: string, ticket?: string): string | null {
+  if (!text || text.length <= max) return text;
+  const slugs = savePages(out, slug, title, folder, text, ticket);
+  return `${text.slice(0, max - 400)}\n\n… (cut here: the full text is on the wiki page${slugs.length > 1 ? "s" : ""} ${slugs.join(", ")})`;
+}
 
 /**
  * paperclip-issues.json, made by the read-only query in docs/14-paperclip-migration.md, beside COMPANY.md:
@@ -215,15 +253,32 @@ function issues(files: Files, out: Files, notes: string[], projectSlug: Record<s
       const agent = agentSlug.get(by);
       // A comment with no agent is the owner's, unless Paperclip wrote it itself.
       const author = agent ? "agent" : by === "system" || by === "Summarizer" ? "system" : "owner";
-      return [{ author, agent: agent ?? null, text: body, at: str(c.at) ?? undefined, ...(author === "system" ? { from: "Paperclip" } : {}) }];
+      // A long comment (often a pasted log) becomes consecutive entries, so no text is lost.
+      const parts = Math.ceil(body.length / TEXT);
+      return Array.from({ length: parts }, (_, i) => ({
+        author,
+        agent: agent ?? null,
+        text: parts > 1 ? `(part ${i + 1} of ${parts})\n\n${body.slice(i * TEXT, (i + 1) * TEXT)}` : body,
+        at: str(c.at) ?? undefined,
+        ...(author === "system" ? { from: "Paperclip" } : {}),
+      }));
     });
+    if (conversation.length > 5000) notes.push(`${ref} has ${conversation.length} comments (after splitting long ones); Boss Man keeps 5,000 per ticket, so the import will refuse it.`);
+    // A title over 500 characters is shortened and the whole of it goes at the top of the description.
+    const fullTitle = str(it.title) ?? ref;
+    const title = cut(fullTitle, 500)!;
+    const described = fullTitle === title ? str(it.description) : `Full title: ${fullTitle}\n\n${str(it.description) ?? ""}`.trim();
+    const body = fitWithPage(out, described, TEXT, `imported/${ref.toLowerCase()}/ticket-description`, `${ref} description`, `Imported/${ref}`, ref);
+    if (body !== described) notes.push(`${ref}'s description was over 100,000 characters; the ticket has the start and the full text is on the wiki page imported/${ref.toLowerCase()}/ticket-description.`);
+    const longComments = (Array.isArray(it.comments) ? it.comments : []).filter((c) => (str(obj(c).body)?.length ?? 0) > TEXT).length;
+    if (longComments) notes.push(`${ref} had ${longComments} comment${longComments > 1 ? "s" : ""} over 100,000 characters; each is split into consecutive entries marked "part 1 of N".`);
     lines.push(
       JSON.stringify({
         ref,
         number: Number(/-(\d{1,9})$/.exec(ref)?.[1]) || null,
         project: project ?? "imported-tickets",
-        title: str(it.title) ?? ref,
-        body: str(it.description),
+        title,
+        body,
         state: STATE[status] ?? "backlog",
         outcome: status === "cancelled" ? "Cancelled in Paperclip." : null,
         parent: str(it.parent),
@@ -240,11 +295,7 @@ function issues(files: Files, out: Files, notes: string[], projectSlug: Record<s
         continue;
       }
       // A page holds at most 200,000 characters, so a longer document is split rather than cut.
-      for (let i = 0; i * PAGE < body.length; i++) {
-        const part = i ? `-${i + 1}` : "";
-        const meta = { slug: `imported/${ref.toLowerCase()}/${key}${part}`, title: `${ref} ${str(d.title) ?? key}${i ? ` (part ${i + 1})` : ""}`, folder: `Imported/${ref}`, ticket: ref };
-        out.set(`wiki/imported/${ref.toLowerCase()}/${key}${part}.md`, strToU8(`---\n${JSON.stringify(meta)}\n---\n${body.slice(i * PAGE, (i + 1) * PAGE)}`));
-      }
+      savePages(out, `imported/${ref.toLowerCase()}/${key}`, `${ref} ${str(d.title) ?? key}`, `Imported/${ref}`, body, ref);
     }
   }
   out.set("tickets.jsonl", strToU8(lines.join("\n") + (lines.length ? "\n" : "")));

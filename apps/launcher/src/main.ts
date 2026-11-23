@@ -16,16 +16,29 @@
 // `node dist/main.js recreate-all` puts every runner on the current image at once, cutting runs off (scripts/update-runner.sh --now).
 // For a setting change use scripts/update-runner.sh --settings, which drains first (BOS-594).
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { dropToUnprivileged, hostPathOfMount, noteSocketGroup } from "./startup.js";
 import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, siblingsFromSysfs } from "./cpu-layout.js";
 import { dockerClient } from "./docker.js";
 import { watchGuardEvents } from "./guard-events.js";
 import { CHECKS_FILE, launcher, launcherServer } from "./launcher.js";
 import { checkSetup, explainError } from "./selfcheck.js";
-import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
+import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseImageRef, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
+// The image install (BOS-974) starts as root with SETUID/SETGID only; this joins the Docker socket's group and drops to uid 1000 before anything else.
+console.log(JSON.stringify({ at: new Date().toISOString(), msg: "privileges", detail: dropToUnprivileged(env.DOCKER_SOCKET ?? "/var/run/docker.sock") }));
+// Say so in the log if the socket's group is not the one the last start saw. Only a log line: a failure here never stops the launcher.
+try {
+  const sock = env.DOCKER_SOCKET ?? "/var/run/docker.sock";
+  const file = path.join(path.dirname(env.BOSSMAN_LAUNCHER_KEY_FILE ?? "/run/launcher/key"), "socket_gid");
+  const line = noteSocketGroup(file, statSync(sock).gid, (f) => (existsSync(f) ? readFileSync(f, "utf8") : null), (f, b) => writeFileSync(f, b));
+  if (line) console.log(JSON.stringify({ at: new Date().toISOString(), msg: "socket-group", detail: line }));
+} catch {
+  /* optional note only */
+}
 const dataRoot = env.BOSSMAN_DATA;
 if (!dataRoot || !path.isAbsolute(dataRoot)) {
   console.error("Set BOSSMAN_DATA to an absolute host folder, mounted at the same path in this container.");
@@ -84,9 +97,16 @@ const cfg: LauncherConfig = {
   cpus: parseCpus(env.BOSSMAN_RUNNER_CPUS),
   guardMode: parseGuardMode(env.BOSSMAN_NETGUARD),
   guardAllow: parseAllow(env.BOSSMAN_NETGUARD_ALLOW),
+  runnerImage: parseImageRef("BOSSMAN_RUNNER_IMAGE", env.BOSSMAN_RUNNER_IMAGE),
+  netguardImage: parseImageRef("BOSSMAN_NETGUARD_IMAGE", env.BOSSMAN_NETGUARD_IMAGE),
 };
 const socketPath = env.DOCKER_SOCKET ?? "/var/run/docker.sock";
 const docker = dockerClient(socketPath);
+// BOSSMAN_DATA_HOST=auto: the data folder is a named volume; ask Docker where it is on the host (BOS-974). A path = use that. Empty = BOSSMAN_DATA is a host path too.
+if (env.BOSSMAN_DATA_HOST?.trim()) {
+  cfg.hostDataRoot = env.BOSSMAN_DATA_HOST.trim() === "auto" ? hostPathOfMount(await docker.inspect(os.hostname()), dataRoot) : env.BOSSMAN_DATA_HOST.trim();
+  console.log(JSON.stringify({ at: new Date().toISOString(), msg: "data folder", inside: dataRoot, onHost: cfg.hostDataRoot }));
+}
 const api = launcher(cfg, docker);
 
 if (process.argv[2] === "recreate-all") {

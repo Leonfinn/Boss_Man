@@ -70,5 +70,11 @@ describe("CI wait decisions (BOS-2137)", () => {
       // A workflow edit is never pushed before review, even beside an image file (BOS-1664, security F1).
       expect(needsEarlyGithubRun(["Dockerfile", ".github/workflows/ci.yml"])).toBe(false);
     });
+
+    it("is true for a workflow edit once the runner pushes main's workflows instead (BOS-2300)", () => {
+      expect(needsEarlyGithubRun([".github/workflows/ci.yml"], true)).toBe(true);
+      expect(needsEarlyGithubRun(["Dockerfile", ".github/workflows/ci.yml"], true)).toBe(true);
+      expect(needsEarlyGithubRun(["apps/web/src/App.tsx"], true)).toBe(false);
+    });
   });
 });

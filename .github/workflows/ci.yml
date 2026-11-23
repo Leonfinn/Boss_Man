@@ -22,8 +22,12 @@ on:
 
 # A newer push to a pull request, or the gate publishing a ticket's merge again after main moved,
 # makes the older run pointless. Main keeps every run: a later push may skip a job the earlier one needed.
+# A group holds one running and one waiting run, and GitHub cancels the waiting one when a third arrives, even with
+# cancel-in-progress off (BOS-2283: 50 main runs cancelled in 54 hours, each also skipping its Publish images run).
+# So main's group is per commit and event: every main run starts on its own, in parallel when merges land close
+# together. publish.yml groups per commit too, and release.yml has its own group, for the same slot rule. Pull requests and bossman branches keep one group per ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/bossman') }}
 
 # Every job has a time limit (BOS-2097): without one a hung step runs for GitHub's 6-hour default, and the merge gate
@@ -134,6 +138,14 @@ jobs:
               const bad = r.testResults.flatMap((f) => f.assertionResults.filter((t) => t.status === "failed").map((t) => `${f.name.split("/").pop()}: ${t.title}: ${(t.failureMessages[0] || "").split("\n")[0]}`));
               const lost = r.testResults.filter((f) => f.status === "failed" && !f.assertionResults.length).map((f) => `${f.name.split("/").pop()}: ${(f.message || "").split("\n")[0]}`);
               console.log(`::error title=web tests failed::${[...bad, ...lost].slice(0, 12).join(" | ").replace(/[\r\n%]/g, " ").slice(0, 1500)}`);
+              // BOS-2082: one note per failed file, on its repo path, so the merge gate can re-run that file when it
+              // failed by chance; the summary above names only base names, which the gate cannot run.
+              const rel = (p) => require("path").relative(process.env.GITHUB_WORKSPACE || process.cwd(), p);
+              for (const f of r.testResults.filter((x) => x.status === "failed").slice(0, 12)) {
+                const t = f.assertionResults.find((x) => x.status === "failed");
+                const msg = (t ? `${t.title}: ${(t.failureMessages[0] || "").split("\n")[0]}` : (f.message || "").split("\n")[0]).replace(/[\r\n%]/g, " ").slice(0, 300);
+                console.log(`::error file=${rel(f.name).replace(/[%,:\r\n]/g, "_")},title=web test failed::${msg}`);
+              }
             ' "$RUNNER_TEMP/web-tests.json"
             exit "$rc"
           fi
@@ -378,6 +390,26 @@ jobs:
           sudo apt-get install -y shellcheck >/dev/null
           scripts/check-shell.sh
           scripts/test-shell.sh
+      - name: Install from the images this branch just built, by digest, through a throwaway local registry (BOS-974, docs/35-install-from-images.md)
+        run: |
+          set -euo pipefail
+          # The registry lives only on this runner for this step. Nothing leaves the machine (the runner image holds Claude Code, DR-050).
+          docker run -d --name bm-local-registry -p 127.0.0.1:5000:5000 registry:2.8.3
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break; sleep 1; done
+          reg=localhost:5000/ci
+          images='[]'
+          for pair in server:boss-man-server:ci launcher:boss-man-launcher:current netguard:boss-man-netguard:current runner:boss-man-runner:ci; do
+            short="${pair%%:*}"; local_tag="${pair#*:}"
+            docker tag "$local_tag" "$reg/boss-man-$short:ci"
+            docker push -q "$reg/boss-man-$short:ci" >/dev/null
+            digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$reg/boss-man-$short:ci" | sed 's/.*@//')"
+            images="$(jq -c --arg n "boss-man-$short" --arg d "$digest" '. + [{name: $n, digest: $d}]' <<<"$images")"
+            # Remove the local tags so the install must pull the digest from the registry, like a real install.
+            docker rmi "$reg/boss-man-$short:ci" >/dev/null
+          done
+          jq -n --argjson images "$images" --arg reg "$reg" '{schema: 1, version: "ci", registries: [$reg], images: $images}' > "$RUNNER_TEMP/release.json"
+          cat "$RUNNER_TEMP/release.json"
+          INSTALL_RELEASE_JSON="$RUNNER_TEMP/release.json" scripts/test-shell.sh scripts/install-images.test.sh
       - name: Save the images for the join job (a one-day build file inside this repo's CI, never published; the runner image is left out because it holds Claude Code, DR-050)
         run: |
           mkdir -p "$RUNNER_TEMP/img"

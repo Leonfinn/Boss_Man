@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SelfDeploy } from "../src/pages/Settings";
 
@@ -107,7 +107,8 @@ describe("Settings → Updates lists the changes waiting to go live (BOS-875)", 
   it("shows the section as today when an older server sends no commits", async () => {
     stub(view());
     render(<SelfDeploy go={() => {}} />);
-    expect((await screen.findByTestId("update-tag")).textContent).toBe("Update ready");
+    // Wait for the text, not just the tag: the tag exists before the fetch answers (BOS-2298).
+    await waitFor(() => expect(screen.getByTestId("update-tag").textContent).toBe("Update ready"));
     expect(screen.getByTestId("update-say").textContent).toBe("A server update is ready.");
     expect(screen.queryByText(/changes waiting/)).toBeNull();
     expect(screen.queryByText(/and \d+ more/)).toBeNull();
@@ -118,7 +119,7 @@ describe("Settings → Updates lists the changes waiting to go live (BOS-875)", 
   it("shows no waiting list when main is up to date", async () => {
     stub(view({ deployed: TIP, commits: [merge("Already live", ticketId(1))] }));
     render(<SelfDeploy go={() => {}} />);
-    expect((await screen.findByTestId("update-tag")).textContent).toBe("Up to date");
+    await waitFor(() => expect(screen.getByTestId("update-tag").textContent).toBe("Up to date"));
     expect(screen.queryByText("1 change waiting:")).toBeNull();
     expect(screen.queryByText("Already live")).toBeNull();
   });

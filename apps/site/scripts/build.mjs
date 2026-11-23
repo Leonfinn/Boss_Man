@@ -376,7 +376,36 @@ ${ctx.feed ? `<p class="g-meta"><a href="/whats-new.xml">Follow by feed</a></p>\
   return { content, wrapMain: false };
 }
 
-export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl, changelogFile = path.join(root, "..", "..", "CHANGELOG.md"), lastModified = gitLastModified, indexNowKey = process.env.INDEXNOW_KEY, umamiScriptUrl = process.env.UMAMI_SCRIPT_URL, umamiWebsiteId = process.env.UMAMI_WEBSITE_ID } = {}) {
+/**
+ * The install guide's "last tested" sentence and the measured time, from the newest release's install-result.json (written
+ * by the Install test workflow, BOS-1488; scripts/publish-site.sh saves it next to the build). Only a pass reads as a pass:
+ * a failed result says so, and no result (file missing or unreadable) says the install has not been measured, never a guess.
+ */
+export function installTestText(file) {
+  const none = { line: "Not yet tested on a fresh machine: the install test runs on each release and its result will show here.", time: "" };
+  let r;
+  try {
+    r = file && existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+  } catch {
+    return none;
+  }
+  const d = r && /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(r.date ?? ""));
+  if (!d || !/^[0-9A-Za-z.+-]{1,40}$/.test(String(r.version ?? ""))) return none;
+  const date = `${+d[3]} ${MONTHS[+d[2] - 1]} ${d[1]}`;
+  if (r.result === "fail") {
+    return { line: `The install test of release ${r.version} failed on ${date}, so that release may not install. Its last result is on the releases page of the repository.`, time: "" };
+  }
+  const minutes = Number(r.minutes);
+  if (r.result !== "pass" || !Number.isFinite(minutes) || minutes <= 0) return none;
+  const n = Math.max(1, Math.round(minutes));
+  const plural = n === 1 ? "minute" : "minutes";
+  return {
+    line: `Last tested on ${date} with ${r.version}, took ${n} ${plural}. The test installs from the ready-made images on a clean x86 and a clean arm64 machine, from the first command to the server answering.`,
+    time: `Measured at about ${n} ${plural} on a clean machine, from the ready-made images. `,
+  };
+}
+
+export function build({ installResultFile = process.env.INSTALL_RESULT_FILE, srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "", portalUrl, changelogFile = path.join(root, "..", "..", "CHANGELOG.md"), lastModified = gitLastModified, indexNowKey = process.env.INDEXNOW_KEY, umamiScriptUrl = process.env.UMAMI_SCRIPT_URL, umamiWebsiteId = process.env.UMAMI_WEBSITE_ID } = {}) {
   const umami = checkUmami(umamiScriptUrl, umamiWebsiteId);
   siteUrl = siteUrl.replace(/\/+$/, "");
   if (siteUrl && !/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(siteUrl)) {
@@ -417,7 +446,10 @@ export function build({ srcDir = path.join(root, "src"), publicDir = path.join(r
   }
 
   const guides = readGuides(path.join(srcDir, "guides"));
+  const tested = installTestText(installResultFile);
   for (const g of guides) {
+    g.source = g.source.replaceAll("{{install-test}}", tested.line);
+    g.meta.time = g.meta.time?.replaceAll("{{install-time}}", tested.time);
     if (!g.meta.path) g.meta.path = `/guides/${g.slug}`;
     g.meta.nav = "guides";
   }

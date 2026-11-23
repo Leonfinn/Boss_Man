@@ -26,6 +26,7 @@ import { when } from "./Runs";
 import { NotFoundBlock } from "../components/NotFoundBlock";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
+import { CopyLinkButton } from "../components/CopyLinkButton";
 import { buildCsv, download } from "../csv";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
@@ -185,7 +186,7 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => void p.then(() => (setError(null), s.reload(), onChanged()), (err: Error) => setError(err.message));
   const [adding, setAdding] = useState<"driver" | "area" | null>(null);
-  if (!s.data) return s.error ? <p className="error">{s.error.message}</p> : <Loader label="Loading settings" />;
+  if (!s.data) return s.error ? <LoadError what="the priority settings" message={s.error.message} onRetry={s.reload} /> :<Loader label="Loading settings" />;
   const d = s.data;
   const add = (kind: "driver" | "area", start: () => Promise<unknown>) => {
     if (adding) return;
@@ -602,6 +603,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const phone = useMediaQuery("(max-width: 640px)");
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
+  const [query, setQuery] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [fold, setFold] = useState(readFeatureOpen);
@@ -616,7 +618,13 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const d = data.data;
   const areas = settings.data?.areas ?? [];
   const order = (a: Feature, b: Feature) => (sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : b.createdAt.localeCompare(a.createdAt));
-  const shown = (d?.features ?? []).filter((f) => all || ACTIVE.includes(f.status));
+  const listed = (d?.features ?? []).filter((f) => all || ACTIVE.includes(f.status));
+  // Search (BOS-2256): a feature matches on title or description; its subfeatures stay under it, and a matching subfeature brings its parent.
+  const needle = query.trim().toLowerCase();
+  const hit = (f: Feature) => `${f.title}\n${f.description ?? ""}`.toLowerCase().includes(needle);
+  const shown = needle
+    ? listed.filter((f) => hit(f) || (f.parentId && listed.some((p) => p.id === f.parentId && hit(p))) || listed.some((s) => s.parentId === f.id && hit(s)))
+    : listed;
   const top = shown.filter((f) => !f.parentId || !shown.some((p) => p.id === f.parentId)).sort(order);
   const groups = [...areas.map((a) => ({ id: a.id, name: a.name })), { id: "", name: areas.length ? "No area" : "" }]
     .map((g) => ({ ...g, features: top.filter((f) => (f.areaId ?? "") === g.id) }))
@@ -663,6 +671,10 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
             <AddFeature companyId={company.id} areas={areas} onAdded={(id) => go(`features/${company.id}/${id}`)} />
             <div className="features-toolbar-tools">
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                Search features
+                <input type="search" className="mini" placeholder="Title or description" value={query} onChange={(e) => setQuery(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 Sort by
                 <select className="mini" value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
                   <option value="priority">Priority</option>
@@ -706,7 +718,19 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           {error && <p className="error">{error}</p>}
           {!d && data.error && <LoadError what="your features" message={data.error.message} onRetry={data.reload} />}
           {!d && !data.error && <Loader label="Loading features" />}
-          {d && !shown.length ? (
+          {d && needle && listed.length > 0 && (
+            <p className="muted" style={{ fontSize: 13 }} data-testid="search-count">
+              {shown.length} of {listed.length} features
+            </p>
+          )}
+          {d && !shown.length && needle && listed.length > 0 ? (
+            <p className="muted">
+              No feature matches "{query.trim()}"{" "}
+              <button type="button" className="btn small" onClick={() => setQuery("")}>
+                Clear
+              </button>
+            </p>
+          ) : d && !shown.length ? (
             <p className="muted">No features yet. Add one above, or create one while linking feedback in the inbox.</p>
           ) : d && phone ? (
             <div className="fcards">
@@ -914,7 +938,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
       () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
       (err: Error) => setError(err.message),
     );
-  if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Feature not found" backHref="#/features" backLabel="Back to Features">This feature doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
+  if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Feature not found" backHref="#/features" backLabel="Back to Features">This feature doesn't exist any more, or the link is wrong.</NotFoundBlock> : <LoadError what="the feature" message={data.error.message} onRetry={data.reload} />;
   const d = data.data;
   if (!d) return <Loader label="Loading feature" />;
   const f = d.feature;
@@ -951,6 +975,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             {f.releasedAt && <span>Released {when(f.releasedAt)}</span>}
           </p>
         </div>
+        <CopyLinkButton />
       </header>
 
       {f.goalCheckAnswer ? (
