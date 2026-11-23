@@ -113,8 +113,8 @@ const saveShot = async (name: string, page: any) => {
 /** The four places, with the lead the owner approved and a phrase only the fold holds. */
 const PLACES = [
   {
-    name: "agents",
-    hash: "#/agents/c1",
+    name: "team",
+    hash: "#/settings/c1/team",
     ready: 'select#ceo-approvals',
     lead: "Choose whether the CEO's changes to an agent's instructions wait for you.",
     held: "Hires and model changes always wait for you",

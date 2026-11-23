@@ -320,7 +320,7 @@ export const OWNER_FIELDS = {
   Agents: [
     "Only start", "From", "To", "Time zone",
     "Thinking", "Blank", "Name", "Job title", "Agent", "Model", "Paid from", "Instructions", "Upload a picture", "Title",
-    "Note", "Review by (optional)", "Why (what you said)", "What waits for you from the CEO",
+    "Note", "Review by (optional)", "Why (what you said)",
   ],
   Skills: [
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
@@ -374,7 +374,7 @@ export const OWNER_FIELDS = {
   Reviews: ["Ask after (days)"],
   // The settings that shape how the team works day to day.
   "Team and CEO": [
-    "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it",
+    "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it", "What waits for you from the CEO",
   ],
   // The Scrum Master's watchdog.
   Watchdog: ["Record only (rehearse)", "Scrum Master"],
@@ -432,7 +432,7 @@ export const OWNER_SECTIONS = {
   Reviews: ["Reviews"],
   "Team and CEO": [
     "Pause this company", "Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references",
-    "Did it move the goal?", "Cleaning up temp files",
+    "What the CEO can do without asking", "Did it move the goal?", "Cleaning up temp files",
   ],
   Watchdog: ["Watchdog"],
   Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],

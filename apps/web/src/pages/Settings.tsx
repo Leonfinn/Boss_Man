@@ -11,7 +11,7 @@ import { Funding, ProjectBudgets } from "./settings/Funding";
 import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
-import { CompanyPause, GoalCheck,StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
+import { CeoApprovals, CompanyPause, GoalCheck,StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
 import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
@@ -62,6 +62,7 @@ export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly Set
         jump: [
           { id: "standing-rules-h", label: "Standing rules" },
           { id: "chapters-h", label: "CEO chapters" },
+          { id: "ceo-approvals-h", label: "What the CEO can do without asking" },
           { id: "advice-timeout-h", label: "Asking the CEO for advice" },
           { id: "nudge-cap-h", label: "Nudges" },
           { id: "run-time-limit-h", label: "Run time limit" },
@@ -253,6 +254,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         <CompanyPause company={company} onChanged={onChanged} />
         <StandingRules company={company} onChanged={onChanged} />
         <Chapters company={company} />
+        <CeoApprovals company={company} />
         <AdviceTimeout company={company} onChanged={onChanged} />
         <NudgeCap company={company} onChanged={onChanged} />
         <RunTimeLimit company={company} onChanged={onChanged} />
