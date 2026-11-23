@@ -105,7 +105,7 @@ export const OWNER_CONTROLS = {
   // Each project is a collapsed row; "Edit settings" opens its form and "Hide settings" folds it away (BOS-1876).
   Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings"],
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
-  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied"],
+  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
   Engagements: [],

@@ -1,7 +1,8 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { isInfiniteModel } from "@boss-man/shared";
-import { api, type Company } from "../api";
+import { api, type Company, type Transcript, type TranscriptItem } from "../api";
+import { download } from "../csv";
 import { away } from "../server-watch";
 import { stopRun } from "../stop-run";
 import { useDraft } from "../drafts";
@@ -145,8 +146,56 @@ function PermissionsInRun({ runId, live }: { runId: string; live: boolean }) {
   );
 }
 
+const CUT = 2_000;
+/** One run as Markdown (BOS-2322): what the Run page shows, in order; long text is cut with "(cut)". */
+export function runMarkdown(run: Transcript["run"], ticketRef: string | null, items: TranscriptItem[]): string {
+  const utc = (iso: string) => `${iso.slice(0, 16).replace("T", " ")} UTC`;
+  const cut = (s: string) => (s.length > CUT ? `${s.slice(0, CUT)} (cut)` : s);
+  const head = [
+    `# Run: ${run.agent ?? "An agent"}${run.ticket ? `, ${ticketRef ? `${ticketRef} ` : ""}${run.ticket}` : ""}`,
+    "",
+    `- Agent: ${run.agent ?? "An agent"}`,
+    ...(run.ticket ? [`- Ticket: ${ticketRef ? `${ticketRef} ` : ""}${run.ticket}`] : []),
+    `- Started: ${utc(run.startedAt)}`,
+    `- Ended: ${run.endedAt ? utc(run.endedAt) : "still running"}`,
+    `- Outcome: ${run.endedAt ? (run.outcome ?? "end_turn") : "still running"}`,
+    "",
+  ];
+  const lines = items.map((item) => {
+    const d = describe(item);
+    return `**${d.label}** · ${new Date(item.at).toISOString().slice(11, 19)} UTC${d.body ? `\n\n${d.tone === "tool" ? `Status: ${d.body}` : cut(d.body)}` : ""}\n`;
+  });
+  return `${head.join("\n")}\n${lines.join("\n")}`;
+}
+
 export function Run({ runId, companies }: { runId: string; companies: Company[] }) {
   const { run, items, dropped, error } = useTranscript(runId);
+  const [preparing, setPreparing] = useState(false);
+  const [dlError, setDlError] = useState<string | null>(null);
+  const downloadRun = async () => {
+    if (!run || preparing) return;
+    setPreparing(true);
+    setDlError(null);
+    try {
+      // The page keeps only the latest events, so fetch the whole transcript again.
+      let all: TranscriptItem[] = [];
+      let after = 0;
+      for (;;) {
+        const page = await api<Transcript>(`/api/runs/${runId}/transcript?after=${after}&limit=500`);
+        all = all.concat(page.items);
+        after = page.next;
+        if (!page.more) break;
+      }
+      const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const ref = run.runTicketRef ?? null;
+      const tail = ref ? slug(ref) : run.startedAt.slice(0, 10);
+      download(`run-${slug(run.agent ?? "") || "agent"}-${tail}.md`, runMarkdown(run, ref, all), "text/markdown;charset=utf-8");
+    } catch (err) {
+      setDlError((err as Error).message);
+    } finally {
+      setPreparing(false);
+    }
+  };
   const scroller = useRef<HTMLDivElement>(null);
   // Follows the end of the transcript until the owner scrolls up; scrolling back down follows again.
   const follow = useRef(true);
@@ -197,8 +246,16 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
             </p>
           )}
         </div>
-        <CopyLinkButton />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {run && (
+            <button type="button" className="btn" onClick={() => void downloadRun()} disabled={preparing}>
+              {preparing ? "Preparing" : "Download"}
+            </button>
+          )}
+          <CopyLinkButton />
+        </div>
       </header>
+      {dlError && <p className="error" role="alert">{dlError}</p>}
       {run && !run.endedAt && <Steer runId={runId} companyId={run.companyId} ticketId={run.ticketId} />}
       {dropped > 0 && (
         <p className="muted" style={{ fontSize: 13 }}>
