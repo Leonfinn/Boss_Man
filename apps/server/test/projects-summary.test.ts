@@ -23,6 +23,8 @@ describe("GET /api/companies/:id/projects-summary", () => {
     const idle = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Idle" })).json() as { id: string };
     await req("PATCH", `/api/projects/${busy.id}`, { monthlyCapUsd: 100 });
 
+    const { company: rival } = (await req("POST", "/api/companies", { name: "Rival Co" })).json() as { company: { id: string } };
+    const foreign = (await req("POST", `/api/companies/${rival.id}/projects`, { name: "Foreign" })).json() as { id: string };
     const now = new Date();
     const mergedAt = new Date(now.getTime() - 86_400_000);
     const base = { companyId: company.id, projectId: busy.id };
@@ -42,6 +44,8 @@ describe("GET /api/companies/:id/projects-summary", () => {
     const res = await req("GET", `/api/companies/${company.id}/projects-summary`);
     expect(res.statusCode).toBe(200);
     const list = (res.json() as { projects: Record<string, unknown>[] }).projects;
+    expect(list.map((p) => p.projectId).sort()).toEqual([busy.id, idle.id].sort());
+    expect(list.some((p) => p.projectId === foreign.id)).toBe(false);
     const b = list.find((p) => p.projectId === busy.id)!;
     expect(b).toMatchObject({ open: 3, inReview: 2, pointsLeft: 8, unsized: 1, finishedLast30Days: 1, monthMicros: 42_000_000, monthlyCapMicros: 100_000_000, lastMergeAt: mergedAt.toISOString() });
     const i = list.find((p) => p.projectId === idle.id)!;
