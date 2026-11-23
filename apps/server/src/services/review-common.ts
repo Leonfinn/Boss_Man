@@ -165,6 +165,9 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       if (d.exitCode === undefined && !d.timedOut && !d.output && Array.isArray(d.why)) return `Approved, but not merged: a migration number is already taken (${d.why.join("; ")}). ${back} to fix; the details are in the conversation below.`;
       return `Approved, but not merged: the check ${d.timedOut ? `timed out after ${Math.max(1, Math.round((d.ms ?? 0) / 60_000))} minutes` : checkFailureSentence(d)}. ${back} to fix; the check's output is in the conversation below.${d.keptLog ? ` ${fullLogPointer(d.keptLog.jobId, d.keptLog.ticketId, d.keptLog.chars)}` : ""}`;
     case "check_stuck":
+      // BOS-2301: an ending with a note (left review, handed over, replaced by a newer check) raises no card (merge-land.ts
+      // counts it as no gate fault), so it says what happened. On 22 Nov BOS-2285 said "a merge card is open" for one.
+      if (typeof d.note === "string" && d.note) return `Approved, but not merged: ${d.note}`;
       return "Approved, but not merged: the check couldn't finish. This isn't a problem with the agent's work; a merge card is open in Decisions, with the CEO first unless only you can fix it.";
     case "conflicts":
       return `Approved, but not merged: the work conflicts with ${ctx.branch} in ${(d.files ?? []).join(", ")}. ${back} to sort out.`;
