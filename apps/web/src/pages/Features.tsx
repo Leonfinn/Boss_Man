@@ -361,6 +361,29 @@ function saveFeatureOpen(state: { ids: string[] }) {
   } catch {}
 }
 
+/** BOS-2396: a feature's points and expected finish, as the server sends them (kept here, not in api.ts). */
+type FeatureForecastView = { pointsDone: number; pointsLeft: number; unsized: number; pace: number; expectedFinish: string | null };
+type FeatureWithPoints = Feature & { pointsDone?: number; pointsTotal?: number };
+
+/** "3 Dec" from a YYYY-MM-DD date. */
+function dayMonth(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  return `${d.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]}`;
+}
+
+/** The feature page's forecast lines in plain words; empty when nothing is sized and nothing is unsized. */
+export function forecastLines(fc: FeatureForecastView): string[] {
+  const lines: string[] = [];
+  const total = fc.pointsDone + fc.pointsLeft;
+  if (total > 0) {
+    const finish = fc.pointsLeft === 0 ? "" : fc.expectedFinish ? ` · at this pace about ${dayMonth(fc.expectedFinish)}` : "";
+    lines.push(`${fc.pointsDone} of ${total} points done · ${fc.pointsLeft} left${finish}`);
+  }
+  if (fc.unsized > 0) lines.push(`${fc.unsized} ${fc.unsized === 1 ? "task has" : "tasks have"} no size`);
+  if (fc.pointsLeft > 0 && fc.pace === 0) lines.push("No finished work in the last 4 weeks to estimate from.");
+  return lines;
+}
+
 /** Done, all and blocked tasks of a feature (cancelled ones count for none). */
 function taskCounts(f: Feature) {
   const live = f.tickets.items.filter((t) => t.outcome !== "cancelled");
@@ -468,6 +491,11 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
           </button>
         ) : (
           "–"
+        )}
+        {!!(f as FeatureWithPoints).pointsTotal && (
+          <div style={{ fontSize: 12 }}>
+            {(f as FeatureWithPoints).pointsDone} of {(f as FeatureWithPoints).pointsTotal} points
+          </div>
         )}
         <BlockedLine n={counts.blocked} />
       </td>
@@ -882,7 +910,7 @@ export function GoalSelect({ id, tree, value, onChange }: { id: string; tree: Tr
 }
 
 function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go: (to: string) => void }) {
-  const data = usePoll((signal) => api<FeatureDetail>(`/api/features/${id}`, { signal }), 30_000, `feature-${id}`);
+  const data = usePoll((signal) => api<FeatureDetail & { forecast?: FeatureForecastView | null }>(`/api/features/${id}`, { signal }), 30_000, `feature-${id}`);
   const list = usePoll((signal) => api<ScoredFeatures>(`/api/companies/${companyId}/features`, { signal }), 60_000, `fl-${companyId}`);
   const settings = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `fs-page-${companyId}`);
   const tree = usePoll((signal) => api<Tree>(`/api/companies/${companyId}/objectives`, { signal }), 120_000, `tree-f-${companyId}`);
@@ -974,6 +1002,12 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             </span>
             {f.releasedAt && <span>Released {when(f.releasedAt)}</span>}
           </p>
+          {d.forecast &&
+            forecastLines(d.forecast).map((line) => (
+              <p key={line} className="sub feature-forecast" style={{ margin: "2px 0 0" }}>
+                {line}
+              </p>
+            ))}
         </div>
         <CopyLinkButton />
       </header>
