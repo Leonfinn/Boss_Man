@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
 import { Loader } from "../components/Loader";
 import { buildCsv, download } from "../csv";
 
@@ -262,12 +262,27 @@ const NO_FILTER: Filter = { companyId: "", agentId: "", result: "", q: "" };
 
 /** The owner's last filter, so a reload (or coming back later) keeps it. */
 function savedFilter(): Filter {
+  let base = NO_FILTER;
   try {
     const f = JSON.parse(localStorage.getItem(FILTER_KEY) ?? "{}") as Partial<Filter>;
-    return { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "", q: typeof f.q === "string" ? f.q.slice(0, 100) : "" };
+    base = { companyId: f.companyId ?? "", agentId: f.agentId ?? "", result: f.result ?? "", q: typeof f.q === "string" ? f.q.slice(0, 100) : "" };
   } catch {
-    return NO_FILTER;
+    /* no usable saved filter */
   }
+  // A link such as #/runs?result=failed wins over the saved filter and is saved like a click.
+  const link = hashQuery();
+  const result = link.get("result");
+  const q = link.get("q");
+  if (result === null && q === null) return base;
+  const next: Filter = { ...base };
+  if (result !== null) next.result = result === "finished" || result === "failed" || result === "interrupted" ? result : "";
+  if (q !== null) next.q = q.slice(0, 100);
+  try {
+    localStorage.setItem(FILTER_KEY, JSON.stringify(next));
+  } catch {
+    /* storage unavailable: the filter still applies for this visit */
+  }
+  return next;
 }
 
 function Chips({ label, value, options, onPick }: { label: string; value: string; options: Array<{ id: string; name: string }>; onPick: (id: string) => void }) {
