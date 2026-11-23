@@ -293,6 +293,69 @@ run 0 "a shared change at the gate" env BOSSMAN_MERGE_CHECK=1
 logged "@boss-man/server exec vitest run test/aliased.test.ts test/ratchet.test.ts test/reads-web.test.ts" "gate shared server"
 logged "@boss-man/web exec vitest run" "gate shared web"
 
+# BOS-2334: a shared change runs the other packages' tests that use the names it exports. BOS-2327 changed OWNER_TABS in
+# packages/shared/src/owner-controls.ts; apps/server/test/owner-screens.test.ts reaches it through src/services/owner-screens.ts,
+# and only GitHub ran it. Types are left to the typecheck; a test that uses none of the names is not picked.
+g checkout -q main
+wr packages/shared/src/tabs.ts 'export const OWNER_TABS = ["a"];
+export function tabLabel(t: string) { return t; }
+export type TabKind = "x";
+export interface TabShape { k: TabKind }'
+wr packages/shared/src/tab-menu.ts 'import { OWNER_TABS } from "./tabs.js";
+export const MENU_ROWS = OWNER_TABS.length;'
+wr packages/shared/src/index.ts 'export * from "./tabs.js";
+export * from "./tab-menu.js";'
+wr apps/server/src/services/screens.ts 'import { OWNER_TABS } from "@boss-man/shared";
+export const screens = () => OWNER_TABS;'
+wr apps/server/test/screens.test.ts 'import { screens } from "../src/services/screens.js";
+it("x", () => screens());'
+wr apps/server/test/direct.test.ts 'import {
+  tabLabel,
+} from "@boss-man/shared";
+it("x", () => tabLabel("a"));'
+wr apps/server/test/kind-only.test.ts 'import type { TabKind } from "@boss-man/shared"; const k: TabKind = "x";'
+wr apps/server/test/unrelated.test.ts 'import { screensOther } from "../src/services/other.js"; it("x", () => screensOther);'
+wr apps/web/src/menu.ts 'import { MENU_ROWS } from "@boss-man/shared"; export const rows = MENU_ROWS;'
+wr apps/web/test/menu.test.tsx 'import { rows } from "@/menu"; it("x", () => rows);'
+g add -A; g commit -q -m "shared users"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B sc1 origin/main; commit packages/shared/src/tabs.ts
+run 0 "a shared change at the gate runs the tests that use its names" env BOSSMAN_MERGE_CHECK=1
+logged "pnpm --filter @boss-man/server exec vitest related --run test/direct.test.ts test/screens.test.ts" "server tests using the changed names"
+# A shared file that imports the changed one (tab-menu.ts) is followed: web's test of a user of MENU_ROWS runs too.
+logged "pnpm --filter @boss-man/web exec vitest related --run test/menu.test.tsx" "web test through a shared file that imports the changed one"
+logged "pnpm --filter @boss-man/shared exec vitest related --run src/tabs.ts" "shared's own related run is unchanged"
+notlogged "unrelated.test.ts" "a server test that uses none of the names"
+notlogged "kind-only.test.ts" "a test that uses only a type of the changed file"
+# A hand run picks them too.
+run 0 "a hand run of a shared change" env
+logged "pnpm --filter @boss-man/server exec vitest related --run test/direct.test.ts test/screens.test.ts" "hand run server"
+# A change that only re-exports (index.ts) picks nothing extra; typecheck covers it.
+g checkout -q -B sc2 origin/main; commit packages/shared/src/index.ts
+run 0 "an index.ts change" env BOSSMAN_MERGE_CHECK=1
+notlogged "@boss-man/server exec vitest related" "index.ts only"
+# A type-only file picks nothing.
+g checkout -q main
+wr packages/shared/src/kinds.ts 'export type Kind = "a";
+export interface Shape { k: Kind }'
+wr apps/server/test/kinds.test.ts 'import type { Kind } from "@boss-man/shared"; const k: Kind = "a";'
+g add -A; g commit -q -m "types"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B sc3 origin/main; commit packages/shared/src/kinds.ts
+run 0 "a type-only shared change" env BOSSMAN_MERGE_CHECK=1
+notlogged "@boss-man/server exec vitest related" "type-only"
+logged "pnpm --filter @boss-man/server typecheck" "type-only change still typechecks the server"
+# A broad pick (over 15 files) is skipped by a hand run, with the usual line, and run at the gate.
+g checkout -q main
+for i in $(seq 1 16); do wr "apps/server/test/use$i.test.ts" 'import { tabLabel } from "@boss-man/shared"; it("x", () => tabLabel("b"));'; done
+g add -A; g commit -q -m "many users"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B sc4 origin/main; commit packages/shared/src/tabs.ts
+run 0 "a broad shared pick, hand run" env
+grep -qF "SKIP related tests: too broad for a hand run, the merge gate runs them (apps/server;" "$t/out" || fail "broad shared pick: no SKIP line: $(cat "$t/out")"
+notlogged "@boss-man/server exec vitest related" "broad shared pick, hand run"
+run 0 "a broad shared pick at the gate" env BOSSMAN_MERGE_CHECK=1
+logged "test/use16.test.ts" "broad shared pick at the gate"
+run 1 "a failing picked test fails the gate" env BOSSMAN_MERGE_CHECK=1 FAIL_ON=screens.test
+grep -q "^FAIL  tests related to @boss-man/server changes" "$t/out" || fail "picked test failure: no FAIL line: $(cat "$t/out")"
+
 # BOS-2286 gap 1: a change outside the packages (a compose file) touches no package, but a whole-repo test that names that file
 # by its repo path runs, in the slot, at the gate and in a queued check; one that names another file does not (BOS-2161 changed
 # deploy/check-worker/compose.yaml with no web change, and the web test that compares it ran first on GitHub, and failed).

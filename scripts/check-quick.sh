@@ -3,6 +3,7 @@
 # ticket's risk (deepChecks in packages/shared/src/risk.ts): high and critical get the full scripts/check-all.sh after this
 # script (BOSSMAN_FULL_CHECK_NEXT); trivial, low and medium get only this script, with BOSSMAN_MERGE_CHECK set, which adds the
 # whole-repo tests of each touched package (BOS-1732) and never skips related tests. GitHub CI is the first full run for those.
+# A shared-code change also runs the other packages' tests that use the names it changed (BOS-2334, see shared_consumer_tests).
 # Prints one PASS/FAIL line per step (output of a failed step follows it) and exits 1 on any failure,
 # or 75 when nothing failed but the heavy phase never got a check slot (check-all exit 75; the merge gate retries).
 # BASE (default origin/main) is the branch to compare with. Tests stub the commands through PATH.
@@ -330,6 +331,67 @@ fi
 related_files() { # related_files <dir>
   grep -E "^$1/.*\.(ts|tsx)$" <<<"$changed" | grep -v '\.d\.ts$' | while IFS= read -r f; do [ -f "$f" ] && echo "${f#"$1"/}"; done || true
 }
+# BOS-2334: a change to shared code also runs the tests of the other packages that use what it changed. related_files above
+# passes a package only its own changed files, so BOS-2327's change to packages/shared/src/owner-controls.ts never reached
+# apps/server/test/owner-screens.test.ts (it imports src/services/owner-screens.ts, which uses OWNER_TABS from
+# @boss-man/shared), and GitHub was the first to fail on it. Passing the shared file itself to the server's `vitest related`
+# does not work: @boss-man/shared is one barrel (src/index.ts, export * of every file), so every test that reaches the
+# barrel (most of the server, through app.ts) counts as related to any shared file: the whole suite on every shared change.
+# So the tests are picked by the names the change exports:
+#   1. the changed shared files (not tests, not index.ts, which only re-exports), and every shared file that imports one of
+#      them, until no new one turns up;
+#   2. the value names they export (function, const, let, class, enum, export { ... }); types are left out: the typecheck of
+#      every package, which runs on any shared change, catches those;
+#   3. in launcher, runner, server and web, the files that import @boss-man/shared and use one of those names as a word;
+#   4. the test files among them, and the test files that import one of the others directly (by file name, as whole_repo_imports).
+# Known limit: a test that reaches the user only through a hub (test -> app.ts -> ... -> user) is not picked; those are what
+# made the plain related run the whole suite. The full check (high and critical) and GitHub (the rest) still run them.
+# A short name (plan, rank) picks extra tests: too many is safe, too few is the risk.
+test_file_re='\.(test|spec)\.(ts|tsx|mts)$'
+shared_src_changed="$(grep -E '^packages/shared/src/.*\.(ts|tsx)$' <<<"$changed" | grep -vE "$test_file_re|\.d\.ts$|^packages/shared/src/index\.ts$" || true)"
+shared_names=""
+if [ -n "$shared_src_changed" ]; then
+  shared_seen=" " shared_queue=""
+  for f in $shared_src_changed; do [ ! -f "$f" ] || { shared_seen="$shared_seen$f "; shared_queue="$shared_queue $f"; }; done
+  shared_all="$(find packages/shared/src -type f \( -name '*.ts' -o -name '*.tsx' \) ! -name '*.test.*' ! -name '*.d.ts' ! -name index.ts -print 2>/dev/null | sort)" || shared_all=""
+  while [ -n "$shared_queue" ]; do
+    shared_next=""
+    for f in $shared_all; do
+      case "$shared_seen" in *" $f "*) continue ;; esac
+      for q in $shared_queue; do
+        if whole_repo_imports "$f" "$q"; then shared_seen="$shared_seen$f "; shared_next="$shared_next $f"; break; fi
+      done
+    done
+    shared_queue=$shared_next
+  done
+  # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+  shared_names="$({
+    sed -nE 's/^export +(declare +)?(async +)?(function\*?|const|let|var|class|abstract +class|enum|const +enum) +([A-Za-z_][A-Za-z0-9_]*).*/\4/p' $shared_seen
+    sed -nE 's/^export +\{([^}]*)\}.*/\1/p' $shared_seen | tr ',' '\n' | sed -E 's/^[[:space:]]*(type[[:space:]]+)?//; s/.*[[:space:]]as[[:space:]]+//; s/[[:space:]]*$//'
+  } 2>/dev/null | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | sort -u | tr '\n' '|' | sed 's/|$//')" || shared_names=""
+fi
+shared_consumer_tests() { # shared_consumer_tests <package dir>: its test files that use what the shared change exports, relative to it
+  local d=$1 users mods tests="" re
+  [ -n "$shared_names" ] || return 0
+  case "$d" in apps/launcher | apps/runner | apps/server | apps/web) ;; *) return 0 ;; esac
+  users="$({ grep -rlE --include='*.ts' --include='*.tsx' --include='*.mts' "[\"']@boss-man/shared(/[^\"']*)?[\"']" "$d/src" "$d/test" 2>/dev/null || true; } \
+    | { xargs -r grep -lwE "($shared_names)" 2>/dev/null || true; })"
+  [ -n "$users" ] || return 0
+  tests="$(grep -E "$test_file_re" <<<"$users" || true)"
+  mods="$(grep -vE "$test_file_re" <<<"$users" || true)"
+  if [ -n "$mods" ]; then
+    # One grep for all of them: the import pattern of whole_repo_imports, with the file names as alternatives.
+    re="$(sed -E 's#.*/##; s#\.[a-z]+$##; s#\.#\\.#g' <<<"$mods" | sort -u | tr '\n' '|' | sed 's/|$//')"
+    tests="$tests"$'\n'"$({ find "$d/src" "$d/test" -type f \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.test.mts' -o -name '*.spec.ts' -o -name '*.spec.tsx' \) -print 2>/dev/null || true; } \
+      | { xargs -r grep -lE "(from|import|require)[[:space:](]*[\"']([^\"']*[/#])?($re)(\.(js|jsx|ts|tsx|mjs|mts))?[\"']" 2>/dev/null || true; })"
+  fi
+  { grep . <<<"$tests" || true; } | sed "s#^$d/##" | sort -u
+}
+# The related-test list of a package: its own changed files (vitest follows their imports) and the tests above. A test file
+# passed to vitest related runs itself, so this stays one run per package.
+related_list() { # related_list <dir>
+  { related_files "$1"; shared_consumer_tests "$1"; } | { grep . || true; } | sort -u
+}
 broad() { # broad <files>: too many files, or one that most of the suite imports
   # The merge gate runs this script as its check (BOSSMAN_MERGE_CHECK=1): it must never skip tests, or merges go in untested.
   [ -z "${CHECK_QUICK_FORCE_RELATED:-}" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] || return 1
@@ -344,7 +406,7 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     step "typecheck $name" pnpm --filter "$name" typecheck
   done
   for d in "${pkgs[@]}" apps/site; do
-    files="$(related_files "$d")"
+    files="$(related_list "$d")"
     [ -n "$files" ] || continue
     ! broad "$files" || continue
     name="$(node -p "require('./$d/package.json').name")"
@@ -385,7 +447,7 @@ fi
 need_slot=0
 [ "${#pkgs[@]}" -eq 0 ] || need_slot=1
 for d in "${pkgs[@]}" apps/site; do
-  files="$(related_files "$d")"
+  files="$(related_list "$d")"
   [ -n "$files" ] || continue
   if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"; partial=1
   else need_slot=1; fi
