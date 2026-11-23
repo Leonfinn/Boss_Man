@@ -13,6 +13,8 @@ import { activity, ticketDependencies, tickets, wakes } from "../src/db/schema.j
 import { issueRunToken } from "../src/mcp.js";
 import { appendLine, CHECK_REPORTED_REASON, checkTicketDoneRefusal, checkTicketVerdict } from "../src/services/after-merge-check-tickets.js";
 import { wakeClass } from "../src/services/wake-classes.js";
+import { wakeWatchers } from "../src/services/watch-triggers.js";
+import { blockedSplit } from "../src/services/go-live-note.js";
 
 const BEFORE = "Health check returns 200";
 const LIVE = { text: "The update banner waits for a running merge check on the live server", after: "merge" as const };
@@ -237,6 +239,82 @@ describe("check tickets: split out, then report back", () => {
     expect(numbered.isError, numbered.text).toBe(false);
     expect((await c.row(made.id!)).systemState).toBe("done");
     expect((await c.row(c.parent.id)).stateNote).toMatch(/reported: 2 pass/);
+  });
+
+  it("BOS-2417: a merged parent whose only unreported criterion is tied to an open check closes, and its watch moves to the check", async () => {
+    const c = await setup();
+    await c.db.update(tickets).set({ watchingFor: "a week of merge checks with no banner shown early", watchTrigger: "gate_ci_failed", liveAt: new Date() }).where(eq(tickets.id, c.parent.id));
+    // Before the split the close is refused (BOS-1794's behaviour), and the refusal names the way out.
+    const early = await c.setState(c.dev.id, { ticketId: c.parent.id, state: "done", summary: "1 pass; live since this morning" });
+    expect(early.isError, early.text).toBe(true);
+    expect(early.text).toContain(`Not reported: "${LIVE.text}"`);
+    expect(early.text).toContain("checksCriterion");
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    await c.db.update(tickets).set({ assigneeAgentId: c.other.id, systemState: "blocked" }).where(eq(tickets.id, made.id!));
+    const closed = await c.setState(c.dev.id, { ticketId: c.parent.id, state: "done", summary: "1 pass; live since this morning" });
+    expect(closed.isError, closed.text).toBe(false);
+    const check = await c.row(made.id!);
+    expect(closed.text).toMatch(new RegExp(`criterion 2 left to [A-Z]+-${check.number}`));
+    expect(closed.text).toContain("watch moved to");
+    const parent = await c.row(c.parent.id);
+    expect(parent.systemState).toBe("done");
+    expect(parent.outcome).toBe("completed");
+    expect(parent.watchTrigger).toBeNull();
+    expect([check.watchTrigger, check.watchingFor]).toEqual(["gate_ci_failed", "a week of merge checks with no banner shown early"]);
+    // No follow-up for an unreported (not failed) criterion, and the check stays open with its tie.
+    expect(check.systemState).toBe("blocked");
+    expect(check.checksTicketId).toBe(c.parent.id);
+    // The trigger now wakes the check's assignee on the check, and not the finished parent's.
+    const woken: Array<{ agentId: string; ticketId: string }> = [];
+    const n = await wakeWatchers(c.db, async (agentId, input) => (woken.push({ agentId, ticketId: input.ticketId }), { status: "queued" }), "gate_ci_failed", "test run");
+    expect(n).toBe(woken.length);
+    expect(woken.filter((w) => w.ticketId === made.id || w.ticketId === c.parent.id)).toEqual([{ agentId: c.other.id, ticketId: made.id }]);
+    // The board still shows the open check in "Merged, watching", not as stuck in Blocked.
+    expect((await blockedSplit(c.db, c.co.company.id)).liveCheck).toBe(1);
+    // The check's pass is still written on the done parent; nobody is woken for a run with nothing to do.
+    await c.db.update(tickets).set({ stateNote: "1 pass: a week of checks, no banner early" }).where(eq(tickets.id, made.id!));
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "completed", overLimit: true });
+    const after = await c.row(c.parent.id);
+    expect(after.systemState).toBe("done");
+    expect(after.stateNote).toMatch(/reported: 2 pass/);
+    expect(await c.reportWakes()).toEqual([]);
+    expect(await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.co.ceo.id), eq(wakes.reason, CHECK_REPORTED_REASON)))).toEqual([]);
+  });
+
+  it("BOS-2417: a fail reported on a parent already closed at go-live wakes the CEO, not the parent's assignee", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    const closed = await c.setState(c.dev.id, { ticketId: c.parent.id, state: "done", summary: "1 pass; live since this morning" });
+    expect(closed.isError, closed.text).toBe(false);
+    // Unassigned check: the reply says nobody is woken for it.
+    expect(closed.text).toContain("has no assignee");
+    await c.db.update(tickets).set({ stateNote: "1 fail: the banner showed while a merge check ran" }).where(eq(tickets.id, made.id!));
+    await c.work.updateTicket(made.id!, { state: "done", outcome: "completed", overLimit: true });
+    const parent = await c.row(c.parent.id);
+    expect(readVerdicts(parent.acceptanceCriteria, parent.stateNote).map((r) => r.verdict)).toEqual(["pass", "fail"]);
+    expect(await c.reportWakes()).toEqual([]);
+    const ceo = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.co.ceo.id), eq(wakes.reason, CHECK_REPORTED_REASON)));
+    expect(ceo).toHaveLength(1);
+    expect(ceo[0]!.ticketId).toBe(c.parent.id);
+    expect(ceo[0]!.note).toContain("reported fail");
+    expect(ceo[0]!.note).toContain("follow-up");
+  });
+
+  it("BOS-2417: the tie lets only merged work close, and a criterion with no check ticket still holds it", async () => {
+    const c = await setup();
+    const third = { text: "Owner sees the new wording on their phone", after: "merge" as const };
+    await c.db.update(tickets).set({ acceptanceCriteria: [BEFORE, LIVE, third] }).where(eq(tickets.id, c.parent.id));
+    await c.create(c.dev.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    const held = await c.setState(c.dev.id, { ticketId: c.parent.id, state: "done", summary: "1 pass; live since this morning" });
+    expect(held.isError).toBe(true);
+    expect(held.text).toContain(`Not reported: "${third.text}"`);
+    expect(held.text).not.toContain(LIVE.text);
+    // Not merged: the tie doesn't count.
+    await c.db.update(tickets).set({ acceptanceCriteria: [BEFORE, LIVE], mergeCommit: null }).where(eq(tickets.id, c.parent.id));
+    const unmerged = await c.setState(c.dev.id, { ticketId: c.parent.id, state: "done", summary: "1 pass" });
+    expect(unmerged.isError).toBe(true);
+    expect(unmerged.text).toContain(`Not reported: "${LIVE.text}"`);
+    expect((await c.row(c.parent.id)).systemState).toBe("blocked");
   });
 
   it("BOS-1867: a linked check can still be cancelled with no verdict, and an unlinked ticket isn't held to the numbered form", async () => {

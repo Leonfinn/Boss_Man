@@ -125,7 +125,8 @@ export const GO_LIVE_WAIT_MAX_MS = 3 * 24 * 60 * 60 * 1000;
 /**
  * BOS-1907: the lane is "Merged, watching". It holds a ticket with a merge in Blocked, and also one still in In progress
  * (merged before this change; it never counts toward a limit either), and a split-out check ticket (checksCriterion) whose
- * parent is merged and not done (`checksParentMerged`, set by the server from the parent link).
+ * parent is merged and not cancelled (`checksParentMerged`, set by the server from the parent link; BOS-2417: a parent
+ * closed at go-live leaves its check in the lane).
  */
 export const isLiveCheckWait = (t: { systemState: string; mergeCommit?: string | null; checksParentMerged?: boolean | null }): boolean =>
   (t.systemState === "blocked" || t.systemState === "in_progress") && (!!t.mergeCommit || !!t.checksParentMerged);
