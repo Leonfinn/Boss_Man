@@ -54,6 +54,8 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState(0);
+  // Bumped by Retry after a failed search: the same query is asked again.
+  const [attempt, setAttempt] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   // Only the latest request's answer is shown: a slow reply to "pel" must not replace "pelican"'s.
   const asked = useRef(0);
@@ -105,7 +107,7 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
       );
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [q, open, companyId]);
+  }, [q, open, companyId, attempt]);
 
   const close = () => {
     setOpen(false);
@@ -162,7 +164,14 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
         <div id="search-results" role="listbox" aria-label="Results" className="search-results">
           {!companyId && <p className="muted">Pick a company first.</p>}
           {companyId && term.length < SEARCH_MIN && <p className="muted">Type at least {SEARCH_MIN} letters, or a ticket number like BOS-12.</p>}
-          {error && <p className="error" role="alert">{error}</p>}
+          {error && (
+            <p className="error" role="alert">
+              {error}{" "}
+              <button type="button" className="linkish" onClick={() => setAttempt((a) => a + 1)}>
+                Retry
+              </button>
+            </p>
+          )}
           {term.length >= SEARCH_MIN && loading && !results && <p className="muted">Searching…</p>}
           {results && !flat.length && !loading && <p className="muted">Nothing matches "{term}".</p>}
           {results &&

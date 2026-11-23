@@ -111,7 +111,7 @@ describe.skipIf(!can)("an open owner card is reachable from the Board, Decisions
     await page.waitForSelector(`#decision-${GONE}`, { timeout: 15_000 });
     expect(await page.getAttribute(`#decision-${GONE}`, "aria-current")).toBe("true");
     expect(await page.textContent(`#decision-${GONE}`)).toContain("Use the blue theme?");
-    expect(await page.locator('[data-testid="answered-list"]').evaluate((d) => (d as HTMLDetailsElement).open)).toBe(true);
+    expect(await page.locator('[data-testid="answered-list"]').evaluate((d: Element) => (d as HTMLDetailsElement).open)).toBe(true);
     await page.close();
   }, 60_000);
 });

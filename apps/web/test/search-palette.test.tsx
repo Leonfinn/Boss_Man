@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // The search box (BOS-2192): Ctrl+K / Cmd+K and the sidebar button open it on any screen, Escape
 // closes it, typing is debounced with nothing sent under 2 characters, and arrows + Enter open a result.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import type { Company } from "../src/api";
@@ -172,6 +172,23 @@ describe("features, decisions and runs in the search box (BOS-2326)", () => {
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "pelican" } });
     fireEvent.click(await screen.findByText("Approve the pelican deploy?"));
     expect(go).toHaveBeenCalledWith("decisions/d1");
+  });
+
+  it("shows a failed search's error with Retry, and Retry asks again and shows the results", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => (++calls === 1 ? new Response(JSON.stringify({ error: "server_busy", message: "The server is busy" }), { status: 503, headers: { "content-type": "application/json" } }) : json(MORE))),
+    );
+    render(<SearchPalette companyId="c1" go={() => {}} />);
+    ctrlK();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "pelican" } });
+    const alert = await screen.findByRole("alert");
+    expect(screen.queryByText("Pelican tracking")).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await screen.findByText("Pelican tracking");
+    expect(calls).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 
