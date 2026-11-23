@@ -148,3 +148,25 @@ describe("in-app view (BOS-2390)", () => {
     expect(last.text).toContain("Merged last week: 1 ticket");
   });
 });
+
+describe("GET /weekly-summary/view route (BOS-2390)", () => {
+  it("returns each week's facts and the email's text, refuses an unknown company, and needs no email setup", async () => {
+    const { default: Fastify } = await import("fastify");
+    const { weeklySummaryRoutes } = await import("../src/routes/weekly-summary.js");
+    const weekly = weeklySummaryService(db, { send: async () => { throw new Error("no mail"); }, isConfigured: async () => false, localDayHour: () => ({ day: 1, hour: 9 }), now: () => NOW });
+    const app = Fastify();
+    weeklySummaryRoutes(app, { weekly, mailer: { isConfigured: async () => false } as never });
+    const get = (id: string, q: string) => app.inject({ method: "GET", url: `/api/companies/${id}/weekly-summary/view${q}` });
+    const mine = (await get(companyId, "?week=this")).json();
+    expect(mine.merged).toHaveLength(2);
+    expect(mine.spentMicros).toBe(17_000_000);
+    expect(mine.text).toContain("Merged this week: 2 tickets");
+    const last = (await get(companyId, "?week=last")).json();
+    expect(last.merged.map((m: { title: string }) => m.title)).toEqual(["Ten days ago"]);
+    expect(last.spentMicros).toBe(5_000_000);
+    expect((await get(companyId, "")).json().week).toBe("this");
+    expect((await get(companyId, "?week=bogus")).statusCode).toBeGreaterThanOrEqual(400);
+    expect((await get("00000000-0000-4000-8000-000000000000", "?week=this")).statusCode).toBe(404);
+    await app.close();
+  });
+});
