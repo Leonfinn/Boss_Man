@@ -51,7 +51,29 @@ describe("git workspaces on the server (R38)", () => {
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]).toMatchObject({ branch: `bossman/${t.id}`, baseCommit: "abc123" });
 
     await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
-    expect(c.sent.at(-1)).toEqual({ type: "workspace.release", projectId: c.project.id, ticketId: t.id });
+    // The release must be sent; the "ticket finished" message to the live run (BOS-2309) may come before or after it.
+    expect(c.sent).toContainEqual({ type: "workspace.release", projectId: c.project.id, ticketId: t.id });
+  });
+
+  it("tells a live run its ticket is finished when it goes done, but not the run that finished it (BOS-2309)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Finish while running", assigneeAgentId: c.ceo.id })).json();
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
+    const finished = (runId: string) => c.sent.filter((x) => x.type === "run.message" && x.runId === runId && x.text.includes("ticket finished"));
+
+    // The run that made the change is not told: it already knows.
+    await c.scheduler.onTicketDone(t.id, start.runId);
+    expect(finished(start.runId)).toEqual([]);
+
+    // Any other live run on the ticket is, with a request only (interrupt false).
+    await c.scheduler.onTicketDone(t.id);
+    expect(finished(start.runId)).toEqual([expect.objectContaining({ type: "run.message", interrupt: false })]);
+
+    // A chat run on the ticket is left alone.
+    await c.db.update(runs).set({ purpose: "chat" }).where(eq(runs.id, start.runId));
+    await c.scheduler.onTicketDone(t.id);
+    expect(finished(start.runId)).toHaveLength(1);
   });
 
   it("gives a reviewer its own copy of the first ticket's work", async () => {
