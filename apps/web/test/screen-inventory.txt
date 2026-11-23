@@ -122,6 +122,12 @@ reads:
   - /api/feedback/unprocessed
   - /api/host-facts
 
+## #/merge-history
+sections: 
+  - Merge history
+reads: 
+  - /api/companies/:id/merge-history
+
 ## #/merge-queue
 sections: 
   - Merge queue

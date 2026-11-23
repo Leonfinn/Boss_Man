@@ -56,15 +56,15 @@ export function MergeHistory({ companies, companyId }: { companies: Company[]; c
             </ul>
           )}
           <div className="filters">
-            <label>Result{" "}
+            <span>Result{" "}
               <select aria-label="Result" value={result} onChange={(e) => setResult(e.target.value as "all" | Result)}>
                 <option value="all">All</option>
                 <option value="landed">Landed</option>
                 <option value="bounced">Bounced</option>
                 <option value="cancelled">Cancelled</option>
               </select>
-            </label>{" "}
-            <label><input type="checkbox" checked={repeat} onChange={(e) => setRepeat(e.target.checked)} /> Only tickets that bounced more than once</label>
+            </span>{" "}
+            <span><input type="checkbox" aria-label="Only tickets that bounced more than once" checked={repeat} onChange={(e) => setRepeat(e.target.checked)} /> Only tickets that bounced more than once</span>
           </div>
           {rows.length === 0 ? <p className="muted">No merges match.</p> : (
             <table>

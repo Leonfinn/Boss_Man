@@ -132,6 +132,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // Funding, Rules and Secrets are pages of their own, shown as tabs of Settings.
   "pages/Funding.tsx": "Funding",
   "pages/MergeQueue.tsx": "Merge queue",
+  "pages/MergeHistory.tsx": "Merge queue",
   "pages/Notifications.tsx": "Notifications",
   // The notification settings moved here from the feed page (BOS-2327); Settings → Notifications is the same screen in the list.
   "pages/settings/Notifications.tsx": "Notifications",
