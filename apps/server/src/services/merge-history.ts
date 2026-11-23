@@ -51,6 +51,7 @@ const EVENTS = ["attempt", "check_queued", "check_started", "check_ended", "ci_w
 /** Pure: turn each ticket's timeline rows (oldest first) into finished attempts. */
 export function attemptsOf(events: Ev[]): RawAttempt[] {
   const out: RawAttempt[] = [];
+  // not state: a local of one call, gone when the function returns
   const open = new Map<string, Episode>();
   for (const e of events) {
     const id = e.ticketId;
@@ -94,6 +95,7 @@ export function median(xs: number[]): number | null {
 
 /** Pure: one line per day (UTC), newest first. */
 export function perDay(rows: Array<Pick<MergeHistoryRow, "result" | "endedAt" | "totalMs">>): MergeHistoryDay[] {
+  // not state: a local of one call, gone when the function returns
   const by = new Map<string, { landed: number; bounced: number; ms: number[] }>();
   for (const r of rows) {
     if (r.result === "cancelled") continue;
@@ -128,6 +130,7 @@ export async function mergeHistory(db: Db, companyId: string, now = new Date()):
   const jobs = jobIds.length ? await db.select({ id: checkJobs.id, logTail: checkJobs.logTail }).from(checkJobs).where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.id, jobIds))) : [];
   const tailOf = new Map(jobs.map((j) => [j.id, j.logTail]));
 
+  // not state: a local of one call, gone when the function returns
   const bounceCount = new Map<string, number>();
   for (const a of attempts) if (a.result === "bounced") bounceCount.set(a.ticketId, (bounceCount.get(a.ticketId) ?? 0) + 1);
 
