@@ -1099,8 +1099,10 @@ export function schedulerService(
   async function tellNudgeSenders(wakeIds: string[], why: string): Promise<void> {
     if (!wakeIds.length) return;
     const dropped = await db
-      .select({ fromId: nudges.fromAgentId, toId: nudges.toAgentId, why: nudges.why })
+      .select({ fromId: nudges.fromAgentId, toId: nudges.toAgentId, why: nudges.why, number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix })
       .from(nudges)
+      .leftJoin(tickets, eq(tickets.id, nudges.ticketId))
+      .leftJoin(companies, eq(companies.id, nudges.companyId))
       .where(inArray(nudges.wakeId, wakeIds));
     if (!dropped.length) return;
     const people = await db
@@ -1112,8 +1114,10 @@ export function schedulerService(
       const from = who.get(d.fromId);
       if (!from || from.retiredAt || from.duty === SCRUM_MASTER_DUTY) continue;
       const to = who.get(d.toId)?.name ?? "a colleague";
+      // A nudge on a ticket names it; a ticketless one names its tickets in the quoted text below.
+      const about = d.number != null ? ` about ${ticketRef(d.prefix, d.number) ?? "a ticket"} "${d.title ?? ""}"` : "";
       const note = [
-        `Your nudge to ${to} was not delivered: ${why}. ${to} was not woken for it.`,
+        `Your nudge to ${to}${about} was not delivered: ${why}. ${to} was not woken for it.`,
         untrusted(`agent ${from.name}`, `What you sent: ${(d.why ?? "(not recorded)").slice(0, 300)}`),
         `If it still matters, write it on an open ticket with ticket_reply, or nudge again with that ticket.`,
       ].join("\n");

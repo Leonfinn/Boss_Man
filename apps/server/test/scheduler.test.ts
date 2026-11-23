@@ -5,7 +5,7 @@ import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
-import { activity, decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, fundingSources, notifications, nudges, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -635,12 +635,18 @@ describe("scheduler", () => {
     // Another pass adds nothing: one notice per dropped nudge.
     await ctx.tick();
     expect(await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"))).toHaveLength(1);
+    // The notice is not a nudge: it has no nudge record, so dropping it (here as the owner's stop would) tells nobody again.
+    expect(await ctx.db.select().from(nudges).where(eq(nudges.wakeId, notices[0]!.id))).toHaveLength(0);
+    await ctx.db.update(wakes).set({ status: "dropped", statusReason: "test drop" }).where(eq(wakes.id, notices[0]!.id));
+    await ctx.scheduler.nudgesDropped([notices[0]!.id], "test drop");
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"))).toHaveLength(1);
   });
 
   it("tells the sender when a nudge on a ticket is dropped because the ticket finished after it was sent (BOS-2356)", async () => {
     ctx = await setup({ agent: 5 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
     const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Closing soon" })).json();
+    await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { ticketPrefix: "TST" });
     await ctx.db.delete(wakes);
     expect(await ctx.scheduler.nudge({ runId: randomUUID(), fromAgentId: ctx.ceo.id, to: worker.id, ticketId: t.id, why: "Can you look at this?" })).toMatchObject({ ok: true });
     const [nudgeWake] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge"));
@@ -651,7 +657,8 @@ describe("scheduler", () => {
     const notices = await ctx.db.select().from(wakes).where(eq(wakes.reason, "nudge dropped"));
     expect(notices).toHaveLength(1);
     expect(notices[0]!.agentId).toBe(ctx.ceo.id);
-    expect(notices[0]!.note).toContain("the ticket it was about was finished after you sent it");
+    // It names the ticket and the reason.
+    expect(notices[0]!.note).toContain(`about TST-${t.number} "Closing soon" was not delivered: the ticket it was about was finished after you sent it`);
   });
 
   it("tells the sender when the owner parks the ticket a waiting nudge was about (BOS-2356)", async () => {
