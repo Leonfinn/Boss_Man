@@ -1,7 +1,7 @@
 // The search box's route (BOS-2192): tickets, wiki pages and chat messages of one company, grouped, with snippets.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, ownerChatMessages, projects, tickets, wikiPages } from "../src/db/schema.js";
-import { refOf, SEARCH_GROUP_MAX, snippetOf, type SearchResults } from "../src/routes/search.js";
+import { agents, companies, decisions, features, ownerChatMessages, projects, runs, tickets, wikiPages } from "../src/db/schema.js";
+import { decisionTitle, refOf, runResultWord, SEARCH_EXTRA_MAX, SEARCH_GROUP_MAX, snippetOf, type SearchResults } from "../src/routes/search.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp;
@@ -34,6 +34,17 @@ beforeAll(async () => {
     await t.db.insert(tickets).values({ companyId: c.company, projectId: c.project, title: "Teach the pelican to land", body: "Runway notes.", number: 7 });
     await t.db.insert(wikiPages).values({ companyId: c.company, slug: "birds", title: "Birds", body: `${"Intro text. ".repeat(40)}The pelican page body says it eats fish.${" More.".repeat(40)}` });
     await t.db.insert(ownerChatMessages).values({ companyId: c.company, agentId: c.agent, role: "owner", text: "Did the pelican ticket get done?" });
+  }
+  // (BOS-2326) A feature, a closed and an open decision and a run per company, all about the osprey. The answer
+  // and the run's outcome carry text that must never reach the results.
+  for (const c of [A, B]) {
+    const [ticket] = await t.db.insert(tickets).values({ companyId: c.company, projectId: c.project, title: "Osprey landing gear", number: 30 }).returning();
+    await t.db.insert(features).values({ companyId: c.company, title: "Bird tracking", description: "Follow each osprey on a map.", status: "planned" });
+    await t.db.insert(decisions).values([
+      { companyId: c.company, kind: "question", question: "Approve the osprey deploy?\nThe long detail of the card.", options: ["Yes", "No"], recommendedOption: "Yes", status: "answered", answer: "Yes, my secret note SEKRIT", answeredAt: new Date("2026-11-20T09:00:00Z"), createdAt: new Date("2026-11-20T08:00:00Z") },
+      { companyId: c.company, kind: "question", question: "Paint the osprey hangar?", options: ["Yes", "No"], recommendedOption: "Yes", createdAt: new Date("2026-11-10T08:00:00Z") },
+    ]);
+    await t.db.insert(runs).values({ companyId: c.company, agentId: c.agent, ticketId: ticket!.id, outcome: "error: token SEKRIT expired", startedAt: new Date("2026-11-23T07:00:00Z"), endedAt: new Date("2026-11-23T07:10:00Z") });
   }
   // Ticket 12 doesn't mention the word: only its reference finds it.
   await t.db.insert(tickets).values({ companyId: A.company, projectId: A.project, title: "Unrelated chore", body: "Nothing here.", number: 12 });
@@ -97,6 +108,46 @@ describe("search route (BOS-2192)", () => {
     expect((await find(A.company, "__")).tickets).toEqual([]);
   });
 
+  it("finds a feature, decisions (open first) and a run, with titles and status words only (BOS-2326)", async () => {
+    const r = await find(A.company, "osprey");
+    // The feature matched on its description; only its title and status come back.
+    expect(r.features).toEqual([{ id: expect.any(String), title: "Bird tracking", snippet: "Planned", link: expect.stringMatching(new RegExp(`^features/${A.company}/`)) }]);
+    // The open card first, though older; a card's title is its first line.
+    expect(r.decisions.map((d) => [d.title, d.snippet])).toEqual([["Paint the osprey hangar?", "Open"], ["Approve the osprey deploy?", "Answered"]]);
+    expect(r.decisions[1]!.link).toBe(`decisions/${r.decisions[1]!.id}`);
+    // The run matched on its ticket's title: the agent, the ticket and "Failed", never the error's text.
+    expect(r.runs).toHaveLength(1);
+    expect(r.runs[0]).toMatchObject({ title: "Alpha CEO on Osprey landing gear", ref: "BOS-30", snippet: "Failed", at: "2026-11-23T07:00:00.000Z" });
+    expect(r.runs[0]!.link).toBe(`runs/${r.runs[0]!.id}`);
+    expect(JSON.stringify(r)).not.toContain("SEKRIT");
+    expect(JSON.stringify(r)).not.toContain("long detail");
+  });
+
+  it("finds a run by the agent's name or its ticket's reference, and never another company's features, decisions or runs", async () => {
+    const byAgent = await find(A.company, "alpha ceo");
+    expect(byAgent.runs.map((x) => x.title)).toEqual(["Alpha CEO on Osprey landing gear"]);
+    expect((await find(A.company, "BOS-30")).runs.map((x) => x.ref)).toEqual(["BOS-30"]);
+    const a = await find(A.company, "osprey");
+    const b = await find(B.company, "osprey");
+    expect([b.features.length, b.decisions.length, b.runs.length]).toEqual([1, 2, 1]);
+    const aIds = new Set([...a.features, ...a.decisions, ...a.runs].map((x) => x.id));
+    expect([...b.features, ...b.decisions, ...b.runs].some((x) => aIds.has(x.id))).toBe(false);
+    expect(b.runs[0]!.title).toBe("Beta CEO on Osprey landing gear");
+    // Beta's agent finds no run in Alpha.
+    expect((await find(A.company, "beta ceo")).runs).toEqual([]);
+  });
+
+  it("caps features, decisions and runs at 5 each", async () => {
+    const [ticket] = await t.db.insert(tickets).values({ companyId: A.company, projectId: A.project, title: "Kestrel work", number: 50 }).returning();
+    await t.db.insert(features).values(Array.from({ length: 8 }, (_, i) => ({ companyId: A.company, title: `Kestrel feature ${i}` })));
+    await t.db.insert(decisions).values(Array.from({ length: 8 }, (_, i) => ({ companyId: A.company, kind: "question" as const, question: `Kestrel card ${i}`, options: [], recommendedOption: "a" })));
+    await t.db.insert(runs).values(Array.from({ length: 8 }, () => ({ companyId: A.company, agentId: A.agent, ticketId: ticket!.id })));
+    const r = await find(A.company, "kestrel");
+    expect([r.features.length, r.decisions.length, r.runs.length]).toEqual([SEARCH_EXTRA_MAX, SEARCH_EXTRA_MAX, SEARCH_EXTRA_MAX]);
+    // A run still going says so.
+    expect(r.runs[0]!.snippet).toBe("Running");
+  });
+
   it("caps each group at 8", async () => {
     await t.db.insert(tickets).values(Array.from({ length: 12 }, (_, i) => ({ companyId: A.company, projectId: A.project, title: `Heron task ${i}` })));
     expect((await find(A.company, "heron")).tickets).toHaveLength(SEARCH_GROUP_MAX);
@@ -133,6 +184,11 @@ describe("search helpers", () => {
     expect(refOf(" #12 ")).toEqual({ prefix: null, number: 12 });
     expect(refOf("12")).toBeNull();
     expect(refOf("BOS-12 login")).toBeNull();
+  });
+  it("names a run's result in the Runs page's words and cuts a card's title to its first line (BOS-2326)", () => {
+    expect(["error: x", "interrupted", "cancelled", "stopped: limit", "lost: y", "done", null].map((o) => runResultWord(o))).toEqual(["Failed", "Interrupted", "Stopped", "Stopped", "Lost", "Finished", "Running"]);
+    expect(decisionTitle("\n  First line \nsecond")).toBe("First line");
+    expect(decisionTitle("x".repeat(300))).toHaveLength(160);
   });
   it("cuts a snippet around the match on one line", () => {
     expect(snippetOf("short\n text", "text")).toBe("short text");

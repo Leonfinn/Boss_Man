@@ -2339,11 +2339,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * (BOS-2187) Answered and withdrawn cards, newest first, a page at a time. The cursor is the last row's
      * "when|id" from the page before. `q` keeps cards whose question contains the text.
      */
-    async answeredList(opts: { limit?: number; cursor?: string; q?: string; companyId?: string } = {}) {
+    async answeredList(opts: { limit?: number; cursor?: string; q?: string; companyId?: string; id?: string } = {}) {
       const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
       const when = sql<Date>`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`;
       const conds = [ne(decisions.status, "open")];
       if (opts.companyId) conds.push(eq(decisions.companyId, opts.companyId));
+      // (BOS-2326) One closed card, for a #/decisions/<id> link from the search box.
+      if (opts.id) conds.push(eq(decisions.id, opts.id));
       if (opts.q?.trim()) conds.push(sql`position(lower(${opts.q.trim()}) in lower(${decisions.question})) > 0`);
       if (opts.cursor) {
         const [at, cid] = opts.cursor.split("|");

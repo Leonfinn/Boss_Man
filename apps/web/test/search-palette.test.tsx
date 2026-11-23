@@ -61,7 +61,7 @@ describe("search box (BOS-2192)", () => {
       if (!screen.queryByRole("dialog", { name: "Search" })) ctrlK();
       expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
     });
-    const box = screen.getByRole("combobox", { name: "Search tickets, wiki and chats" });
+    const box = screen.getByRole("combobox", { name: "Search tickets, wiki, chats, features, decisions and runs" });
     expect(document.activeElement).toBe(box);
     fireEvent.keyDown(box, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
@@ -77,7 +77,7 @@ describe("search box (BOS-2192)", () => {
     expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
 
     // No keyboard: the sidebar's button.
-    fireEvent.click(screen.getByRole("button", { name: "Search tickets, wiki and chats" }));
+    fireEvent.click(screen.getByRole("button", { name: "Search tickets, wiki, chats, features, decisions and runs" }));
     await screen.findByRole("dialog", { name: "Search" });
   });
 
@@ -125,6 +125,53 @@ describe("search box (BOS-2192)", () => {
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "ArrowUp" });
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
     expect(go).toHaveBeenCalledWith("chat/c1/a1/m1");
+  });
+});
+
+describe("features, decisions and runs in the search box (BOS-2326)", () => {
+  const MORE: SearchResults = {
+    ...RESULTS,
+    wiki: [],
+    features: [{ id: "f1", title: "Pelican tracking", snippet: "Planned", link: "features/c1/f1" }],
+    decisions: [{ id: "d1", title: "Approve the pelican deploy?", snippet: "Answered", at: "2026-11-20T09:15:00.000Z", link: "decisions/d1" }],
+    runs: [{ id: "r1", title: "Radagast on Teach the pelican", ref: "BOS-7", snippet: "Failed", at: "2026-11-23T07:00:00.000Z", link: "runs/r1" }],
+  };
+  const serve = (body: SearchResults) => vi.stubGlobal("fetch", vi.fn(async () => json(body)));
+
+  it("shows each kind under its own heading after the first three, and hides a kind with no matches", async () => {
+    serve(MORE);
+    render(<SearchPalette companyId="c1" go={() => {}} />);
+    ctrlK();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "pelican" } });
+    await screen.findByText("Pelican tracking");
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    // Wiki had nothing, so it has no heading.
+    expect(headings).toEqual(["Tickets", "Chats", "Features", "Decisions", "Runs"]);
+    expect(screen.getByRole("region", { name: "Runs" }).textContent).toContain("Failed · ");
+    expect(screen.getByRole("region", { name: "Decisions" }).textContent).toContain("Answered · ");
+  });
+
+  it("arrows and Enter move through every group and open the feature, the decision or the run", async () => {
+    serve(MORE);
+    for (const [downs, link] of [[2, "features/c1/f1"], [3, "decisions/d1"], [4, "runs/r1"], [5, "tickets/t1"]] as const) {
+      const go = vi.fn();
+      render(<SearchPalette companyId="c1" go={go} />);
+      ctrlK();
+      const box = screen.getByRole("combobox");
+      fireEvent.change(box, { target: { value: "pelican" } });
+      await screen.findByText("Pelican tracking");
+      for (let i = 0; i < downs; i++) fireEvent.keyDown(box, { key: "ArrowDown" });
+      fireEvent.keyDown(box, { key: "Enter" });
+      expect(go).toHaveBeenCalledWith(link);
+      cleanup();
+    }
+    // A click opens it too.
+    const go = vi.fn();
+    render(<SearchPalette companyId="c1" go={go} />);
+    ctrlK();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "pelican" } });
+    fireEvent.click(await screen.findByText("Approve the pelican deploy?"));
+    expect(go).toHaveBeenCalledWith("decisions/d1");
   });
 });
 

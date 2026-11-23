@@ -195,7 +195,7 @@ p { margin: 0; }
 .queue { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .decision { background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: block; }
 /* The card a link opened (#/decisions/<id>, BOS-1078). */
-.decision.linked { border-color: var(--link); box-shadow: 0 0 0 2px var(--accent-soft); scroll-margin-top: 16px; }
+.decision.linked, .strip.linked { border-color: var(--link); box-shadow: 0 0 0 2px var(--accent-soft); scroll-margin-top: 16px; }
 .decision .body { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .decision h2 { font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
 /* (BOS-1236) One head line: kind tag, ticket chip, who and how long ago; the pills sit on the right and wrap under on a phone. */
