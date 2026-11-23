@@ -15,7 +15,7 @@ afterEach(() => {
 
 const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
 const ticket = (i: number): SearchHit => ({ id: `t${i}`, title: `Osprey task ${i}`, ref: `BOS-${i}`, snippet: "", link: `tickets/t${i}` });
-const counts = { tickets: 30, wiki: 1, chats: 0, features: 0, decisions: 2, runs: 0, agents: 0, skills: 0 };
+const counts = { tickets: 40, wiki: 1, chats: 0, features: 0, decisions: 2, runs: 0, agents: 0, skills: 0 };
 const base: SearchResults = { q: "osprey", tickets: [], wiki: [], chats: [], features: [], decisions: [], runs: [], agents: [], skills: [], counts };
 /** Where the page sends the browser: the address is the page's state, so the tests follow it like the router does. */
 const open = async (hash: string) => {
@@ -38,16 +38,16 @@ describe("Search page (BOS-2378)", () => {
     window.location.hash = "#/search?q=osprey";
     render(<SearchPage companyId="c1" go={() => {}} />);
     await screen.findByText("Birds");
-    expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Tickets (30)", "Wiki (1)", "Decisions (2)"]);
-    expect(screen.getByRole("link", { name: "See all 30 tickets" }).getAttribute("href")).toBe("#/search?q=osprey&kind=tickets");
+    expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Tickets (40)", "Wiki (1)", "Decisions (2)"]);
+    expect(screen.getByRole("link", { name: "See all 40 tickets" }).getAttribute("href")).toBe("#/search?q=osprey&kind=tickets");
     // One of two decisions is shown, so it links to both; the one wiki page is all there is, so no link.
     expect(screen.getByRole("link", { name: "See all 2 decisions" }).getAttribute("href")).toBe("#/search?q=osprey&kind=decisions");
     expect(screen.queryByRole("link", { name: /See all 1 wiki/ })).toBeNull();
     expect(screen.getByRole("link", { name: /Osprey task 0/ }).getAttribute("href")).toBe("#/tickets/t0");
     expect(screen.getByRole("link", { name: /Birds/ }).getAttribute("href")).toBe("#/wiki/c1/birds");
     // The kind select carries each kind's count.
-    expect(screen.getByRole("option", { name: "Tickets (30)" })).toBeTruthy();
-    expect(screen.getByRole("option", { name: "All kinds (33)" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Tickets (40)" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "All kinds (43)" })).toBeTruthy();
     expect(asked(f)[0]!.get("kind")).toBeNull();
   });
 
@@ -55,7 +55,7 @@ describe("Search page (BOS-2378)", () => {
     const f = vi.fn(async (url: string) => {
       const p = new URL(url, "http://x").searchParams;
       const offset = Number(p.get("offset"));
-      const hits = Array.from({ length: Math.min(Number(p.get("limit")), 30 - offset) }, (_, i) => ticket(offset + i));
+      const hits = Array.from({ length: Math.min(Number(p.get("limit")), 40 - offset) }, (_, i) => ticket(offset + i));
       return json({ ...base, tickets: hits });
     });
     vi.stubGlobal("fetch", f);
@@ -68,9 +68,10 @@ describe("Search page (BOS-2378)", () => {
     expect(more.getAttribute("href")).toBe("#/search?q=osprey&kind=tickets&n=50");
 
     await open(more.getAttribute("href")!);
-    await screen.findByText("Osprey task 29");
+    await screen.findByText("Osprey task 39");
     expect(Object.fromEntries(asked(f)[1]!)).toMatchObject({ kind: "tickets", offset: "25", limit: "25" });
-    expect(screen.getAllByRole("listitem")).toHaveLength(30);
+    // 25 then 15: all 40, each once.
+    expect(screen.getAllByRole("listitem")).toHaveLength(40);
     expect(screen.queryByRole("link", { name: "Show more" })).toBeNull();
 
     // Back to 25: the list shrinks without asking again.
@@ -130,7 +131,7 @@ describe("the Ctrl+K box's See all link (BOS-2378)", () => {
     render(<SearchPalette companyId="c1" go={() => {}} />);
     ctrlK();
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "osprey hunt" } });
-    const link = await screen.findByRole("link", { name: "See all 33 results" });
+    const link = await screen.findByRole("link", { name: "See all 43 results" });
     expect(link.getAttribute("href")).toBe("#/search?q=osprey+hunt");
     fireEvent.click(link);
     expect(screen.queryByRole("dialog")).toBeNull();

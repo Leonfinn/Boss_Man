@@ -235,21 +235,21 @@ describe("the Search page's asks: counts, one kind a page at a time, a date filt
   });
 
   it("pages through one kind 25 at a time, every match once, the other kinds empty but counted", async () => {
-    await t.db.insert(tickets).values(Array.from({ length: 30 }, (_, i) => ({ companyId: A.company, projectId: A.project, title: `Albatross task ${i}`, number: 1000 + i })));
+    await t.db.insert(tickets).values(Array.from({ length: 40 }, (_, i) => ({ companyId: A.company, projectId: A.project, title: `Albatross task ${i}`, number: 1000 + i })));
     await t.db.insert(wikiPages).values({ companyId: A.company, slug: "albatross", title: "Albatross notes", body: "Wings." });
     const first = await ask(A.company, "q=albatross&kind=tickets");
     expect(first.tickets).toHaveLength(25);
-    expect(first.counts).toMatchObject({ tickets: 30, wiki: 1 });
+    expect(first.counts).toMatchObject({ tickets: 40, wiki: 1 });
     expect(first.wiki).toEqual([]);
     const second = await ask(A.company, "q=albatross&kind=tickets&offset=25&limit=25");
-    expect(second.tickets).toHaveLength(5);
+    expect(second.tickets).toHaveLength(15);
     const ids = [...first.tickets, ...second.tickets].map((x) => x.id);
-    expect(new Set(ids).size).toBe(30);
+    expect(new Set(ids).size).toBe(40);
     // The wiki page on its own: the same hit the box shows.
     const wiki = await ask(A.company, "q=albatross&kind=wiki");
     expect(wiki.wiki.map((x) => x.link)).toEqual([`wiki/${A.company}/albatross`]);
     expect(wiki.tickets).toEqual([]);
-    expect(wiki.counts.tickets).toBe(30);
+    expect(wiki.counts.tickets).toBe(40);
     // Without a kind the box's limits hold, whatever limit is sent.
     expect((await ask(A.company, "q=albatross&limit=100")).tickets).toHaveLength(SEARCH_GROUP_MAX);
   });
@@ -269,18 +269,20 @@ describe("the Search page's asks: counts, one kind a page at a time, a date filt
     expect(p2.tickets[0]!.exact).toBeUndefined();
   });
 
-  it("keeps only what changed since the date given, in the counts too", async () => {
+  it("keeps only what changed since the date given, in the counts too: last 7 days drops 10 days ago, keeps 2 days ago", async () => {
+    const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000);
     await t.db.insert(tickets).values([
-      { companyId: A.company, projectId: A.project, title: "Gannet old", stateChangedAt: new Date("2026-01-05T00:00:00Z") },
-      { companyId: A.company, projectId: A.project, title: "Gannet new", stateChangedAt: new Date("2026-11-20T00:00:00Z") },
+      { companyId: A.company, projectId: A.project, title: "Gannet old", stateChangedAt: daysAgo(10) },
+      { companyId: A.company, projectId: A.project, title: "Gannet new", stateChangedAt: daysAgo(2) },
     ]);
     await t.db.insert(ownerChatMessages).values([
-      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet then", createdAt: new Date("2026-01-05T00:00:00Z") },
-      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet now", createdAt: new Date("2026-11-20T00:00:00Z") },
+      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet then", createdAt: daysAgo(10) },
+      { companyId: A.company, agentId: A.agent, role: "owner", text: "gannet now", createdAt: daysAgo(2) },
     ]);
     const all = await find(A.company, "gannet");
     expect(all.counts).toMatchObject({ tickets: 2, chats: 2 });
-    const recent = await ask(A.company, `q=gannet&since=${encodeURIComponent("2026-11-01T00:00:00.000Z")}`);
+    // What the page sends for "Last 7 days".
+    const recent = await ask(A.company, `q=gannet&since=${encodeURIComponent(daysAgo(7).toISOString())}`);
     expect(recent.counts).toMatchObject({ tickets: 1, chats: 1 });
     expect(recent.tickets.map((x) => x.title)).toEqual(["Gannet new"]);
     expect(recent.chats.map((x) => x.snippet)).toEqual(["gannet now"]);
