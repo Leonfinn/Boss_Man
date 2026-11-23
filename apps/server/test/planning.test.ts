@@ -176,6 +176,11 @@ describe("milestone forecast (points and pace)", () => {
     expect(f.daysLate).toBeGreaterThan(0);
   });
 
+  it("sums 5+3 done, 8+2 left, ignores unsized points, and finishes two weeks out at 20 points per 28 days", () => {
+    const rows = [{ size: 5, done: true }, { size: 3, done: true }, { size: 8, done: false }, { size: 2, done: false }, { size: null, done: false }];
+    expect(forecastMilestone(rows, 20 / 4, "2026-12-30", "2026-11-23")).toMatchObject({ pointsDone: 8, pointsLeft: 10, unsized: 1, expectedFinish: "2026-12-07" });
+  });
+
   it("has no finish date without pace, and none is late without a target", () => {
     expect(forecastMilestone([{ size: 3, done: false }], 0, "2026-12-01", "2026-11-23")).toMatchObject({ pointsLeft: 3, expectedFinish: null, daysLate: 0 });
     expect(forecastMilestone([{ size: 7, done: false }], 7, null, "2026-11-23")).toMatchObject({ expectedFinish: "2026-11-30", daysLate: 0 });
