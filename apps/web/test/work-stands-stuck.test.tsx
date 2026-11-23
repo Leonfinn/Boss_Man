@@ -28,4 +28,16 @@ describe("looks stuck in the strip", () => {
     expect(document.activeElement).toBe(a);
     card.remove();
   });
+
+  it("with onShowStuck, a click turns the filter on instead of moving; off the Board it still links away", () => {
+    let calls = 0;
+    const { unmount } = render(<WorkStands counts={counts} stuck={2} stuckTicketId="t-1" onShowStuck={() => { calls++; }} />);
+    fireEvent.click(screen.getByTestId("standing-stuck"));
+    expect(calls).toBe(1);
+    unmount();
+    render(<WorkStands counts={counts} stuck={2} hrefFor="#/board" onShowStuck={() => { calls++; }} />);
+    fireEvent.click(screen.getByTestId("standing-stuck"));
+    expect(calls).toBe(1);
+    expect(screen.getByTestId("standing-stuck").getAttribute("href")).toBe("#/board");
+  });
 });

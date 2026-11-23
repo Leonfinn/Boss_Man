@@ -35,6 +35,8 @@ export type ClearWhen =
   | { kind: "idleSlotsGone"; companyId: string }
   /** The daily-backup alert (BOS-2176): a new automatic backup was saved, so the newest is under 36 hours old. */
   | { kind: "backupFresh" }
+  /** The landing-turn-late alert (BOS-2359): the named ticket no longer holds the landing turn. */
+  | { kind: "landingTurnEnded"; companyId: string; ticketId: string }
   /** A failing sweep step's card (BOS-2160): the step ran without an error in the last pass. */
   | { kind: "sweepStepOk"; step: string };
 
@@ -252,6 +254,11 @@ export const ALERT_KINDS = {
   // The same alert 30 minutes after the CEO's card, if still true: an info notice on the owner's queue (BOS-2358).
   idle_slots_owner: {
     topRung: "owner",
+  },
+  // landing-turn-eta.ts (BOS-2359): a landing turn held for more than twice the usual GitHub wait. Stops at the CEO,
+  // never the owner; one card per ticket's turn, closes by itself (landingTurnEnded) when that ticket's turn ends.
+  landing_turn_late: {
+    topRung: "ceo",
   },
   // daily-backup.ts (BOS-2176): the newest automatic database backup is over 36 hours old. Only the owner can start the
   // backup service or free the disk on the host, so it starts with them: one card, closed by itself (backupFresh).

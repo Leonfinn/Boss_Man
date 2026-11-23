@@ -55,6 +55,37 @@ function lanes(ms: RoadmapMilestone[], x: (m: RoadmapMilestone) => number, width
   return { lane, count: Math.max(1, ends.length) };
 }
 
+/** "21 of 34 points done · 13 left · at this pace about 2 Dec" and what is worth a warning. */
+export function forecastLines(f: RoadmapMilestone["forecast"]): { text: string; late: boolean; note: string | null } {
+  const total = f.pointsDone + f.pointsLeft;
+  const base = `${f.pointsDone} of ${total} points done · ${f.pointsLeft} left`;
+  const note = f.unsized ? `${f.unsized} ticket${f.unsized === 1 ? " has" : "s have"} no size` : null;
+  if (f.pointsLeft === 0) return { text: `${base}`, late: false, note };
+  if (!f.expectedFinish) return { text: `${base} · No finished work in the last 4 weeks to estimate from.`, late: false, note };
+  const when = short(f.expectedFinish);
+  return f.daysLate > 0
+    ? { text: `${base} · at this pace about ${when}, ${f.daysLate} day${f.daysLate === 1 ? "" : "s"} after the target`, late: true, note }
+    : { text: `${base} · at this pace about ${when}`, late: false, note };
+}
+
+function Forecasts({ ms }: { ms: RoadmapMilestone[] }) {
+  const open = ms.filter((m) => m.status !== "done" && m.forecast.pointsDone + m.forecast.pointsLeft + m.forecast.unsized > 0);
+  if (!open.length) return null;
+  return (
+    <ul className="rm-forecasts" style={{ listStyle: "none", margin: "8px 0 0", padding: 0, fontSize: 13 }}>
+      {open.map((m) => {
+        const l = forecastLines(m.forecast);
+        return (
+          <li key={m.id}>
+            <b>{m.title}</b>: <span style={l.late ? { color: "var(--amber)" } : undefined}>{l.text}</span>
+            {l.note && <span className="muted"> · {l.note}</span>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; win: { start: number; end: number }; now: string; selected: string | null; onSelect: (id: string) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
@@ -69,6 +100,7 @@ function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; wi
   const { lane, count } = lanes(dated, x, width);
   const todayX = ((dayOf(now) - win.start) / (win.end - win.start)) * 100;
   return (
+    <>
     <div ref={ref} className="rm-track" style={{ height: 34 + count * 46 }}>
       {months(win).map((mo) => (
         <span key={mo.at} className="rm-month" style={{ left: `${((mo.at - win.start) / (win.end - win.start)) * 100}%` }}>
@@ -99,6 +131,8 @@ function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; wi
         );
       })}
     </div>
+    <Forecasts ms={o.milestones} />
+    </>
   );
 }
 

@@ -71,7 +71,7 @@ export const OWNER_CONTROLS = {
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer", "Show",
-    "Show all done tasks", "Run now", "Discard draft", "Add limit",
+    "Show all done tasks", "Show all", "Run now", "Discard draft", "Add limit",
     // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
     // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
     "Filter", "Clear all", "Clear filters", "Clear search",
@@ -165,7 +165,7 @@ export const OWNER_CONTROLS = {
     "Funding", "Secrets", "Account", "Notifications", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
     "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
     "Server and runner",
-    "Run the setup wizard",
+    "Run the setup wizard", "Clear",
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
@@ -204,6 +204,8 @@ export const OWNER_CONTROLS = {
     "Remove anyway",
     // The Deploys fold under each deploy target (BOS-2318): the next page of older deploys.
     "Show older",
+    // A past successful deploy in that fold: ship that version again (BOS-2329).
+    "Deploy this version again",
   ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
@@ -240,6 +242,8 @@ export const OWNER_FIELDS = {
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
   Runs: ["Search by ticket"],
+  // The Settings page's search box (BOS-2348).
+  Settings: ["Find a setting"],
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
@@ -258,7 +262,7 @@ export const OWNER_FIELDS = {
   // The "Remember this" box under the owner's own message (BOS-2184).
   Chat: ["Add this to the standing rules every agent reads"],
   Notifications: [
-    "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
+    "Search notifications", "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
@@ -322,7 +326,7 @@ export const OWNER_FIELDS = {
   Agents: [
     "Only start", "From", "To", "Time zone",
     "Thinking", "Blank", "Name", "Job title", "Agent", "Model", "Paid from", "Instructions", "Upload a picture", "Title",
-    "Note", "Review by (optional)", "Why (what you said)", "What waits for you from the CEO",
+    "Note", "Review by (optional)", "Why (what you said)",
   ],
   Skills: [
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
@@ -377,7 +381,7 @@ export const OWNER_FIELDS = {
   Reviews: ["Ask after (days)"],
   // The settings that shape how the team works day to day.
   "Team and CEO": [
-    "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it",
+    "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it", "What waits for you from the CEO",
   ],
   // The Scrum Master's watchdog.
   Watchdog: ["Record only (rehearse)", "Scrum Master"],
@@ -435,7 +439,7 @@ export const OWNER_SECTIONS = {
   Reviews: ["Reviews"],
   "Team and CEO": [
     "Pause this company", "Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references",
-    "Did it move the goal?", "Cleaning up temp files",
+    "What the CEO can do without asking", "Did it move the goal?", "Cleaning up temp files",
   ],
   Watchdog: ["Watchdog"],
   Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],

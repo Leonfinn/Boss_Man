@@ -99,6 +99,7 @@ import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
+import { landingTurnAlertSweep, usualCiWait } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
@@ -877,6 +878,7 @@ export async function buildApp(opts: AppOptions) {
     release: (ticketId) => decisionsSvc.release(ticketId),
     serverCalm: (rule) => health?.calmReason(rule) ?? null,
     freeSlots: (companyId) => scheduler.freeSlots(companyId),
+    landingTurnHeld: async (companyId, ticketId) => (await review.landingTurnStatus(companyId)).some((s) => s.holder?.ticketId === ticketId),
     liveCommit: () => process.env.BOSSMAN_COMMIT || null,
     now: opts.now,
   });
@@ -909,7 +911,10 @@ export async function buildApp(opts: AppOptions) {
       return checkHold?.sweep();
     },
     priorityWatch: () => priorityWatch.run(),
-    mergeStall: () => mergeStall.run(),
+    mergeStall: async () => {
+      await landingTurnAlert.run(); // BOS-2359
+      return mergeStall.run();
+    },
     // R46: refresh what each free check slot declined (the pump), then tell on any that has sat idle with a job waiting.
     checkIdle: async () => {
       await checks.pump();
@@ -1224,6 +1229,9 @@ export async function buildApp(opts: AppOptions) {
       return !!h && h.kind !== "wrapup";
     },
     launcherOn: () => launch.enabled,
+    // BOS-2359: the landing turns and the usual GitHub wait, for the holder's line and the estimates.
+    landingTurns: (companyId) => review.landingTurnStatus(companyId),
+    usualCiWait: (companyId) => usualCiWait(db, companyId, (opts.now ?? (() => new Date()))()),
     // BOS-1594: the stuck/over-capacity verdict's two live facts: an empty train seat (the restart seed wait excluded), and a check worker.
     emptySeatSince: async (companyId) => {
       const since = (await mergeTrainStatus(db, companyId).catch(() => [])).filter((p) => !p.seeding && p.emptySeatSince).map((p) => new Date(p.emptySeatSince!).getTime());
@@ -1320,6 +1328,17 @@ export async function buildApp(opts: AppOptions) {
     },
     notify: (input) => notes.notify(input),
     now: opts.now,
+  });
+  // BOS-2359: one CEO alert when a landing turn has been held for over twice the usual GitHub wait; it closes itself when the turn ends.
+  const landingTurnAlert = landingTurnAlertSweep({
+    companies: async () => (await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, false))).map((c) => c.id),
+    held: async (companyId) => {
+      const ci = new Map(review.runningMerges().map((m) => [m.ticketId, m.ci]));
+      return (await review.landingTurnStatus(companyId)).flatMap((s) => (s.holder ? [{ projectId: s.projectId, ticketId: s.holder.ticketId, ref: s.holder.ref, title: s.holder.title, sinceMs: Date.parse(s.holder.since), waitingFor: ci.get(s.holder.ticketId) ? `its GitHub run (started ${new Date(ci.get(s.holder.ticketId)!.since).toISOString().slice(11, 16)} UTC)` : "its check or merge" }] : []));
+    },
+    usual: (companyId) => usualCiWait(db, companyId, (opts.now ?? (() => new Date()))()),
+    alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
+    now: opts.now ?? (() => new Date()),
   });
   // Merge stall alarm (BOS-1515): an empty train seat or no landing while tickets wait; the CEO first, the owner as in fix A.
   const mergeStall = mergeStallService(db, {

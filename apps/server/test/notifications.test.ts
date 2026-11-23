@@ -433,6 +433,27 @@ describe("notification ladder (R44)", () => {
     const filtered = (await c.req("GET", "/api/notifications?level=flag&status=read")).json();
     expect(filtered.counts).toEqual({ level: { note: 1, flag: 1 }, company: { [c.company.id]: 1, none: 1 } });
   });
+
+  it("q finds notices by words in the title or text, any case, with the other filters and paging (BOS-2316)", async () => {
+    const c = await setup();
+    const row = { requested: "note", level: "note", link: "#/runs" } as const;
+    await c.db.insert(notifications).values([
+      { ...row, title: "Runner went offline", body: null, createdAt: new Date("2026-11-01T10:00:00Z") },
+      { ...row, title: "Deploy done", body: "The RUNNER is back", level: "flag", requested: "flag", createdAt: new Date("2026-11-02T10:00:00Z") },
+      { ...row, title: "Budget at 100%", body: "x", createdAt: new Date("2026-11-03T10:00:00Z") },
+      { ...row, title: "Budget at 1000", body: "x", createdAt: new Date("2026-11-04T10:00:00Z") },
+    ]);
+    const titles = async (qs: string) => ((await c.req("GET", `/api/notifications?${qs}`)).json().items as Array<{ title: string }>).map((i) => i.title);
+    expect(await titles("q=runner")).toEqual(["Deploy done", "Runner went offline"]);
+    expect(await titles("q=runner&level=flag")).toEqual(["Deploy done"]);
+    expect(await titles(`q=runner&before=${encodeURIComponent("2026-11-02T00:00:00Z")}`)).toEqual(["Runner went offline"]);
+    // A % in the text matches a % and not "anything".
+    expect(await titles(`q=${encodeURIComponent("100%")}`)).toEqual(["Budget at 100%"]);
+    expect(await titles("q=nothing-like-this")).toEqual([]);
+    // Spaces alone are no search; too long is refused.
+    expect(await titles(`q=${encodeURIComponent("   ")}`)).toHaveLength(4);
+    expect((await c.req("GET", `/api/notifications?q=${"a".repeat(201)}`)).statusCode).toBe(400);
+  });
 });
 
 describe("appUrl: a link in the app as the phone opens it", () => {

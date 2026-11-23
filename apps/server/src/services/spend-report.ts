@@ -1,7 +1,7 @@
-import { and, eq, gte, ne, sql } from "drizzle-orm";
-import { dateIn, isTimeZone } from "@boss-man/shared";
+import { and, eq, gte, inArray, ne, sql } from "drizzle-orm";
+import { dateIn, isTimeZone, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, costEvents, features, fundingSources, projects, runs, tickets } from "../db/schema.js";
+import { agents, companies, costEvents, features, fundingSources, projects, runs, tickets } from "../db/schema.js";
 
 export const SPEND_REPORT_PERIODS = [7, 30, 90] as const;
 
@@ -18,7 +18,20 @@ export type SpendReportRow = {
   micros: number;
 };
 
-export type SpendReport = { timeZone: string; days: string[]; rows: SpendReportRow[]; totalMicros: number };
+/** One of the period's costliest tickets; `ticketId` null is the "Not on a ticket" row (spend with no ticket). */
+export type SpendTopTicket = {
+  ticketId: string | null;
+  ref: string | null;
+  title: string;
+  state: string | null;
+  feature: string | null;
+  micros: number;
+  runs: number;
+};
+
+export type SpendReport = { timeZone: string; days: string[]; rows: SpendReportRow[]; totalMicros: number; topTickets: SpendTopTicket[] };
+
+const TOP_TICKETS = 10;
 
 /** A zone Intl accepts, else UTC (the browser sends its own zone; a bad one must not fail the page). */
 export function validZone(tz: string | undefined): string {
@@ -43,6 +56,7 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
     .select({
       at: costEvents.occurredAt,
       micros: costEvents.costMicros,
+      runId: costEvents.runId,
       agentId: costEvents.agentId,
       agent: agents.name,
       ticketId: tickets.id,
@@ -62,6 +76,8 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
     .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, since), ne(fundingSources.kind, "subscription")));
 
   const daySet = new Set(days);
+  // not state: locals that live for this one call
+  const perTicket = new Map<string, { ticketId: string | null; micros: number; runs: Set<string> }>();
   // not state: a local that lives for this one call
   const groups = new Map<string, SpendReportRow & { ids: Set<string> }>();
   let totalMicros = 0;
@@ -88,9 +104,37 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
     g.micros += e.micros;
     totalMicros += e.micros;
     if (e.ticketId) g.ids.add(e.ticketId);
+    const tk = e.ticketId ?? "";
+    const t = perTicket.get(tk) ?? { ticketId: e.ticketId, micros: 0, runs: new Set<string>() };
+    t.micros += e.micros;
+    if (e.runId) t.runs.add(e.runId);
+    perTicket.set(tk, t);
   }
+  const ranked = [...perTicket.values()].sort((a, b) => b.micros - a.micros).slice(0, TOP_TICKETS);
+  const ids = ranked.flatMap((t) => (t.ticketId ? [t.ticketId] : []));
+  const info = ids.length
+    ? await db
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, feature: features.title, prefix: companies.ticketPrefix })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .leftJoin(features, eq(features.id, tickets.featureId))
+        .where(inArray(tickets.id, ids))
+    : [];
+  const infoById = new Map(info.map((i) => [i.id, i]));
+  const topTickets: SpendTopTicket[] = ranked.map((t) => {
+    const i = t.ticketId ? infoById.get(t.ticketId) : undefined;
+    return {
+      ticketId: t.ticketId,
+      ref: i ? ticketRef(i.prefix, i.number) : null,
+      title: i?.title ?? "Not on a ticket",
+      state: i?.state ?? null,
+      feature: i?.feature ?? null,
+      micros: t.micros,
+      runs: t.runs.size,
+    };
+  });
   const rows = [...groups.values()]
     .map(({ ids, ...r }) => ({ ...r, tickets: ids.size }))
     .sort((a, b) => a.date.localeCompare(b.date) || b.micros - a.micros || a.agent.localeCompare(b.agent));
-  return { timeZone, days, rows, totalMicros };
+  return { timeZone, days, rows, totalMicros, topTickets };
 }

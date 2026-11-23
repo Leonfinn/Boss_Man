@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { DeployTargets } from "../src/pages/settings/Tools";
 
+let targetOver: Record<string, unknown> = {};
 afterEach(() => {
+  targetOver = {};
   cleanup();
   vi.unstubAllGlobals();
 });
@@ -40,7 +42,7 @@ function stub(all: Row[], failFirst = false) {
         const rest = before ? sorted.filter((r) => String(r.deploy.id) < before) : sorted;
         return json(rest.slice(0, Number(q.get("limit") ?? 20)));
       }
-      return json(url.endsWith("/deploy-targets") ? [target] : []);
+      return json(url.endsWith("/deploy-targets") ? [{ ...target, ...targetOver }] : []);
     }),
   );
   return urls;
@@ -90,5 +92,41 @@ describe("deploy history", () => {
     const details = await open();
     fireEvent.click(await within(details).findByRole("button", { name: /retry/i }));
     expect(await within(details).findAllByRole("listitem")).toHaveLength(1);
+  });
+});
+
+describe("deploy this version again (BOS-2329)", () => {
+  it("offers the button on older successes only, confirms with ref, commit and date, and posts the redeploy", async () => {
+    const sha = (c: string) => c.repeat(40);
+    targetOver = { lastDeploy: { id: "d003", ref: "v3", commit: sha("3"), at: null, tagName: null, tagResult: null } };
+    stub([
+      row(1, { commit: sha("1"), finishedAt: "2026-01-01T00:01:00.000Z" }),
+      row(2, { commit: sha("2") }),
+      row(3, { commit: sha("3") }),
+      row(4, { status: "failed", commit: sha("4") }),
+      row(5, { status: "rejected", commit: sha("5") }),
+    ]);
+    const details = await open();
+    await within(details).findAllByRole("listitem");
+    const buttons = within(details).getAllByRole("button", { name: "Deploy this version again" });
+    expect(buttons).toHaveLength(2);
+    // Newest first: d002 is above d001; neither the latest success, the failed nor the refused row has one.
+    const owners = buttons.map((b) => b.closest("li")!.textContent);
+    expect(owners[0]).toContain("v2");
+    expect(owners[1]).toContain("v1");
+
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    fireEvent.click(buttons[1]!);
+    expect(confirm).toHaveBeenCalledOnce();
+    const text = (confirm.mock.calls[0] as unknown as [string])[0];
+    expect(text).toContain("v1");
+    expect(text).toContain("1111111");
+    expect(text).toContain("2026-01-01");
+    expect(text).toContain("does not roll back data");
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some((c) => String(c[0]) === "/api/deploys/d001/redeploy")).toBe(true));
+    const call = fetchMock.mock.calls.find((c) => String(c[0]) === "/api/deploys/d001/redeploy")!;
+    expect(JSON.parse((call[1] as { body: string }).body)).toEqual({ companyId: "c1" });
   });
 });

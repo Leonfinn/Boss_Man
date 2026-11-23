@@ -1,0 +1,207 @@
+{
+  "blue": {
+    "Image": "ghcr.io/leonfinn/boss-man-server@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "Hostname": "server-blue",
+    "Env": [
+      "DATABASE_URL=postgres://bossman@db:5432/bossman",
+      "BOSSMAN_DATABASE_PASSWORD_FILE=/run/db/db_password",
+      "BOSSMAN_LAUNCHER=1",
+      "BOSSMAN_COLOUR=blue",
+      "BOSSMAN_ROLE=standby"
+    ],
+    "Labels": {
+      "boss-man.install": "test",
+      "com.bossman.managed": "1",
+      "com.bossman.colour": "blue",
+      "com.bossman.release": "0.2.0",
+      "com.bossman.digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    "StopTimeout": 60,
+    "HostConfig": {
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "test_config",
+          "Target": "/run/config",
+          "ReadOnly": true
+        },
+        {
+          "Type": "volume",
+          "Source": "test_db-secret",
+          "Target": "/run/db",
+          "ReadOnly": true
+        },
+        {
+          "Type": "volume",
+          "Source": "test_launcher-key",
+          "Target": "/run/launcher",
+          "ReadOnly": true
+        }
+      ],
+      "NetworkMode": "test_default",
+      "CapDrop": [
+        "ALL"
+      ],
+      "CapAdd": [],
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "Privileged": false,
+      "Devices": [],
+      "RestartPolicy": {
+        "Name": "unless-stopped"
+      },
+      "Memory": 0,
+      "MemoryReservation": 0,
+      "OomScoreAdj": -500,
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+    }
+  },
+  "green": {
+    "Image": "ghcr.io/leonfinn/boss-man-server@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "Hostname": "server-green",
+    "Env": [
+      "DATABASE_URL=postgres://bossman@db:5432/bossman",
+      "BOSSMAN_DATABASE_PASSWORD_FILE=/run/db/db_password",
+      "BOSSMAN_LAUNCHER=1",
+      "BOSSMAN_COLOUR=green",
+      "BOSSMAN_ROLE=standby"
+    ],
+    "Labels": {
+      "boss-man.install": "test",
+      "com.bossman.managed": "1",
+      "com.bossman.colour": "green",
+      "com.bossman.release": "0.2.0",
+      "com.bossman.digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    "StopTimeout": 60,
+    "HostConfig": {
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "test_config",
+          "Target": "/run/config",
+          "ReadOnly": true
+        },
+        {
+          "Type": "volume",
+          "Source": "test_db-secret",
+          "Target": "/run/db",
+          "ReadOnly": true
+        },
+        {
+          "Type": "volume",
+          "Source": "test_launcher-key",
+          "Target": "/run/launcher",
+          "ReadOnly": true
+        }
+      ],
+      "NetworkMode": "test_default",
+      "CapDrop": [
+        "ALL"
+      ],
+      "CapAdd": [],
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "Privileged": false,
+      "Devices": [],
+      "RestartPolicy": {
+        "Name": "unless-stopped"
+      },
+      "Memory": 0,
+      "MemoryReservation": 0,
+      "OomScoreAdj": -500,
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+    }
+  },
+  "networks": {
+    "blue": [
+      {
+        "network": "test_launcher",
+        "aliases": []
+      },
+      {
+        "network": "test_front",
+        "aliases": [
+          "server-blue-front"
+        ]
+      }
+    ],
+    "green": [
+      {
+        "network": "test_launcher",
+        "aliases": []
+      },
+      {
+        "network": "test_front",
+        "aliases": [
+          "server-green-front"
+        ]
+      }
+    ],
+    "liveGreen": [
+      {
+        "network": "test_launcher",
+        "aliases": []
+      },
+      {
+        "network": "test_front",
+        "aliases": [
+          "server-green-front",
+          "server-live"
+        ]
+      }
+    ]
+  },
+  "migrate": {
+    "Image": "ghcr.io/leonfinn/boss-man-server@sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "Cmd": [
+      "node",
+      "dist/migrate.js"
+    ],
+    "Env": [
+      "DATABASE_URL=postgres://bossman@db:5432/bossman",
+      "BOSSMAN_DATABASE_PASSWORD_FILE=/run/db/db_password"
+    ],
+    "Labels": {
+      "boss-man.install": "test",
+      "com.bossman.migrate": "0.2.0"
+    },
+    "HostConfig": {
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Source": "test_db-secret",
+          "Target": "/run/db",
+          "ReadOnly": true
+        }
+      ],
+      "NetworkMode": "test_default",
+      "CapDrop": [
+        "ALL"
+      ],
+      "CapAdd": [],
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "Privileged": false,
+      "Devices": [],
+      "RestartPolicy": {
+        "Name": "no"
+      }
+    }
+  }
+}

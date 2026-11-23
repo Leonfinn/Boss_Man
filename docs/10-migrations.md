@@ -14,7 +14,7 @@ These keep a release and the one before it compatible, which is what makes a rol
 
 ### The lint
 
-`scripts/lint-migrations.mjs` runs in CI. It looks only at migrations numbered above 0042 (history is not re-judged) and fails on `DROP TABLE/COLUMN/INDEX/TYPE/CONSTRAINT`, `RENAME`, `ALTER COLUMN ... TYPE`, `SET NOT NULL`, `ADD COLUMN ... NOT NULL` without `DEFAULT`, `TRUNCATE` and `DELETE FROM` without `WHERE`. A deliberate contract step passes when the statement, or the line above it, carries a reason a reviewer can see:
+`scripts/lint-migrations.mjs` runs in CI. It looks only at migrations numbered above 0042 (history is not re-judged) and fails on `DROP TABLE/COLUMN/INDEX/TYPE/CONSTRAINT`, `RENAME`, `ALTER COLUMN ... TYPE`, `SET NOT NULL`, `ADD COLUMN ... NOT NULL` without `DEFAULT`, `TRUNCATE`, `DELETE FROM` without `WHERE`, `ALTER COLUMN ... DROP DEFAULT`, `DROP SCHEMA/VIEW/FUNCTION/TRIGGER/SEQUENCE/EXTENSION/RULE/POLICY` and `ALTER TYPE ... DROP/RENAME VALUE`. The image updater (BOS-941) runs a release's migration while the old release still serves, flips, and keeps the old release as a stopped standby it can start again, so the old code has to keep working on the new schema for the soak and after a going-back; this lint is what makes that safe. A deliberate contract step passes when the statement, or the line above it, carries a reason a reviewer can see:
 
 ```sql
 -- contract-ok: nothing has read old_col since release 0.9

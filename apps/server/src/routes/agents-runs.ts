@@ -131,6 +131,8 @@ export function agentRunsRoutes(
     const b = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional() }).parse(req.body);
     return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
   });
+  // Agents woken but not started yet, and why (BOS-2320). Read-only; no notes text.
+  owner.get("/api/companies/:id/wakes/waiting", async (req) => runsSvc.waiting(IdParam.parse(req.params).id));
   owner.get("/api/runs/recent", async (req) => {
     const q = z
       .object({

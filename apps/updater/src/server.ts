@@ -20,8 +20,9 @@ export function keyMatches(presented: string | undefined, key: string): boolean 
 
 export type UpdaterServer = { server: http.Server; /** Resolves when the move running now (if any) has finished. */ idle(): Promise<void> };
 
-export function createServer(deps: MoveDeps, key: string): UpdaterServer {
-  let running: Promise<void> = Promise.resolve();
+/** `initial`: work a restart found to resume (a soak in progress), so `idle()` waits for it too. `exit` is process.exit; tests pass their own. */
+export function createServer(deps: MoveDeps, key: string, initial: Promise<void> = Promise.resolve(), exit: (code: number) => void = (c) => process.exit(c)): UpdaterServer {
+  let running: Promise<void> = initial;
   const send = (res: http.ServerResponse, status: number, body: unknown) => {
     const text = JSON.stringify(body);
     res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), connection: "close" });
@@ -30,7 +31,7 @@ export function createServer(deps: MoveDeps, key: string): UpdaterServer {
   };
   const publicState = () => {
     const { stage, version, startedAt, updatedAt, error, report } = deps.state.get();
-    return { stage, version, startedAt, updatedAt, currentVersion: deps.cfg.currentVersion, error, report };
+    return { stage, version, startedAt, updatedAt, currentVersion: deps.state.get().currentVersion ?? deps.cfg.currentVersion, error, report };
   };
 
   async function readBody(req: http.IncomingMessage): Promise<Buffer> {
@@ -56,7 +57,7 @@ export function createServer(deps: MoveDeps, key: string): UpdaterServer {
       }
       const url = new URL(req.url ?? "/", "http://updater");
       const route = `${url.pathname}`;
-      if (route !== "/move" && route !== "/status" && route !== "/ack") return send(res, 404, { error: "not_found" });
+      if (route !== "/move" && route !== "/status" && route !== "/ack" && route !== "/handover") return send(res, 404, { error: "not_found" });
       const want = route === "/status" ? "GET" : "POST";
       if (req.method !== want) return send(res, 405, { error: "method_not_allowed" });
       if (url.search) return send(res, 400, { error: "bad_request", message: "No query string is accepted." });
@@ -73,6 +74,22 @@ export function createServer(deps: MoveDeps, key: string): UpdaterServer {
           parsed = JSON.parse(body.toString("utf8"));
         } catch {
           throw new UpdaterError("bad_request", "The request is not JSON.");
+        }
+        if (route === "/handover") {
+          // Only the updater this one created, naming the digest this one is waiting for, is accepted (design section 8).
+          const e = deps.gate?.expecting;
+          const dg = parsed && typeof parsed === "object" ? (parsed as { digest?: unknown }).digest : undefined;
+          if (!e || dg !== e.digest) return send(res, 409, { error: "not_expected" });
+          deps.gate!.expecting = null;
+          try {
+            await e.run();
+          } catch {
+            return send(res, 500, { error: "handover_failed" });
+          }
+          send(res, 200, { handedOver: true });
+          // The answer is out: this updater's job is done. Its restart policy is "no", so Docker leaves it stopped.
+          setTimeout(() => exit(0), 200);
+          return;
         }
         const ins = parseInstruction(parsed);
         if (RUNNING_STAGES.includes(deps.state.get().stage)) return send(res, 409, { error: "busy", message: "Another update is already running.", state: publicState() });

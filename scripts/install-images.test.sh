@@ -41,12 +41,21 @@ unpinned="$(echo "$cfg" | jq -r '.services | to_entries[] | select(.key != "db")
 echo "$cfg" | jq -e '.services.db.image | test(":[0-9]")' >/dev/null && ok "the database image is pinned to a version" || bad "database image not pinned"
 echo "$cfg" | jq -e '[.services[] | has("build")] | any | not' >/dev/null && ok "nothing is built" || bad "a service has a build section"
 # The only folder from the host is the Docker socket; everything else is a named volume.
-hostbinds="$(echo "$cfg" | jq -r '.services[].volumes[]? | select(.type == "bind") | .source')"
+hostbinds="$(echo "$cfg" | jq -r '.services[].volumes[]? | select(.type == "bind") | .source' | sort -u)"
 [ "$hostbinds" = "/var/run/docker.sock" ] && ok "the only host path is the Docker socket" || bad "host paths bound: $hostbinds"
 sock="$(BOSSMAN_DOCKER_SOCK=/run/user/1000/docker.sock docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json | jq -r '.services.launcher.volumes[] | select(.target == "/var/run/docker.sock") | .source')"
 [ "$sock" = "/run/user/1000/docker.sock" ] && ok "BOSSMAN_DOCKER_SOCK picks the socket" || bad "socket setting: $sock"
 echo "$cfg" | jq -e '.services.setup.network_mode == "none" and (.services.setup.cap_add == ["CHOWN"])' >/dev/null && ok "setup has no network and one capability" || bad "setup is not locked down"
 echo "$cfg" | jq -e '.services.launcher.cap_add == ["SETGID","SETUID"] or .services.launcher.cap_add == ["SETUID","SETGID"]' >/dev/null && ok "the launcher keeps only SETUID and SETGID" || bad "launcher capabilities"
+# BOS-1226: the first colour compose makes and every colour the updater makes must be the same install (the updater builds them from
+# UPDATER_SPEC_ENV and UPDATER_SPEC_MOUNTS); a drift here is a difference that appears only after the first update.
+blue_env="$(echo "$cfg" | jq -r '.services["server-blue"].environment | to_entries | map(select(.key != "BOSSMAN_COLOUR" and .key != "BOSSMAN_ROLE")) | map("\(.key)=\(.value)") | .[]' | sort)"
+spec_env="$(echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SPEC_ENV' | grep -v '^$' | sort)"
+[ -n "$blue_env" ] && [ "$blue_env" = "$spec_env" ] && ok "server-blue's environment equals the updater's colour spec environment" || bad "server-blue's environment differs from UPDATER_SPEC_ENV"
+blue_mounts="$(echo "$cfg" | jq -r '.name as $p | .services["server-blue"].volumes[] | "\($p)_\(.source):\(.target)\(if .read_only then ":ro" else "" end)"' | sort)"
+spec_mounts="$(echo "$cfg" | jq -r '.services.updater.environment.UPDATER_SPEC_MOUNTS' | grep -v '^$' | sort)"
+[ -n "$blue_mounts" ] && [ "$blue_mounts" = "$spec_mounts" ] && ok "server-blue's volumes equal the updater's colour spec mounts" || bad "server-blue's volumes differ from UPDATER_SPEC_MOUNTS: $blue_mounts / $spec_mounts"
+echo "$cfg" | jq -e '(.services.proxy.ports | length) == 2 and (.services["server-blue"] | has("ports") | not) and (.services.proxy.networks.front.ipv4_address != null)' >/dev/null && ok "the proxy owns the ports; the colour has none" || bad "proxy or colour ports"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
 [ -f docs/35-install-from-images.md ] && ok "the install guide exists" || bad "docs/35-install-from-images.md is missing"

@@ -1,6 +1,6 @@
 // The search box's route (BOS-2192): tickets, wiki pages and chat messages of one company, grouped, with snippets.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, decisions, features, ownerChatMessages, projects, runs, tickets, wikiPages } from "../src/db/schema.js";
+import { agents, companies, decisions, features, ownerChatMessages, projects, runs, skills, tickets, wikiPages } from "../src/db/schema.js";
 import { decisionTitle, refOf, runResultWord, SEARCH_EXTRA_MAX, SEARCH_GROUP_MAX, snippetOf, type SearchResults } from "../src/routes/search.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
@@ -146,6 +146,46 @@ describe("search route (BOS-2192)", () => {
     expect([r.features.length, r.decisions.length, r.runs.length]).toEqual([SEARCH_EXTRA_MAX, SEARCH_EXTRA_MAX, SEARCH_EXTRA_MAX]);
     // A run still going says so.
     expect(r.runs[0]!.snippet).toBe("Running");
+  });
+
+  it("finds agents by name or job and skills by name or description, never their instructions or another company's (BOS-2347)", async () => {
+    for (const c of [A, B]) {
+      await t.db.insert(agents).values([
+        { companyId: c.company, name: "Zippy", title: "Senior Developer", role: "worker", agentKind: "claude", instructions: "Secret plan: wombat" },
+        { companyId: c.company, name: "Old Zippy", title: "Tester", role: "worker", agentKind: "claude", retiredAt: new Date("2026-11-01T00:00:00Z") },
+      ]);
+      await t.db.insert(skills).values([
+        { companyId: c.company, name: "penpot", description: "Draw mock-ups in the company's Penpot, board by board.", source: "written", files: [{ path: "SKILL.md", content: "d29tYmF0" }], sizeBytes: 6 },
+        { companyId: c.company, name: "drawing-help", description: `${"Filler words. ".repeat(30)}Exports a Penpot board as a PNG.`, source: "written", files: [], sizeBytes: 0 },
+      ]);
+    }
+    const r = await find(A.company, "zippy");
+    // The working agent before the retired one; the job in the Agents page's words.
+    expect(r.agents.map((a) => [a.title, a.snippet])).toEqual([["Zippy", "Senior Developer"], ["Old Zippy", "Tester · Retired"]]);
+    expect(r.agents[0]!.link).toBe(`agents/${r.agents[0]!.id}`);
+    expect((await find(A.company, "senior dev")).agents.map((a) => a.title)).toEqual(["Zippy"]);
+    // The instructions are never searched or returned.
+    expect((await find(A.company, "wombat")).agents).toEqual([]);
+    const s = await find(A.company, "PENPOT");
+    // A name match first, its description from the start; a description match shows the text around the match.
+    expect(s.skills.map((x) => x.title)).toEqual(["penpot", "drawing-help"]);
+    expect(s.skills[0]).toMatchObject({ snippet: "Draw mock-ups in the company's Penpot, board by board.", link: `skills/${s.skills[0]!.id}` });
+    expect(s.skills[1]!.snippet).toMatch(/^….*Penpot board as a PNG\.$/);
+    expect(JSON.stringify([r, s])).not.toContain("wombat");
+    // Beta's rows have the same names but never show in Alpha's search.
+    const b = await find(B.company, "zippy");
+    const aIds = new Set([...r.agents, ...s.skills].map((x) => x.id));
+    expect([...b.agents, ...(await find(B.company, "penpot")).skills].some((x) => aIds.has(x.id))).toBe(false);
+    expect(b.agents).toHaveLength(2);
+  });
+
+  it("caps agents and skills at 5 each (BOS-2347)", async () => {
+    await t.db.insert(agents).values(Array.from({ length: 8 }, (_, i) => ({ companyId: A.company, name: `Puffin ${i}`, role: "worker" as const, agentKind: "claude" })));
+    await t.db.insert(skills).values(Array.from({ length: 8 }, (_, i) => ({ companyId: A.company, name: `puffin-${i}`, description: "x", source: "written" as const, files: [], sizeBytes: 0 })));
+    const r = await find(A.company, "puffin");
+    expect([r.agents.length, r.skills.length]).toEqual([SEARCH_EXTRA_MAX, SEARCH_EXTRA_MAX]);
+    // An agent with no job title is an "Agent", as on the Agents page.
+    expect(r.agents[0]!.snippet).toBe("Agent");
   });
 
   it("caps each group at 8", async () => {
