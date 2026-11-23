@@ -405,7 +405,7 @@ function DeployHistoryList({ companyId, targetId, name, latestSuccessId }: { com
                 · <a href={`#/tickets/${d.ticketId}`}>{ticketRef ?? "ticket"}</a>
               </>
             )}
-            {d.redeployOf && <div className="muted">Repeats {(older.rows.find((r) => r.deploy.id === d.redeployOf)?.deploy.commit ?? "").slice(0, 7) || "an earlier deploy"}</div>}
+            {d.redeployOf && <div className="muted">Repeats {(older.rows?.find((r) => r.deploy.id === d.redeployOf)?.deploy.commit ?? "").slice(0, 7) || "an earlier deploy"}</div>}
             {d.notes && <div className="muted">{d.notes}</div>}
             {d.status === "succeeded" && d.commit && d.id !== latestSuccessId && (
               <button

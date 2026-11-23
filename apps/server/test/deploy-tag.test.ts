@@ -289,7 +289,7 @@ describe("deploying an earlier version again (BOS-2329)", () => {
     expect(card.question).toContain("You asked to deploy again");
     expect(card.question).toContain(c.o.F.slice(0, 7));
     // The list the fold reads carries the link.
-    const list = (await c.req("GET", `/api/deploys?companyId=${c.company.id}&targetId=${old.targetId}&limit=20`)).json() as { deploy: { id: string; redeployOf: string | null }[] }[];
+    const list = (await c.req("GET", `/api/deploys?companyId=${c.company.id}&targetId=${old.targetId}&limit=20`)).json() as { deploy: { id: string; redeployOf: string | null } }[];
     expect(list.find((x) => x.deploy.id === again.id)!.deploy.redeployOf).toBe(old.id);
 
     // A deploy that failed, one that doesn't exist and another company's: refused, nothing created.
