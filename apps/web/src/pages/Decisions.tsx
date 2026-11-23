@@ -1614,16 +1614,16 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   );
 }
 
-type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null };
+type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; companyName?: string; note?: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null };
 
 const answeredBy = (i: AnsweredItem) => (i.by === "owner" ? "You" : i.by === "ceo" ? i.byName ?? "The CEO" : i.by === "auto" ? "Automatically" : "Withdrawn by the team");
 const answeredWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-/** (BOS-2312) The Answered list as CSV: when, ticket, question, answer, who answered. The route returns no note or company, so those are not columns. */
+/** (BOS-2312) The Answered list as CSV: when, company, ticket, question, answer, note, who answered. */
 export function answeredToCsv(rows: AnsweredItem[]): string {
   return buildCsv(
-    ["Answered at", "Ticket", "Question", "Answer", "Answered by"],
-    rows.map((i) => [i.at, i.ticket?.ref ?? "", i.question, i.status === "answered" ? i.answer ?? "" : "(withdrawn)", i.by === "owner" ? "owner" : i.by === "ceo" ? i.byName ?? "CEO" : i.by === "auto" ? "automatic" : "withdrawn"]),
+    ["Answered at", "Company", "Ticket", "Question", "Answer", "Note", "Answered by"],
+    rows.map((i) => [i.at, i.companyName ?? "", i.ticket?.ref ?? "", i.question, i.status === "answered" ? i.answer ?? "" : "(withdrawn)", i.note ?? "", i.by === "owner" ? "owner" : i.by === "ceo" ? i.byName ?? "CEO" : i.by === "auto" ? "automatic" : "withdrawn"]),
   );
 }
 

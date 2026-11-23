@@ -9,7 +9,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const item = (n: number, over: Record<string, unknown> = {}) => ({ id: `d${n}`, question: `Question ${n}`, status: "answered", answer: "Stripe", by: "owner", byName: null, at: "2026-11-01T10:00:00.000Z", ticket: { id: `t${n}`, title: `Ticket ${n}`, ref: `BOS-${n}` }, ...over });
+const item = (n: number, over: Record<string, unknown> = {}) => ({ id: `d${n}`, question: `Question ${n}`, status: "answered", answer: "Stripe", by: "owner", byName: null, companyName: "App Co", note: n === 1 ? "Use the test key, please" : null, at: "2026-11-01T10:00:00.000Z", ticket: { id: `t${n}`, title: `Ticket ${n}`, ref: `BOS-${n}` }, ...over });
 const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 
 describe("Answered list", () => {
@@ -62,9 +62,9 @@ describe("Answered list", () => {
       expect(urls[0]).toContain("q=pay");
       expect(urls[0]).toContain("companyId=11111111");
       const lines = (await (saved as unknown as Blob).text()).trim().split("\r\n");
-      expect(lines[0]).toBe("Answered at,Ticket,Question,Answer,Answered by");
+      expect(lines[0]).toBe("Answered at,Company,Ticket,Question,Answer,Note,Answered by");
       expect(lines).toHaveLength(3);
-      expect(lines[1]).toBe('2026-11-01T10:00:00.000Z,BOS-1,"Pay, now?",Stripe,owner');
+      expect(lines[1]).toBe('2026-11-01T10:00:00.000Z,App Co,BOS-1,"Pay, now?",Stripe,"Use the test key, please",owner');
       expect(lines[2]).toContain("Yes");
       expect(lines[2]).toContain("Casey");
     } finally {
