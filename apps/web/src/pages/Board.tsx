@@ -643,7 +643,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
   const hover = (cut: boolean, text: string) => (cut && !open ? text : undefined);
   const first = who ? name.split(" ")[0]! : name;
   return (
-    <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId} data-ticket-id={t.id}>
+    <article className={`ticket${quiet ? " quietcard" : ""}${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId} data-ticket-id={t.id} data-shortcut-card tabIndex={-1}>
       <div className="top">
         {select && (
           <input type="checkbox" className="bulk-check" aria-label={`Select ${ticketRefText}`} checked={select.checked} onChange={() => {}} onClick={(e) => select.onClick(t.id, e.shiftKey)} />
@@ -686,7 +686,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         {t.number && <span className="mono muted ref">{ticketRef(prefix, t.number)}</span>}
       </div>
       <h3>
-        <a ref={titleRef} className={open ? undefined : "clamp2"} href={`#/tickets/${t.id}`} title={hover(titleCut, t.title)}>{t.title}</a>
+        <a ref={titleRef} className={open ? undefined : "clamp2"} href={`#/tickets/${t.id}`} data-shortcut-open title={hover(titleCut, t.title)}>{t.title}</a>
       </h3>
       {mine && <span ref={noteRef} className={`note${open ? "" : " clamp2"}`} title={hover(noteCut, noteText)}>{noteText}</span>}
       {t.recheckingBy && !mine && <span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
