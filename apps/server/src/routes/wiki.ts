@@ -44,7 +44,8 @@ export function wikiRoutes(owner: FastifyInstance, deps: { wiki: ReturnType<type
     // A deleted page answers with its "deleted on <date>" stub (deleted: true) so the link view can offer Restore (BOS-2197).
     const gone = await wiki.deletedStub(id, slug);
     if (gone) return gone;
-    return wiki.get(id, slug).catch(wikiErrors(reply));
+    // The page's links, its missing [[slug]] targets and what links to it, as agents' reads show (BOS-2366).
+    return wiki.get(id, slug).then(async (p) => ({ ...p, ...(await wiki.links(id, p.slug, p.body)) }), wikiErrors(reply));
   });
   owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
     const { id, slug } = SlugParams.parse(req.params);

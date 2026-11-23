@@ -442,6 +442,7 @@ reads:
 ## #/wiki
 sections: 
   - Company brief
+  - Links
   - Wiki
 reads: 
   - /api/companies/:id/brief
