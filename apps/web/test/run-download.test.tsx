@@ -47,4 +47,31 @@ describe("run download (BOS-2322)", () => {
     expect(text).toContain("(cut)");
     expect(text).not.toContain("x".repeat(2001));
   });
+
+  it("shows Preparing while fetching, and an error line with no file when the fetch fails", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    let fail = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!url.includes("/transcript")) return new Response("[]", { status: 200 });
+        if (fail) {
+          await gate;
+          return new Response(JSON.stringify({ error: "Server went away" }), { status: 500 });
+        }
+        return new Response(JSON.stringify({ run, items: [say(1, "hi")], next: 1, more: false }), { status: 200 });
+      }),
+    );
+    const clicks = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<Run runId="r1" companies={[company]} />);
+    const btn = await screen.findByRole("button", { name: "Download" });
+    fail = true;
+    fireEvent.click(btn);
+    const busy = await screen.findByRole("button", { name: "Preparing" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    release();
+    await screen.findByRole("alert");
+    expect(clicks).not.toHaveBeenCalled();
+  });
 });
