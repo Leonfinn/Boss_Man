@@ -2305,3 +2305,28 @@ export const deviceProfiles = pgTable(
   },
   (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
 );
+
+/** One row per runner-update hold (BOS-2408): what it was, each swap try, notable moments, and how it ended. Kept after the hold's settings row is gone, so a restart can't erase why an update waited. */
+export const updateHolds = pgTable(
+  "update_holds",
+  {
+    id: id(),
+    /** The hold's own `since`: one hold, one row. */
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    kind: text("kind").notNull(),
+    reason: text("reason").notNull(),
+    deadline: timestamp("deadline", { withTimezone: true }),
+    minutes: integer("minutes"),
+    /** Each swap attempt: runner slug, try number, when, the error, and the outcome. */
+    swapTries: jsonb("swap_tries").$type<{ slug: string; n: number; at: string; outcome: string; error?: string }[]>().notNull().default(sql`'[]'::jsonb`),
+    /** Short timestamped moments (at most 200): wait on nothing nameable, owner answers, force, cap. */
+    events: jsonb("events").$type<{ at: string; text: string }[]>().notNull().default(sql`'[]'::jsonb`),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    endOk: boolean("end_ok"),
+    endTitle: text("end_title"),
+    endBody: text("end_body"),
+    /** The hold's swapped and failed maps as they stood at the end. */
+    finalState: jsonb("final_state").$type<{ swapped?: Record<string, string>; failed?: Record<string, string> }>(),
+  },
+  (t) => [uniqueIndex("update_holds_started").on(t.startedAt)],
+);

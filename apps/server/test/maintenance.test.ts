@@ -7,7 +7,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, updateHolds, wakes } from "../src/db/schema.js";
 import { BUILD_HOLD_MAX_MINUTES, DRAIN_GO_AHEAD_MINUTES, drainForecast, drainGoAheadAt, getHold, HOLD_CAP_MINUTES, HOLD_REASON, holdBlocksStarts, holdCapAt, holdEndsAt, SWAP_WHEN_DONE_CAP_MINUTES, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { CEO_REPLY_REASON, MISSED_REASON, UPDATE_ALERT_REASON } from "../src/services/scheduler.js";
 import { activeWaits, WAIT_RULES } from "../src/services/update-waits.js";
@@ -859,6 +859,34 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(page!.body).toContain("going back to the previous runner image failed too");
     expect(page!.body).toContain("Press Start runner");
     expect(page!.body).toContain("silent-co: has not reconnected");
+  });
+
+  // BOS-2408: each hold's record outlives its settings row: tries, how it ended, and a hold that lost its end is closed.
+  it("keeps a record of each hold: swap tries, how it ended, and closes one that lost its end", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("Broken Co", "broken-co");
+    c.fake.broken.add("broken-co");
+    c.fake.setNoPrevious(true);
+    await c.maintenance.start();
+    await c.maintenance.step();
+    await retryOut(c);
+    expect(await getHold(c.db)).toBeNull();
+    const rows = await c.db.select().from(updateHolds);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind).toBe("update");
+    expect(rows[0]!.swapTries.map((t) => `${t.slug}:${t.n}:${t.outcome}`)).toEqual(["broken-co:1:failed", "broken-co:2:failed", "broken-co:3:failed"]);
+    expect(rows[0]!.endTitle).toBe("Runner update finished with problems");
+    expect(rows[0]!.endOk).toBe(false);
+    expect(rows[0]!.endedAt).not.toBeNull();
+    expect(rows[0]!.finalState?.failed?.["broken-co"]).toContain("would not start");
+    const api = await c.req("GET", "/api/maintenance/history");
+    expect(api.json().holds).toHaveLength(1);
+    // A row left open with no live hold (a restart that lost the end) is closed by the next pass, not left open.
+    await c.db.insert(updateHolds).values({ startedAt: new Date("2026-01-01T00:00:00Z"), kind: "update", reason: "update pending" });
+    await c.maintenance.step();
+    const open = (await c.db.select().from(updateHolds)).find((r) => r.startedAt.toISOString().startsWith("2026-01-01"))!;
+    expect(open.endedAt).not.toBeNull();
+    expect(open.endTitle).toContain("Ended without a record");
   });
 
   // BOS-382: a swap that fails is tried again on its own, then goes back to the previous image, then says so once.
