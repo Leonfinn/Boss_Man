@@ -88,6 +88,11 @@ describe("feedback portal", () => {
     const xml = res.body;
     expect(xml.match(/<entry>/g)?.length).toBe(2);
     expect(xml).toContain("<title>Faster &lt;boards&gt;</title>");
+    // Valid Atom shape: every entry has a date and a link, and entries are newest first.
+    const dates = [...xml.matchAll(/<entry>.*?<updated>(.*?)<\/updated><link rel="alternate" type="text\/html" href="[^"]+\/portal\.html"\/>/g)].map((m) => m[1]!);
+    expect(dates.length).toBe(2);
+    expect(dates).toEqual([...dates].sort().reverse());
+    expect(xml.startsWith('<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom">')).toBe(true);
     expect(xml).toContain("Boards load in a blink.");
     for (const leak of ["BOS-99", "Hidden", "Internal title X", "No summary", "internal secret"]) expect(xml).not.toContain(leak);
     // Not at all without a portal at the bare address.
