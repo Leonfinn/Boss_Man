@@ -771,10 +771,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "deploy",
     {
       description:
-        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live.",
+        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done), history (target by name or id, optional limit, default 10, at most 50: that target's recent deploys newest first, failed and refused ones too, one line each with deploy id, requested time, ref and commit, who asked, ticket and status; use it to answer why a deploy didn't go out, or what was live before). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live.",
       inputSchema: {
-        action: z.enum(["targets", "request", "report"]),
+        action: z.enum(["targets", "request", "report", "history"]),
         target: z.string().optional(),
+        limit: z.number().int().min(1).max(50).optional(),
         ref: z.string().min(1).max(200).optional(),
         notes: z.string().max(2000).optional(),
         ticketId: z.string().uuid().optional(),
@@ -800,6 +801,24 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
                 };
               }),
             ),
+          );
+        }
+        if (input.action === "history") {
+          if (!input.target) return fail("Give the target (name or id).");
+          const all = await deploys.listTargets(scope.companyId);
+          const t = all.find((x) => x.id === input.target || x.name.toLowerCase() === input.target!.toLowerCase());
+          if (!t) return fail(all.length ? `No deploy target called "${input.target}". Targets: ${all.map((x) => x.name).join(", ")}.` : "Your company has no deploy targets.");
+          const rows = await deploys.list(scope.companyId, { targetId: t.id, limit: input.limit ?? 10 });
+          if (!rows.length) return text(`No deploys of ${t.name} yet.`);
+          return text(
+            rows
+              .map((r) => {
+                const d = r.deploy;
+                const sha = d.commit ? ` (${d.commit.slice(0, 7)})` : "";
+                const tag = d.tagName ? `, tag ${d.tagName}: ${d.tagResult ?? "none"}` : "";
+                return `${d.id} | ${d.createdAt.toISOString().slice(0, 16).replace("T", " ")} UTC | ${d.ref}${sha} | by ${r.agentName ?? "the owner"} | ${r.ticketRef ?? "no ticket"} | ${d.status}${tag}`;
+              })
+              .join("\n"),
           );
         }
         if (input.action === "request") {
