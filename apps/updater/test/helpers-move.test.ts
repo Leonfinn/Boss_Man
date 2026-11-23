@@ -5,7 +5,8 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { assertSafeServerCreate } from "../src/docker.js";
 import { converge, firstStart, reconcile } from "../src/firststart.js";
-import { readReleaseCurrent } from "../src/helpers.js";
+import { moveHelpers, readReleaseCurrent } from "../src/helpers.js";
+import { getVerifiedRelease } from "../src/release.js";
 import { runMove } from "../src/move.js";
 import { launcherSpec } from "../src/spec.js";
 import { FakeDaemon, HELPER_CFG } from "./fake-daemon.js";
@@ -123,6 +124,28 @@ describe("test 13: after the server is done, the rest of the release moves", () 
     expect(s.daemon.find("test-updater-guardcheck")).toBeUndefined();
     expect(s.state.get().helpers.status).toBe("pending");
     expect(s.state.get().helpers.note).toMatch(/network guard did not pass/);
+    // The failed guard is never named in release-current: runners started later keep the guard they had.
+    expect(readReleaseCurrent(s.cfg)).toBeNull();
+  });
+
+  test("two helper moves at once (a retry tick while a move waits for a busy launcher): only one runs", async () => {
+    const s = await setup({ cfg: HELPER_CFG });
+    s.daemon.addLauncher("0.0.9");
+    s.deps.launcherBusy = async () => true;
+    await runMove(s.deps, ins());
+    expect(s.state.get().helpers.status).toBe("pending");
+    // Two retry ticks overlap while the launcher is busy for a few polls and then clear: the second must do nothing.
+    let asked = 0;
+    s.deps.launcherBusy = async () => ++asked <= 3;
+    s.daemon.calls.length = 0;
+    const release = await getVerifiedRelease(s.cfg, "0.2.0", s.deps.release);
+    const both = await Promise.all([moveHelpers(s.deps, release), moveHelpers(s.deps, release)]);
+    expect(both).toContain("pending");
+    expect(both).toContain("moved");
+    const creates = s.daemon.calls.filter((c) => c.path.startsWith("/containers/create?name=launcher-next"));
+    expect(creates).toHaveLength(1);
+    expect(s.state.get().helpers).toEqual({ release: "0.2.0", status: "moved", note: null });
+    expect(s.daemon.find("launcher")!.image).toContain(NEW.launcher);
   });
 
   test("a move that rolls back never writes release-current or touches the launcher", async () => {
@@ -190,6 +213,30 @@ describe("test 14: first start, adoption and convergence", () => {
     await firstStart(s.deps);
     expect(s.daemon.find("launcher")!.running).toBe(true);
     expect(s.daemon.find("launcher-next")).toBeUndefined();
+  });
+
+  test("a healthy launcher-next left after an interrupted rename is kept and renamed, not replaced by an install-time launcher", async () => {
+    const s = await fresh();
+    leader(s);
+    await firstStart(s.deps);
+    const keep = s.daemon.find("launcher")!;
+    s.daemon.containers.delete("launcher");
+    keep.name = "launcher-next";
+    s.daemon.containers.set("launcher-next", keep);
+    s.daemon.calls.length = 0;
+    await firstStart(s.deps);
+    expect(s.daemon.find("launcher")!.id).toBe(keep.id);
+    expect(s.daemon.find("launcher-next")).toBeUndefined();
+    expect(s.daemon.calls.some((c) => c.path.includes("create?name=launcher"))).toBe(false);
+  });
+
+  test("a launcher missing while the state records a newer release is not rebuilt from the install-time release; converge makes it", async () => {
+    const s = await setup({ cfg: HELPER_CFG });
+    s.state.update({ currentVersion: "0.2.0", helpers: { release: "0.2.0", status: "moved", note: null } });
+    const notes = await firstStart(s.deps);
+    expect(notes.join(" ")).toMatch(/recorded release/);
+    expect(s.daemon.find("launcher")).toBeUndefined();
+    expect(s.state.get().helpers.status).toBe("pending");
   });
 
   test("the database never ready: nothing is made, the note says it is tried at the next start", async () => {

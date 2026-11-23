@@ -113,7 +113,7 @@ export async function waitLauncherIdle(d: SwapDeps): Promise<boolean> {
   }
 }
 
-const healthy = (c: ContainerInfo) => c.State.Running === true && (c.State.Health === undefined || c.State.Health.Status === "healthy");
+export const healthy = (c: ContainerInfo) => c.State.Running === true && (c.State.Health === undefined || c.State.Health.Status === "healthy");
 
 async function waitHealthy(d: SwapDeps, name: string, seconds: number): Promise<boolean> {
   const clock = d.clock ?? realClock;
@@ -185,24 +185,40 @@ export function previousOf(old: ContainerInfo | null, file: ReleaseCurrent | nul
 }
 
 /**
- * The whole helper move for a verified release whose images are already pulled. `release-current` is written first (so runners made
- * from now on are the release's whatever happens next); a guard that fails its check or a launcher that stays busy leaves the
- * launcher as it was and marks the move "pending" for a later retry.
+ * The whole helper move for a verified release whose images are already pulled. The guard is checked, then `release-current` is
+ * written (so runners made from now on are the release's even if the launcher stays busy); a guard that fails its check leaves
+ * release-current and the launcher as they were, and a busy launcher leaves the launcher; either marks the move "pending" for a retry.
  */
 export async function moveHelpers(d: MoveDeps, release: Release): Promise<"moved" | "pending" | "skipped"> {
   if (!isSwap(d) || !d.cfg.swap.helpers) return "skipped";
+  // One helper move at a time per updater: a retry tick that fires while a move still waits for the launcher must not start a second
+  // one (both would build `launcher-next` and remove each other's new launcher).
+  if (moving.has(d.state)) return "pending";
+  moving.add(d.state);
+  try {
+    return await moveHelpersOnce(d, release);
+  } finally {
+    moving.delete(d.state);
+  }
+}
+
+const moving = new WeakSet<object>();
+
+async function moveHelpersOnce(d: SwapDeps, release: Release): Promise<"moved" | "pending" | "skipped"> {
   const { state, docker } = d;
   const r = helperRelease(release);
   const before = readReleaseCurrent(d.cfg);
-  const old = await docker.inspectOurs(d.cfg.swap.helpers.launcherName).catch(() => null);
+  const old = await docker.inspectOurs(d.cfg.swap.helpers!.launcherName).catch(() => null);
   const previous = previousOf(old, before);
   const pending = (note: string): "pending" => {
     state.update({ helpers: { release: state.get().helpers.release, status: "pending", note } });
     return "pending";
   };
   try {
-    writeReleaseCurrent(d.cfg, release);
+    // The guard is checked first: release-current names the guard every later runner start uses, so a guard that failed its check
+    // must never be written there (guards fail closed, those runners would be removed).
     await checkGuard(d, r);
+    writeReleaseCurrent(d.cfg, release);
     if (!(await waitLauncherIdle(d))) return pending("A run was starting for ten minutes, so the launcher was not replaced yet. It is tried again by itself; runners made now already use the new release.");
     const out = await recreateLauncher(d, r);
     if (out === "failed") return pending("The new launcher did not become healthy, so the previous launcher was started again. It is tried again by itself.");

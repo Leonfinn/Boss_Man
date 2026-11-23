@@ -3,7 +3,7 @@
 // soak (nothing is serving yet). Reconcile runs at every start and after that: it finishes a half-done launcher replacement, retries a
 // helper move that was deferred, and moves this updater to the release the state records when compose started an older one.
 import { UpdaterError } from "./config.js";
-import { moveHelpers, NEXT, recreateLauncher } from "./helpers.js";
+import { healthy, moveHelpers, NEXT, recreateLauncher } from "./helpers.js";
 import { imageRef, pullByDigest } from "./pull.js";
 import { getVerifiedRelease } from "./release.js";
 import { compareVersions } from "./schema.js";
@@ -38,8 +38,22 @@ export async function firstStart(d: MoveDeps): Promise<string[]> {
   const notes: string[] = [];
   if (!h || !h.first) return notes;
   const { docker, state } = d;
-  // A launcher replacement the previous updater did not finish: the half-made one goes, the old one runs again.
-  await docker.remove(`${h.launcherName}${NEXT}`).catch(() => undefined);
+  // A launcher replacement the previous updater did not finish. If the old launcher is still there, the half-made one goes and the
+  // old one runs again. If the old one is gone and the new one is healthy (the move died between the removal and the rename), the
+  // new one is kept: it takes the name.
+  const next = `${h.launcherName}${NEXT}`;
+  const nextC = await docker.inspectOurs(next).catch(() => null);
+  if (nextC) {
+    const oldC = await docker.inspectOurs(h.launcherName).catch(() => null);
+    if (!oldC && healthy(nextC)) {
+      await docker.rename(next, h.launcherName);
+      await docker.disconnect(d.cfg.swap.launcherNetwork, h.launcherName).catch(() => undefined);
+      await docker.connect(d.cfg.swap.launcherNetwork, h.launcherName, [h.launcherName]);
+      notes.push("A launcher left half-way by an interrupted update was healthy, so it was kept.");
+    } else {
+      await docker.remove(next).catch(() => undefined);
+    }
+  }
   const launcher = await docker.inspectOurs(h.launcherName).catch(() => null);
   if (launcher && !launcher.State.Running) await docker.start(h.launcherName).catch(() => undefined);
   const cols = await findColours(docker);
@@ -52,6 +66,15 @@ export async function firstStart(d: MoveDeps): Promise<string[]> {
   const version = d.cfg.currentVersion;
   try {
     const first = { ...h.first, version };
+    // A launcher missing after the state already recorded a newer release than the install file pins: do not rebuild it from the
+    // older install-time release. Mark the helpers pending; converge makes it from the recorded (signed) release.
+    const recorded = state.get().currentVersion;
+    const recordedNewer = !!recorded && compareVersions(recorded, version) > 0;
+    if (!launcher && recordedNewer && haveColour) {
+      state.update({ helpers: { release: state.get().helpers.release, status: "pending", note: "The launcher is missing; it is made from the recorded release." } });
+      notes.push("The launcher is missing and the recorded release is newer than the install file, so it is made from the recorded release, not the older one.");
+      return notes;
+    }
     if (!launcher) {
       await ensureImage(d, "boss-man-launcher", first.launcher);
       await ensureImage(d, "boss-man-runner", first.runner);
@@ -122,7 +145,8 @@ export async function converge(d: MoveDeps): Promise<void> {
     } catch {
       return;
     }
-    await moveHelpers(d, release);
+    // Re-read after the pulls: another tick may have finished the move meanwhile.
+    if (state.get().helpers.status === "pending") await moveHelpers(d, release);
   }
   if (behind) await selfUpdate(d, release, null);
 }
