@@ -212,7 +212,7 @@ export const OWNER_CONTROLS = {
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
   "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
-  Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
+  Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
@@ -388,7 +388,7 @@ export const OWNER_FIELDS = {
   // The permission rules page, the advice mode, the second opinion and the fence's mode (BOS-325).
   Permissions: [
     "Rules for", "Filter rules", "Show rules that", "What should this rule do", "New rule", "Rule name", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",
-    "Make a rule", "Ask a model for a second opinion", "Provider address", "Model", "API key", "Fence", "Advice",
+    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Fence", "Advice",
     // The "Try a command" box can include the rule being typed (BOS-2188).
     "Try it with the rule I'm typing under \"Add a rule\" first (nothing is saved)",
   ],
