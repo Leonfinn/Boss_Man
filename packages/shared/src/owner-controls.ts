@@ -125,6 +125,8 @@ export const OWNER_CONTROLS = {
     "What's holding work up …", "Show all …", "Show fewer",
     // BOS-1306: the labelled Hide / Show button at the right end of that heading.
     "Hide", "Show",
+    // BOS-2430: the filters' reset and the CSV of the items shown.
+    "Clear filters", "Download CSV",
   ],
   Wiki: [
     "Show older versions", "Compare", "Close compare", "Show", "Restore this version",

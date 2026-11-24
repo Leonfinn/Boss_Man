@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NoCompany } from "../components/NoCompany";
 import { api, type Company, type Plan as PlanData, type PlanNode } from "../api";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { ageLabel } from "../age";
+import { download } from "../csv";
+import { applyPlanFilter, parsePlanFilter, personSummary, planFilterQuery, planToCsv, UNASSIGNED, type PlanFilter } from "../plan-filter";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 
@@ -54,7 +56,7 @@ function related(id: string, edges: PlanData["edges"]) {
   return out;
 }
 
-function Graph({ plan }: { plan: PlanData }) {
+function Graph({ plan, faded }: { plan: PlanData; faded?: Set<string> }) {
   const [focus, setFocus] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [available, setAvailable] = useState(0);
@@ -114,7 +116,7 @@ function Graph({ plan }: { plan: PlanData }) {
         {plan.nodes.map((n) => {
           const p = pos.get(n.id)!;
           return (
-            <div key={n.id} className={nodeClass(n)} style={{ left: p.x, top: p.y, width: W, height: H, opacity: lit && !lit.has(n.id) ? 0.25 : 1 }}>
+            <div key={n.id} className={nodeClass(n)} style={{ left: p.x, top: p.y, width: W, height: H, opacity: lit && !lit.has(n.id) ? 0.25 : faded?.has(n.id) ? 0.45 : 1 }} data-faded={faded?.has(n.id) ? "true" : undefined}>
               <button type="button" className="pl-hit" aria-pressed={focus === n.id} aria-label={`Show ${n.title}'s chain`} onClick={() => setFocus(focus === n.id ? null : n.id)} />
               <div className="pl-top">
                 <span className="pl-kind">
@@ -237,7 +239,101 @@ export function Causes({ plan }: { plan: PlanData }) {
   );
 }
 
+/** Filters above the plan; the choice lives in the page link, so a filtered view can be shared. */
+export function PlanFilters({ plan, filter, onChange, shownCount, onDownload }: { plan: PlanData; filter: PlanFilter; onChange: (f: PlanFilter) => void; shownCount: number; onDownload: () => void }) {
+  const projects = [...new Set(plan.nodes.map((n) => n.project).filter((x): x is string => !!x))].sort();
+  const people = [...new Set(plan.nodes.map((n) => n.assignee).filter((x): x is string => !!x))].sort();
+  const set = (patch: Partial<PlanFilter>) => onChange({ ...filter, ...patch });
+  const any = filter.project || filter.assignee || filter.kind || filter.finished;
+  return (
+    <div className="pl-filters" role="group" aria-label="Plan filters">
+      <label>
+        <span className="muted">Project</span>
+        <select value={filter.project} onChange={(e) => set({ project: e.target.value })}>
+          <option value="">All projects</option>
+          {projects.map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span className="muted">Assignee</span>
+        <select value={filter.assignee} onChange={(e) => set({ assignee: e.target.value })}>
+          <option value="">Anyone</option>
+          {people.map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+          <option value={UNASSIGNED}>Unassigned</option>
+        </select>
+      </label>
+      <label>
+        <span className="muted">Kind</span>
+        <select value={filter.kind} onChange={(e) => set({ kind: e.target.value as PlanFilter["kind"] })}>
+          <option value="">All kinds</option>
+          <option value="ticket">Task</option>
+          <option value="engagement">Engagement</option>
+          <option value="decision">Decision</option>
+        </select>
+      </label>
+      <label className="pl-finished">
+        <input type="checkbox" role="switch" checked={filter.finished} onChange={(e) => set({ finished: e.target.checked })} /> Show finished
+      </label>
+      {any && (
+        <button type="button" className="btn pl-refresh" onClick={() => onChange({ project: "", assignee: "", kind: "", finished: false })}>
+          Clear filters
+        </button>
+      )}
+      <button type="button" className="btn pl-refresh" disabled={!shownCount} onClick={onDownload}>
+        Download CSV
+      </button>
+    </div>
+  );
+}
+
+/** "By person": open and blocked items per assignee and how many items they hold up; a name sets the assignee filter. */
+export function ByPerson({ plan, onPick }: { plan: PlanData; onPick: (assignee: string) => void }) {
+  const rows = personSummary(plan.nodes);
+  if (!rows.length) return null;
+  return (
+    <details className="card pl-people">
+      <summary>By person ({rows.length})</summary>
+      <table className="pl-people-table">
+        <thead>
+          <tr>
+            <th scope="col">Person</th>
+            <th scope="col">Open</th>
+            <th scope="col">Blocked</th>
+            <th scope="col">Holding up</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.assignee}>
+              <th scope="row">
+                <button type="button" className="pl-person-btn" onClick={() => onPick(r.assignee)}>
+                  {r.assignee === UNASSIGNED ? "Unassigned" : r.assignee}
+                </button>
+              </th>
+              <td>{r.open}</td>
+              <td>{r.blocked}</td>
+              <td>{r.holdingUp}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
+  );
+}
+
 export function Plan({ companies, companyId, go }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void }) {
+  const [filter, setFilter] = useState<PlanFilter>(() => parsePlanFilter(hashQuery()));
+  const changeFilter = (f: PlanFilter) => {
+    setFilter(f);
+    // Keep the choice in the page link without adding history entries or re-routing.
+    const q = planFilterQuery(f);
+    const base = window.location.hash.split("?")[0] || "#/plan";
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${base}${q ? `?${q}` : ""}`);
+  };
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const plan = usePoll((signal) => (company ? api<PlanData>(`/api/companies/${company.id}/plan`, { signal }) : Promise.resolve(null)), 30_000, company?.id ?? "none");
   const p = plan.data;
@@ -250,6 +346,7 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
     const timer = setInterval(() => setNow(Date.now()), 15_000);
     return () => clearInterval(timer);
   }, []);
+  const view = useMemo(() => (p ? applyPlanFilter(p, filter) : { plan: { nodes: [], edges: [], columns: [] } as PlanData, shown: [], faded: new Set<string>() }), [p, filter]);
   const blocked = p?.nodes.filter((n) => n.blocked).length ?? 0;
   const updated = updatedAt
     ? `Last updated ${new Date(updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (${ageLabel(now - updatedAt)})`
@@ -279,7 +376,9 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
             </button>
           </div>
           <Causes plan={p} />
-          <Graph plan={p} />
+          <ByPerson plan={p} onPick={(assignee) => changeFilter({ ...filter, assignee })} />
+          <PlanFilters plan={p} filter={filter} onChange={changeFilter} shownCount={view.shown.length} onDownload={() => download(`plan-${new Date().toISOString().slice(0, 10)}.csv`, planToCsv(view.shown))} />
+          {view.shown.length ? <Graph plan={view.plan} faded={view.faded} /> : <p className="muted">Nothing matches these filters.</p>}
         </>
       ) : plan.error && !away(plan.error) ? null : (
         <Loader label="Loading the plan" />
