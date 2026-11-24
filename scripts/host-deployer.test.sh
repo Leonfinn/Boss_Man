@@ -733,7 +733,7 @@ case "$a" in
   "exec -T db pg_dump"*) echo dump ;;
   "up -d --no-deps backup") # BOS-2176; BOS-2221: the daily folder must already exist (made by the host user, not by Docker)
     [[ -d $BOSSMAN_BACKUP_DIR/daily ]] && echo "daily folder ready" >>"$DL"; echo "ensure backup service" >>"$DL" ;;
-  "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; [[ -z ${FAKE_BUILD_HANG:-} ]] || exec sleep 30; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
+  "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; if [[ -n ${FAKE_BUILD_NET_ONCE:-} && ! -e $W/net-failed ]]; then : >"$W/net-failed"; echo "ERROR: failed to fetch anonymous token: Get https://auth.docker.io/token: dial tcp: connect: network is unreachable" >&2; exit 1; fi; [[ -z ${FAKE_BUILD_NET_ALWAYS:-} ]] || { echo "ERROR: failed to fetch anonymous token: network is unreachable" >&2; exit 1; }; [[ -z ${FAKE_BUILD_CODE_ERR:-} ]] || { echo "ERROR: process did not complete successfully: exit code: 2 (tsc error TS2304)" >&2; echo "build-attempt" >>"$W/code-attempts"; exit 1; };[[ -z ${FAKE_BUILD_HANG:-} ]] || exec sleep 30; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
   "run --rm --no-deps migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
   "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
@@ -953,6 +953,23 @@ FAKE_BUILD_HANG=1 BG_BUILD_SECONDS=1 bg
 has "$D/outbox/status.json" "did not finish within"
 hasnt "$DL" "migrate"; hasnt "$DL" "up -d --no-deps server"; hasnt "$DL" "signal"; live_is blue
 [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "hung build: checkout not put back"
+# BOS-2552: a build that fails once on a registry/network error is retried once, and the first error is kept in the log.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
+FAKE_BUILD_NET_ONCE=1 BG_BUILD_RETRY_PAUSE=0 bg
+[[ $(status result) == deployed ]] || fail "network error then pass: $(cat "$D/outbox/status.json")"
+has "$D/deployer.log" "registry or network error"; has "$D/deployer.log" "network is unreachable"
+[[ $(grep -c '^build green' "$DL") == 1 ]] || fail "retry: expected one finished build"
+# Both attempts hit the network error: one retry only, then the update fails and says why.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
+FAKE_BUILD_NET_ALWAYS=1 BG_BUILD_RETRY_PAUSE=0 bg
+[[ $(status result) == failed ]] || fail "network error twice: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "retry failed too"; hasnt "$DL" "up -d --no-deps server"; live_is blue
+# A real build error is not retried.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"; bgreq "$b4"
+FAKE_BUILD_CODE_ERR=1 BG_BUILD_RETRY_PAUSE=0 bg
+[[ $(status result) == failed ]] || fail "code error: $(cat "$D/outbox/status.json")"
+[[ $(wc -l <"$W/code-attempts") == 1 ]] || fail "code error was retried"
+hasnt "$D/deployer.log" "Trying once more"
 # A proxy that is not running changes nothing.
 reset_world blue "$cur"; rm "$W/running.proxy"; bgreq "$b4"; bg
 has "$D/outbox/status.json" "proxy container is not running"; hasnt "$DL" "pg_dump"

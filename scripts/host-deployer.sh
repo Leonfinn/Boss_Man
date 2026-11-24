@@ -1371,10 +1371,22 @@ do_deploy_bluegreen() {
   mem_start before-build
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
-  local brc=0
-  (cd "$REPO" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT="$COMMIT" timeout -k 30 "$BG_BUILD_SECONDS" docker compose build "server-$BG_IDLE") >>"$LOG" 2>&1 || brc=$?
+  local brc=0 bout bneterr="" bpause="${BG_BUILD_RETRY_PAUSE:-20}"
+  [[ $bpause =~ ^[0-9]{1,3}$ ]] || bpause=20
+  bout="$(mktemp "${TMPDIR:-/tmp}/bg-build.XXXXXX")"
+  bg_build() { : >"$bout"; brc=0; (cd "$REPO" && BOSSMAN_DEPLOYER="$D" BOSSMAN_COMMIT="$COMMIT" timeout -k 30 "$BG_BUILD_SECONDS" docker compose build "server-$BG_IDLE") >"$bout" 2>&1 || brc=$?; cat "$bout" >>"$LOG"; }
+  bg_build
+  # BOS-2552: one retry when the build only failed to reach a registry (a one-off network fault, BOS-2550). Never after a
+  # timeout (124, 137) or a real build error; the first error is kept and shown in the report.
+  if ((brc != 0 && brc != 124 && brc != 137)) && grep -qiE 'network is unreachable|failed to fetch anonymous token|TLS handshake timeout|i/o timeout|connection reset by peer|no such host|temporary failure in name resolution' "$bout"; then
+    bneterr="$(grep -iE 'network is unreachable|failed to fetch anonymous token|TLS handshake timeout|i/o timeout|connection reset by peer|no such host|temporary failure in name resolution' "$bout" | head -1 | cut -c1-300)"
+    log "Building $BG_IDLE failed on a registry or network error ($bneterr). Trying once more in ${bpause}s."
+    sleep "$bpause"
+    bg_build
+  fi
+  rm -f "$bout"
   if ((brc == 124 || brc == 137)); then pre_fail "Building $BG_IDLE did not finish within $((BG_BUILD_SECONDS / 60)) minutes, so it was stopped."; return 1; fi
-  ((brc == 0)) || { pre_fail "Building $BG_IDLE failed."; return 1; }
+  ((brc == 0)) || { pre_fail "Building $BG_IDLE failed.${bneterr:+ The first attempt failed on a registry or network error ($bneterr) and the retry failed too.}"; return 1; }
   mem_sample after-build
   # Expand-only migrations: the live colour keeps working on the new schema.
   BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
