@@ -1338,7 +1338,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         }
         const start = offset ?? 0;
         const rows = await db
-          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
+          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, createdAt: tickets.createdAt, finishedAt: sql<Date | null>`case when ${tickets.systemState} = 'done' then ${finishedAtSql} end`, featureId: tickets.featureId, featureTitle: features.title, recurring: tickets.recurring, urgent: tickets.urgent, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .leftJoin(features, eq(features.id, tickets.featureId))
@@ -1347,11 +1347,11 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           .limit(40)
           .offset(start);
         const json = JSON.stringify(
-          rows.map(({ featureId, featureTitle, finishedAt, ...r }) => {
+          rows.map(({ featureId, featureTitle, finishedAt, recurring, urgent, ...r }) => {
             const out = withNote(ref(r));
             const fin = finishedAt ? new Date(finishedAt) : null;
             const madeSince = sinceAt ? [...(r.createdAt >= sinceAt ? ["created"] : []), ...(fin && fin >= sinceAt ? ["finished"] : [])] : undefined;
-            return { ...out, feature: featureId ? { id: featureId, title: featureTitle } : null, ...(madeSince ? { since: madeSince } : {}) };
+            return { ...out, feature: featureId ? { id: featureId, title: featureTitle } : null, ...(recurring ? { recurring: true } : {}), ...(urgent ? { urgent: true } : {}), ...(madeSince ? { since: madeSince } : {}) };
           }),
         );
         const [{ n: total } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(where);
@@ -1384,7 +1384,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
         `# ${t.title}`,
-        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+        `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.${t.recurring ? " Recurring: yes." : ""}${t.urgent ? " Urgent: yes." : ""}`,
         ...(note ? [note] : []),
         ...(signoff ? [signoff] : []),
         ...(signoffLog ? [signoffLog] : []),
