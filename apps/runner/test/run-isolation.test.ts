@@ -60,6 +60,9 @@ async function crossRun(sameAgent: boolean) {
   const holderJson = path.join(cwdA, "holder.json");
   // A missing or half-written file is not an answer (the peer renames one into place), so it is waited for rather
   // than parsed: the run B asks for its environment is told so and asks again (BOS-2551).
+  // holderReady is a plain file read with a try/catch, not an expect(): a throw from the SECOND arg of waitFor's
+  // check (a matcher) escapes, and the poll other tests use (a filesHolding walk) reads every file under a folder
+  // the peer is still writing, so on GitHub's slow CPU it met a file that appeared before its bytes and threw.
   const readHolder = () => JSON.parse(readFileSync(holderJson, "utf8")) as Holder;
   const holderReady = () => {
     try {
@@ -103,7 +106,8 @@ async function crossRun(sameAgent: boolean) {
     const atStart = { holder: holderSeen, homeHits: filesHolding(homeA, token), homeSecretHits: filesHolding(homeA, secret) };
 
     start(runB, agentB, cwdB, `bm_run_other-${randomUUID()}`);
-    // The prober's write is renamed into place (fake-peer), so the file it leaves is always whole.
+    // The prober's write is renamed into place (fake-peer), so the file it leaves is always whole. (The prober ends
+    // only after leaving that file, so this read races only a previous test's leftover, never a live write.)
     await waitFor(() => !!ended(runB), "the prober");
     expect(ended(runB)).toMatchObject({ error: null });
     const probe = JSON.parse(readFileSync(path.join(cwdB, "probe.json"), "utf8")) as Probe;
