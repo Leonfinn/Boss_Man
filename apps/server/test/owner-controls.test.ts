@@ -95,7 +95,16 @@ describe("secrets screen", () => {
     const runId = randomUUID();
     await c.secrets.resolveCompanyEnv(c.company.id, "run", runId);
     await c.secrets.resolveCompanyEnv(c.company.id, "merge");
-    const log = (await c.req("GET", `/api/secrets/${secret.id}/access-log`)).json();
+    const full = (await c.req("GET", `/api/secrets/${secret.id}/access-log`)).json();
+    const log = full.entries;
+    expect(full.summary.total).toBe(2);
+    expect(full.summary.byCompany).toEqual([{ company: "Homelab Co", reads: 2 }]);
+    expect(full.summary.byPurpose).toEqual({ run: 1, deploy: 0, merge: 1, other: 0 });
+    expect(full.summary.perDay).toHaveLength(30);
+    expect(full.summary.perDay[29]).toBe(2);
+    const listed = (await c.req("GET", "/api/secrets")).json().find((s: { id: string }) => s.id === secret.id);
+    expect(listed.unusedIn30Days).toBe(false);
+    expect(listed.lastUsedAt).toBeTruthy();
     expect(log.map((l: { company: string; purpose: string; runId: string | null }) => [l.company, l.purpose, l.runId])).toEqual([
       ["Homelab Co", "merge", null],
       ["Homelab Co", "run", runId],
