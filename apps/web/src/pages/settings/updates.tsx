@@ -6,7 +6,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-2531: false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen?: boolean; chatBackBy?: string | null; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -18,7 +18,7 @@ export function checkSentence(c: RunnerCheckView): string {
  * What a runner update is waiting for, in plain words, from live state (BOS-1600). "swapping the runners now" only
  * when nothing is left to wait for. Agent runs and checks are named separately.
  */
-export function waitingFor(m: { runs: number; companies: number; checks?: number; checksList?: RunnerCheckView[]; merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean }): string {
+export function waitingFor(m: { runs: number; companies: number; checks?: number; checksList?: RunnerCheckView[]; merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; chatOpen?: boolean }): string {
   const n = m.runs;
   const k = m.checks ?? 0;
   const g = m.merges ?? 0;
@@ -31,6 +31,9 @@ export function waitingFor(m: { runs: number; companies: number; checks?: number
   const parts = [...(n > 0 ? [agents] : []), ...(k > 0 ? [checks] : []), ...(g > 0 ? [merges] : [])];
   if (parts.length) return `waiting for ${parts.join(", and for ")}`;
   if (m.unknownWait) return "waiting on something Boss Man cannot name (no agent run, check or merge is going)";
+  // BOS-2531: "now" only while a runner is really being recreated (the server says so with chatOpen false). With
+  // nothing left to wait for and no runner mid-swap, the swap is next, not under way. An older server sends no chatOpen.
+  if (m.chatOpen === true) return "about to swap the runners (nothing is left to wait for)";
   return "swapping the runners now";
 }
 /** BOS-2479: a check on a separate check worker, which a runner update lets run and never waits for. */
@@ -61,9 +64,13 @@ export function updateWaitExtras(m: { workerChecksList?: WorkerCheckView[]; goAh
  * BOS-1877: when a drain started and when it should end, in plain words, from the server's forecast. All fields are
  * absent from an older server, which then gets no timing line. `overdue` says so plainly instead of promising a time.
  */
-export function drainTiming(m: { since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; runs: number }): string {
+export function drainTiming(m: { since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; runs: number; chatOpen?: boolean; chatBackBy?: string | null }): string {
   if (!m.phase) return "";
-  if (m.phase === "swapping") return "The runners are being swapped now.";
+  if (m.phase === "swapping") {
+    // BOS-2531: phase "swapping" only means nothing counted is left. A runner is being recreated when chatOpen is false.
+    if (m.chatOpen === true) return "The runners are swapped next.";
+    return m.chatBackBy ? `The runners are being swapped now, back by ${atTime(m.chatBackBy)} at the latest.` : "The runners are being swapped now.";
+  }
   const started = m.since ? `Started ${atTime(m.since)}. ` : "";
   if (m.overdue) return `${started}This is taking longer than expected.`;
   if (m.expectedFinishAt) return `${started}Expected to finish about ${atTime(m.expectedFinishAt)}.`;
