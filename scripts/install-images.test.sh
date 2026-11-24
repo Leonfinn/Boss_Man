@@ -87,7 +87,9 @@ else
   imgs=""
   for n in $have; do imgs="$imgs${imgs:+,}{\"name\":\"boss-man-$n\",\"digest\":\"$D\"}"; done
   echo "{\"schema\":1,\"version\":\"ci\",\"registries\":[\"registry.invalid/ci\"],\"images\":[$imgs]}" > "$T/ci-release.json"
-  if env -u GITHUB_REPOSITORY -u GITHUB_REPOSITORY_OWNER scripts/render-image-env.sh "$T/ci-release.json" > "$T/ci-images.env" 2> "$T/ci-render.err"; then
+  # BOS-1227: the updater's compose needs BOSSMAN_UPDATER_REPO, which render-image-env.sh writes only from GITHUB_REPOSITORY (set on
+  # GitHub's runners and by the real half below, which defaults it the same way), so the render gets a made-up one here.
+  if env -u GITHUB_REPOSITORY_OWNER GITHUB_REPOSITORY=example/boss-man scripts/render-image-env.sh "$T/ci-release.json" > "$T/ci-images.env" 2> "$T/ci-render.err"; then
     if env -u GITHUB_REPOSITORY -u GITHUB_REPOSITORY_OWNER docker compose --env-file "$T/ci-images.env" --profile '*' -f docker-compose.images.yml config -q 2> "$T/ci-compose.err"; then
       ok "a release.json built like the CI install step renders and docker-compose.images.yml accepts it"
     else
