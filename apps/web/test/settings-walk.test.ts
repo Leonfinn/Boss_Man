@@ -80,6 +80,7 @@ const api = urlStub({
   "/api/self-deploy/history": [],
   "/api/wip-limits": { agent: null, company: null, defaultAgent: 2 },
   "/api/settings/check-workers/stats": [],
+  "/api/settings/check-workers/line": { days: [], kinds: [], busiestHours: [], waitingNow: 0, oldestWaitSeconds: null, timeZone: "UTC" },
   "/api/settings/wait-for-ci": { on: false },
   "/api/settings/merge-carry": { on: false, turnMinutes: 30 },
   "/api/settings/main-ci": { on: false, projects: [] },
