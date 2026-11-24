@@ -21,6 +21,7 @@ import { linkPieces, type LinkContext } from "../links";
 import { countHits, dayStart, findQuery, findSpots, firstOnOrAfter, spotIndex, splitHits, stepSpot, type FindSpot, type Segment } from "../chat-find";
 import { isFarUp, messageLink, newSince } from "../chat-scroll";
 import { copyText } from "../clipboard";
+import { filterTeam } from "../chat-team-filter";
 import type { TraceBody } from "@boss-man/shared";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
@@ -533,6 +534,10 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
     }
   };
   const unread = (t: Thread) => !!t.last && t.last.role !== "owner" && t.id !== current?.id && (!seen[t.id] || seen[t.id]! < t.last.createdAt);
+  const [teamQuery, setTeamQuery] = useState("");
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const shownTeam = filterTeam(team, teamQuery, unreadOnly, roleOf, unread);
+  const teamFiltered = teamQuery.trim() !== "" || unreadOnly;
 
   return (
     <div className="chat-page">
@@ -549,8 +554,24 @@ export function ChatPage({ companies, companyId, agentId, messageId, maintenance
           <nav className="messenger-list" aria-label="Team">
             {!threads.data && threads.error && <LoadError what="the team" message={threads.error.message} onRetry={threads.reload} />}
             {!threads.data && !threads.error && <Loader label="Loading the team" size={16} />}
+            {team.length > 0 && (
+              <div className="team-find" role="search">
+                <input type="search" value={teamQuery} onChange={(e) => setTeamQuery(e.target.value)} placeholder="Find a teammate" aria-label="Find a teammate" />
+                <label className="team-unread">
+                  <input type="checkbox" role="switch" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} /> Unread only
+                </label>
+              </div>
+            )}
+            {team.length > 0 && teamFiltered && shownTeam.length === 0 && (
+              <p className="muted team-none" role="status">
+                No one matches.{" "}
+                <button type="button" className="link" onClick={() => { setTeamQuery(""); setUnreadOnly(false); }}>
+                  Clear
+                </button>
+              </p>
+            )}
             <ul>
-              {team.map((t) => (
+              {shownTeam.map((t) => (
                 <li key={t.id}>
                   <a href={`#/chat/${company.id}/${t.id}`} aria-current={t.id === current?.id ? "page" : undefined} title={`${t.name}, ${roleOf(t)}`} data-unread={unread(t) ? "yes" : undefined}>
                     <Avatar agent={company.agents.find((x) => x.id === t.id) ?? t} className={t.role} />

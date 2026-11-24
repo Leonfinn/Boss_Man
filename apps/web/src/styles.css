@@ -1007,6 +1007,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger-chat > .chat-log { min-height: 160px; }
 .messenger-list { border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
 .messenger-list ul { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.messenger-list .team-find { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 8px 0; }
+.messenger-list .team-find input[type="search"] { flex: 1 1 140px; min-width: 0; }
+.messenger-list .team-unread { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.messenger-list .team-none { margin: 8px 12px; font-size: 13px; }
 .messenger-list a { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
 .messenger-list a:hover { background: var(--ground); }
 .messenger-list a[aria-current="page"] { background: var(--accent-soft); }
