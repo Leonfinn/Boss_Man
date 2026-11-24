@@ -191,6 +191,15 @@ export function swapInProgressUntil(hold: Hold | null, at: Date, reconnectMs = S
   return ends.length ? new Date(Math.max(...ends)) : null;
 }
 
+/**
+ * BOS-2404: swapInProgressUntil on the saved hold, for the chat screen's words only (chat.ts state()). It holds nothing
+ * back: the chat's one wait is launch() finding the runner offline. Kept here so the hold stays read only by the files
+ * the update-waits guard lists (BOS-2058).
+ */
+export async function swapUntilForScreen(db: Db, at: Date): Promise<Date | null> {
+  return swapInProgressUntil(await getHold(db), at);
+}
+
 /** BOS-1954: the longest a drain pass waits for a scheduling pass to end before it tries again on the next pass. */
 export const SETTLE_WAIT_MS = 60_000;
 /** BOS-1954: how long past a check's usual finish the swap may wait before the CEO is woken. */

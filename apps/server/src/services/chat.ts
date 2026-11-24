@@ -14,7 +14,7 @@ import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
 import { ownerSetupFacts, ownerSetupLines, workerSetupLines } from "./owner-record.js";
 import { namedThingsSection, type NamedSources } from "./named-things.js";
-import { getHold, swapInProgressUntil } from "./maintenance.js";
+import { swapUntilForScreen } from "./maintenance.js";
 
 /** Drops the "You said "X" on card Y, 2026-11-01, about Z, ..." footer lines that BOS-1855 saved under older CEO replies. */
 export function stripYouSaidLines(text: string): string {
@@ -177,7 +177,7 @@ export function chatService(
     if (!queued) return "idle";
     // BOS-2404: the one update wait a chat has is its runner being swapped (launch() finds it offline): name it and when it ends.
     if (queued.reason === RUNNER_OFFLINE) {
-      const until = swapInProgressUntil(await getHold(db), now());
+      const until = await swapUntilForScreen(db, now());
       if (until) return `waiting: your runner is being swapped to the new version, usually under a minute (back by ${until.toISOString().slice(11, 16)} UTC at the latest)`;
     }
     // A queued wake with a reason is held (agent or company paused, a limit, a runner offline), not just waiting for the runner.
