@@ -44,9 +44,13 @@ export type State = {
   pending: { version: string; serverDigest: string } | null;
   /** The commit the new colour must report (from the signed release), kept so a restart can still judge the new colour. */
   commit: string | null;
+  /** BOS-1227: the release the launcher was last moved to ("moved"), or the one still waiting to move ("pending": runs were starting, or it failed). */
+  helpers: { release: string | null; status: "moved" | "pending" | "none"; note: string | null };
+  /** What reconcile found at the last start: containers whose release label differs from the state's. Report only. */
+  reconcile: { at: string; notes: string[] } | null;
 };
 
-export const emptyState = (now: string): State => ({ stage: "idle", version: null, serverDigest: null, startedAt: null, updatedAt: now, error: null, report: null, live: null, idle: null, soakUntil: null, backup: null, restore: false, currentVersion: null, nextUpdater: null, pending: null, commit: null });
+export const emptyState = (now: string): State => ({ stage: "idle", version: null, serverDigest: null, startedAt: null, updatedAt: now, error: null, report: null, live: null, idle: null, soakUntil: null, backup: null, restore: false, currentVersion: null, nextUpdater: null, pending: null, commit: null, helpers: { release: null, status: "none", note: null }, reconcile: null });
 
 export function stateStore(dir: string, now: () => string = () => new Date().toISOString()) {
   const file = path.join(dir, "state.json");

@@ -16,7 +16,7 @@
 // `node dist/main.js recreate-all` puts every runner on the current image at once, cutting runs off (scripts/update-runner.sh --now).
 // For a setting change use scripts/update-runner.sh --settings, which drains first (BOS-594).
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { dropToUnprivileged, hostPathOfMount, noteSocketGroup } from "./startup.js";
@@ -24,6 +24,7 @@ import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, sibli
 import { dockerClient } from "./docker.js";
 import { watchGuardEvents } from "./guard-events.js";
 import { CHECKS_FILE, launcher, launcherServer } from "./launcher.js";
+import { releaseReader } from "./release-current.js";
 import { checkSetup, explainError } from "./selfcheck.js";
 import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseImageRef, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
@@ -100,6 +101,8 @@ const cfg: LauncherConfig = {
   runnerImage: parseImageRef("BOSSMAN_RUNNER_IMAGE", env.BOSSMAN_RUNNER_IMAGE),
   netguardImage: parseImageRef("BOSSMAN_NETGUARD_IMAGE", env.BOSSMAN_NETGUARD_IMAGE),
 };
+// BOS-1227: BOSSMAN_RELEASE_FILE names the updater's `release-current` file (a read-only volume); unset or missing = the environment images.
+cfg.release = releaseReader(env.BOSSMAN_RELEASE_FILE?.trim() || undefined, { runner: cfg.runnerImage, netguard: cfg.netguardImage }, (msg) => console.error(JSON.stringify({ at: new Date().toISOString(), msg })));
 const socketPath = env.DOCKER_SOCKET ?? "/var/run/docker.sock";
 const docker = dockerClient(socketPath);
 // BOSSMAN_DATA_HOST=auto: the data folder is a named volume; ask Docker where it is on the host (BOS-974). A path = use that. Empty = BOSSMAN_DATA is a host path too.
@@ -125,6 +128,13 @@ if (key.length < 32) {
 
 // BOS-1892: check the set-up at start and name each fix in the log; the compose healthcheck (dist/check.js) shows it in `docker compose ps`.
 const setup = { dataRoot, socketPath };
+// BOS-1227: a fresh data volume has no `companies` folder (the first launcher the updater makes starts on an empty one, and its health check
+// wants the folder). Make it; an existing one is left alone, and a folder it cannot make is reported by the check just below.
+try {
+  mkdirSync(path.join(dataRoot, "companies"), { recursive: true, mode: 0o755 });
+} catch {
+  /* checkSetup names the problem */
+}
 for (const p of checkSetup(setup)) console.error(JSON.stringify({ at: new Date().toISOString(), msg: "launcher set-up problem", problem: p.what, fix: p.message }));
 const server = launcherServer(api, key, undefined, (err) => explainError(err, setup));
 server.listen(Number(env.PORT ?? 3105), "0.0.0.0", () => console.log(JSON.stringify({ at: new Date().toISOString(), msg: "launcher listening", network: cfg.network })));

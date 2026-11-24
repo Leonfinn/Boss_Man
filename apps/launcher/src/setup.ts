@@ -98,6 +98,16 @@ export function prepareLauncherKeyDir(dir: string, chown: Chown = chownSync): bo
 }
 
 /**
+ * The updater's key (BOS-1227, 941c): the updater refuses to start without it, and nothing else makes it. Written once into its own
+ * volume, given to uid 1000 (the updater's user), never rewritten. Returns true when it was made now; false when it was already
+ * there or the volume is not mounted. 43 characters, the same shape as the launcher's key.
+ */
+export function prepareUpdaterKey(dir: string, chown: Chown = chownSync, rand: (n: number) => Buffer = randomBytes): boolean {
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return false;
+  return writeOnce(path.join(dir, "key"), `${rand(32).toString("base64url")}\n`, chown, 0o400, SERVER_UID);
+}
+
+/**
  * Optional: if the Docker socket is mounted into setup at `socket` (it is not, by default: root in this container should not get it),
  * say now whether its group can read and write it, rather than at the launcher's first start. Returns the problem, or null.
  */
@@ -112,6 +122,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     if (problem) throw new Error(problem);
     const r = runSetup(process.env.BOSSMAN_CONFIG_DIR ?? "/config", process.env.BOSSMAN_DB_SECRET_DIR ?? "/db-secret");
     prepareLauncherKeyDir(process.env.BOSSMAN_LAUNCHER_KEY_DIR ?? "/launcher-key");
+    if (prepareUpdaterKey(process.env.BOSSMAN_UPDATER_KEY_DIR ?? "/updater-key")) r.created.push("updater key");
+    else r.kept.push("updater key");
     for (const f of r.created) console.log(`Created ${f}`);
     for (const f of r.kept) console.log(`Kept ${f} (already there; not changed)`);
     console.log("Setup is done. Back up the config volume: without master.key, stored secrets cannot be read.");

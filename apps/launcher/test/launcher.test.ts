@@ -880,4 +880,25 @@ describe("the runner launcher (R55)", () => {
     // No list set: an empty list and the default mode.
     expect(launcher(config(), fakeDocker().docker).netguard()).toEqual({ mode: "auto", allow: [] });
   });
+
+  it("reports on GET /busy that a runner is being made, so the updater can wait (BOS-1227)", async () => {
+    const fake = fakeDocker();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const docker = { ...fake.docker, create: async (...a: Parameters<typeof fake.docker.create>) => (await gate, fake.docker.create(...a)) };
+    const api = launcher({ ...config(), guardMode: "off" as const }, docker);
+    const server = launcherServer(api, Buffer.from(KEY), () => undefined);
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    close = () => new Promise((r) => server.close(() => r()));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const get = () => fetch(`${base}/busy`, { headers: { authorization: `Bearer ${KEY}` } }).then((r) => r.json());
+    expect(await get()).toEqual({ busy: false, jobs: 0 });
+    const putting = api.put("app-co", "t".repeat(40));
+    expect(await get()).toEqual({ busy: true, jobs: 1 });
+    release();
+    await putting;
+    expect(await get()).toEqual({ busy: false, jobs: 0 });
+    expect((await fetch(`${base}/busy`, {})).status).toBe(401);
+    expect((await fetch(`${base}/busy`, { method: "POST", headers: { authorization: `Bearer ${KEY}` } })).status).toBe(405);
+  });
 });

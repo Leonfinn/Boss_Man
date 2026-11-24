@@ -77,6 +77,8 @@ export type LauncherConfig = {
   runnerImage?: string;
   /** BOSSMAN_NETGUARD_IMAGE (BOS-974): the same for the network guard. Unset = boss-man-netguard:current. */
   netguardImage?: string;
+  /** BOS-1227: the release the updater last finished moving to (release-current.ts); read at every runner and guard start. */
+  release?: () => { runner?: string; netguard?: string };
   /**
    * BOS-974: where `dataRoot` is on the Docker host, when the data folder is a named volume mounted into this container
    * (the image install). Binds given to runners must name host paths, so they use this; this container's own file work uses `dataRoot`.
@@ -150,8 +152,9 @@ const stackLabels = (stack?: string): Record<string, string> => (stack ? { [STAC
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
 /** The same folder as the Docker host sees it: what goes into a runner's Binds (BOS-974). */
 const hostCompanyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.hostDataRoot ?? cfg.dataRoot, "companies", slug);
-export const runnerImageOf = (cfg: LauncherConfig) => cfg.runnerImage ?? runnerImage(cfg.stack);
-export const guardImageOf = (cfg: LauncherConfig) => cfg.netguardImage ?? guardImage(cfg.stack);
+// BOS-1227: the `release-current` file (release-current.ts) wins over the environment image when it holds a safe digest of the same repository.
+export const runnerImageOf = (cfg: LauncherConfig) => cfg.release?.().runner ?? cfg.runnerImage ?? runnerImage(cfg.stack);
+export const guardImageOf = (cfg: LauncherConfig) => cfg.release?.().netguard ?? cfg.netguardImage ?? guardImage(cfg.stack);
 /** Where the launcher keeps a company's tool-server allow list; only the guard (read-only) mounts it, never the runner. */
 export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "netguard");
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
