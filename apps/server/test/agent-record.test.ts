@@ -118,3 +118,30 @@ it("GET /api/agents/:id/record returns the last 10 finished tickets newest first
   // The owner is global (as for /history): there is no per-company scoping, so an unknown id is the only 404.
   expect((await built.app.inject({ method: "GET", url: `/api/agents/${randomUUID()}/record`, headers })).statusCode).toBe(404);
 });
+
+it("lists every non-retired agent's record without the recent list (BOS-2504)", async () => {
+  const { db, close: closeDb } = await openPglite(undefined, { fresh: true });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false });
+  close = async () => {
+    await built.app.close();
+    await closeDb();
+  };
+  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+  const headers = { cookie: `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}` };
+  const co = (await built.app.inject({ method: "POST", url: "/api/companies", headers, payload: { name: "App Co" } })).json() as { company: { id: string } };
+  const dev = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/agents`, headers, payload: { name: "Dev" } })).json() as { id: string };
+  const gone = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/agents`, headers, payload: { name: "Gone" } })).json() as { id: string };
+  await built.app.inject({ method: "POST", url: `/api/agents/${gone.id}/retire`, headers });
+  await db.insert(runs).values([
+    { companyId: co.company.id, agentId: dev.id, outcome: "end_turn", endedAt: new Date() },
+    { companyId: co.company.id, agentId: dev.id, outcome: "error: boom", endedAt: new Date() },
+  ]);
+  const res = await built.app.inject({ method: "GET", url: `/api/companies/${co.company.id}/agent-records`, headers });
+  expect(res.statusCode).toBe(200);
+  const body = res.json() as { days: number; agents: Array<Record<string, unknown>> };
+  expect(body.days).toBe(30);
+  const mine = body.agents.find((a) => a.agentId === dev.id)!;
+  expect(mine).toMatchObject({ name: "Dev", finished: 0, runs: 2, failedRuns: 1, medianMergeMs: null, costPerFinishedMicros: null });
+  expect(mine).not.toHaveProperty("recent");
+  expect(body.agents.some((a) => a.agentId === gone.id)).toBe(false);
+});
