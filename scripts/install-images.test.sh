@@ -105,7 +105,7 @@ dc up -d || { dc logs --tail 40; bad "up"; exit 1; }
 # Wait for the event (the server answering), with a deadline: a cold pull-and-migrate can take minutes on a slow runner.
 deadline=$((SECONDS + ${INSTALL_WAIT_SECONDS:-300}))
 until curl -fsS "http://127.0.0.1:${INSTALL_HOST_PORT:-31100}/api/health" >/dev/null 2>&1; do
-  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}'; for c in updater launcher server-blue; do echo "--- $c"; docker logs --tail 40 "$c" 2>&1; done; dc logs --tail 30; bad "the server did not answer /api/health in time"; exit 1; }
+  [ "$SECONDS" -lt "$deadline" ] || { docker ps -a --format '{{.Names}} {{.Status}}' | tr '\n' ';'; echo; for c in updater launcher server-blue; do echo "--- $c"; docker logs --tail 12 "$c" 2>&1 | cut -c1-260; done; bad "the server did not answer /api/health in time"; exit 1; }
   sleep 3
 done
 ok "the server answers /api/health"
