@@ -203,6 +203,8 @@ export const OWNER_CONTROLS = {
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
     // BOS-1550: copy the ready-filled compose file shown after adding.
     "Copy compose file",
+    // Check workers (BOS-2519): the machines' 7 days and the check line's 7 days, each saved as a CSV.
+    "Download CSV",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": [
@@ -328,7 +330,7 @@ export const OWNER_FIELDS = {
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
-    "New feature", "Area", "Search features", "Sort by", "Show released and declined", "Stalled only", "New task", "Project", "Risk", "Description", "Status",
+    "New feature", "Area", "Search features", "Sort by", "Show released and declined", "Stalled only", "Unfinished setup", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Not shown yet",

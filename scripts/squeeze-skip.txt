@@ -1,0 +1,4 @@
+# Test files the report-only squeeze step of scripts/check-quick.sh never runs (BOS-2484).
+# One repo path per line; text after a # is the reason. A file with its own GitHub time limit fails the squeeze whether it is
+# healthy or not (scripts/squeeze-test.sh says so), so a report on it would be a false alarm.
+apps/server/test/hot-path-budget.test.ts  # has its own GitHub limit (LIMIT_MS); fails under the squeeze either way

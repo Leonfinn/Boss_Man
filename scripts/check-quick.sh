@@ -631,10 +631,52 @@ if [ "$need_slot" -eq 1 ] && whole_repo_on && [ -n "$(whole_repo_tests apps/web 
 fi
 if [ "$web_build" -eq 1 ] && [ "$web_built_early" -eq 0 ]; then step "build web" pnpm --filter @boss-man/web build; fi
 
+# BOS-2484: the report-only squeeze. Each new or changed vitest file (web, server, shared, launcher, updater; not the runner, and
+# not scripts/squeeze-skip.txt) runs on one slow, busy CPU (scripts/squeeze-test.sh). In BOS-1754 that showed 4 of 6 new tests
+# that later failed only on GitHub and none of 23 good files. It runs here, after the check slot was released, only when every
+# step above passed, for at most 3 files (the rest are counted). A finding is a SQUEEZE line and a closing note, never a FAIL:
+# the run's exit code does not change. CHECK_QUICK_SQUEEZE=0 switches it off.
+squeeze_note=""
+squeeze_files() { # prints the added or changed test files to squeeze (added first), one per line
+  local f skip="" kind
+  [ ! -f scripts/squeeze-skip.txt ] || skip="$(sed -e 's/[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' scripts/squeeze-skip.txt)"
+  for kind in A M; do
+    git diff --name-only --diff-filter="$kind" "$base"...HEAD | grep -E '^(apps/(web|server|launcher|updater)|packages/shared)/.*\.(test|spec)\.[cm]?[jt]sx?$' | while IFS= read -r f; do
+      [ -f "$f" ] || continue
+      grep -qxF -- "$f" <<<"$skip" || echo "$f"
+    done
+  done
+}
+if [ "${CHECK_QUICK_SQUEEZE:-}" != 0 ] && [ "$failed" -eq 0 ] && [ "$skipped" -eq 0 ] && [ "$env_fault" -eq 0 ] && [ -x scripts/squeeze-test.sh ]; then
+  sq_all="$(squeeze_files | { grep . || true; })"
+  if [ -n "$sq_all" ]; then
+    sq_total=$(grep -c . <<<"$sq_all"); sq_run=0 sq_bad=0 sq_none=0 sq_err=0
+    while IFS= read -r sq_f; do
+      [ "$sq_run" -lt 3 ] || break
+      sq_run=$((sq_run + 1)); sq_rc=0
+      sq_out="$(scripts/squeeze-test.sh "$sq_f" 2>&1 </dev/null)" || sq_rc=$?
+      case "$sq_rc" in
+        0) echo "SQUEEZE  pass: $sq_f" ;;
+        1) sq_bad=$((sq_bad + 1)); echo "SQUEEZE  FAILED on a slow, busy CPU (report only, does not fail this check): $sq_f"
+           echo "      GitHub's machines are 2.5 to 5 times slower: look for a time limit or a short fixed sleep. Rerun: scripts/squeeze-test.sh $sq_f"
+           printf '%s\n' "$sq_out" | tail -n 12 | sed 's/^/      /' ;;
+        3) sq_none=$((sq_none + 1)); echo "SQUEEZE  no answer (stopped before it finished; neither pass nor fail): $sq_f" ;;
+        *) sq_err=$((sq_err + 1)); echo "SQUEEZE  could not run (exit $sq_rc; not a finding): $sq_f"; printf '%s\n' "$sq_out" | tail -n 4 | sed 's/^/      /' ;;
+      esac
+    done <<<"$sq_all"
+    sq_left=$((sq_total - sq_run))
+    [ "$sq_left" -le 0 ] || echo "SQUEEZE  $sq_left more changed test file(s) were not squeezed (at most 3 a check)"
+    squeeze_note="squeeze (report only): $sq_run of $sq_total test files run on a slow CPU, $sq_bad failed, $sq_none no answer, $sq_err could not run, $((sq_total - sq_run)) left out"
+  else
+    squeeze_note="squeeze (report only): no new or changed test file to run"
+  fi
+fi
+
 if [ "$failed" -ne 0 ] && [ "$env_fault" -eq 1 ]; then echo "$ENV_FAULT_MARKER: nothing of the branch was checked (exit 75)"; return 75; fi
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
 echo "check-quick: all steps passed (the merge gate also runs the whole-repo tests of the packages you touched; high and critical tickets get the full check too)"
+[ -z "$squeeze_note" ] || echo "check-quick: $squeeze_note"
 # Recorded only when the files are still exactly the tree the run started on (nothing edited while it ran).
 [ -z "$tree" ] || [ "$(clean_tree)" != "$tree" ] || quick_log quick-pass "$([ "$partial" = 1 ] && echo partial || echo all)"
 return 0
