@@ -136,6 +136,18 @@ describe("check tickets: split out, then report back", () => {
     expect(deps.map((d) => [d.blockerTicketId, d.until])).toEqual([[check.id, "done"]]);
   });
 
+  it("BOS-2563: a check made without saying noCode is no-code, so its assignee can close it; noCode false keeps it a code ticket", async () => {
+    const c = await setup();
+    const made = await c.create(c.dev.id, { noCode: undefined, checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    expect(made.isError, made.text).toBe(false);
+    expect((await c.row(made.id!)).noCode).toBe(true);
+    const code = await c.create(c.dev.id, { title: "Check that needs code", noCode: false, checksCriterion: { ticket: c.parent.id, criterion: 2 } });
+    expect(code.isError, code.text).toBe(false);
+    expect((await c.row(code.id!)).noCode).toBe(false);
+    const plain = await c.create(c.dev.id, { title: "A plain ticket", noCode: undefined });
+    expect((await c.row(plain.id!)).noCode).toBe(false);
+  });
+
   it("refuses someone else's ticket, a before-merge criterion and a criterion that isn't there", async () => {
     const c = await setup();
     const notMine = await c.create(c.other.id, { checksCriterion: { ticket: c.parent.id, criterion: 2 } });

@@ -295,12 +295,14 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         if (similar.length || byMeaning.length) return fail(duplicateRefusal(similar, byMeaning));
       }
       // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate without anyone remembering it.
-      const gate = { featureId, ownerSetup, noCode };
+      // BOS-2563: a check split out of an after-merge criterion is a watch, not a code change: no code unless the creator says noCode false.
+      const noCodeSet = noCode ?? !!checked;
+      const gate = { featureId, ownerSetup, noCode: noCodeSet };
       const gateAdded = addsUsabilityCriterion(acceptanceCriteria ?? [], gate);
       const criteria = withUsabilityCriterion(acceptanceCriteria ?? [], gate);
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(checked ? { checksTicketId: checked.id, checksCriterion: checksCriterion!.criterion } : {}), ...(criteria.length ? { acceptanceCriteria: criteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim(), ownerSetupOverride: setup.override, ownerSetupWhy: ownerSetupWhy?.trim() || null, ownerSetupIfSkipped: ownerSetupIfSkipped?.trim() || null } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(checked ? { checksTicketId: checked.id, checksCriterion: checksCriterion!.criterion } : {}), ...(criteria.length ? { acceptanceCriteria: criteria } : {}), ...(noCodeSet ? { noCode: true } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim(), ownerSetupOverride: setup.override, ownerSetupWhy: ownerSetupWhy?.trim() || null, ownerSetupIfSkipped: ownerSetupIfSkipped?.trim() || null } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
         .returning({ id: tickets.id });
       // Held through moveTicket (DR-047 point 5, BOS-922): the column and the history line follow, not a blocked insert.
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id, scope.agentId);
@@ -313,7 +315,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
       // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
-      const thin = noCode ? "" : thinTicketWarning(body, assignee);
+      const thin = noCodeSet ? "" : thinTicketWarning(body, assignee);
       const checkNote = checked ? ` It is the check for criterion ${checksCriterion!.criterion} of ticket ${checked.id}, which now waits on it until done; when it is done, its pass or fail is recorded on that criterion and that ticket's assignee is woken.${to ? "" : " Ask your CEO to assign it."}` : "";
       return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${checkNote}${gateAdded ? ` ${USABILITY_ADDED_NOTE}` : ""}${await wipQueuedNote(db, t!.id)}${criteriaWarning(acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body))}${thin}${unlinkedOrderWarning([title, body], new Set(blockers.flatMap((b) => (b.number === null ? [] : [b.number]))))}`);
     },
