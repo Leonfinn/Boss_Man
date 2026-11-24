@@ -6,6 +6,7 @@ import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { STATUS_TONE } from "./Features";
 import { dayOf, short } from "../short-date";
+import { buildCsv, download } from "../csv";
 
 export const STATUS: Record<MilestoneStatus, { label: string; tone: string; colour: string }> = {
   done: { label: "Done", tone: "green", colour: "var(--green-ink)" },
@@ -705,6 +706,48 @@ function FeatureBoard({ c, onChanged }: { c: FeatureRoadmapCompany; onChanged: (
   );
 }
 
+const COLUMN_LABEL: Record<RoadmapFeature["column"], string> = { now: "Now", next: "Next", later: "Later", released: "Released" };
+export const FEATURES_CSV_HEAD = ["company", "column", "rank", "feature", "status", "objective", "milestones", "tasks_done", "tasks_total", "released", "on_portal"];
+export const MILESTONES_CSV_HEAD = ["company", "objective", "milestone", "target_date", "status", "tasks_done", "tasks_total", "points_left", "expected_finish", "days_late"];
+
+const day = (s: string | null) => (s ? s.slice(0, 10) : "");
+
+/** One row per feature on the Roadmap tab, in the order the page shows them: each company's columns Now, Next, Later, then Released. */
+export function featuresToCsvRows(companies: FeatureRoadmapCompany[]): Array<Array<string | number>> {
+  const order = (a: RoadmapFeature, b: RoadmapFeature) => (a.rank ?? 99) - (b.rank ?? 99) || b.priority - a.priority || a.title.localeCompare(b.title);
+  return companies.flatMap((c) =>
+    (["now", "next", "later", "released"] as const).flatMap((col) =>
+      c.features
+        .filter((f) => f.column === col)
+        .sort(order)
+        .map((f) => [
+          c.name,
+          COLUMN_LABEL[col],
+          f.rank ?? "",
+          f.title,
+          FEATURE_STATUS_LABEL[f.status],
+          f.objective?.title ?? "",
+          f.milestones.map((m) => (m.targetDate ? `${m.title} (${day(m.targetDate)})` : m.title)).join("; "),
+          f.tickets.done,
+          f.tickets.total,
+          day(f.releasedAt),
+          f.showPublicly ? "yes" : "no",
+        ]),
+    ),
+  );
+}
+
+/** One row per milestone on the Timeline tab, with the status label the page shows. */
+export function milestonesToCsvRows(companies: RoadmapCompany[]): Array<Array<string | number>> {
+  return companies.flatMap((c) =>
+    c.objectives.flatMap((o) =>
+      o.milestones.map((m) => [c.name, o.title, m.title, day(m.targetDate), STATUS[m.status].label, m.done, m.total, m.forecast.pointsLeft, day(m.forecast.expectedFinish), m.forecast.daysLate]),
+    ),
+  );
+}
+
+export const roadmapFileName = (kind: "features" | "milestones", now = new Date()) => `roadmap-${kind}-${now.toISOString().slice(0, 10)}.csv`;
+
 export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]; tab: string | undefined; go: (to: string) => void }) {
   const tab: Tab = (TABS.find((t) => t.id === tabParam)?.id ?? "features") as Tab;
   const [closed, setClosed] = useState(false);
@@ -724,12 +767,26 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
         <div>
           <h1>Roadmap</h1>
         </div>
-        {tab === "timeline" && (
-          <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
-            <input type="checkbox" checked={closed} onChange={(e) => setClosed(e.target.checked)} />
-            Show done work
-          </label>
-        )}
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          {tab === "timeline" && (
+            <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
+              <input type="checkbox" checked={closed} onChange={(e) => setClosed(e.target.checked)} />
+              Show done work
+            </label>
+          )}
+          <button
+            type="button"
+            className="btn small"
+            disabled={tab === "timeline" ? !data.data : !board.data}
+            onClick={() =>
+              tab === "timeline"
+                ? download(roadmapFileName("milestones"), buildCsv(MILESTONES_CSV_HEAD, milestonesToCsvRows(list)))
+                : download(roadmapFileName("features"), buildCsv(FEATURES_CSV_HEAD, featuresToCsvRows(board.data ?? [])))
+            }
+          >
+            Download CSV
+          </button>
+        </div>
       </header>
       <div className="tabs" role="tablist" aria-label="Roadmap views">
         {TABS.map((t) => (

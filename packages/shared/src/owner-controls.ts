@@ -126,7 +126,7 @@ export const OWNER_CONTROLS = {
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   // BOS-2473: Merge history's CSV of the rows shown.
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front", "Download CSV"],
-  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change"],
+  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change", "Download CSV"],
   Plan: [
     "Refresh",
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
