@@ -228,7 +228,7 @@ export const OWNER_CONTROLS = {
   // The permission rules page, its advice mode, the second opinion and the fence.
   Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence", "Download CSV"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
-  Watchdog: ["Switch off", "Switch back on", "Switch on", "Run the test"],
+  Watchdog: ["Switch off", "Switch back on", "Switch on", "Run the test", "Download CSV"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // The owner's password and other logins (BOS-2159).
   Account: ["Change password", "Sign out other devices"],
