@@ -21,7 +21,8 @@ const api = {
   "/api/companies/c1/watchdog": { settings: { ...DEFAULT_WATCHDOG, enabled: true }, scrumMaster: null, lastSweepAt: null, trippedAt: null, trippedReason: null, openFlags: 0 },
   "/api/companies/c1/watchdog/backtest": {
     from: "2026-11-22T00:00:00Z", to: "2026-11-24T00:00:00Z", scrumMasterWakes: 1, busiestHourWakes: 1, wouldTripCap: false, caveats: [],
-    flags: [flag(1, { title: LONG }), flag(2, { verdict: "cleared within 30 min" }), flag(3, { rule: "stale_in_progress" })],
+    // 30 flags: one with a long title, one that cleared by itself, one of another problem type.
+    flags: [flag(1, { title: LONG }), flag(2, { verdict: "cleared within 30 min" }), flag(3, { rule: "stale_in_progress" }), ...Array.from({ length: 27 }, (_, i) => flag(4 + i))],
   },
 };
 
@@ -53,7 +54,7 @@ describe.skipIf(!browser || !server)("BOS-2541 Watchdog test result Download CSV
         const [file] = await Promise.all([page.waitForEvent("download"), csvButton.press("Enter")]);
         expect(file.suggestedFilename()).toMatch(/^watchdog-test-2d-\d{4}-\d{2}-\d{2}\.csv$/);
         const text = readFileSync(await file.path(), "utf8");
-        expect(text.trim().split("\r\n")).toHaveLength(4);
+        expect(text.trim().split("\r\n")).toHaveLength(31);
         expect(text).toContain("A very long ticket title");
         expect(text).toContain("no movement in progress");
       } finally {
