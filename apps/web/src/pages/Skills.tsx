@@ -11,6 +11,7 @@ import { LoadError } from "../components/LoadError";
 import { useOlder, usePoll } from "../hooks";
 import { ShowOlder } from "../components/ShowOlder";
 import { diffLines } from "../line-diff";
+import { buildCsv, download } from "../csv";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
@@ -659,6 +660,50 @@ const needsAttention = (s: SkillRow, u: Upstream | undefined, whatHarness: (agen
   if (s.agents.every((a) => !harnessLoadsSkills(whatHarness(a.id)))) return "unloadable";
   return null;
 };
+/** The words BOS-2518's row tags use for each reason, so the CSV's "needs attention" column reads the same as the list. */
+export const ATTENTION_WORDS: Record<Attention, string> = {
+  unreadable: "Instructions unreadable",
+  "no-instructions": "No instructions",
+  newer: "Newer version available",
+  unchecked: "Couldn't check for updates",
+  nobody: "Nobody has it",
+  unloadable: "Only agents that can't load skills",
+  healthy: "",
+};
+
+/** Every reason a shown skill needs attention, in the order the row tag picks its first one (BOS-2518); empty when none. */
+export function attentionReasons(s: SkillRow, u: Upstream | undefined, whatHarness: (agentId: string) => string): string[] {
+  const out: string[] = [];
+  if (s.instructionsUnreadable) out.push(ATTENTION_WORDS.unreadable);
+  if (s.hasInstructions === false) out.push(ATTENTION_WORDS["no-instructions"]);
+  if (u?.status === "newer") out.push(u.date ? `${ATTENTION_WORDS.newer} (${u.date.slice(0, 10)})` : ATTENTION_WORDS.newer);
+  if (u?.status === "error") out.push(ATTENTION_WORDS.unchecked);
+  if (s.agents.length === 0) out.push(ATTENTION_WORDS.nobody);
+  else if (s.agents.every((a) => !harnessLoadsSkills(whatHarness(a.id)))) out.push(ATTENTION_WORDS.unloadable);
+  return out;
+}
+
+export const SKILLS_CSV_HEAD = ["Name", "Description", "Where from", "Source link", "Pack", "Files", "Size", "Updated", "Agents", "Needs attention"];
+
+/** One row per skill shown, in the order the list shows them (a pack's name, then its skills), from what the page already loads. */
+export function skillsToCsv(shown: SkillRow[], u: Record<string, Upstream>, whatHarness: (agentId: string) => string): string {
+  return buildCsv(
+    SKILLS_CSV_HEAD,
+    shown.map((s) => [
+      s.name,
+      s.description ?? "",
+      SOURCE[s.source],
+      s.sourceUrl ?? "",
+      s.pack ?? "",
+      s.fileCount,
+      kb(s.sizeBytes),
+      s.updatedAt.slice(0, 10),
+      s.agents.map((a) => a.name).join("; "),
+      attentionReasons(s, u[s.id], whatHarness).join("; "),
+    ]),
+  );
+}
+
 /** The tag on a row that needs attention; 1 and 2 keep the tags they already had. */
 function AttentionTag({ why }: { why: Attention }) {
   if (why === "unreadable") return <span className="tag red" title="The SKILL.md isn't text, so its instructions can't be shown.">Instructions unreadable</span>;
@@ -710,6 +755,8 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
   };
   const packs = allPacks.filter((p) => packRows(p).length > 0);
   const loose = rows.filter((r) => !r.pack && (!needle || hits(r)) && wanted(r));
+  // The skills the list shows, in its order (each pack's matching skills, then the loose ones), for the Download CSV.
+  const shown = [...packs.flatMap((p) => packRows(p)), ...loose];
   const pick = (id: string) => (setPicked(id), setPickedPack(null), setAdding(false));
   const item = (s: SkillRow) => {
     const why1 = why(s);
@@ -762,6 +809,9 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
                   <span className="switch-knob" aria-hidden="true" />
                 </button>
                 <span className="muted" aria-hidden="true">Needs attention only</span>
+                <button type="button" className="btn small" disabled={shown.length === 0} onClick={() => download(`skills-${new Date().toISOString().slice(0, 10)}.csv`, skillsToCsv(shown, upstream, whatHarness))}>
+                  Download CSV
+                </button>
               </div>
             </>
           )}
