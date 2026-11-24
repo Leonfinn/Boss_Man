@@ -10,7 +10,7 @@ import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { Loader } from "../components/Loader";
 import { statusLineText, type StatusLine } from "./MergeQueue";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
 import { useWheelToPage } from "../wheel-to-page";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -905,10 +905,23 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [filters, setFilters] = useState(readFilters);
+  // BOS-2475: "?holding=1" in the page link wins over the saved session value, so a shared link opens with it on.
+  const [filters, setFilters] = useState(() => {
+    const saved = readFilters();
+    const linked = hashQuery().get("holding");
+    return linked === "1" ? { ...saved, holding: true } : linked === "0" ? { ...saved, holding: false } : saved;
+  });
   const setFilter = (change: Partial<SavedFilters>) =>
     setFilters((cur) => {
       const next = { ...cur, ...change };
+      if ("holding" in change) {
+        // Keep the choice in the page link without adding history entries or re-routing.
+        const q = hashQuery();
+        if (next.holding) q.set("holding", "1");
+        else q.delete("holding");
+        const base = window.location.hash.split("?")[0] || "#/board";
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}${base}${q.toString() ? `?${q}` : ""}`);
+      }
       try {
         sessionStorage.setItem(FILTERS_KEY, JSON.stringify(next));
       } catch {

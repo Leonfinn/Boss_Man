@@ -7,6 +7,7 @@ import { Board, workingFor } from "../src/pages/Board";
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  window.history.replaceState(null, "", window.location.pathname);
   stuckIds = [];
   holdUp = false;
   vi.unstubAllGlobals();
@@ -119,6 +120,22 @@ describe("board filters", () => {
     fireEvent.click(screen.getByRole("switch", { name: /^Holding others up/ }));
     expect(shown()).toEqual(["Alpha"]);
     expect(JSON.parse(sessionStorage.getItem("board-filters") ?? "{}").holding).toBe(true);
+  });
+
+  it("BOS-2475: a link with ?holding=1 opens with Holding others up on, and the switch writes it to the link", async () => {
+    holdUp = true;
+    stub();
+    window.location.hash = "#/board/p1?holding=1";
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    expect(shown()).toEqual(["Alpha"]);
+    openPanel("Filter, 1 on");
+    fireEvent.click(screen.getByRole("switch", { name: /^Holding others up/ }));
+    expect(window.location.hash).not.toContain("holding");
+    expect(shown().length).toBeGreaterThan(1);
+    fireEvent.click(screen.getByRole("switch", { name: /^Holding others up/ }));
+    expect(window.location.hash).toContain("holding=1");
+    window.location.hash = "";
   });
 
   it("treats a saved feature that is not in the list as Any feature", async () => {
