@@ -1,7 +1,7 @@
 // The company wiki (R69): Markdown pages the owner and agents share. Pages written for a
 // ticket link back to it, and every save is kept, so an older version can be put back.
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Menu as MenuIcon } from "lucide-react";
+import { Check, Link as LinkIcon, Menu as MenuIcon } from "lucide-react";
 import { NoCompany } from "../components/NoCompany";
 import { api, type Company } from "../api";
 import { useFormDraft } from "../drafts";
@@ -17,7 +17,9 @@ import { LoadError } from "../components/LoadError";
 import { DeletedNotice, DeletedPages } from "../components/DeletedPages";
 import { WikiCompare } from "../components/WikiCompare";
 import { download } from "../csv";
-import { CopyLinkButton } from "../components/CopyLinkButton";
+import { COPIED_MS, CopyLinkButton } from "../components/CopyLinkButton";
+import { copyText } from "../clipboard";
+import { OUTLINE_MIN, headingAt, readOutline, sectionHash, sectionLink, type OutlineEntry } from "../wiki-outline";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
@@ -182,7 +184,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
   const [old, setOld] = useState<OldVersion | null>(null);
   const [cmp, setCmp] = useState<{ from: string; to: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => (setCmp(null), setEditing(false),setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null)), [slug]);
+  useEffect(() => (setCmp(null), setEditing(false),setHistory(false), setOlder({ rows: [], busy: false, error: null }), setOld(null), setCopied(null)), [slug]);
   const p = page.data;
   const versions = [...(p?.revisions ?? []), ...older.rows];
   const hasMore = !!p && versions.length < (p.revisionCount ?? p.revisions.length);
@@ -204,6 +206,44 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
     const heading = [...document.querySelectorAll("h1, h2, h3, h4, h5, h6")].find((h) => h.id === wanted || h.textContent?.trim().toLowerCase() === section.trim().toLowerCase());
     heading?.scrollIntoView({ block: "start" });
   }, [p?.id, section]);
+
+  // "On this page" (BOS-2443): read from the rendered body, so its ids are the ones the headings carry.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [outline, setOutline] = useState<OutlineEntry[]>([]);
+  const shownBody = (old ?? p)?.body;
+  useEffect(() => setOutline(bodyRef.current ? readOutline(bodyRef.current) : []), [shownBody, editing]);
+  // Indent from the page's top heading level, so a page that starts at ## isn't pushed in a step.
+  const topLevel = Math.min(...outline.map((o) => o.level));
+  // The address changes with replaceState, not location.hash: a hash change re-routes and remounts the page,
+  // which would load it again just to scroll. The landing effect above handles the same address when opened.
+  const jump = (e: OutlineEntry) => {
+    if (!p || !bodyRef.current) return;
+    headingAt(bodyRef.current, e.index)?.scrollIntoView({ block: "start" });
+    window.history.replaceState(window.history.state, "", sectionHash(companyId, p.slug, e.id));
+  };
+  const [copied, setCopied] = useState<{ id: string; ok: boolean; link: string; title: string } | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
+  const copySection = async (id: string, title: string) => {
+    if (!p) return;
+    const link = sectionLink(companyId, p.slug, id);
+    const ok = await copyText(link);
+    clearTimeout(copiedTimer.current);
+    setCopied({ id, ok, link, title });
+    if (ok) copiedTimer.current = setTimeout(() => setCopied(null), COPIED_MS);
+  };
+  // Inside each heading: an icon only, so it adds nothing to the heading's text (the outline and landing read it).
+  // If copying fails here, the address shows beside the heading, selected, to copy by hand.
+  const sectionAction = (id: string, title: string) => (
+    <>
+      <button type="button" className="heading-link" aria-label={`Copy link to this section (${title.trim()})`} title="Copy link to this section" onClick={() => void copySection(id, title)}>
+        {copied?.id === id && copied.ok ? <Check size={15} aria-hidden /> : <LinkIcon size={15} aria-hidden />}
+      </button>
+      {copied?.id === id && !copied.ok && (
+        <input className="mono heading-link-field" aria-label="Section address" readOnly value={copied.link} autoFocus onFocus={(e) => e.currentTarget.select()} />
+      )}
+    </>
+  );
 
   const save = async (v: Draft) => {
     // The owner is replacing the page they just edited, so the agent shrink guard never blocks their own save.
@@ -366,7 +406,32 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           </button>
         </div>
       )}
-      <Markdown text={(old ?? p).body} linkContext={{ companyId }} />
+      {outline.length >= OUTLINE_MIN && (
+        <details className="wiki-outline">
+          <summary>On this page ({outline.length})</summary>
+          <ul>
+            {outline.map((e) => (
+              <li key={e.index} style={{ paddingLeft: (e.level - topLevel) * 16 }}>
+                <a
+                  href={sectionHash(companyId, p.slug, e.id)}
+                  onClick={(ev) => {
+                    ev.preventDefault();
+                    jump(e);
+                  }}
+                >
+                  {e.text}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <span className="sr-only" role="status">
+        {copied ? (copied.ok ? `Link to "${copied.title.trim()}" copied.` : "Couldn't copy here. The address is shown beside the heading, selected, to copy by hand.") : ""}
+      </span>
+      <div ref={bodyRef}>
+        <Markdown text={(old ?? p).body} linkContext={{ companyId }} headingAction={sectionAction} />
+      </div>
       {!old && <PageLinks companyId={companyId} p={p} />}
       {error && (
         <p className="error" role="alert">
