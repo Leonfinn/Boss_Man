@@ -997,6 +997,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .wiki-list details > summary { cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
 .wiki-list details > summary:hover { background: var(--ground); }
 .wiki-list details > ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }
+/* "N need attention" and its switch (BOS-2518): one line beside the filter box, counted, never pushed off. */
+.wiki-list .skills-attention { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.wiki-list .skills-attention-count { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.wiki-list .skills-attention .muted { font-size: 13px; }
 
 /* Chat as a messenger (R70) */
 /* The page fills the window under the heading (BOS-270): the panel takes the room left over instead

@@ -648,6 +648,26 @@ function Proposals({ companyId }: { companyId: string }) {
 
 type Upstream = { status: "current" | "unchecked" } | { status: "newer"; commit: string; date: string | null } | { status: "error"; reason: string };
 
+/** Why a skill needs a look (BOS-2518), from what the page already loads; the first one found names its row tag. */
+type Attention = "unreadable" | "no-instructions" | "newer" | "unchecked" | "nobody" | "unloadable" | "healthy";
+const needsAttention = (s: SkillRow, u: Upstream | undefined, whatHarness: (agentId: string) => string): Attention | null => {
+  if (s.instructionsUnreadable) return "unreadable";
+  if (s.hasInstructions === false) return "no-instructions";
+  if (u?.status === "newer") return "newer";
+  if (u?.status === "error") return "unchecked";
+  if (s.agents.length === 0) return "nobody";
+  if (s.agents.every((a) => !harnessLoadsSkills(whatHarness(a.id)))) return "unloadable";
+  return null;
+};
+/** The tag on a row that needs attention; 1 and 2 keep the tags they already had. */
+function AttentionTag({ why }: { why: Attention }) {
+  if (why === "unreadable") return <span className="tag red" title="The SKILL.md isn't text, so its instructions can't be shown.">Instructions unreadable</span>;
+  if (why === "no-instructions") return <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>;
+  if (why === "nobody") return <span className="tag amber" title="Nobody has it: give it to the agents whose work calls for it.">Nobody has it</span>;
+  if (why === "unloadable") return <span className="tag red" title="Everyone who has it runs on a harness that can't load skills, so it does nothing.">Only agents that can't load skills</span>;
+  return null;
+}
+
 /** A text tag (no button): the Refresh button stays the only way to take a newer version. */
 function UpstreamTag({ u }: { u: Upstream | undefined }) {
   if (u?.status === "newer") return <span className="tag amber">Newer version available{u.date ? ` (${u.date.slice(0, 10)})` : ""}</span>;
@@ -670,28 +690,34 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  // "Needs attention only" (BOS-2518): gathers the problem tags the page already shows into one switch and count.
+  const [attentionOnly, setAttentionOnly] = useState(false);
   if (!company) return <NoCompany />;
   const rows = list.data ?? [];
   const needle = filter.trim().toLowerCase();
   const hits = (s: SkillRow) => s.name.toLowerCase().includes(needle) || (s.description ?? "").toLowerCase().includes(needle);
+  const whatHarness = (agentId: string) => company.agents.find((c) => c.id === agentId)?.agentKind ?? "";
+  const why = (s: SkillRow) => needsAttention(s, upstream[s.id], whatHarness);
+  const needing = rows.filter((r) => why(r) !== null).length;
+  const wanted = (s: SkillRow) => !attentionOnly || why(s) !== null;
   const allPacks = [...new Set(rows.map((r) => r.pack).filter((p): p is string => !!p))].sort();
-  // A pack whose name matches shows all its skills; otherwise only the matching ones.
+  // A pack whose name matches shows all its skills; otherwise only the matching ones. A pack with none
+  // needing attention is hidden under the switch (it shows when any of its skills needs attention).
   const packRows = (p: string) => {
     const all = rows.filter((r) => r.pack === p);
-    return !needle || p.toLowerCase().includes(needle) ? all : all.filter(hits);
+    const named = !needle || p.toLowerCase().includes(needle) ? all : all.filter(hits);
+    return named.filter(wanted);
   };
   const packs = allPacks.filter((p) => packRows(p).length > 0);
-  const loose = rows.filter((r) => !r.pack && (!needle || hits(r)));
+  const loose = rows.filter((r) => !r.pack && (!needle || hits(r)) && wanted(r));
   const pick = (id: string) => (setPicked(id), setPickedPack(null), setAdding(false));
-  const item = (s: SkillRow) => (
+  const item = (s: SkillRow) => {
+    const why1 = why(s);
+    return (
     <li key={s.id}>
       <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), pick(s.id))}>
         <span className="mono">{s.name}</span>
-        {s.instructionsUnreadable ? (
-          <span className="tag red" title="The SKILL.md isn't text, so its instructions can't be shown.">Instructions unreadable</span>
-        ) : s.hasInstructions === false ? (
-          <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>
-        ) : null}
+        <AttentionTag why={why1 ?? "healthy"} />
         {/* A pack shows "newer" once, on the pack; its skills show only their own read errors. */}
         <UpstreamTag u={s.pack && upstream[s.id]?.status === "newer" ? undefined : upstream[s.id]} />
         <small>
@@ -699,7 +725,8 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
         </small>
       </a>
     </li>
-  );
+    );
+  };
   return (
     <>
       <header className="page-head">
@@ -722,12 +749,23 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
         <nav className="card wiki-list" aria-label="Skills">
           {list.data && rows.length === 0 && <p className="muted">No skills yet.</p>}
           {rows.length > 0 && (
-            <div className="field">
-              <label htmlFor="skills-filter">Filter</label>
-              <input id="skills-filter" type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Name or description" />
-            </div>
+            <>
+              <div className="field">
+                <label htmlFor="skills-filter">Filter</label>
+                <input id="skills-filter" type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Name or description" />
+              </div>
+              <div className="skills-attention">
+                <span className="skills-attention-count" id="skills-attention-count">
+                  {`${needing} ${needing === 1 ? "needs" : "need"} attention`}
+                </span>
+                <button type="button" role="switch" aria-checked={attentionOnly} aria-label="Needs attention only" className={`switch${attentionOnly ? " on" : ""}`} onClick={() => setAttentionOnly(!attentionOnly)}>
+                  <span className="switch-knob" aria-hidden="true" />
+                </button>
+                <span className="muted" aria-hidden="true">Needs attention only</span>
+              </div>
+            </>
           )}
-          {needle && packs.length === 0 && loose.length === 0 && <p className="muted">No skills match.</p>}
+          {(needle || attentionOnly) && packs.length === 0 && loose.length === 0 && <p className="muted">{attentionOnly ? "Nothing needs attention." : "No skills match."}</p>}
           <ul>
             {packs.map((p) => {
               const inPack = packRows(p);
