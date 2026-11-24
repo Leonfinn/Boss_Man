@@ -7,6 +7,7 @@ import { CHECK_PEAK_MB, checkMemoryWarning } from "@boss-man/shared";
 const MEMORY_GUIDE = "https://github.com/Leonfinn/Boss_Man/blob/main/docs/34-check-workers.md#changing-the-memory-on-any-docker-host";
 import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
+import { buildCsv, download } from "../../csv";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import type { HostFactsView } from "../../host-facts-display";
@@ -113,6 +114,26 @@ export type CheckLineView = {
   timeZone: string;
 };
 
+export const MACHINES_CSV_HEAD = ["machine", "connected", "checks", "passed", "failed", "stuck", "median_seconds", "longest_seconds"];
+const emptyIfNone = (n: number | null | undefined): number | string => (n === null || n === undefined ? "" : n);
+
+/** One row per machine: the company runner first, then each worker. A figure the machine has no value for is an empty cell. */
+export function machinesToCsvRows(machines: { name: string; connected: boolean; stats: MachineStatsView | undefined }[]): Array<Array<string | number>> {
+  return machines.map((m) => [m.name, m.connected ? "yes" : "no", m.stats?.total ?? 0, m.stats?.passed ?? 0, m.stats?.failed ?? 0, m.stats?.stuck ?? 0, emptyIfNone(m.stats?.medianSeconds), emptyIfNone(m.stats?.longestSeconds)]);
+}
+
+export const LINE_DAYS_CSV_HEAD = ["date", "quick", "full", "merge", "total"];
+export const LINE_KINDS_CSV_HEAD = ["kind", "checks", "cancelled", "median_wait_seconds", "longest_wait_seconds", "median_run_seconds"];
+
+/** The days, a blank line, then the kinds, each part with its own header row. */
+export function lineToCsv(line: CheckLineView): string {
+  const days = buildCsv(LINE_DAYS_CSV_HEAD, line.days.map((d) => [d.date, d.quick, d.full, d.merge, d.quick + d.full + d.merge]));
+  const kinds = buildCsv(LINE_KINDS_CSV_HEAD, line.kinds.map((k) => [k.kind, k.total, k.cancelled, emptyIfNone(k.medianWaitSeconds), emptyIfNone(k.longestWaitSeconds), emptyIfNone(k.medianRunSeconds)]));
+  return `${days}\r\n${kinds}`;
+}
+
+export const csvDay = (now = new Date()) => now.toISOString().slice(0, 10);
+
 const KIND_NAMES = { quick: "Quick", full: "Full", merge: "Merge" } as const;
 const hourText = (h: number) => `${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00`;
 const dayText = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
@@ -188,6 +209,11 @@ export function CheckLine({ line }: { line: CheckLineView }) {
                 {line.busiestHours.map((h) => `${hourText(h.hour)} (${h.checks})`).join(" · ")}
               </p>
             )}
+            <div>
+              <button type="button" className="btn" onClick={() => download(`check-line-7-days-${csvDay()}.csv`, lineToCsv(line))}>
+                Download CSV
+              </button>
+            </div>
             <p className="muted" style={{ margin: 0 }}>
               Wait is from a check joining the line to a machine starting it. Checks still waiting count above, not in the medians; cancelled checks are counted apart.
             </p>
@@ -306,6 +332,22 @@ export function CheckWorkers({ workers, maxSlots, reload, companyId }: { workers
       </div>
       {statsPoll.error && statsPoll.data === null && <LoadError what="the machines' last 7 days" message={statsPoll.error.message} onRetry={statsPoll.reload} />}
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
+      {Array.isArray(statsPoll.data) && (
+        <div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() =>
+              download(
+                `check-workers-7-days-${csvDay()}.csv`,
+                buildCsv(MACHINES_CSV_HEAD, machinesToCsvRows([{ name: "Company runner", connected: true, stats: statsOf("runner") }, ...workers.map((w) => ({ name: w.name, connected: w.connected, stats: statsOf(w.id) }))])),
+              )
+            }
+          >
+            Download CSV
+          </button>
+        </div>
+      )}
       {workers.map((w) => (
         <div key={w.id} className="card" style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }} data-testid="check-worker">
           <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
