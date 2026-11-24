@@ -8,13 +8,15 @@ afterEach(() => {
   cleanup();
   sessionStorage.clear();
   stuckIds = [];
+  holdUp = false;
   vi.unstubAllGlobals();
 });
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [{ id: "a1", name: "Developer" }] } as Company;
 let stuckIds: string[] = [];
-const card = (over: Record<string, unknown>) => ({ ...(stuckIds.includes(String(over.id)) ? { looksStuck: { idleMs: 3_600_000 } } : {}), systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...over });
+let holdUp = false;
+const card = (over: Record<string, unknown>) => ({ ...(stuckIds.includes(String(over.id)) ? { looksStuck: { idleMs: 3_600_000 } } : {}), ...(holdUp && (over.id === "t2" || over.id === "t3") ? { blockedBy: [{ ticketId: "t1", engagementId: null, decisionId: null }] } : {}), systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...over });
 const feat = (id: string, title: string) => ({ id, companyId: "c1", areaId: null, parentId: null, title, description: null, status: "in_progress", effort: null, driverScores: {}, milestoneId: null, portalVisible: false, createdAt: "2026-10-19T09:00:00Z", updatedAt: "2026-10-19T09:00:00Z", releasedAt: null, demand: 0, insightCount: 0, customerCount: 0, value: 0, demandPart: 0, priority: 0, tickets: { total: 0, done: 0, items: [] } });
 
 function stub(extra: Record<string, unknown> = {}) {
@@ -104,6 +106,19 @@ describe("board filters", () => {
     expect(shown()).toEqual(["Alpha"]);
     fireEvent.change(select, { target: { value: "f2" } });
     expect(shown()).toEqual([]);
+  });
+
+  it("BOS-2475: a card others wait on says so, and Holding others up shows only it, kept for the session", async () => {
+    holdUp = true;
+    stub();
+    open();
+    const alpha = (await screen.findByText("Alpha task", { selector: "h3 a" })).closest("article")!;
+    expect(alpha.textContent).toContain("2 waiting on this");
+    expect(screen.getAllByText(/waiting on this/)).toHaveLength(1);
+    openPanel();
+    fireEvent.click(screen.getByRole("switch", { name: /^Holding others up/ }));
+    expect(shown()).toEqual(["Alpha"]);
+    expect(JSON.parse(sessionStorage.getItem("board-filters") ?? "{}").holding).toBe(true);
   });
 
   it("treats a saved feature that is not in the list as Any feature", async () => {
