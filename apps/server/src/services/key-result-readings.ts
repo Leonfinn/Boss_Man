@@ -24,7 +24,7 @@ export type ReadingView = { at: string; value: number; by: string };
 
 /** The newest readings per key result, oldest first, with who gave each (agent names looked up). */
 export async function readingsFor(db: Db, keyResultIds: string[]): Promise<Map<string, ReadingView[]>> {
-  const out = new Map<string, ReadingView[]>();
+  const out = new Map<string, ReadingView[]>(); // lost on restart, harmless because it only lives for this one call
   if (!keyResultIds.length) return out;
   const rows = await db
     .select({ keyResultId: keyResultReadings.keyResultId, at: keyResultReadings.at, value: keyResultReadings.value, byKind: keyResultReadings.byKind, agentName: agents.name })
