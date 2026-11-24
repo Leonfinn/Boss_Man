@@ -93,7 +93,13 @@ probe_loop() { # until $T/stop exists, one attempt about every half second, one 
 }
 move() { # <label> <version> <launcher digest> <guard digest>; prints the JSON line on stdout, the rest on stderr
   local out
-  out="$(docker exec -i -e MOVE_VERSION="$2" -e MOVE_LAUNCHER="$3" -e MOVE_RUNNER="$RUNNER_DIGEST" -e MOVE_NETGUARD="$4" updater node --input-type=module - < scripts/helper-move-live.mjs 2>"$T/move.$1.err")" || { cat "$T/move.$1.err" >&2; echo "$out" >&2; return 1; }
+  out="$(docker exec -i -e MOVE_VERSION="$2" -e MOVE_LAUNCHER="$3" -e MOVE_RUNNER="$RUNNER_DIGEST" -e MOVE_NETGUARD="$4" updater node --input-type=module - < scripts/helper-move-live.mjs 2>"$T/move.$1.err")" || {
+    cat "$T/move.$1.err" >&2; echo "$out" >&2
+    # One flat line for the public GitHub notice: the job log can't be read without a login, annotations can (BOS-2528). The updater prints no key or environment.
+    # (move runs in a subshell, so the text goes through a file, not a variable.)
+    printf ' [%s failed: %s | %s]' "$1" "$(head -c 400 "$T/move.$1.err" | tr '\n\r' '  ')" "$(printf '%s' "$out" | head -c 300 | tr '\n\r' '  ')" >> "$T/diag"
+    return 1
+  }
   cut -c1-300 "$T/move.$1.err" >&2
   tail -n1 <<<"$out"
 }
@@ -145,7 +151,7 @@ echo "during move 2: $n_closed closed, $n_open open, $n_err errors"
 [ "$(probe)" = CLOSED ] && ok "after move 2: the runner still cannot open db:5432" || bad "after move 2: egress is not closed"
 # One public line for the GitHub run: annotations can be read without a login, raw job logs cannot (BOS-2528). Figures only, no secrets.
 same_runner=no; [ "$r0" = "$r1" ] && [ "$r1" = "$r2" ] && same_runner=yes
-summary="runner id unchanged across both moves: $same_runner; move 1 (good guard) result $(jq -r .result <<<"$m1" 2>/dev/null): $c1 closed, $o1 open probes; move 2 (failing guard) result $(jq -r .result <<<"$m2" 2>/dev/null): $n_closed closed, $n_open open probes; release-current unchanged by move 2: $([ "$(jq -c .releaseCurrent <<<"$m2" 2>/dev/null)" = "$rel1" ] && echo yes || echo no)"
+summary="runner id unchanged across both moves: $same_runner; move 1 (good guard) result $(jq -r .result <<<"$m1" 2>/dev/null): $c1 closed, $o1 open probes; move 2 (failing guard) result $(jq -r .result <<<"$m2" 2>/dev/null): $n_closed closed, $n_open open probes; release-current unchanged by move 2: $([ "$(jq -c .releaseCurrent <<<"$m2" 2>/dev/null)" = "$rel1" ] && echo yes || echo no)$(cat "$T/diag" 2>/dev/null)"
 noticed=1
 if [ "$fail" = 0 ]; then
   echo "::notice title=BOS-2528 helper move::PASS, $oks ok lines, none failed: $summary"
