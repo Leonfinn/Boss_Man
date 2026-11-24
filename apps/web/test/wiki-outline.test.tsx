@@ -106,6 +106,20 @@ describe("On this page (BOS-2443)", () => {
     expect(field.closest("h2")!.id).toBe("batch-28");
   });
 
+  it("a copied link to a heading with spaces and punctuation, opened fresh, lands on that heading", async () => {
+    showWiki(BODY);
+    const btn = await screen.findByRole("button", { name: "Copy link to this section (Batch 27: wiki)" });
+    await act(async () => void fireEvent.click(btn));
+    const link = copyText.mock.calls[0]![0];
+    expect(link.endsWith("#/wiki/c1/plans/backlog#batch-27-wiki")).toBe(true);
+    cleanup();
+    scrolled.mockReset();
+    // Open it as a new visit: the route after "#/wiki/c1/" is what App passes Wiki as its slug.
+    showWiki(BODY, "plans/backlog", `#${link.split("#").pop()!}`);
+    await screen.findByText(/^On this page/);
+    expect(scrolledTo().map((h) => h.textContent)).toEqual(["Batch 27: wiki"]);
+  });
+
   it("opening a section link lands on that heading", async () => {
     // The route carries slug#section; Wiki splits it into the page and the heading to land on.
     showWiki(BODY, "plans/backlog", "#done-so-far");
