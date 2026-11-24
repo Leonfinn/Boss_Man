@@ -35,7 +35,18 @@ export type HealthLine = {
   text: string;
   href: string;
   linkText: string;
+  /** BOS-2538: how often this line is read in words, e.g. "Updates every 20 s."; healthLines fills it in from
+   *  LINE_REFRESH, and RightNow falls back to the same list when a caller builds its own lines. */
+  refresh?: string;
 };
+
+/** BOS-2538: the freshness note under one line, naming its own interval. Runner, Usage limits and Update come from
+ *  the dashboard poll (10 s); Merges from the merge-queue poll (20 s, shared with the merges banner). Keep this in
+ *  step with Dashboard.tsx's two usePoll calls. */
+export const LINE_REFRESH: Record<HealthLine["key"], string> = { runner: "10 s", merges: "20 s", usage: "10 s", update: "10 s" };
+export function refreshNote(key: HealthLine["key"]): string {
+  return `Updates every ${LINE_REFRESH[key]}.`;
+}
 
 const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)));
@@ -92,8 +103,12 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   const held = inForceHeadline(health?.runLimit);
   if (held && health?.runLimit) update = { key: "update", tone: "warn", symbol: "↑", state: `Agents at once: ${held}`, pill: `Agents ${health.runLimit.inForce} of ${health.runLimit.saved}`, text: `${up?.waiting && up.deadline ? `Server update waits for a quiet machine; you'll be asked at ${clock(up.deadline)}. ` : ""}${inForceReason(health.runLimit)}`, href: `#/settings/${companyId}/updates`, linkText: "the waiting update" };
 
-  return [runner, mergesLine, usage, update];
+  // BOS-2538: every line carries its own interval, so the heading names none (the Merges line is read every 20 s).
+  return [runner, mergesLine, usage, update].map((l) => ({ ...l, refresh: refreshNote(l.key) }));
 }
+
+/** BOS-2538: what each line is called while the first read is still on its way. */
+const RIGHT_NOW_NAME: Record<HealthLine["key"], string> = { runner: "Runner", merges: "Merges", usage: "Usage limits", update: "Updates" };
 
 export function RightNow({ lines, paused, companyId, loading, onResume }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean; /** Resumes this company; the notice shows a Resume button when given. */ onResume?: () => Promise<void> }) {
   const [resuming, setResuming] = useState(false);
@@ -102,7 +117,7 @@ export function RightNow({ lines, paused, companyId, loading, onResume }: { line
     <section className="card dash-panel dash-right" aria-labelledby="dash-right">
       <h2 id="dash-right" className="dash-panel-head">
         Right now
-        <small className="muted">{loading ? "Checking…" : "Refreshes every 10 s"}</small>
+        <small className="muted">{loading ? "Checking…" : <><span className="dash-head-wide">Updates at the times below</span><span className="dash-head-narrow">Each line says how often it updates</span></>}</small>
       </h2>
       {paused && (
         <p className="dash-line tone-warn">
@@ -128,14 +143,15 @@ export function RightNow({ lines, paused, companyId, loading, onResume }: { line
         </p>
       )}
       <ul className="dash-lines">
-        {(lines ?? (["Runner", "Merges", "Usage limits", "Updates"] as const).map((n) => ({ key: n, tone: "unknown" as const, symbol: "…", state: `${n}: checking…`, pill: `${n}…`, text: "", href: "#", linkText: "" }))).map((l) => (
+        {(lines ?? (["runner", "merges", "usage", "update"] as const).map((key) => ({ key, tone: "unknown" as const, symbol: "…", state: `${RIGHT_NOW_NAME[key]}: checking…`, pill: `${RIGHT_NOW_NAME[key]}…`, text: "", href: "#", linkText: "" }))).map((l) => (
           <li key={l.key} className={`dash-line tone-${l.tone}`}>
-            <a className="dash-line-link" href={l.href} aria-label={l.text ? `${l.state}. ${l.text} Open ${l.linkText}.` : l.state}>
+            <a className="dash-line-link" href={l.href} aria-label={l.text ? `${l.state}. ${l.text} ${refreshNote(l.key)} Open ${l.linkText}.` : `${l.state} ${refreshNote(l.key)}`}>
               <span className="dash-sym" aria-hidden="true">{l.symbol}</span>
               <span className="dash-line-text">
                 <strong className="dash-state">{l.state}</strong>
                 <span className="dash-pill" aria-hidden="true">{l.pill}</span>
                 {l.text && <span className="dash-sentence">{l.text}</span>}
+                <span className="dash-refresh">{("refresh" in l && l.refresh) || refreshNote(l.key)}</span>
               </span>
             </a>
           </li>
