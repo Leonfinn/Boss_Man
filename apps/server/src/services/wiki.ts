@@ -647,8 +647,22 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         .from(ticketArtifacts)
         .innerJoin(tickets, eq(tickets.id, ticketArtifacts.ticketId))
         .where(eq(ticketArtifacts.wikiPageId, p.id));
+      // Who started the page (oldest revision's author; null agent = the owner) and how many different authors edited it.
+      const [first] = await db
+        .select({ agentId: wikiRevisions.agentId, name: agents.name })
+        .from(wikiRevisions)
+        .leftJoin(agents, eq(agents.id, wikiRevisions.agentId))
+        .where(eq(wikiRevisions.pageId, p.id))
+        .orderBy(asc(wikiRevisions.createdAt))
+        .limit(1);
+      const [authors] = await db
+        .select({ count: sql<number>`count(distinct coalesce(${wikiRevisions.agentId}::text, 'owner'))::int` })
+        .from(wikiRevisions)
+        .where(eq(wikiRevisions.pageId, p.id));
+      // No revisions (older data): createdBy stays null and the screen shows the date alone.
+      const createdBy = first ? (first.name ?? "you") : null;
       // revisionCount is the whole history: the screen pages past `revisions` with it (BOS-496).
-      return { ...p, updatedBy: by?.name ?? null, revisions, revisionCount: Number(total?.count ?? 0), tickets: forTickets };
+      return { ...p, updatedBy: by?.name ?? null, createdBy, editors: Number(authors?.count ?? 0), revisions, revisionCount: Number(total?.count ?? 0), tickets: forTickets };
     },
 
     /**
