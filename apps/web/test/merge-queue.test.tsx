@@ -509,12 +509,11 @@ describe("owner figures over the rows shown (BOS-2532, G2)", () => {
     const tab = screen.getByRole("tab", { name: /Merges/ });
     const count = tab.querySelector(".tab-count")!;
     expect({ value: count.textContent, label: count.getAttribute("aria-label") }).toEqual({ value: "6", label: "6 in the merge line" });
-    // The Merges tab's waiting list numbers its rows; the running ones carry no number. This reads 1, 2, 3 until
-    // BOS-2508 lands (the number should be the row's place in line, 4, 5, 6); it keeps them numbered and never above the tab.
+    // The Merges tab's waiting list numbers its rows; the running ones carry no number. This reads 1, 2, 3 today;
+    // BOS-2508 will make it the row's place in line (4, 5, 6), and this pin will move with it then.
     const rows = [...document.querySelectorAll('#mq-panel-merges article')];
     const numbers = rows.map((a) => a.querySelector(".mq-pos")?.textContent ?? null).filter((v) => v !== null);
-    expect(numbers.length).toBe(waiting.length);
-    expect(Math.max(...numbers.map(Number))).toBeLessThanOrEqual(Number(count.textContent));
+    expect(numbers).toEqual(["1", "2", "3"]);
   });
 
   it("Quick checks tab: with 2 running, the waiting quick checks are numbered 3, 4, 5 and the badge matches the list", async () => {

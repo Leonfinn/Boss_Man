@@ -769,12 +769,10 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   const openCards = shown.filter((d) => !d.waiting);
   // (BOS-2434) The summary counts every open card for the owner; the kind link narrows the list, the order switch re-sorts it.
   const queueView = useQueueView();
-  const kindChoice = queueView.kind && waitingSummary(openCards).kinds.some((k) => k.key === queueView.kind) ? queueView.kind : null;
+  const summary = waitingSummary(openCards);
+  const kindChoice = queueView.kind && summary.kinds.some((k) => k.key === queueView.kind) ? queueView.kind : null;
   const byKind = kindChoice ? openCards.filter((d) => kindKeyOf(d) === kindChoice) : openCards;
   const queueCards = queueView.oldestFirst ? [...byKind].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()) : byKind;
-  // BOS-2532 (G2): with a project chosen the list is only that project's cards, so the summary must count the same
-  // cards. It said "10 projects waiting for you" over a 3-card list (the all-projects figure was 10).
-  const summary = waitingSummary(projectFilter ? queueCards : openCards);
   // (BOS-1691) A card folded away while its author re-checks it leaves a line in the main list, never a silent gap.
   const recheckCards = shown.filter((d) => !!d.waiting && !!d.rechecking?.hidden);
   const waitingCards = shown.filter((d) => !!d.waiting && !d.rechecking?.hidden);
