@@ -228,7 +228,7 @@ export const OWNER_CONTROLS = {
   // The owner's password and other logins (BOS-2159).
   Account: ["Change password", "Sign out other devices"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
-  Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
+  Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel", "Download CSV"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
   Secrets: ["Revoke", "Rotate", "Delete", "Check with Claude", "Check", "Remove"],
   // The "What this shows" card's button when there is too little data (BOS-1937).
