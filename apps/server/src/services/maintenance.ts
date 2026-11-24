@@ -178,6 +178,19 @@ export function unknownWait(hold: Hold, at: Date, reconnectMs = SWAP_WINDOW_MS):
 }
 
 /**
+ * BOS-2533: the one rule for "this company's runner is mid-swap": it is being recreated (inside the reconnect window
+ * after its recreate) or is on its retry schedule, AND it is not connected yet. A runner that is back, a failed swap,
+ * a wrap-up hold and a building hold are never mid-swap. swapFor, swappingFor and swapInProgressUntil all use it.
+ */
+export function midSwap(hold: Hold | null, slug: string | undefined, nowMs: number, connected: boolean, reconnectMs = SWAP_WINDOW_MS): boolean {
+  if (!hold || !slug || connected || hold.kind === "wrapup" || hold.kind === "building") return false;
+  if (hold.failed?.[slug]) return false;
+  if (hold.tries?.[slug]) return true;
+  const at = hold.swapped?.[slug];
+  return !!at && nowMs - new Date(at).getTime() < reconnectMs;
+}
+
+/**
  * BOS-2404: the one time the owner's chat waits during an update: a runner was recreated and has not dialled back in.
  * Returns when that wait ends at the latest (the recreate plus the reconnect window), or null when no runner is mid-swap.
  * `isBack(slug)` says a runner is already connected again; without it every recent recreate counts. Pure, so the
@@ -187,7 +200,7 @@ export function swapInProgressUntil(hold: Hold | null, at: Date, reconnectMs = S
   if (!hold) return null;
   const ends = Object.entries(hold.swapped ?? {})
     .map(([slug, s]) => ({ slug, end: new Date(s).getTime() + reconnectMs }))
-    .filter(({ slug, end }) => end > at.getTime() && !isBack(slug))
+    .filter(({ slug, end }) => end > at.getTime() && midSwap(hold, slug, at.getTime(), isBack(slug), reconnectMs))
     .map(({ end }) => end);
   return ends.length ? new Date(Math.max(...ends)) : null;
 }
