@@ -4,8 +4,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { deploys } from "../src/db/schema.js";
+import { eq } from "drizzle-orm";
+import { companies, deploys, settings } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { FAILURE_HOLD_KEY, readFailureHold } from "../src/services/self-deploy.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -69,6 +71,29 @@ describe("deploy tool: history", () => {
     expect(all.join("\n")).not.toContain("secret-ref");
     expect(textOf(await client.callTool({ name: "deploy", arguments: { action: "history" } }))).toContain("Give the target");
     await client.close();
+  });
+});
+
+describe("deploy tool: release_update_hold (BOS-2554)", () => {
+  it("releases the held server update for Boss Man's own company only, with the agent's reason", async () => {
+    const c = (ctx = await setup());
+    const home = await c.mk("Home"); // the oldest company is Boss Man's own
+    const other = await c.mk("Other");
+    // Two companies made in the same millisecond would tie on createdAt: make the home one plainly older.
+    await c.db.update(companies).set({ createdAt: new Date("2026-01-01T00:00:00Z") }).where(eq(companies.id, home.company.id));
+    const call = async (x: typeof home, args: Record<string, unknown>) => {
+      const client = await c.mcp(x);
+      const r = (await client.callTool({ name: "deploy", arguments: { action: "release_update_hold", ...args } })) as { isError?: boolean };
+      await client.close();
+      return { error: !!r.isError, text: textOf(r) };
+    };
+    expect(await call(home, { notes: "fine" })).toMatchObject({ error: true, text: expect.stringContaining("No server update is held") });
+    await c.db.insert(settings).values({ key: FAILURE_HOLD_KEY, value: { commit: "b".repeat(40), result: "failed", at: new Date().toISOString(), message: "Building green failed." } });
+    expect(await call(other, { notes: "fine" })).toMatchObject({ error: true, text: expect.stringContaining("Only Boss Man's own company") });
+    expect(await call(home, {})).toMatchObject({ error: true, text: expect.stringContaining("Give notes") });
+    expect(await readFailureHold(c.db)).not.toHaveProperty("released");
+    expect(await call(home, { notes: "Disk was full; freed." })).toMatchObject({ error: false, text: expect.stringContaining("Released.") });
+    expect((await readFailureHold(c.db))?.released).toMatchObject({ by: "Home engineer", reason: "Disk was full; freed." });
   });
 });
 

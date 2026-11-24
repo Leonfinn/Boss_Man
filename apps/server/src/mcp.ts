@@ -40,6 +40,7 @@ import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearin
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { PAGE_DEFAULT } from "./services/list-page.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
+import { releaseFailureHold } from "./services/self-deploy.js";
 import { RunError, runOriginQuery, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
 import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
@@ -772,9 +773,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "deploy",
     {
       description:
-        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done), history (target by name or id, optional limit, default 10, at most 50: that target's recent deploys newest first, failed and refused ones too, one line each with deploy id, requested time, ref and commit, who asked, ticket and status; use it to answer why a deploy didn't go out, or what was live before). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live.",
+        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done), history (target by name or id, optional limit, default 10, at most 50: that target's recent deploys newest first, failed and refused ones too, one line each with deploy id, requested time, ref and commit, who asked, ticket and status; use it to answer why a deploy didn't go out, or what was live before). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success. A target called staging (listed only when the host's staging lane is on) is different: request it with a ref that names a merged commit (main or a sha on main) and no approval is needed; the host deploys it, runs its smoke checks and you're woken with the result, and you do not report it. server_status shows staging's commit, runner image and each check. Staging has an empty database and no real integrations, so check there only what needs the code alone; anything needing real accounts, production data, the edge or timing is checked live. release_update_hold (notes: why a retry is safe, in plain words for the owner; Boss Man's own company only): after a failed Boss Man server update the next update card is held while the failure is diagnosed (you're woken about it); call this once you know a retry is safe, and the owner gets the card with Deploy recommended and your notes on it. Unreleased, it goes to the owner after 12 hours marked \"cause unknown\".",
       inputSchema: {
-        action: z.enum(["targets", "request", "report", "history"]),
+        action: z.enum(["targets", "request", "report", "history", "release_update_hold"]),
         target: z.string().optional(),
         limit: z.number().int().min(1).max(50).optional(),
         ref: z.string().min(1).max(200).optional(),
@@ -821,6 +822,15 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
               })
               .join("\n"),
           );
+        }
+        if (input.action === "release_update_hold") {
+          // BOS-2554: the self-deploy cards belong to Boss Man's home company (the oldest), as in self-deploy.ts.
+          const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+          if (home?.id !== scope.companyId) return fail("Only Boss Man's own company holds server update cards.");
+          if (!input.notes?.trim()) return fail("Give notes: why a retry is safe, in plain words for the owner (it goes on their card).");
+          const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+          const r = await releaseFailureHold(db, me?.name ?? "an agent", input.notes);
+          return r.released ? text(r.text) : fail(r.text);
         }
         if (input.action === "request") {
           if (!input.target || !input.ref) return fail("Give the target and the ref to deploy.");

@@ -14,7 +14,7 @@ import { record } from "./activity.js";
 import { priorityGroup } from "./priority-group.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, reraiseHeldHandApply, vetOwnerTodoSteps, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
-import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
+import { atWords, leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
 import { allMergeOrder, commitIsLive, liveServerRecord, serverContains, serverHas } from "./go-live-wait.js";
@@ -155,6 +155,40 @@ const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
+
+/**
+ * BOS-2554: after a failed server update the next update card is held while the failure is diagnosed, so the owner
+ * never gets "Deploy (recommended)" beside an agent's card asking for the deploy log. Kept in `settings` (it must
+ * survive a restart and both colours read it). Ended by a later successful deploy, released by an agent with the
+ * deploy tool's release_update_hold, or released to the owner with "cause unknown" wording after FAILURE_HOLD_MS.
+ */
+export const FAILURE_HOLD_KEY = "self_deploy_failure_hold";
+/**
+ * 12 hours: the CEO is woken at once, so a diagnosis normally starts within the hour; the cap covers an owner away
+ * overnight answering a log card, without stalling every update for days if nobody picks the failure up.
+ */
+export const FAILURE_HOLD_MS = 12 * 3_600_000;
+export type FailureHold = { commit: string; result: string; at: string; message: string; released?: { by: string; reason: string; at: string } };
+export type FailureHoldState = "held" | "released" | "timed_out";
+export function failureHoldState(h: FailureHold | null, now = Date.now()): FailureHoldState | null {
+  if (!h) return null;
+  if (h.released) return "released";
+  return now - Date.parse(h.at) >= FAILURE_HOLD_MS ? "timed_out" : "held";
+}
+export async function readFailureHold(db: Db): Promise<FailureHold | null> {
+  const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, FAILURE_HOLD_KEY));
+  const v = row?.value as FailureHold | null | undefined;
+  return v && typeof v.commit === "string" && typeof v.at === "string" ? v : null;
+}
+/** The deploy tool's release_update_hold: the agent who diagnosed the failure says a retry is safe, and why. */
+export async function releaseFailureHold(db: Db, by: string, reason: string): Promise<{ released: boolean; text: string }> {
+  const h = await readFailureHold(db);
+  const state = failureHoldState(h);
+  if (!h || state === "released") return { released: false, text: h ? `The hold after the failed update to ${short(h.commit)} was already released by ${h.released!.by}: ${h.released!.reason}` : "No server update is held: there is no undiagnosed failed update." };
+  const value: FailureHold = { ...h, released: { by, reason: reason.replace(/\s+/g, " ").trim().slice(0, 300), at: new Date().toISOString() } };
+  await db.update(settings).set({ value }).where(eq(settings.key, FAILURE_HOLD_KEY));
+  return { released: true, text: `Released. Within a minute Boss Man offers the owner the next server update card with Deploy recommended, and your reason on it.${state === "timed_out" ? " (It had already gone to the owner as \"cause unknown\"; that card is replaced.)" : ""}` };
+}
 
 export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** BOS-990: the deployer script fingerprints from the host's report; null = no report. */ deployerScript?: () => Promise<{ scriptSha: string; repoSha: string } | null>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; /** Wakes an agent (the CEO) when Boss Man can't tell whether a runner update is needed (BOS-1648). */ wake?: CeoWake; log?: (msg: string) => void }) {
   const dir = deps.dir;
@@ -777,7 +811,19 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
           .slice(0, 10)
           .map((r) => ({ decisionId: r.id, label: r.question.split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 80) }))
       : [];
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(runnerTickets.length ? { tickets: runnerTickets } : {}), ...(requested ? { requested: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
+    // BOS-2554: a server card raised after a failed update says so first. Held (only the owner's own Deploy latest press
+    // gets here): Not now is recommended. Timed out: "cause unknown". Released: the agent's reason a retry is safe.
+    const hold = target === "server" ? await readFailureHold(db) : null;
+    const holdState = failureHoldState(hold);
+    const failedWhen = hold ? `${atWords(new Date(hold.at))}` : "";
+    const holdLead = !hold || !holdState
+      ? ""
+      : holdState === "held"
+        ? `Held: the last update (to ${short(hold.commit)}) failed at ${failedWhen} and is still being looked into. Deploying again now may fail the same way, so Not now is recommended until we tell you a retry is safe. If a card asks you for the deploy log, answer that one first.\n\n`
+        : holdState === "timed_out"
+          ? `Cause unknown: the last update (to ${short(hold.commit)}) failed at ${failedWhen}, and nobody has found out why in ${FAILURE_HOLD_MS / 3_600_000} hours. You can try again. If a card asks you for the deploy log, answer that one first.\n\n`
+          : `The update that failed at ${failedWhen} (to ${short(hold.commit)}) was looked into by ${hold.released!.by}: ${hold.released!.reason}\n\n`;
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(holdState ? { failureHold: holdState } : {}), ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(runnerTickets.length ? { tickets: runnerTickets } : {}), ...(requested ? { requested: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}), ...(doAfter.length ? { doAfter } : {}), ...(urgent ? { urgent } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     // The heading is the card's first paragraph, so the card, its phone push and the CEO's view all lead with it.
     const lead = urgent ? `${urgent.heading}.\n\n` : "";
@@ -789,6 +835,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const carries = carried.length ? ` It includes ${carried.join("; ")}${notNamed > 0 ? `; and ${notNamed} more` : ""}.` : "";
     const question =
       lead +
+      holdLead +
       (target === "runner"
         ? `Update the runners to ${short(commit)}?\n\n${alreadyRun}This rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.${runnerTickets.length ? `\n\nIt also carries ${runnerTickets.map((t) => `"${t.title}"`).join("; ")}. Their only setup step is the runner update above, so they have no card of their own.` : ""}`
         : infra
@@ -804,8 +851,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         kind: "approval",
         question: question + (target === "server" && !infra ? await stagingLine(commit, !!urgent) : ""),
         options,
-        recommendedOption: options[0]!,
-        dedupeKey: `self-deploy:${target}:${commit}${again ? `:${randomBytes(3).toString("hex")}` : ""}`,
+        recommendedOption: holdState === "held" ? NOT_NOW : options[0]!,
+        // BOS-2554: once a hold is released or timed out the commit is often the one whose (answered) card still holds
+        // the plain key, so that card's key would silently drop the offer. Each hold and state gets one key of its own:
+        // the card appears once, and an owner's "Not now" on it still sticks.
+        dedupeKey: `self-deploy:${target}:${commit}${again ? `:${randomBytes(3).toString("hex")}` : hold && (holdState === "released" || holdState === "timed_out") ? `:${holdState}-${Date.parse(hold.at).toString(36)}` : ""}`,
         context: ctx,
       })
       .onConflictDoNothing()
@@ -1195,8 +1245,22 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\n${changedHead}\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
     // BOS-1805: the owner's "Deploy" that left the live commit where it was (refused, failed, switched back, nothing new)
     // is told to the CEO as well, with the host's own reason, so somebody acts on it. The owner has the line above.
+    // BOS-2554: a server update that broke (failed, half-done or switched back) holds the next update card while the
+    // failure is diagnosed. A refusal or "nothing new" broke nothing, so it holds nothing; a later success ends the hold.
+    const broke = s.target === "server" && (s.result === "failed" || s.result === "partial" || s.result === "rolled_back");
+    if (broke) {
+      await putSetting(FAILURE_HOLD_KEY, { commit: s.to_commit, result: s.result, at: new Date().toISOString(), message: s.message.slice(0, 300) } satisfies FailureHold);
+      // A card raised before the failure (during a trial that then switched back) would still say Deploy (recommended).
+      const now = new Date();
+      for (const o of await openFor("server")) await withdrawOpen(o.id, replacedNotice({ commit: s.to_commit, text: `The last update (to ${short(s.to_commit)}) failed, so this card is held while we find out why. A new card follows once a retry is safe. You don't need to do anything.`, now }));
+    } else if (s.target === "server" && s.result === "deployed") await putSetting(FAILURE_HOLD_KEY, null);
+    const holdNote = broke
+      ? ` Boss Man is holding the next server update card while this is diagnosed, so the owner is not offered Deploy again. When you (or whoever diagnoses it) know a retry is safe, call the deploy tool with action release_update_hold and notes saying why, in plain words for the owner. If nobody does within ${FAILURE_HOLD_MS / 3_600_000} hours, the card goes to the owner marked "cause unknown".`
+      : "";
     if (s.target === "server" && d && ctx?.type === "self_deploy" && (s.result !== "deployed" || (!!s.from_commit && s.to_commit === s.from_commit)))
-      await tellCeo(`The owner approved the server update on card ${d.id.slice(0, 8)} (to ${short(ctx.commit)}), but the live server did not change: the host reported "${s.result}": ${s.message} Find out why, tell the owner on the ticket that needed it, and say when to approve it again.`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
+      await tellCeo(`The owner approved the server update on card ${d.id.slice(0, 8)} (to ${short(ctx.commit)}), but the live server did not change: the host reported "${s.result}": ${s.message} Find out why, tell the owner on the ticket that needed it, and say when to approve it again.${holdNote}`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
+    else if (broke)
+      await tellCeo(`A server update (to ${short(s.to_commit)}) ended "${s.result}": ${s.message} Find out why and tell the owner.${holdNote}`).catch((err: Error) => deps.log?.(`self-deploy: telling the CEO failed: ${err.message}`));
     // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
     if (s.target === "server") {
       await putSetting(LAST_SERVER, { result: s.result, from: s.from_commit, to: s.to_commit, ended: s.ended } satisfies LastServer);
@@ -1575,6 +1639,18 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         const liveAt = s?.result === "deployed" && s.to_commit === a.deployed && Number.isFinite(Date.parse(s.ended)) ? new Date(s.ended) : new Date(a.checkedAt);
         for (const d of await openFor("server")) await withdrawOpen(d.id, (steps) => liveNotice({ commit: a.deployed, liveAt, steps, now: new Date() }));
         return woken;
+      }
+      // BOS-2554: while a failed update is undiagnosed no card is raised by itself (the owner's Deploy latest press
+      // still gets one, marked held). A card whose hold wording is out of date (held → released or timed out, or the
+      // hold ended) is replaced, which frees its dedupe key for the card raised just below.
+      const holdState = failureHoldState(await readFailureHold(db));
+      if (holdState === "held") {
+        deps.log?.(`self-deploy: server update for ${short(a.tip)} held; the last update failed and is not diagnosed yet`);
+        return woken;
+      }
+      for (const d of await openFor("server")) {
+        const was = (d.context as SelfDeployContext).failureHold;
+        if (was && was !== holdState) await withdrawOpen(d.id);
       }
       await raise("server", a.tip, a.deployed, a);
       return woken;
