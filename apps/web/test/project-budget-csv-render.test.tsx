@@ -19,10 +19,15 @@ afterAll(async () => {
 
 const out = process.env.BOSSMAN_SCRATCH;
 const LONG = "A really long task title that wraps onto two lines in the list, with a comma, and more words to push it past the column";
-const topTickets = [
+const special = [
   { id: "11111111-1111-4111-8111-111111111111", title: "Add the CSV export", micros: 12_345_678, planMicros: 4_000_000 },
   { id: "22222222-2222-4222-8222-222222222222", title: LONG, micros: 999_999, planMicros: 0 },
   { id: "33333333-3333-4333-8333-333333333333", title: "=Formula start", micros: 5_000, planMicros: 2_500 },
+];
+// 10 tasks (the ticket's criterion), the three special ones first, so the list runs down the page.
+const topTickets = [
+  ...special,
+  ...Array.from({ length: 7 }, (_, i) => ({ id: `9999999${i}-9999-4999-8999-99999999999${i}`, title: `Routine task number ${i + 4}`, micros: 3_000_000 - i * 250_000, planMicros: i % 2 ? 1_000_000 : 0 })),
 ];
 const spend = (rows: typeof topTickets) => ({ monthMicros: 30_000_000, totalMicros: 90_000_000, ticketCostCapMicros: null, monthlyCapMicros: null, monthStart: "2026-11-01T00:00:00.000Z", plan: [], topTickets: rows });
 
@@ -60,6 +65,12 @@ describe.skipIf(!can)("Project spend: Costliest tasks Download CSV (BOS-2543, re
         if (p.touch && p.width < 641) expect(b!.height).toBeGreaterThanOrEqual(44);
         const apart = b!.x + b!.width <= h!.x || h!.x + h!.width <= b!.x || b!.y + b!.height <= h!.y || h!.y + h!.height <= b!.y;
         expect(apart, `button at ${JSON.stringify(b)} overlaps heading ${JSON.stringify(h)}`).toBe(true);
+        // The heading row does not overlap the section above it ("On your subscriptions") either.
+        const above = await funds.locator("section").first().boundingBox();
+        expect(above).not.toBeNull();
+        expect(h!.y, `heading at ${JSON.stringify(h)} overlaps the section above ${JSON.stringify(above)}`).toBeGreaterThanOrEqual(above!.y + above!.height - 1);
+        // The list has 10 tasks (the ticket's criterion), so the page shows all of them.
+        expect(await funds.locator("ol li").count()).toBe(10);
         if (out) {
           mkdirSync(out, { recursive: true });
           await page.screenshot({ path: path.join(out, `project-budget-csv-${p.name}.png`), fullPage: true });
@@ -68,13 +79,15 @@ describe.skipIf(!can)("Project spend: Costliest tasks Download CSV (BOS-2543, re
         if (p === PROFILES[0]) {
           const [dl] = await Promise.all([page.waitForEvent("download"), button.click()]);
           expect(dl.suggestedFilename()).toMatch(/^development-costliest-tasks-\d{4}-\d{2}-\d{2}\.csv$/);
-          expect(readFileSync(await dl.path(), "utf8").split("\r\n")).toEqual([
+          const rows = readFileSync(await dl.path(), "utf8").split("\r\n");
+          expect(rows.slice(0, 4)).toEqual([
             "rank,task,ticket_id,pay_as_you_go_usd,subscriptions_at_list_usd,both_together_usd",
             "1,Add the CSV export,11111111-1111-4111-8111-111111111111,12.35,4.00,16.35",
             `2,"${LONG}",22222222-2222-4222-8222-222222222222,1.00,0.00,1.00`,
             "3,'=Formula start,33333333-3333-4333-8333-333333333333,0.01,0.00,0.01",
-            "",
           ]);
+          expect(rows).toHaveLength(12);
+          expect(rows[11]).toBe("");
         }
       } finally {
         await page.close();
