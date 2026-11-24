@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { OWNER_CONTROLS, OWNER_FIELDS, OWNER_MENU, OWNER_SECTIONS, OWNER_TABS, type OwnerScreen } from "@boss-man/shared";
 import { checkAsk } from "../src/services/decisions.js";
+import { buttonLabels, fieldLabels, shown } from "../src/services/guard-scan.js";
 import { lintOwnerSteps } from "../src/services/steps.js";
 
 // R7 of the owner-card lint (BOS-421, DR-009 L6): a card may only send the owner to a button the app has.
@@ -241,8 +242,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
 // JumpLinks is the "on this page" nav, which holds no controls of its own; HTMLHeadingElement is the focused page
 // title's type in the useRef call.
 const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement", "NoCompany"]);
-/** Components whose `label` prop is a form field's label (rendered as a <label> from the prop). */
-const FIELD_COMPONENTS = new Set(["CheckPicker"]);
+// Field components (CheckPicker) are FIELD_COMPONENTS in src/services/guard-scan.ts, with the label scanner.
 
 /** Entries no <button> text shows, each with where it comes from; the test checks those sources instead. */
 const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
@@ -268,91 +268,8 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   "Server and runner": ["Review and deploy", "Check for updates now", "Cancel queued runner update", "Cancel the update", "Stop making room", "Lift the hold now"],
 };
 
-function skipString(s: string, i: number): number {
-  const q = s[i];
-  for (i++; i < s.length && s[i] !== q; i++) {
-    if (s[i] === "\\") i++;
-    else if (q === "`" && s[i] === "$" && s[i + 1] === "{") i = skipBraces(s, i + 1) - 1;
-  }
-  return i + 1;
-}
-function skipBraces(s: string, i: number): number {
-  let depth = 0;
-  for (; i < s.length; i++) {
-    const c = s[i];
-    if (c === '"' || c === "'" || c === "`") i = skipString(s, i) - 1;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) return i + 1;
-  }
-  return i;
-}
-/** The strings a JSX expression can show: not ones compared against (`tab === "all"`) or given as attributes. */
-function shown(expr: string): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < expr.length; i++) {
-    const c = expr[i];
-    if (c !== '"' && c !== "'" && c !== "`") continue;
-    const e = skipString(expr, i);
-    const before = expr.slice(0, i).trimEnd();
-    const after = expr.slice(e).trimStart();
-    const compared = /[=!]=$/.test(before) || /^[=!]==?/.test(after) || /\b(?:includes|has|startsWith|endsWith)\($/.test(before);
-    if (!compared && !/[\w-]=$/.test(before)) out.push(c === "`" ? expr.slice(i + 1, e - 1).split("${")[0]! : expr.slice(i + 1, e - 1));
-    i = e - 1;
-  }
-  return out;
-}
-/**
- * The text each <button> in a file shows: its JSX text and the strings in its {…} children. A label with a value
- * inside comes out in pieces ("Open", "'s Kanban"); only pieces starting with a capital are labels (the rest are
- * the tail of one, or class names). TypeScript 7 has no JS parser API to borrow, so this is a small scanner that
- * knows JSX braces and strings.
- */
-function buttonLabels(src: string): string[] {
-  return clean(elementTexts(src, "button").flatMap((chunks) => chunks.flat()));
-}
-
-/** The inside of every `<tag …>…</tag>` in a file, as its runs of text: each JSX text run or {…} is one chunk. */
-function elementTexts(src: string, tag: string): string[][][] {
-  const out: string[][][] = [];
-  for (const m of src.matchAll(new RegExp(`<${tag}\\b`, "g"))) {
-    let i = m.index + tag.length + 1;
-    while (i < src.length && src[i] !== ">") i = src[i] === "{" ? skipBraces(src, i) : src[i] === '"' || src[i] === "'" ? skipString(src, i) : i + 1;
-    if (src[i - 1] === "/") continue;
-    const inner = src.slice(i + 1, src.indexOf(`</${tag}>`, i));
-    const chunks: string[][] = [];
-    for (let k = 0; k < inner.length; ) {
-      if (inner[k] === "{") {
-        const e = skipBraces(inner, k);
-        chunks.push(shown(inner.slice(k + 1, e - 1)));
-        k = e;
-      } else if (inner[k] === "<") {
-        // A field's own text stops at its input: the options of a <select> inside a <label> are not its label.
-        if (/^<(?:select|option|textarea)\b/.test(inner.slice(k))) break;
-        while (k < inner.length && inner[k] !== ">") k = inner[k] === "{" ? skipBraces(inner, k) : k + 1;
-        k++;
-      } else {
-        const e = inner.slice(k).search(/[{<]/);
-        const t = inner.slice(k, e < 0 ? undefined : k + e);
-        if (t.trim()) chunks.push([t]);
-        k = e < 0 ? inner.length : k + e;
-      }
-    }
-    out.push(chunks);
-  }
-  return out;
-}
-// Leading and trailing marks aren't part of the name: "▸ Show all", "Saved ✓", "Attaching…", "History (".
-const clean = (pieces: string[]) => pieces.map((p) => p.replace(/\s+/g, " ").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N})]+$/gu, "")).filter((p) => /^\p{Lu}/u.test(p));
-
-/**
- * The label of every form field in a file (BOS-442): the first text of each <label> (the words before its input;
- * a label that is only a variable shows nothing to list), and the `label` prop of a field component (CheckPicker).
- */
-function fieldLabels(src: string): string[] {
-  const out = elementTexts(src, "label").flatMap((chunks) => chunks[0] ?? []);
-  for (const m of src.matchAll(/<(\w+)\b[^>]*?\blabel="([^"]+)"/g)) if (FIELD_COMPONENTS.has(m[1]!)) out.push(m[2]!);
-  return clean(out);
-}
+// The label scanner (buttonLabels, fieldLabels, shown) is in src/services/guard-scan.ts (BOS-2522), shared with the
+// move-to-review check, so the check at the move and this test read a file the same way.
 
 const tsx: string[] = [];
 const walk = (d: string) => {
