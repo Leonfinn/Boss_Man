@@ -1817,6 +1817,16 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
     expect(await c.selfDeploy.deployLatest()).toMatchObject({ decisionId: expect.any(String) });
   });
 
+  it("deployLatest still raises a card when the waiting approved update is for an older commit than the offered tip", async () => {
+    const c = (ctx = await setup());
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await c.available({ tip: C, commits: [{ sha: B, subject: "Add rate limiting" }, { sha: C, subject: "Newer work" }] });
+    expect(await c.selfDeploy.deployLatest()).toMatchObject({ decisionId: expect.any(String) });
+  });
+
   describe("the host deployer's report line", () => {
     const host = (c: Awaited<ReturnType<typeof setup>>, writtenAt: string) =>
       writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt, ownership: [] }));
