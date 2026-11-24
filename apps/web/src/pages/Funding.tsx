@@ -166,6 +166,7 @@ function WhoUsedIt({ s }: { s: FundingStatus }) {
         <span className="muted">Not used in the last 7 days</span>
       ) : (
         <>
+          <span className="muted">Shares are of {w.totalMicros > 0 ? "spend" : "tokens"}.</span>
           {list("Top agents", w.agents, w.agentsOthers)}
           {list("By project", w.projects, w.projectsOthers)}
         </>

@@ -614,14 +614,13 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         .leftJoin(companies, eq(companies.id, sql`coalesce(${costEvents.chargedCompanyId}, ${costEvents.companyId})`))
         .where(where)
         .groupBy(projectKey, projects.name, companies.name);
-      const share = (r: { tokens: number; micros: number }) => {
-        const parts = [totalTokens > 0 ? Number(r.tokens) / totalTokens : null, totalMicros > 0 ? Number(r.micros) / totalMicros : null].filter((x): x is number => x !== null);
-        return parts.length ? Math.max(...parts) : 0;
-      };
+      // One basis for order and share, so the column adds to 100%: spend when the source has any, else tokens.
+      const bySpend = totalMicros > 0;
+      const share = (r: { tokens: number; micros: number }) => (bySpend ? Number(r.micros) / totalMicros : Number(r.tokens) / totalTokens);
       const shape = (rows: Array<{ key: string | null; name: string | null; company?: string | null; tokens: number; micros: number; engaged: boolean }>, unknown: string) => {
         const sorted = rows
           .map((r) => ({ id: r.key, name: r.name ?? unknown, company: r.company ?? null, tokens: Number(r.tokens), costMicros: Number(r.micros), engagement: r.engaged }))
-          .sort((a, b) => b.costMicros - a.costMicros || b.tokens - a.tokens);
+          .sort((a, b) => (bySpend ? b.costMicros - a.costMicros || b.tokens - a.tokens : b.tokens - a.tokens || b.costMicros - a.costMicros));
         const list = sorted.slice(0, top).map((r) => ({ ...r, share: share({ tokens: r.tokens, micros: r.costMicros }) }));
         const rest = sorted.slice(top);
         const others = rest.length ? { tokens: rest.reduce((n, r) => n + r.tokens, 0), costMicros: rest.reduce((n, r) => n + r.costMicros, 0), count: rest.length } : null;

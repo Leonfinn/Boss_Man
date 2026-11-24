@@ -91,6 +91,21 @@ describe("API credit tracking from Boss Man's own runs (spike S3 fallback)", () 
     expect(own).toMatchObject({ company: "Provider Co", tokens: 2100, engagement: false });
   });
 
+  it("uses one basis (spend) for order and share when agents' token and money splits differ, so shares add to 1", async () => {
+    const co = await company("App Co");
+    const src = (await post("/api/funding-sources", { name: "Key", kind: "api_payg", provider: "anthropic" })).json();
+    const a = (await post(`/api/companies/${co}/agents`, { name: "Agent A" })).json().id as string;
+    const b = (await post(`/api/companies/${co}/agents`, { name: "Agent B" })).json().id as string;
+    // A: 90% of tokens, 10% of spend. B: 10% of tokens, 90% of spend.
+    await post("/api/cost-events", { fundingSourceId: src.id, companyId: co, agentId: a, costUsd: 1, inputTokens: 900 });
+    await post("/api/cost-events", { fundingSourceId: src.id, companyId: co, agentId: b, costUsd: 9, inputTokens: 100 });
+    const who = (await get(`/api/funding-sources/${src.id}/status`)).json().whoUsedIt;
+    expect(who.agents.map((r: { name: string }) => r.name)).toEqual(["Agent B", "Agent A"]);
+    expect(who.agents[0].share).toBeCloseTo(0.9, 6);
+    expect(who.agents[1].share).toBeCloseTo(0.1, 6);
+    expect(who.agents.reduce((n: number, r: { share: number }) => n + r.share, 0)).toBeCloseTo(1, 6);
+  });
+
   it("splits the last 7 days by company, biggest first", async () => {
     const appCo = await company("App Co");
     const holiday = await company("HolidayHours");
