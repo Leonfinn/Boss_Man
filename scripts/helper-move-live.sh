@@ -93,7 +93,9 @@ probe_loop() { # until $T/stop exists, one attempt about every half second, one 
 }
 move() { # <label> <version> <launcher digest> <guard digest>; prints the JSON line on stdout, the rest on stderr
   local out
-  out="$(docker exec -i -e MOVE_VERSION="$2" -e MOVE_LAUNCHER="$3" -e MOVE_RUNNER="$RUNNER_DIGEST" -e MOVE_NETGUARD="$4" updater node --input-type=module - < scripts/helper-move-live.mjs 2>"$T/move.$1.err")" || {
+  # The updater runs as uid 1000 with the socket's group (it starts as root only to learn that group). A plain exec would be root with
+  # every capability dropped, which cannot write the uid-1000 state folder (EACCES on /state/state.json.tmp, run 45481019861).
+  out="$(docker exec -i --user "1000:$(stat -c %g "${BOSSMAN_DOCKER_SOCK:-/var/run/docker.sock}")" -e MOVE_VERSION="$2" -e MOVE_LAUNCHER="$3" -e MOVE_RUNNER="$RUNNER_DIGEST" -e MOVE_NETGUARD="$4" updater node --input-type=module - < scripts/helper-move-live.mjs 2>"$T/move.$1.err")" || {
     cat "$T/move.$1.err" >&2; echo "$out" >&2
     # One flat line for the public GitHub notice: the job log can't be read without a login, annotations can (BOS-2528). The updater prints no key or environment.
     # (move runs in a subshell, so the text goes through a file, not a variable.)
