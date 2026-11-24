@@ -77,9 +77,13 @@ describe("chat: find in this conversation (BOS-2411)", { timeout: 45_000 }, () =
     let scrolls = 0;
     const { container } = renderChat();
     await screen.findByText("msg-89");
+    // The scroll to the first match can land after "1 of 3" shows (GitHub failed with 1 here). Count from before typing,
+    // wait for that first scroll, then zero the counter: only a scroll caused by clearing is left to count.
+    Element.prototype.scrollIntoView = () => void scrolls++;
     type("needle");
     await screen.findByText("1 of 3");
-    Element.prototype.scrollIntoView = () => void scrolls++;
+    await waitFor(() => expect(scrolls).toBeGreaterThan(0));
+    scrolls = 0;
     type("");
     await waitFor(() => expect(container.querySelectorAll("mark")).toHaveLength(0));
     expect(screen.queryByText("1 of 3")).toBeNull();
