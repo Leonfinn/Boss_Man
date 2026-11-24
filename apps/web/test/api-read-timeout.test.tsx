@@ -48,7 +48,8 @@ describe("apiOnce: a read that never answers", () => {
     const got = apiOnce<{ ok: number }>("/api/slow-ok");
     await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS * 2);
     await expect(got).resolves.toEqual({ ok: 1 });
-    expect(f).toHaveBeenCalledTimes(1);
+    // A slow answer also makes the server-watch banner probe /api/setup; only this read's own path counts.
+    expect((f.mock.calls as unknown[][]).filter((c) => c[0] === "/api/slow-ok")).toHaveLength(1);
   });
 
   it("does not cut a write short", async () => {
