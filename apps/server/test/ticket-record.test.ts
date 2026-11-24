@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, checkWorkers, costEvents, fundingSources, projects, runners as runnersT, runs, tickets } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, costEvents, fundingSources, projects, runners as runnersT, runs, ticketTransitions, tickets } from "../src/db/schema.js";
 import { eq } from "drizzle-orm";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -106,5 +106,23 @@ describe("ticket checks list (BOS-2371)", () => {
     expect(checks).toHaveLength(50);
     expect(checks[0]!.queuedAt).toBe(new Date(Date.UTC(2026, 10, 20, 12, 50)).toISOString());
     expect(checks.at(-1)!.queuedAt).toBe(new Date(Date.UTC(2026, 10, 20, 12, 1)).toISOString());
+  });
+});
+
+describe("ticket state history (BOS-2419)", () => {
+  it("lists the ticket's transitions oldest first, flags a history that starts mid-way, and 404s an unknown ticket", async () => {
+    const co = ctx.co.company.id;
+    const rows = async () => (await ctx.req("GET", `/api/tickets/${ctx.ticketId}/state-history`)).json() as { complete: boolean; transitions: Array<{ from: string | null; to: string }> };
+    await ctx.db.delete(ticketTransitions).where(eq(ticketTransitions.ticketId, ctx.ticketId));
+    expect(await rows()).toMatchObject({ complete: false, transitions: [] });
+    const base = { companyId: co, ticketId: ctx.ticketId };
+    await ctx.db.insert(ticketTransitions).values({ ...base, fromState: "review", toState: "in_progress", at: new Date(2000) });
+    await ctx.db.insert(ticketTransitions).values({ ...base, fromState: "backlog", toState: "review", at: new Date(1000) });
+    const mid = await rows();
+    expect(mid.complete).toBe(false);
+    expect(mid.transitions.map((t) => t.to)).toEqual(["review", "in_progress"]);
+    await ctx.db.insert(ticketTransitions).values({ ...base, fromState: null, toState: "backlog", at: new Date(500) });
+    expect((await rows()).complete).toBe(true);
+    expect((await ctx.req("GET", `/api/tickets/${crypto.randomUUID()}/state-history`)).statusCode).toBe(404);
   });
 });
