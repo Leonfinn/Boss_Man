@@ -125,6 +125,7 @@ reads:
   - /api/companies/:id/feedback
   - /api/companies/:id/feedback-customers
   - /api/companies/:id/feedback-settings
+  - /api/companies/:id/feedback-summary
   - /api/feedback/:id
   - /api/feedback/unprocessed
   - /api/host-facts

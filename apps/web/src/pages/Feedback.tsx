@@ -5,7 +5,8 @@ import { LoadError } from "../components/LoadError";
 import { figureText } from "@boss-man/shared";
 import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
 import { copyMessage, copyText } from "../clipboard";
-import { usePoll } from "../hooks";
+import { hashQuery, usePoll } from "../hooks";
+import { FEEDBACK_PAGE, feedbackOrderHref, feedbackPageQuery, readFeedbackOrder, waitedText, type FeedbackOrder, type FeedbackSummary } from "../feedback-summary";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { buildCsv, download } from "../csv";
@@ -587,17 +588,18 @@ const fileSafe = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+
 
 const EXPORT_PAGE = 200;
 
-/** The list shows only the newest 50; the export pages back (limit 200, before=oldest seen) so it holds every note of the tab and search. */
-export async function fetchAllNotes(companyId: string, tab: string, search: string): Promise<NoteSummary[]> {
+/** The list shows 50 at a time ("Show older" adds more); the export pages through (limit 200, before= or, oldest first, after=) so it holds every note of the tab and search, in the chosen order. */
+export async function fetchAllNotes(companyId: string, tab: string, search: string, order: FeedbackOrder = "newest"): Promise<NoteSummary[]> {
   const all: NoteSummary[] = [];
   const seen = new Set<string>();
-  let before: string | null = null;
+  let cursor: string | null = null;
+  const oldest = order === "oldest";
   for (let page = 0; page < 500; page++) {
-    const url: string = `/api/companies/${companyId}/feedback?${noteFilter(tab)}&limit=${EXPORT_PAGE}${search ? `&q=${encodeURIComponent(search)}` : ""}${before ? `&before=${encodeURIComponent(before)}` : ""}`;
+    const url: string = `/api/companies/${companyId}/feedback?${noteFilter(tab)}&limit=${EXPORT_PAGE}${search ? `&q=${encodeURIComponent(search)}` : ""}${oldest ? "&order=oldest" : ""}${cursor ? `&${oldest ? "after" : "before"}=${encodeURIComponent(cursor)}` : ""}`;
     const rows: NoteSummary[] = await api<NoteSummary[]>(url);
     for (const r of rows) if (!seen.has(r.id)) (seen.add(r.id), all.push(r));
     if (rows.length < EXPORT_PAGE) break;
-    before = rows[rows.length - 1]!.createdAt;
+    cursor = rows[rows.length - 1]!.createdAt;
   }
   return all;
 }
@@ -610,15 +612,44 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
   const [portal, setPortal] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [order, setOrderState] = useState<FeedbackOrder>(() => (typeof window === "undefined" ? "newest" : readFeedbackOrder(hashQuery())));
+  const setOrder = (o: FeedbackOrder) => {
+    setOrderState(o);
+    window.location.hash = feedbackOrderHref(window.location.hash, o);
+  };
   const list = usePoll(
-    (signal) => (company ? api<NoteSummary[]>(`/api/companies/${company.id}/feedback?${noteFilter(tab)}${search ? `&q=${encodeURIComponent(search)}` : ""}`, { signal }) : Promise.resolve([])),
+    (signal) => (company ? api<NoteSummary[]>(`/api/companies/${company.id}/feedback?${noteFilter(tab)}${search ? `&q=${encodeURIComponent(search)}` : ""}${feedbackPageQuery(order, null)}`, { signal }) : Promise.resolve([])),
     30_000,
-    `fb-${company?.id}-${tab}-${search}`,
+    `fb-${company?.id}-${tab}-${search}-${order}`,
   );
+  // "Show older" / "Show newer": the next page under the first one. A new tab, search or order starts again.
+  const [more, setMore] = useState<{ key: string; rows: NoteSummary[]; done: boolean }>({ key: "", rows: [], done: false });
+  const [moreBusy, setMoreBusy] = useState(false);
+  const listKey = `${company?.id}-${tab}-${search}-${order}`;
+  const extra = more.key === listKey ? more : { key: listKey, rows: [] as NoteSummary[], done: false };
+  const shown = (() => {
+    const seen = new Set<string>();
+    return [...(list.data ?? []), ...extra.rows].filter((n) => !seen.has(n.id) && !!seen.add(n.id));
+  })();
+  const canMore = !!list.data && list.data.length >= FEEDBACK_PAGE && !extra.done;
+  const showMore = async () => {
+    if (!company || !shown.length) return;
+    setMoreBusy(true);
+    try {
+      const url = `/api/companies/${company.id}/feedback?${noteFilter(tab)}${search ? `&q=${encodeURIComponent(search)}` : ""}${feedbackPageQuery(order, shown[shown.length - 1]!.createdAt)}`;
+      const rows = await api<NoteSummary[]>(url);
+      setMore({ key: listKey, rows: [...extra.rows, ...rows], done: rows.length < FEEDBACK_PAGE });
+    } catch {
+      setExportError("Could not load more notes. Try again.");
+    } finally {
+      setMoreBusy(false);
+    }
+  };
+  const summary = usePoll((signal) => (company ? api<FeedbackSummary>(`/api/companies/${company.id}/feedback-summary`, { signal }) : Promise.resolve(null)), 30_000, `fb-summary-${company?.id}`);
   const counts = usePoll((signal) => api<Record<string, number>>("/api/feedback/unprocessed", { signal }), 30_000, "fb-counts");
   const features = usePoll((signal) => (company ? api<ScoredFeatures>(`/api/companies/${company.id}/features`, { signal }) : Promise.resolve(null)), 60_000, `fb-features-${company?.id}`);
-  const open = (id: string | null) => go(id ? `feedback/${company!.id}/${id}` : `feedback/${company!.id}`);
-  const changed = () => (list.reload(), counts.reload(), features.reload());
+  const open = (id: string | null) => go(`${id ? `feedback/${company!.id}/${id}` : `feedback/${company!.id}`}${order === "oldest" ? "?order=oldest" : ""}`);
+  const changed = () => (list.reload(), counts.reload(), features.reload(), summary.reload());
   return (
     <>
       <header className="page-head">
@@ -650,6 +681,29 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                   </button>
                 ))}
               </div>
+              {typeof summary.data?.waiting === "number" && (
+                <p className="muted" data-testid="feedback-summary">
+                  {summary.data.waiting === 0 ? "Nothing waiting" : `${summary.data.waiting} waiting to be triaged`}
+                  {summary.data.oldest && (
+                    <>
+                      {" · oldest waiting "}
+                      {waitedText(summary.data.oldest.createdAt, Date.now())}{" ("}
+                      <a href={`#/feedback/${company.id}/${summary.data.oldest.id}`} onClick={() => setTab("unprocessed")}>
+                        {summary.data.oldest.title.length > 50 ? `${summary.data.oldest.title.slice(0, 50)}…` : summary.data.oldest.title}
+                      </a>
+                      {")"}
+                    </>
+                  )}
+                  {` · this week: ${summary.data.week.portal} from the portal, ${summary.data.week.github} from GitHub, ${summary.data.week.owner} added here`}
+                </p>
+              )}
+              <div className="field" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <label htmlFor="fb-order">Order</label>
+                <select id="fb-order" value={order} onChange={(e) => setOrder(e.target.value === "oldest" ? "oldest" : "newest")}>
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                </select>
+              </div>
               <form
                 role="search"
                 onSubmit={(e) => {
@@ -673,7 +727,7 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                     setExporting(true);
                     setExportError(null);
                     try {
-                      const rows = await fetchAllNotes(company.id, tab, search);
+                      const rows = await fetchAllNotes(company.id, tab, search, order);
                       download(`feedback-${fileSafe(company.name)}-${tab}-${new Date().toISOString().slice(0, 10)}.csv`, notesToCsv(rows));
                     } catch {
                       setExportError("Could not fetch every note. Try again.");
@@ -693,7 +747,7 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
               )}
               {list.data && !list.data.length && <p className="muted">{search ? "Nothing matches." : tab === "unprocessed" ? "Nothing waiting. Add feedback above." : "Nothing here."}</p>}
               <ul className="note-list">
-                {(list.data ?? []).map((n) => (
+                {shown.map((n) => (
                   <li key={n.id}>
                     <button type="button" aria-current={n.id === noteId ? "true" : undefined} onClick={() => open(n.id)}>
                       <span className="note-head">
@@ -719,6 +773,12 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
                   </li>
                 ))}
               </ul>
+              {moreBusy && <Loader label="Loading" size={16} />}
+              {canMore && !moreBusy && (
+                <button type="button" className="btn" onClick={() => void showMore()}>
+                  {order === "oldest" ? "Show newer" : "Show older"}
+                </button>
+              )}
             </section>
             {noteId ? (
               <NotePane key={noteId} id={noteId} companyId={company.id} features={features.data?.features ?? []} onChanged={changed} onClose={() => open(null)} />
