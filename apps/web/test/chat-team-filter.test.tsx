@@ -26,19 +26,28 @@ describe("filterTeam", () => {
     expect(filterTeam(team, "developer", false, role, unread).map((t) => t.name)).toEqual(["Bungle"]);
     expect(filterTeam(team, "", false, role, unread).map((t) => t.name)).toEqual(["Radagast", "Bungle", "Yaffle"]);
   });
-  it("matches the role the list shows, whole: 'qa', 'ceo', 'developer', but not 'dev' or 'man'", () => {
+  it("matches a role word by prefix: 'dev' finds Developer, 'man' finds Manager, 'wo' finds Worker", () => {
     expect(filterTeam(team, "QA", false, role, unread).map((t) => t.name)).toEqual(["Yaffle"]);
     expect(filterTeam(team, "ceo", false, role, unread).map((t) => t.name)).toEqual(["Radagast"]);
-    expect(filterTeam(team, "dev", false, role, unread)).toEqual([]);
-    expect(filterTeam(team, "man", false, role, unread)).toEqual([]);
-    // The label is matched word by word: a multi-word title is found by any of its words whole.
+    expect(filterTeam(team, "dev", false, role, unread).map((t) => t.name)).toEqual(["Bungle"]);
+    // The label is matched word by word: a multi-word title is found by the start of any of its words.
     expect(filterTeam(team, "Developer", false, role, unread).map((t) => t.name)).toEqual(["Bungle"]);
+  });
+  it("'man' finds Manager and 'wo' finds Worker, not a word merely containing them", () => {
+    const wider = [
+      { name: "Phoebe", role: "manager", unread: false },
+      { name: "Zip", role: "worker", unread: false },
+      { name: "Nomad", role: "ceo", unread: false },
+    ];
+    const r = (t: (typeof wider)[number]) => t.role;
+    expect(filterTeam(wider, "man", false, r, unread).map((t) => t.name)).toEqual(["Phoebe"]);
+    expect(filterTeam(wider, "wo", false, r, unread).map((t) => t.name)).toEqual(["Zip"]);
+    expect(filterTeam(wider, "an", false, r, unread)).toEqual([]);
   });
   it("a PA is found by 'pa', though the API stores it as a worker", () => {
     const pa = { name: "Kit", role: "worker", duty: "assistant", unread: false };
     const isPa = (t: typeof pa) => (t.duty === "assistant" ? "PA" : t.role);
     expect(filterTeam([pa], "pa", false, isPa, unread).map((t) => t.name)).toEqual(["Kit"]);
-    expect(filterTeam([pa], "wo", false, isPa, unread)).toEqual([]);
   });
   it("narrows to unread, and combines with the text", () => {
     expect(filterTeam(team, "", true, role, unread).map((t) => t.name)).toEqual(["Bungle", "Yaffle"]);
@@ -82,8 +91,7 @@ describe("Chat team list filter, 5 agents and an open conversation", () => {
     fireEvent.change(box, { target: { value: "worker" } });
     expect(nav().getAllByRole("link")).toHaveLength(4);
     fireEvent.change(box, { target: { value: "wo" } });
-    expect(nav().queryAllByRole("link")).toHaveLength(0);
-    expect(screen.getByText(/No one matches/)).toBeTruthy();
+    expect(nav().getAllByRole("link")).toHaveLength(4);
     fireEvent.change(box, { target: { value: "miles" } });
     expect(screen.getByText(/No one matches/)).toBeTruthy();
     fireEvent.change(box, { target: { value: "" } });

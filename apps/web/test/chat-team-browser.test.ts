@@ -62,7 +62,7 @@ describe.skipIf(!browser || !server)("BOS-2490 Chat team list filter in a real b
       await shot(page, "bos-2490-desktop-1-default");
 
       const box = page.getByRole("searchbox", { name: "Find a teammate" });
-      await box.fill("manager");
+      await box.fill("man");
       await page.waitForFunction(() => document.querySelectorAll(".messenger-list ul li a").length === 1);
       expect(await names(page)).toEqual(["Zippy Manager"]);
       expect(await page.textContent(".messenger-head h2")).toBe("Radagast");

@@ -2,9 +2,10 @@
 // The order is kept and the open conversation is never touched.
 //
 // The role part matches the words a row shows: "worker", "manager", "ceo", "developer", "qa", and "pa" (a PA's
-// row reads "PA" though the API stores it as a worker). They match whole words, so "wo" or "man" finds no one
-// rather than half the team; a name matches anywhere in it. The stored role and the label can differ, so both
-// are checked, and a word the row doesn't show ("worker" for a row that reads "Web Developer") matches nobody.
+// row reads "PA" though the API stores it as a worker). A query matches a role word that starts with it, so "dev"
+// finds Developer and "man" finds Manager; a name matches anywhere in it. The stored role and the label can
+// differ, so both are checked, and a word the row doesn't show ("worker" for a row that reads "Web Developer")
+// matches nobody.
 const ROLE_WORDS: Record<string, string[]> = { ceo: ["ceo"], manager: ["manager"], worker: ["worker"] };
 
 export function filterTeam<T extends { name: string; role: string }>(
@@ -18,7 +19,7 @@ export function filterTeam<T extends { name: string; role: string }>(
   return team.filter((t) => {
     if (unreadOnly && !isUnread(t)) return false;
     if (!q) return true;
-    return t.name.toLowerCase().includes(q) || roleWords(t.role, roleOf(t)).includes(q);
+    return t.name.toLowerCase().includes(q) || roleWords(t.role, roleOf(t)).some((w) => w.startsWith(q));
   });
 }
 
