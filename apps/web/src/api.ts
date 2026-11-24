@@ -314,6 +314,8 @@ export type Ticket = {
   reviewStage?: "awaiting_review" | "merging" | "held" | "checking" | null;
   /** BOS-1906: with reviewStage "checking", where its quick check stands ("running now", "no. 3 in line"). */
   checkLine?: string | null;
+  /** BOS-2435: the git host's build result for a card in Review; null with no git host or no branch. */
+  build?: { state: "passed" | "failed" | "running" | "none" | "unavailable"; failing: string[] } | null;
   /** A reviewer passed it but holds the merge (BOS-808). */
   hold?: ReviewHold | null;
   /** Where an approved ticket's merge is, in plain words ("Waiting for a check slot."). */
