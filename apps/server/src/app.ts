@@ -32,7 +32,7 @@ import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListen
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
-import { serverWaitChecks, updateWaitCountsRun } from "./services/runner-busy.js";
+import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
 import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
@@ -587,6 +587,7 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
     landingMergeIds: () => review.landingMergeIds(),
+    landingEndsAt: async () => (await review.landingWaitFacts()).endsAt,
     // BOS-2058: the owner's wrap-up pressed while a server update waits for a quiet machine belongs to it and lifts with it.
     serverUpdateWaiting: async () => (await deployWait.get())?.phase === "waiting", // `deployWait` is built further down; this only runs on a pass
     tick: () => scheduler.tick(),
@@ -1277,8 +1278,14 @@ export async function buildApp(opts: AppOptions) {
   });
   // BOS-2058: every update wait that is on, for the owner's screens and the CEO's server_status (one list, update-waits.ts).
   const currentUpdateWaits = async () => {
-    const landing = await review.landingWaitFacts().catch(() => ({ since: null, ids: [] as string[] }));
-    return activeWaits(db, { landingSince: landing.since, landingNames: landing.ids.map((id) => id.slice(0, 8)) });
+    const landing = await review.landingWaitFacts().catch(() => ({ since: null, ids: [] as string[], names: [] as string[], endsAt: null }));
+    // BOS-2479: what the drain still waits on, from the same reads as the drain (runner checks only), and the worker's
+    // checks it lets run and does not wait for. A failed read leaves the line as it was (no counts), never a wrong count.
+    const at = new Date();
+    const drain = await Promise.all([runnerBusy(db, true, at), runnerChecks(db, at), workerChecks(db)])
+      .then(([busy, onRunner, onWorker]) => ({ runs: busy.runsTotal, runnerChecks: onRunner, workerChecks: onWorker }))
+      .catch(() => undefined);
+    return activeWaits(db, { landingSince: landing.since, landingNames: landing.names, ...(drain ? { drain } : {}) });
   };
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
   // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.

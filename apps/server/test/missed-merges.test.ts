@@ -185,7 +185,7 @@ describe("a landing that stopped beating doesn't hold the runner swap (BOS-2058)
     // The record is still "running" and "merging", but nothing has beat for a day.
     await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 24 * 60 * 60_000) }).where(eq(tickets.id, t.id));
     expect((await c.review.landingMergesByCompany()).size).toBe(0);
-    expect(await c.review.landingWaitFacts()).toEqual({ since: null, ids: [] });
+    expect(await c.review.landingWaitFacts()).toEqual({ since: null, ids: [], names: [], endsAt: null });
     await c.req("POST", "/api/maintenance/start", {});
     await c.maintenance.step();
     expect(c.recreated).toEqual(["app-co"]); // the swap does not wait for it
@@ -193,25 +193,27 @@ describe("a landing that stopped beating doesn't hold the runner swap (BOS-2058)
   });
 });
 
-describe("a merge whose check is still queued doesn't hold the runner swap (BOS-1954)", () => {
-  it("the swap goes ahead while the check waits for the hold; a merge past its check is still waited for", async () => {
+// BOS-1954 (19 Nov 22:13) dropped a "merging" landing whose merge check was queued; BOS-2479 replaced that exception with
+// one rule: only the push call counts. A merge waiting for its check, a train seat or GitHub CI is not in a push call, so it
+// never counts (landing-wait-pushing.test.ts); a push call under way counts whatever the check queue holds.
+describe("only a push under way holds the runner swap (BOS-1954, BOS-2479)", () => {
+  it("a push in flight is waited for even with a merge check row queued for the ticket, and stops counting when it ends", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Fix the other thing");
     c.setHoldPush(true);
     await c.review.startLanding(t.id, "Sam", null, { skipChecks: true });
     await until(() => c.heldPush.length > 0, "the merge push");
-    // The CI-gated path marks a merge "merging" before its check is queued; the update holds that check, so waiting for the
-    // merge would wait for the swap that waits for it (22:13 to 22:46 on 19 Nov).
-    const [job] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t.id, kind: "merge", scope: "full", commit: sha("b"), tree: "t1", state: "queued" }).returning();
-    expect((await c.review.landingMergesByCompany()).size).toBe(0);
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t.id, kind: "merge", scope: "full", commit: sha("b"), tree: "t1", state: "queued" });
+    expect((await c.review.landingMergesByCompany()).get(c.company.id)).toBe(1);
+    // The Merges tab shows that push in Running now, so the banner's "being pushed" always has a row to match.
+    expect(c.review.runningMerges().find((m) => m.ticketId === t.id)?.pushingSince).toEqual(expect.any(String));
     await c.req("POST", "/api/maintenance/start", {});
     await c.maintenance.step();
-    expect(c.recreated).toEqual(["app-co"]);
-    // Past its check (the job ended), the same merge is a push in flight and is counted again.
-    await c.db.update(checkJobs).set({ state: "passed" }).where(eq(checkJobs.id, job!.id));
-    expect((await c.review.landingMergesByCompany()).get(c.company.id)).toBe(1);
+    expect(c.recreated).toEqual([]);
     c.heldPush.shift()!();
     await until(async () => !(await c.review.landingMergesByCompany()).size, "the landing to end");
+    await c.maintenance.step();
+    expect(c.recreated).toEqual(["app-co"]);
   });
 });
 
@@ -238,6 +240,10 @@ describe("what holds the swap is named, and chat keeps answering until the swap 
     expect(st).toMatchObject({ phase: "waiting", merges: 1, chatOpen: true, unknownWait: false, expectedFinishAt: null, overdue: false });
     expect(st.mergesList).toHaveLength(1);
     expect(st.mergesList[0]!.ticket).toMatch(/-\d+$/); // named by its ticket reference
+    // BOS-2479: the latest go-ahead is given (the drain's own end here, later than the push's 20-minute cap); no worker checks.
+    const extra = st as unknown as { goAheadAt: string | null; workerChecksList: unknown[] };
+    expect(Date.parse(extra.goAheadAt!)).toBeGreaterThan(Date.now());
+    expect(extra.workerChecksList).toEqual([]);
     // Chat is answered although no agent run or check is going: the old code held it (wake stayed queued "update pending").
     expect(await chatStarts(c)).toBe(1);
     // Past the hold's deadline it is running late, still named, still answering.

@@ -85,6 +85,11 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
   // a passed check ("push"). It holds no check slot then, so the Merges tab, mergeState and server_status read this one
   // marker for their words. shortcut: in memory like `landings`; the turns it describes are in memory too (DR-026).
   const turnWaits = new Map<string, TurnWait>();
+  // BOS-2479: a merge whose call that can push to main is going (merge-rounds.ts whilePushing): ticket -> when that call
+  // began. The one thing a runner swap waits on for a merge (merge-status.ts landingMergeIds); set from the push call
+  // until the landing ends (land()'s `finally`), so a merged one is held until its record is written (BOS-1645).
+  // shortcut: in memory like `landings`, lost on restart, harmless because a restart ends every merge (DR-014).
+  const pushing = new Map<string, number>();
   // BOS-2361: a turn promoted from the line, or released by server_status past its cap, writes its merge-line row here.
   // The ticket is looked up in this server's database; a ticket it doesn't hold (another ctx's) is skipped.
   landingTurns.onEvent = (e) => {
@@ -698,6 +703,7 @@ export function reviewContext(db: Db, deps: ReviewDeps) {
     phases,
     ciWaits,
     turnWaits,
+    pushing,
     ciPassedTrees,
     ciCardWaiting,
     ciTiming,

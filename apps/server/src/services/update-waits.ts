@@ -79,15 +79,18 @@ export const WAIT_RULES: Record<WaitKind, WaitRule> = {
 /** BOS-2058: a merge landing counts as "being pushed" for at most this long. Past it the swap goes ahead (DR-014: a restart fails an in-flight merge at once, and the gate retries it). */
 export const LANDING_END_MS = WAIT_RULES["runner-landing"].endMin * 60_000;
 /**
- * Which "merging" landings a runner swap still waits on, before the heartbeat test (review.ts landingMergeIds). Dropped:
- * a landing waiting for GitHub CI on its merge copy (it has pushed nothing to main and keeps its beat fresh while it polls:
- * the 20 Nov 11:44 hold, BOS-1991), and one past LANDING_END_MS. A landing with an unknown start is kept.
+ * Which running landings a runner swap still waits on, before the heartbeat test (merge-status.ts landingMergeIds).
+ * BOS-2479: one positive rule. A landing counts only while its call that can push to main is going (`pushingSince`, set by
+ * merge-rounds.ts whilePushing), and for at most LANDING_END_MS from that call's start. Everything before the push (a train
+ * seat, a landing turn, a check slot, the check, GitHub CI) is not counted: the swap's own hold can stall each of those, so
+ * waiting for them made the swap wait on a merge that waited on the swap. This replaces the list of exceptions that grew one
+ * at a time: GitHub CI (BOS-1991, 20 Nov 11:44), a queued merge check (BOS-1954, 19 Nov 22:13), and the train-seat wait
+ * none of them caught (24 Nov 10:11 BOS-2408; 17:22 BOS-2484 and BOS-2521).
  */
-export function landingsThatCount(ids: string[], facts: { ciWaiting: (id: string) => boolean; startedMs: (id: string) => number; now: number }): string[] {
+export function landingsThatCount(ids: string[], facts: { pushingSince: (id: string) => number | undefined; now: number }): string[] {
   return ids.filter((id) => {
-    if (facts.ciWaiting(id)) return false;
-    const started = facts.startedMs(id);
-    return !(Number.isFinite(started) && facts.now - started > LANDING_END_MS);
+    const since = facts.pushingSince(id);
+    return since !== undefined && !(facts.now - since > LANDING_END_MS);
   });
 }
 
@@ -165,11 +168,40 @@ export function describeWait(kind: WaitKind, since: string, detail?: string, end
 type DeployWaitRow = { phase?: string; approvedAt?: string; sentAt?: string; windowUntil?: string; handoverSince?: string; quiet?: { why?: string[] } };
 type HoldRow = { kind?: string; since?: string; deadline?: string; swapWhenDoneAt?: string; force?: boolean; ignoreChecks?: boolean; swapWhenDone?: boolean; wrapSince?: string; forUpdate?: string; settleSince?: string; launcherDownSince?: string };
 
+/** A running check as the drain's words name it: its ticket reference and what kind of check it is. */
+export type NamedCheck = { ticket: string | null; kind: string; scope: string };
+/**
+ * BOS-2479: what the runner drain waits on now, from the same reads the drain itself uses (runner-busy.ts runnerBusy with
+ * onRunnerOnly, runnerChecks), plus the check-worker checks it lets run and does not wait for (BOS-2108).
+ */
+export type DrainFacts = { runs: number; runnerChecks: NamedCheck[]; workerChecks: NamedCheck[] };
+
+const checkWord = (c: NamedCheck) => (c.kind === "merge" ? "merge check" : c.scope === "full" ? "full check" : c.scope === "quick" ? "quick check" : "check");
+
+/** "2 quick checks: BOS-2456, BOS-2468; 1 merge check: BOS-2408", grouped by kind in first-seen order. */
+export function namedChecksText(checks: NamedCheck[]): string {
+  const groups = new Map<string, string[]>(); // not state: local to this call
+  for (const c of checks) groups.set(checkWord(c), [...(groups.get(checkWord(c)) ?? []), c.ticket ?? "no ticket"]);
+  return [...groups].map(([word, tickets]) => `${tickets.length} ${word}${tickets.length === 1 ? "" : "s"}: ${tickets.join(", ")}`).join("; ");
+}
+
+/**
+ * BOS-2479: the drain line's detail. On 24 Nov the line always read "running agents and checks to finish", with no counts,
+ * while the drain was waiting on nothing of its own, and the CEO read the two quick checks running on a check worker as what
+ * it waited for. It now says what is left (with counts and tickets), says plainly when nothing is, and names the worker's
+ * checks as not waited for.
+ */
+export function drainDetail(d: DrainFacts, otherWaits: boolean): string {
+  const left = [...(d.runs > 0 ? [`${d.runs} agent run${d.runs === 1 ? "" : "s"}`] : []), ...(d.runnerChecks.length ? [namedChecksText(d.runnerChecks)] : [])];
+  const own = left.length ? left.join("; ") : otherWaits ? "nothing left of its own; it now waits only for the waits below" : "nothing left; the swap happens on the next pass";
+  return d.workerChecks.length ? `${own}. Not waited for: ${namedChecksText(d.workerChecks)} on a check worker` : own;
+}
+
 /**
  * Every wait that is on now, from the rows that exist today (`deploy_wait`, `maintenance`) plus the live landing ids
  * the runner swap waits on. No table of its own: a restart keeps every `since`.
  */
-export async function activeWaits(db: Db, opts: { landingSince?: string | null; landingNames?: string[] } = {}): Promise<ActiveWait[]> {
+export async function activeWaits(db: Db, opts: { landingSince?: string | null; landingNames?: string[]; drain?: DrainFacts } = {}): Promise<ActiveWait[]> {
   const rows = await db.select().from(settings);
   const deploy = rows.find((r) => r.key === DEPLOY_WAIT_KEY)?.value as DeployWaitRow | undefined;
   const hold = rows.find((r) => r.key === "maintenance")?.value as HoldRow | undefined;
@@ -187,7 +219,10 @@ export async function activeWaits(db: Db, opts: { landingSince?: string | null; 
       // being pushed is left, on its own end.
       const goAt = drainEndsAt({ ...hold, since: hold.since }).toISOString();
       const kind = runnerHoldWait(hold);
-      out.push(kind === "owner-force" && hold.force ? describeWait(kind, hold.since) : describeWait(kind, hold.since, undefined, goAt));
+      // BOS-2479: the plain drain says what it still waits on; "other waits" are the rows pushed after it.
+      const others = !!opts.landingSince || !!hold.settleSince || !!hold.launcherDownSince;
+      const detail = kind === "runner-drain" && opts.drain ? drainDetail(opts.drain, others) : undefined;
+      out.push(kind === "owner-force" && hold.force ? describeWait(kind, hold.since) : describeWait(kind, hold.since, detail, goAt));
       if (hold.settleSince) out.push(describeWait("runner-settle", hold.settleSince));
       if (hold.launcherDownSince) out.push(describeWait("runner-launcher", hold.launcherDownSince));
     }

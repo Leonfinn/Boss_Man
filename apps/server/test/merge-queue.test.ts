@@ -409,6 +409,20 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(view.running[0]!.minutes).toBeGreaterThanOrEqual(15);
     });
 
+    // BOS-2479: on 24 Nov 17:22 the update banner named merges "being pushed" that the Merges tab didn't list. A push under way
+    // holds no slot but is what the update waits for, so it is in Running now; a landing waiting for a train seat is not.
+    it("lists a push to main under way in Running now although it holds no slot; a landing not pushing stays out", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const pushedAt = new Date(Date.now() - 20_000).toISOString();
+      const landing = { ticketId: id, startedAt: new Date(Date.now() - 10 * 60_000).toISOString(), startedBy: "the merge gate", phase: "merging" as const };
+      const view = await svc(c, { runningMerges: () => [{ ...landing, pushingSince: pushedAt }], runningChecks: async () => [] }).get(c.company.id);
+      expect(view.running.map((r) => r.ticketId)).toEqual([id]);
+      expect(view.running[0]!.statusLine).toMatchObject({ step: "pushing to main", since: pushedAt });
+      const seat = await svc(c, { runningMerges: () => [landing], runningChecks: async () => [] }).get(c.company.id);
+      expect(seat.running).toEqual([]);
+    });
+
     // BOS-1942: where a running merge check runs comes from its check job, and the server's host name rides with the view.
     it("carries where each running merge check runs, and the server's host name", async () => {
       const c = (ctx = await setup());

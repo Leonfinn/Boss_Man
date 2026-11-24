@@ -23,8 +23,28 @@ import type { MergeAttempt } from "./merge-attempt.js";
 import { COVERED_WHY, type CiStepParts, type Early } from "./merge-ci-step.js";
 import type { CiOutcome, CiStop } from "./ci-publish.js";
 
+/**
+ * BOS-2479: marks the merge as pushing for the length of a runner call that can push to main, the only time a runner swap
+ * waits for it (merge-status.ts landingMergeIds). "merging" is set at the start of every round, before a train seat, a
+ * landing turn, a check slot or GitHub CI, all of which an update hold can stall: on 24 Nov (10:11, BOS-2408) and again at
+ * 17:22 (BOS-2484, BOS-2521) the swap waited 20 minutes for merges that were only waiting for a train seat. A call that
+ * did not merge (main moved, a refusal, an error) stops counting at once; a merged one counts until land() ends (its
+ * `finally` clears it), so the swap never falls between the push and its record (BOS-1645).
+ */
+export async function markPushing<R extends { status: string }>(pushing: Map<string, number>, ticketId: string, push: () => Promise<R>): Promise<R> {
+  pushing.set(ticketId, Date.now());
+  let merged = false;
+  try {
+    const r = await push();
+    merged = r.status === "merged";
+    return r;
+  } finally {
+    if (!merged) pushing.delete(ticketId);
+  }
+}
+
 export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAttempt, c: CiStepParts) {
-  const { db, deps, gate, queue, phases, clashOnMain, namedTickets, prTarget, mergeCarry, mergeRetarget, mergeTurnMinutes, holdForWaits, refuseIfHeld, turnWaits } = ctx;
+  const { db, deps, gate, queue, phases, clashOnMain, namedTickets, prTarget, mergeCarry, mergeRetarget, mergeTurnMinutes, holdForWaits, refuseIfHeld, turnWaits, pushing } = ctx;
   const { t, ticketId, opts, runner, repoUrl, defaultBranch, landing, gitHost, gitApiBase, touch, inReview, leftReview, whileActive, askMerge, checks, combinedCommand, named, kindOf, timedCheck, checkPrio, serverChecks, checkMerged, ci } = a;
   const { publishAndWait, ciVerdict, alongsideCi, legacyChecks, ciCovered, stopWhy } = c;
   // A pull request: the host must be known and reachable before anything is pushed (R59).
@@ -52,7 +72,8 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
   // base / expectBase only reach a runner that announced "merge-base" (the train checks that before it runs).
   // carryFrom (BOS-1820) only reaches a runner that announced "merge-refresh" (ciRefreshOn checks that).
   const prepare = (base?: string, carryFrom?: { commit: string; tree: string }) => askMerge((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare", ...(base ? { base } : {}), ...(carryFrom ? { carryFrom } : {}) }), MERGE_WAIT_MS);
-  const finish = (prep: Prepared, expectBase?: string, carry?: boolean) => askMerge((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "finish", commit: prep.commit, tree: prep.tree, ...(expectBase ? { expectBase } : {}), ...(carry ? { carry: true } : {}) }), MERGE_WAIT_MS);
+  const whilePushing = <R extends { status: string }>(push: () => Promise<R>) => markPushing(pushing, ticketId, push);
+  const finish = (prep: Prepared, expectBase?: string, carry?: boolean) => whilePushing(() => askMerge((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "finish", commit: prep.commit, tree: prep.tree, ...(expectBase ? { expectBase } : {}), ...(carry ? { carry: true } : {}) }), MERGE_WAIT_MS));
   // BOS-1762: carry only to a runner that announced "merge-carry" (an older one's zod would drop it), and only while the
   // owner's switch is on. Read once per attempt.
   const carryOn = deps.runners.can(runner.id, "merge-carry") && (await mergeCarry());
@@ -432,11 +453,13 @@ export async function mergeRounds(this: ReviewSelf, ctx: ReviewCtx, a: MergeAtte
       (checkMerged
         ? (w: () => Promise<MergeResult>) =>
             timedCheck(checks.map(named).join(" && "), "merged", (x) => gate.run(checkPrio, false, x), (r) => (r.status === "merged" ? true : r.status === "check_failed" ? checkVerdict(r.result) : null), w)
-        : (w: () => Promise<MergeResult>) => w())(() => askMerge(
+        : (w: () => Promise<MergeResult>) => w())(() => whilePushing(() => askMerge(
         (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: gateMergeMessage(t.title, ticketId), ...(checkMerged ? { checks } : {}), ...(expectTree ? { expectTree } : {}) }),
         // The runner may check up to three merged results, one after another.
         checkMerged ? MERGE_WAIT_MS + 3 * checks.length * VERIFY_ASK_TIMEOUT_MS : MERGE_WAIT_MS,
-      )),
+        // BOS-2479: one call that checks (when asked) and pushes. It starts only once the gate gave it a check slot, which
+        // an update hold doesn't, so it is runner work under way, never a wait the hold itself causes.
+      ))),
     );
   }
   /**

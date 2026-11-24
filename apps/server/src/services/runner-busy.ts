@@ -1,7 +1,7 @@
 // What keeps a runner busy (BOS-1471): agent work runs plus running check jobs. One function for both readers: the
 // runner drain (maintenance.ts: a swap waits for a company that is busy) and the quiet-host wait of a server update
 // (deploy-wait.ts, BOS-420). A swap that only looked at agent runs killed merge checks that were still going.
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { checkJobs, runs } from "../db/schema.js";
 import { DEFAULT_NO_OUTPUT_MINUTES } from "./check-queue.js";
@@ -96,6 +96,22 @@ export async function runnerBusy(db: Db, onRunnerOnly = false, at: Date = new Da
 
 export type RunnerCheck = { companyId: string; ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
 
+/** The check job's ticket reference ("BOS-12"), or null without a ticket number. */
+const jobTicketRef = () => sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${checkJobs.ticketId})`;
+
+/**
+ * BOS-2479: the running checks on a separate check worker. The runner drain lets a worker start quick checks and never
+ * waits for them (BOS-2108: swapping a runner doesn't touch the worker), so the banner and server_status name them as
+ * "not waited for", which is what the owner saw running on 24 Nov while the update waited for something else.
+ */
+export async function workerChecks(db: Db): Promise<Array<{ companyId: string; ticket: string | null; kind: string; scope: string }>> {
+  return db
+    .select({ companyId: checkJobs.companyId, ticket: jobTicketRef(), kind: checkJobs.kind, scope: checkJobs.scope })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.state, "running"), isNotNull(checkJobs.workerId)))
+    .orderBy(checkJobs.startedAt);
+}
+
 /**
  * The checks a runner swap waits on, for the banner (BOS-1600): which ticket, what kind, since when, and how long the
  * same kind and scope usually takes (the mean of the last five that passed; null with none). Only checks on a runner.
@@ -107,7 +123,7 @@ export async function runnerChecks(db: Db, at: Date): Promise<RunnerCheck[]> {
       kind: checkJobs.kind,
       scope: checkJobs.scope,
       startedAt: checkJobs.startedAt,
-      ticket: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${checkJobs.ticketId})`,
+      ticket: jobTicketRef(),
     })
     .from(checkJobs)
     .where(and(eq(checkJobs.state, "running"), isNull(checkJobs.workerId), liveOnRunner(at)))

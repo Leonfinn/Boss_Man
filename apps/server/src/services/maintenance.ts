@@ -12,7 +12,7 @@ import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, STOP_AND_UP
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 import { untrusted } from "@boss-man/shared";
-import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, type RunnerCheck } from "./runner-busy.js";
+import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, workerChecks, type RunnerCheck } from "./runner-busy.js";
 import { updateHoldHistory } from "./update-hold-history.js";
 import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
@@ -263,6 +263,8 @@ export type MaintenanceDeps = {
   landingMerges?: () => Promise<Map<string, number>>;
   /** BOS-1951: the same merges as ticket ids, so the banner can name them. */
   landingMergeIds?: () => Promise<string[]>;
+  /** BOS-2479: when the last counted push stops holding the swap at the latest (null when none), for the banner's go-ahead time. */
+  landingEndsAt?: () => Promise<string | null>;
   /** BOS-2058: a server update is waiting for a quiet machine right now (a wrap-up pressed then belongs to it, and lifts with it). */
   serverUpdateWaiting?: () => Promise<boolean>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
@@ -694,7 +696,14 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const forecast = h.kind === "building" ? { phase: "waiting" as const, expectedFinishAt: null, overdue: false } : drainForecast({ runs: runsTotal, checks: checksList, deadline: h.deadline, now: now(), merges: mergesN, unknownWait: unknown });
       // BOS-2404: the chat is open through every hold; it waits only while a runner is being recreated and not back yet.
       const swapUntil = await swappingUntil(h);
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: !swapUntil, chatBackBy: swapUntil?.toISOString() ?? null, blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, unknownWait: unknown, last };
+      // BOS-2479: the checks on a check worker, which the drain lets run and never waits for (BOS-2108), named so the owner
+      // doesn't read them as what the update waits on (24 Nov 10:24). And the latest time it goes ahead: the drain's own end,
+      // or the end of the last push being waited for, if later. Not for a wrap-up or a build: neither swaps on a timer.
+      const swaps = h.kind !== "wrapup" && h.kind !== "building";
+      const workerChecksList = swaps ? (await workerChecks(db)).map(({ ticket, kind, scope }) => ({ ticket, kind, scope })) : [];
+      const landingEnd = swaps && mergesN > 0 && deps.landingEndsAt ? await deps.landingEndsAt().catch(() => null) : null;
+      const goAheadAt = swaps ? new Date(Math.max(drainGoAheadAt(h).getTime(), landingEnd ? Date.parse(landingEnd) : 0)).toISOString() : null;
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, ...forecast, runs: runsTotal, companies: active.size, chatOpen: !swapUntil, chatBackBy: swapUntil?.toISOString() ?? null, blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, merges: mergesN, mergesList, workerChecksList, goAheadAt, unknownWait: unknown, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows

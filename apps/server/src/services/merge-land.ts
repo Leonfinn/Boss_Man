@@ -319,6 +319,8 @@ export async function land(this: ReviewSelf, ctx: ReviewCtx, ticketId: string, r
     // Whoever approved still hears why, as before.
     throw err;
   } finally {
+    // BOS-2479: the landing is over (merged and recorded, or not): its push no longer holds a runner swap.
+    ctx.pushing.delete(ticketId);
     // BOS-1860: the retry is over, whichever way it ended: the note no longer says "retrying". A card's own flag stays.
     if (gitRetried) await setGitNote(ticketId, null, [GIT_RETRY_NOTE]).catch(() => undefined);
   }
