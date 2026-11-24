@@ -12,7 +12,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { priorityGroup } from "./priority-group.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, vetOwnerTodoSteps, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
@@ -1380,7 +1380,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (open) {
       // Already raised: only refresh its steps if the recorded folders or host name changed since.
       const ctx = open.context as Extract<DecisionContext, { type: "owner_todo" }>;
-      if (JSON.stringify(ctx.steps) !== JSON.stringify(c.steps)) await db.update(decisions).set({ context: { ...ctx, steps: c.steps, check: c.check, rollback: c.rollback } }).where(eq(decisions.id, open.id));
+      if (JSON.stringify(ctx.steps) !== JSON.stringify(c.steps)) {
+        // BOS-2336: the refreshed steps pass the same card check as a new card; refused, the open card keeps its old steps.
+        const [card] = await db.select({ question: decisions.question, options: decisions.options }).from(decisions).where(eq(decisions.id, open.id));
+        const checked = await vetOwnerTodoSteps(db, { companyId, key: DEPLOYER_SCRIPT_CARD, question: card?.question ?? "", steps: c.steps, options: (card?.options as string[] | undefined) ?? [] });
+        if (checked) await db.update(decisions).set({ context: { ...ctx, steps: checked, check: c.check, rollback: c.rollback } }).where(eq(decisions.id, open.id));
+      }
       return;
     }
     const question = "Your host's deployer script is older than the running version. Boss Man's fixes to the deployer reach your host only when you copy the script in, and the host's copy is "
