@@ -37,6 +37,30 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - In Settings → Tools → Deploy targets, each target's row shows its newest deploy when that failed, was refused, is waiting for your approval or is running (for example "Latest: failed" and when), not only inside the Deploys fold.
 - The Dashboard shows "Oldest block" with the ticket and how long it has been blocked, linking to the ticket that has waited longest. It only shows when something is blocked.
 - Chat keeps answering while Boss Man or the runners update. It pauses only while a runner is actually being swapped, usually under a minute, and says by when it will answer again.
+- Download CSV buttons on more lists: Engagements (following the search and state filter), Permission rules (with each rule's use in the last 7 and 30 days), a deploy target's deploy history in Settings → Tools and deploys → Deploy targets (following the status filter), the Projects list (each project's summary figures, in the sort you chose), and each funding source's "Last 8 weeks" fold in Settings → Funding.
+- The Scrum Master log has a Download CSV button for the entries shown and an "Undone only" switch.
+- On the Agents page, each agent's 30-day record also shows how many runs it had and how many failed, so an agent that keeps failing stands out. "N failed" opens the Runs page filtered to its failed runs.
+- The Agents page has a "Team record, last 30 days" fold: every agent's record in one table, sortable by any column. The sort is kept in the link.
+- The Runs page has a "Why runs started, last 7 days" fold with the runs and cost for each reason, and the finished list can be filtered by reason.
+- A project's budget shows a forecast: "At this pace: about $X by the end of the month", with the limit and whether it stays under it or the day it reaches it. In the first 2 days of the month it says it is too early for a forecast.
+- Settings → Server and runner → Updates → Server health has a "Database size, last 14 days" fold with each day's size and change. A day that grew by more than 10% is marked.
+- In Decisions → Answered, each card says how long it waited for your answer (for example "answered after 3 h"), with a summary line: how many, the middle wait and the slowest kind. The Download CSV has a "Waited (minutes)" column.
+- Settings → Watchdog can test its limits against the past 48 hours, 7 days or 14 days, shows a count for each kind of problem and how many cleared by themselves, and can hide the ones that cleared by themselves.
+- On the Board, a card that other open cards wait on says "N waiting on this" (hover to see which). A "Holding others up" filter shows only those cards and is kept in the link, and the Download CSV has a "Waiting on this" column.
+- The Features page has a "Last moved" column and marks a part-done feature "Stalled" when nothing has moved for over 3 days. You can show stalled features only and sort by last moved.
+- The Wiki has a "Not changed in 30 days" list beside "Recently changed": the stalest pages first, with how long since their last change and who made it.
+- Search results show each ticket's state (such as In progress, Done or Cancelled), and the Search page has an "Open tickets only" switch that is kept in the link.
+- A run's page has "Find in this run" to search its transcript, with a match count and next and previous, and a "Show" filter for everything, messages, tool calls or problems.
+- Each message in a ticket conversation has a "Copy link" button. Opening the link scrolls to that message and highlights it, loading older messages if needed.
+- On the Merge queue's Quick checks tab, waiting checks are numbered after the running ones, so the last number matches the count on the tab.
+- The Board loads fast again. It had been waiting for GitHub about every card before showing anything; build results now fill in on the next refresh.
+- The Board layout is repaired: lane headers no longer squash or split "oldest 3 d", and the card footer no longer covers the agent's picture.
+- The Dashboard's "Oldest block" line is laid out properly, and the ages in Board lane headers stay on one line.
+- The merge banner's time to clear is more accurate and now gives a clock time ("the last one expected by about HH:MM"), or says "no estimate yet" when there is too little to go on.
+- Settings → Server and runner → This server → This host names each container that is unhealthy or restarting and each fact the host has not reported, and no longer counts a container that is still starting after a runner swap.
+- A wiki page's header says when it was created and by whom, as well as when it last changed and by whom. History shows how many versions there are and how many people edited the page.
+- The Notifications page groups notices by day ("Today", "Yesterday", then the date), shows each day's unread count, and has "Mark this day read".
+- In Settings → Server and runner → Updates, "Deploy to staging" has a help line saying it is optional, that agents deploy to staging themselves, and when you might press it.
 
 ## 23 November 2026
 
