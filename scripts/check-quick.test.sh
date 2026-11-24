@@ -678,12 +678,14 @@ run 0 "squeeze: no test file" env
 grep -q "^check-quick: squeeze (report only): no new or changed test file to run" "$t/out" || fail "squeeze none: $(cat "$t/out")"
 notlogged "squeeze " "squeeze none"
 # Passing files; the runner's tests and the skip list's file are left out; a failing file is a report line, the run still exits 0.
-commit apps/server/test/ok.test.ts apps/server/test/fails.test.ts apps/runner/test/r.test.ts apps/server/test/hot-path-budget.test.ts
+skipped_file="$(sed -e 's/[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' "$here/squeeze-skip.txt" | head -n 1)"
+[ -n "$skipped_file" ] || fail "squeeze-skip.txt lists no file"
+commit apps/server/test/ok.test.ts apps/server/test/fails.test.ts apps/runner/test/r.test.ts "$skipped_file"
 run 0 "squeeze: report only" env
 logged "squeeze apps/server/test/ok.test.ts" "squeeze"
 logged "squeeze apps/server/test/fails.test.ts" "squeeze"
 notlogged "squeeze apps/runner/test/r.test.ts" "squeeze runner"
-notlogged "squeeze apps/server/test/hot-path-budget.test.ts" "squeeze skip list"
+notlogged "squeeze $skipped_file" "squeeze skip list"
 grep -q "^SQUEEZE  pass: apps/server/test/ok.test.ts" "$t/out" || fail "squeeze pass line: $(cat "$t/out")"
 grep -q "^SQUEEZE  FAILED on a slow, busy CPU (report only, does not fail this check): apps/server/test/fails.test.ts" "$t/out" || fail "squeeze fail line: $(cat "$t/out")"
 grep -q "AssertionError: too slow" "$t/out" || fail "squeeze fail output not shown"
