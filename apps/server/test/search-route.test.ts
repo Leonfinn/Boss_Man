@@ -204,6 +204,9 @@ describe("search route (BOS-2192)", () => {
     expect(heron.feedback[0]!.title).toMatch(/^A call/);
     const only = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?q=dark&kind=feedback&limit=5`, headers: { cookie } });
     expect((only.json() as SearchResults).feedback).toHaveLength(1);
+    // The since filter works on a note's creation date: nothing was made after tomorrow.
+    const later = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?q=dark&since=${encodeURIComponent(new Date(Date.now() + 86_400_000).toISOString())}`, headers: { cookie } });
+    expect((later.json() as SearchResults).counts.feedback).toBe(0);
   });
 
   it("caps each group at 8", async () => {
