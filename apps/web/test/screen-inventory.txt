@@ -419,6 +419,7 @@ reads:
   - /api/companies/:id/skills/:id
   - /api/companies/:id/skills/:id/history
   - /api/companies/:id/skills/elsewhere
+  - /api/companies/:id/skills/updates
 
 ## #/spend
 sections: 
