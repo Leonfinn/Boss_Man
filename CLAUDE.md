@@ -34,6 +34,8 @@ Anything the gate reports blocks the merge.
 - Main took your migration number? Leave it. Do not renumber by hand: the merge gate renumbers a branch whose only clash is migration bookkeeping (`rebaseMigrations`, BOS-690), and `scripts/check-quick.sh` accepts that case, printing "migration NNNN will be renumbered to MMMM by the merge gate". A real clash (code, or the same table or column changed on both sides) still fails; see `docs/10-migrations.md`.
 - Added a shell script or a `*.test.sh`? `git add` it: `scripts/check-shell.sh` ShellChecks every tracked `*.sh` and `scripts/test-shell.sh` runs every tracked `*.test.sh`. Only a file on a skip list in those scripts (each entry with its reason) is left out.
 
+Changing a screen? If your branch changes `apps/web/src/styles.css`, `App.tsx` or the JSX of a page or component, the move to review needs a `*-render.test.tsx` in `apps/web/test` that loads `styles.css` in Playwright/Chromium and measures geometry (template: `merge-queue-held-render.test.tsx`; jsdom doesn't count). It also needs "before" and "after" screenshots from `scripts/screenshot.mjs --api` (only those carry the mark the check looks for), attached to the ticket. A change that doesn't alter the layout passes `noVisualChange: "<why>"` instead. See `docs/28-browser-checks.md` (BOS-2511).
+
 ## Writing tests: they must pass on GitHub's runners too
 
 A pass at the merge gate is not enough: GitHub CI runs every test again on main, on machines 2.5 to 5 times slower, with a newer git and a cold browser. Authors follow this rule and reviewers check every new or changed test against it:
