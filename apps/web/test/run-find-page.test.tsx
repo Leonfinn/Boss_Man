@@ -98,6 +98,35 @@ describe("find in this run (BOS-2476)", () => {
     expect(showSelect().value).toBe("tools");
     expect(screen.queryByText("Nothing to see")).toBeNull();
   });
+  it("on a live run, new events arriving after a find do not move the view back to the end", async () => {
+    const scrollTo = vi.fn();
+    (HTMLElement.prototype as unknown as { scrollTo: unknown }).scrollTo = scrollTo;
+    let polls = 0;
+    const live = { id: "r1", companyId: "c1", agent: "Ada", agentId: "a1", ticketId: null, ticket: null, startedAt: at, endedAt: null };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!url.includes("/transcript")) return new Response(JSON.stringify(url.includes("/permissions") ? { entries: [], truncated: false } : []), { status: 200 });
+        polls++;
+        const body = polls === 1
+          ? { run: live, items: items.slice(0, 6), next: 7, more: false }
+          : { run: live, items: [upd(7, { kind: "agent_message", text: "Brand new late message" })], next: 8, more: false };
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    await find("git push");
+    expect(await screen.findByText("1 of 3")).toBeTruthy();
+    await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+    // Let the end-follow frame (if any) settle, then count the moves so far.
+    await new Promise((r) => setTimeout(r, 50));
+    const before = scrollTo.mock.calls.length;
+    // The next poll (2 s) brings one more event; the page must not scroll to it.
+    await screen.findByText("Brand new late message", {}, { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(polls).toBeGreaterThan(1);
+    expect(scrollTo.mock.calls.length).toBe(before);
+    delete (HTMLElement.prototype as unknown as { scrollTo?: unknown }).scrollTo;
+  }, 12_000);
   it("with Tool calls shown, find counts only tool events", async () => {
     stub();
     render(<Run runId="r1" companies={[company]} />);
