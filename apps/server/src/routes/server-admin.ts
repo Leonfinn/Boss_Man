@@ -182,10 +182,13 @@ export function serverAdminRoutes(
   };
   owner.get("/api/companies/:id/deploy-targets", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
+    const [targets, last, latest] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id), deploysSvc.latestAttempts(id)]);
     return targets.map((t) => {
       const d = last.get(t.id);
-      return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
+      const n = latest.get(t.id);
+      // BOS-2464: only when the newest deploy is not the last success (failed, refused, waiting or running).
+      const latestAttempt = n && n.id !== d?.id ? { status: n.status, outcome: n.outcome, at: (n.finishedAt ?? n.createdAt).toISOString() } : null;
+      return { ...t, latestAttempt, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
     });
   });
   owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
