@@ -120,7 +120,7 @@ export type DeployWaitView =
   | { on: true; phase: "waiting" | "sent" | "window" | "handover"; origin: "approve" | "hand"; commit: string; deadline: string; windowUntil?: string; quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[] } };
 
 /** One row of Recent updates, from GET /api/self-deploy/history (BOS-1238). */
-export type HistoryRow = { id: string; target: "server" | "runner"; commit: string; changes: number; result: string | null; message: string | null; at: string };
+export type HistoryRow = { id: string; target: "server" | "runner"; commit: string; changes: number; /** BOS-2549: how many of them the card names (the rest are only counted). */ shown?: number; /** BOS-2549: the short commit of the update that replaced this one. */ replacedBy?: string | null; result: string | null; message: string | null; at: string };
 
 const gbOf = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
 
@@ -463,13 +463,14 @@ export function runnerProgress(live: LiveRow[] | null | undefined, maint: Mainte
 export function historyTag(r: HistoryRow, swap?: RunnerProgress | null): { tag: string; tone: StatusTone } {
   if (r.result === "deployed" && r.target === "runner" && swap?.inProgress) return { tag: swap.total > 0 ? `Swapping (${swap.done} of ${plural(swap.total, "company", "companies")} done)` : "Swapping", tone: "amber" };
   if (r.result === "deployed") return { tag: r.target === "runner" ? "Done" : "Live", tone: "green" };
+  if (r.result === "replaced") return { tag: "Replaced", tone: "grey" };
   if (r.result === "rolled_back") return { tag: "Switched back", tone: "red" };
   if (r.result === "failed") return { tag: "Failed", tone: "red" };
   if (r.result === "rejected") return isReplaced(r.message) ? { tag: "Replaced", tone: "grey" } : { tag: "Failed", tone: "red" };
   if (r.result === "nothing_new") return { tag: "Done", tone: "grey" };
   return { tag: "Waiting", tone: "amber" };
 }
-export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.changes ? `Server, ${plural(r.changes, "change", "changes")}` : "Server");
+export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.result === "replaced" ? `Server${r.changes ? `, ${plural(r.changes, "change", "changes")}` : ""}: replaced by a newer update${r.replacedBy ? ` (${r.replacedBy})` : ""}` : r.changes ? `Server, ${plural(r.changes, "change", "changes")}${r.shown !== undefined && r.shown < r.changes ? ` (showing ${r.shown} of ${r.changes})` : ""}` : "Server");
 
 /** The live state of one company's runner, leading the panel: connected or not, and since when. */
 export function LiveState({ r, progress }: { r: LiveRow; progress?: RunnerProgress | null }) {
