@@ -7,8 +7,9 @@ import { LiveState, historyTag, runnerProgress, type HistoryRow, type LiveRow, t
 
 // BOS-2546: the swap badge measured "done" against the newest image any runner reports, so with every runner still on
 // the old image it read "3 of 3 done". It now measures against the image the update is for. This renders the badge and
-// the "Now running" list with the real styles.css in headless Chromium at a desktop and a 380 px phone width and checks
-// that the badge, the list tags and the page width agree. Skipped, not failed, where no browser is installed.
+// the "Now running" list with the real styles.css in headless Chromium at a owner's two desktop widths (1667, 1550) and a 390 px phone
+// and checks that the badge, the list tags and the page width agree. It renders these two components by hand, not the
+// whole Settings page. Skipped, not failed, where no browser is installed (same pattern as merge-queue-held-render.test.tsx).
 
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 

@@ -421,6 +421,7 @@ export function runnerProgress(live: LiveRow[] | null | undefined, maint: Mainte
   // BOS-2546: "done" is measured against the image the update is for (`runnerImage.needed`); only without one does the fleet's newest stand in.
   const newest = needed || (stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null);
   // Same test as LiveState's "Connected" (a leftover swap mark must not hide a runner that is already up on the new image, BOS-2525).
+  // Image stamps are fixed-width (YYYYMMDDHHMM), so the string comparison orders them correctly.
   const done = runners.filter((l) => l.connected && !!l.imageVersion && !!newest && l.imageVersion >= newest).length;
   // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
   const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup" && maint.kind !== "building";
