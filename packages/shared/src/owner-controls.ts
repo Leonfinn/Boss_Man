@@ -126,7 +126,7 @@ export const OWNER_CONTROLS = {
     // BOS-1306: the labelled Hide / Show button at the right end of that heading.
     "Hide", "Show",
     // BOS-2430: the filters' reset and the CSV of the items shown.
-    "Clear filters", "Download CSV",
+    "Clear filters", "Download CSV", "Unassigned",
   ],
   Wiki: [
     "Show older versions", "Compare", "Close compare", "Show", "Restore this version",
@@ -244,6 +244,8 @@ export const OWNER_FIELDS = {
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
   Runs: ["Search by ticket"],
+  // The Plan page's filters (BOS-2430).
+  Plan: ["Project", "Assignee", "Kind", "Show finished"],
   // The Settings page's search box (BOS-2348).
   Settings: ["Find a setting"],
   Setup: [

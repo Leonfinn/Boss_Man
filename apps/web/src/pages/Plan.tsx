@@ -246,6 +246,8 @@ export function PlanFilters({ plan, filter, onChange, shownCount, onDownload }: 
   const set = (patch: Partial<PlanFilter>) => onChange({ ...filter, ...patch });
   const any = filter.project || filter.assignee || filter.kind || filter.finished;
   return (
+    <details className="card pl-people" open={!!any}>
+    <summary>Filters{any ? " (on)" : ""}</summary>
     <div className="pl-filters" role="group" aria-label="Plan filters">
       <label>
         <span className="muted">Project</span>
@@ -287,6 +289,7 @@ export function PlanFilters({ plan, filter, onChange, shownCount, onDownload }: 
         Download CSV
       </button>
     </div>
+    </details>
   );
 }
 
@@ -376,8 +379,10 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
             </button>
           </div>
           <Causes plan={p} />
-          <ByPerson plan={p} onPick={(assignee) => changeFilter({ ...filter, assignee })} />
-          <PlanFilters plan={p} filter={filter} onChange={changeFilter} shownCount={view.shown.length} onDownload={() => download(`plan-${new Date().toISOString().slice(0, 10)}.csv`, planToCsv(view.shown))} />
+          <div className="pl-tools">
+            <PlanFilters plan={p} filter={filter} onChange={changeFilter} shownCount={view.shown.length} onDownload={() => download(`plan-${new Date().toISOString().slice(0, 10)}.csv`, planToCsv(view.shown))} />
+            <ByPerson plan={p} onPick={(assignee) => changeFilter({ ...filter, assignee })} />
+          </div>
           {view.shown.length ? <Graph plan={view.plan} faded={view.faded} /> : <p className="muted">Nothing matches these filters.</p>}
         </>
       ) : plan.error && !away(plan.error) ? null : (
