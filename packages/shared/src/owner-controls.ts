@@ -110,7 +110,8 @@ export const OWNER_CONTROLS = {
   // not under Settings.
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   // Each project is a collapsed row; "Edit settings" opens its form and "Hide settings" folds it away (BOS-1876).
-  Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings"],
+  // "Download CSV" saves the active projects' figures in the chosen sort (BOS-2502).
+  Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings", "Download CSV"],
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
   Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
