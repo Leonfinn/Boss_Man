@@ -419,7 +419,8 @@ export function runnerProgress(live: LiveRow[] | null | undefined, maint: Mainte
   const runners = (live ?? []).filter((l) => l.registered);
   const stamps = runners.map((l) => l.imageVersion).filter((v): v is string => !!v);
   const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
-  const done = runners.filter((l) => l.connected && !l.swap && l.imageVersion === newest).length;
+  // Same test as LiveState's "Connected" (a leftover swap mark must not hide a runner that is already up on the new image, BOS-2525).
+  const done = runners.filter((l) => l.connected && l.imageVersion === newest).length;
   // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
   const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup" && maint.kind !== "building";
   return { inProgress: held, done, total: runners.length, newest };
