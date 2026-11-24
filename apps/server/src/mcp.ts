@@ -4,6 +4,7 @@
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { checkQueue } from "./services/check-queue.js";
+import { setKeyResultValue } from "./services/key-result-readings.js";
 import { failedChecksText } from "./services/check-failures.js";
 import { FULL_LOG_RETENTION_DAYS, PLAN_REAL_USE_REFUSAL, realUseWalkthrough, usabilityGated } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
@@ -683,7 +684,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         .innerJoin(objectives, eq(objectives.id, keyResults.objectiveId))
         .where(and(eq(keyResults.id, keyResultId), eq(objectives.companyId, scope.companyId)));
       if (!kr) return fail("No key result with that ID in your company.");
-      await db.update(keyResults).set({ current: value }).where(eq(keyResults.id, keyResultId));
+      await setKeyResultValue(db, keyResultId, value, { kind: "agent", agentId: scope.agentId ?? null });
       return text(`Key result ${keyResultId} is now ${value}.`);
     },
   );
