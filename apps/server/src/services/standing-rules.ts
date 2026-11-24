@@ -54,8 +54,65 @@ export async function setStandingRules(db: Db, companyId: string, { text, by, by
   if (!c) throw new StandingRulesError("That company doesn't exist.");
   // Kept against the CEO (for an agent's change) or, when the owner makes it, the CEO's own history is
   // skipped: `agentId` is the CEO so the owner's undo has one place to live; the `by` text says who it was.
-  if (byAgentId) await db.insert(agentChanges).values({ companyId, agentId: byAgentId, byAgentId, field: STANDING_RULES_FIELD, before: { text: before.text }, after: { text: trimmed } });
+  if (byAgentId) await db.insert(agentChanges).values({ companyId, agentId: byAgentId, byAgentId, field: STANDING_RULES_FIELD, before: { text: before.text }, after: { text: trimmed, by } });
   return { text: c.text ?? "", by: c.by ?? null, at: c.at ?? null };
+}
+
+export const STANDING_RULES_HISTORY_LIMIT = 20;
+
+export type StandingRulesVersion = {
+  id: string;
+  at: string;
+  /** "the owner" or the CEO's name; "the owner or the CEO" for rows saved before the name was kept. */
+  by: string;
+  added: number;
+  removed: number;
+  before: string;
+  after: string;
+};
+
+function lineSet(text: string): string[] {
+  return text === "" ? [] : text.split("\n");
+}
+
+/** Lines added and removed between two texts (a line count by content, so a moved line counts as neither). */
+export function standingRulesLineCounts(before: string, after: string): { added: number; removed: number } {
+  const count = (lines: string[]) => {
+    const m = new Map<string, number>();
+    for (const l of lines) m.set(l, (m.get(l) ?? 0) + 1);
+    return m;
+  };
+  const a = count(lineSet(before));
+  const b = count(lineSet(after));
+  let added = 0;
+  let removed = 0;
+  for (const [l, n] of b) added += Math.max(0, n - (a.get(l) ?? 0));
+  for (const [l, n] of a) removed += Math.max(0, n - (b.get(l) ?? 0));
+  return { added, removed };
+}
+
+/** The last 20 stored changes to the company's rules, newest first. */
+export async function standingRulesHistory(db: Db, companyId: string): Promise<StandingRulesVersion[]> {
+  const rows = await db
+    .select()
+    .from(agentChanges)
+    .where(and(eq(agentChanges.companyId, companyId), eq(agentChanges.field, STANDING_RULES_FIELD)))
+    .orderBy(desc(agentChanges.createdAt))
+    .limit(STANDING_RULES_HISTORY_LIMIT);
+  return rows.map((r) => {
+    const before = (r.before as { text?: string } | null)?.text ?? "";
+    const afterObj = r.after as { text?: string; by?: string } | null;
+    const after = afterObj?.text ?? "";
+    return { id: r.id, at: r.createdAt.toISOString(), by: afterObj?.by ?? "the owner or the CEO", ...standingRulesLineCounts(before, after), before, after };
+  });
+}
+
+/** Saves the `after` text of one stored change again, as a new change of its own (so it can be undone). */
+export async function putBackStandingRules(db: Db, companyId: string, changeId: string, write: { by: string; byAgentId: string | null }): Promise<StandingRules> {
+  const [row] = await db.select().from(agentChanges).where(and(eq(agentChanges.id, changeId), eq(agentChanges.companyId, companyId), eq(agentChanges.field, STANDING_RULES_FIELD)));
+  if (!row) throw new StandingRulesError("That version is no longer in the history.");
+  const text = (row.after as { text?: string } | null)?.text ?? "";
+  return setStandingRules(db, companyId, { text, ...write });
 }
 
 export class StandingRulesError extends Error {
