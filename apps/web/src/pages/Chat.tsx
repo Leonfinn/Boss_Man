@@ -49,7 +49,7 @@ export function linked(text: string, wikiCompanyId?: string, ctx: LinkContext = 
 }
 
 /** What a message shows as words (plain text and link text), for the find box: never the markup or an image. */
-const visibleParts = (text: string) => linkPieces(text, {}).flatMap((p) => (p.kind === "text" || p.kind === "link" ? [p.text] : []));
+export const visibleParts = (text: string) => linkPieces(text, {}).flatMap((p) => (p.kind === "text" || p.kind === "link" ? [p.text] : []));
 
 /** The whole conversation as Markdown (BOS-2313): oldest first, no thinking traces; attachments stay as their links. */
 export function chatMarkdown(agentName: string, date: string, items: Message[]): string {
