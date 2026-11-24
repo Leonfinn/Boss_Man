@@ -167,7 +167,7 @@ export const OWNER_CONTROLS = {
   ],
   Skills: [
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",
-    "Add a skill", "Discard draft",
+    "Add a skill", "Discard draft", "Download CSV",
   ],
   "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …", "Download CSV"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
