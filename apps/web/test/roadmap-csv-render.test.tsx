@@ -64,3 +64,39 @@ describe.skipIf(!browser || !vite)("Roadmap Download CSV (BOS-2517)", () => {
     expect(lines).toHaveLength(3);
   }, 60_000);
 });
+
+// 30 features with one very long title, so the page is crowded; the new button must sit inside the page, clear of the tabs.
+const LONG = "A very long feature title that keeps going and going so the card has to wrap it over several lines on a phone";
+const crowd = {
+  ...api,
+  "/api/roadmap/features": [
+    { id: "c1", name: "App Co", features: Array.from({ length: 30 }, (_, i) => feature(`f${i}`, i === 0 ? LONG : `Feature ${i}`, (["now", "next", "later"] as const)[i % 3]!, { rank: i + 1 })) },
+  ],
+};
+
+describe.skipIf(!browser || !vite)("Roadmap Download CSV layout (BOS-2517)", () => {
+  for (const width of [1667, 1550, 390]) {
+    for (const tab of ["features", "timeline"]) {
+      it(`${tab} tab at ${width} px: the button is on screen, inside the page and clear of the tabs`, async () => {
+        const page = await browser!.newPage({ viewport: { width, height: 900 } });
+        try {
+          await stubApi(page, crowd);
+          await page.goto(`${vite!.resolvedUrls.local[0]}#roadmap/${tab}`, { waitUntil: "networkidle" });
+          await page.waitForSelector(tab === "features" ? `text=${LONG.slice(0, 20)}` : ".rm-obj", { timeout: 15_000 });
+          const box = async (sel: string) => (await page.locator(sel).first().boundingBox())!;
+          const btn = await page.getByRole("button", { name: "Download CSV" }).boundingBox();
+          const tabs = await box(".tabs");
+          expect(btn, "the button is drawn").toBeTruthy();
+          expect(btn!.x).toBeGreaterThanOrEqual(0);
+          expect(btn!.x + btn!.width, "right edge inside the viewport").toBeLessThanOrEqual(width);
+          expect(btn!.y + btn!.height, "above the tabs").toBeLessThanOrEqual(tabs.y + 1);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "no sideways scroll").toBe(true);
+          const scratch = process.env.BOSSMAN_SCRATCH;
+          if (scratch) await page.screenshot({ path: `${scratch}/roadmap-csv-${tab}-${width}.png` });
+        } finally {
+          await page.close();
+        }
+      }, 60_000);
+    }
+  }
+});
