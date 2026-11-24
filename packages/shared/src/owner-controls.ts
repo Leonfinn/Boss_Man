@@ -215,7 +215,7 @@ export const OWNER_CONTROLS = {
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
-  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Run a retro now"],
+  "Team and CEO": ["Pause company", "Resume company", "Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Put this version back", "Discard draft", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
   Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.

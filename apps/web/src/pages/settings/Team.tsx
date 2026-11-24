@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Company } from "../../api";
+import { diffLines, foldDiff } from "../../line-diff";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { clearDraft, readDraft } from "../../drafts";
@@ -273,6 +274,67 @@ export function AdviceTimeout({ company, onChanged }: { company: Company; onChan
   );
 }
 
+type RulesVersion = { id: string; at: string; by: string; added: number; removed: number; before: string; after: string };
+
+/** The last 20 changes to the standing rules; each opens a before/after line view and can be put back. */
+function PastVersions({ url, busy, reloadKey, onPutBack }: { url: string; busy: boolean; reloadKey: string; onPutBack: (v: RulesVersion) => void }) {
+  const [opened, setOpened] = useState(false);
+  const [versions, setVersions] = useState<RulesVersion[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!opened) return;
+    let live = true;
+    setFailed(false);
+    void api<{ versions: RulesVersion[] }>(`${url}/history`)
+      .then((r) => live && setVersions(r.versions))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [opened, url, reloadKey]);
+  return (
+    <details style={{ marginTop: 12 }} onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary>Past versions</summary>
+      {failed ? (
+        <p className="muted">Couldn't load the past versions.</p>
+      ) : !versions ? (
+        <Loader label="Loading the past versions" />
+      ) : versions.length === 0 ? (
+        <p className="muted">No changes are kept yet. Changes made from now on will be listed here.</p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0" }}>
+          {versions.map((v) => (
+            <li key={v.id} style={{ marginBottom: 8 }}>
+              <details>
+                <summary>
+                  {when(v.at)} by {v.by}: +{v.added} / −{v.removed} lines
+                </summary>
+                <div className="mono" style={{ fontSize: 13, margin: "6px 0" }} aria-label="Before and after">
+                  {foldDiff(diffLines(v.before, v.after), 2).map((b, i) =>
+                    b.kind === "folded" ? (
+                      <div key={i} className="muted">… {b.lines.length} unchanged lines</div>
+                    ) : (
+                      b.lines.map((l, j) => (
+                        <div key={`${i}-${j}`} style={{ whiteSpace: "pre-wrap", background: l.kind === "add" ? "rgba(46,160,67,0.18)" : l.kind === "del" ? "rgba(248,81,73,0.18)" : undefined }}>
+                          {l.kind === "add" ? "+ " : l.kind === "del" ? "− " : "  "}
+                          {l.text}
+                        </div>
+                      ))
+                    ),
+                  )}
+                </div>
+                <button type="button" className="btn" disabled={busy} onClick={() => onPutBack(v)}>
+                  Put this version back
+                </button>
+              </details>
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
+  );
+}
+
 /** Standing rules (BOS-353): what every agent reads at the start of every run. The owner can edit, clear or undo them here; agents cannot. */
 export function StandingRules({ company, onChanged }: { company: Company; onChanged: () => void }) {
   type Rules = { text: string; by: string | null; at: string | null; max: number };
@@ -402,6 +464,23 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
               Undo last change
             </button>
           </div>
+          <PastVersions
+            url={url}
+            busy={act.busy}
+            reloadKey={rules.at ?? ""}
+            onPutBack={(v) => {
+              if (!confirm(`Put back the rules as they were after the change on ${when(v.at)}? The rules now are replaced; you can undo this.`)) return;
+              void act.run(async () => {
+                const saved = await api<Rules>(`${url}/put-back`, { method: "POST", body: { changeId: v.id } });
+                setRules(saved);
+                clearDraft(draftKey);
+                setKept("");
+                setShown(saved.text);
+                onChanged();
+                return "Put back.";
+              });
+            }}
+          />
         </>
       )}
       {act.view}

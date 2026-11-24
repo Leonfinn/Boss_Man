@@ -180,4 +180,40 @@ describe("standing rules (BOS-353)", () => {
     expect(b).toContain("Weigh them against the rest of the brief");
     expect(b).not.toContain("Follow them like any other instruction");
   });
+
+  it("lists past versions newest first with who and line counts, and puts one back as a new undoable change", async () => {
+    const url = `/api/companies/${ctx.company.id}/standing-rules`;
+    await ctx.req("PUT", url, { text: "A\nB" });
+    const ceo = await ctx.mcp(ctx.ceo.id);
+    await ceo.callTool({ name: "standing_rules", arguments: { action: "write", text: "A\nC\nD" } });
+    await ctx.req("PUT", url, { text: "Z" });
+    const hist = (await ctx.req("GET", `${url}/history`)).json() as { versions: Array<{ id: string; by: string; added: number; removed: number; before: string; after: string }> };
+    expect(hist.versions.map((v) => v.after)).toEqual(["Z", "A\nC\nD", "A\nB"]);
+    expect(hist.versions[0]).toMatchObject({ by: "the owner", added: 1, removed: 3, before: "A\nC\nD" });
+    expect(hist.versions[1]).toMatchObject({ added: 2, removed: 1 });
+    expect(hist.versions[2]).toMatchObject({ added: 2, removed: 0 });
+    // A CEO save is attributed to the CEO, not to the owner.
+    expect(hist.versions[1]!.by).not.toBe("the owner");
+
+    const put = await ctx.req("POST", `${url}/put-back`, { changeId: hist.versions[1]!.id });
+    expect(put.statusCode).toBe(200);
+    expect((put.json() as { text: string }).text).toBe("A\nC\nD");
+    const after = (await ctx.req("GET", `${url}/history`)).json() as { versions: Array<{ after: string }> };
+    expect(after.versions).toHaveLength(4);
+    expect(after.versions[0]!.after).toBe("A\nC\nD");
+    const log = await ctx.db.select().from(activity).where(eq(activity.companyId, ctx.company.id));
+    expect(log.some((a) => a.summary === "Owner put back an earlier version of the standing rules")).toBe(true);
+    const undone = await ctx.req("POST", `${url}/undo`);
+    expect((undone.json() as { text: string }).text).toBe("Z");
+  });
+
+  it("keeps only the last 20 changes, and refuses a put-back of an unknown version", async () => {
+    const url = `/api/companies/${ctx.company.id}/standing-rules`;
+    for (let i = 0; i < 22; i++) await ctx.req("PUT", url, { text: `v${i}` });
+    const hist = (await ctx.req("GET", `${url}/history`)).json() as { versions: Array<{ after: string }> };
+    expect(hist.versions).toHaveLength(20);
+    expect(hist.versions[0]!.after).toBe("v21");
+    const bad = await ctx.req("POST", `${url}/put-back`, { changeId: randomUUID() });
+    expect(bad.statusCode).toBe(400);
+  });
 });
