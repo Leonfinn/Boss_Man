@@ -24,6 +24,7 @@ const Engagements = lazyPage(() => import("./pages/Engagements"), "Engagements")
 const Run = lazyPage(() => import("./pages/Run"), "Run");
 const Runs = lazyPage(() => import("./pages/Runs"), "Runs");
 const MergeQueue = lazyPage(() => import("./pages/MergeQueue"), "MergeQueue");
+const MergeHistory = lazyPage(() => import("./pages/MergeHistory"), "MergeHistory");
 const Settings = lazyPage(() => import("./pages/Settings"), "Settings");
 const ProjectsPage = lazyPage(() => import("./pages/settings/Projects"), "ProjectsPage");
 const Ticket = lazyPage(() => import("./pages/Ticket"), "Ticket");
@@ -430,6 +431,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Plan companies={list} companyId={companyId} go={go} />
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
+        ) : page === "merge-history" ? (
+          <MergeHistory companies={list} companyId={companyId} />
         ) : page === "search" ? (
           <SearchPage companyId={companyId} go={go} />
         ) : page === "merge-queue" ? (
