@@ -300,7 +300,7 @@ function PastVersions({ url, busy, reloadKey, onPutBack }: { url: string; busy: 
       ) : !versions ? (
         <Loader label="Loading the past versions" />
       ) : versions.length === 0 ? (
-        <p className="muted">No changes are kept yet. Changes made from now on will be listed here.</p>
+        <p className="muted">No past versions yet. Changes made from now on will be listed here.</p>
       ) : (
         <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0" }}>
           {versions.map((v) => (

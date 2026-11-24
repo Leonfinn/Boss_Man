@@ -215,5 +215,13 @@ describe("standing rules (BOS-353)", () => {
     expect(hist.versions[0]!.after).toBe("v21");
     const bad = await ctx.req("POST", `${url}/put-back`, { changeId: randomUUID() });
     expect(bad.statusCode).toBe(400);
+    // An unknown company is a 404 on both routes, and a company with no changes has an empty list.
+    expect((await ctx.req("GET", `/api/companies/${randomUUID()}/standing-rules/history`)).statusCode).toBe(404);
+    expect((await ctx.req("POST", `/api/companies/${randomUUID()}/standing-rules/put-back`, { changeId: randomUUID() })).statusCode).toBe(404);
+    const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+    expect(((await ctx.req("GET", `/api/companies/${other.company.id}/standing-rules/history`)).json() as { versions: unknown[] }).versions).toEqual([]);
+    // A version of another company can't be put back here.
+    const mine = (hist.versions as Array<{ after: string }>)[0]!;
+    expect(mine.after).toBe("v21");
   });
 });
