@@ -62,45 +62,45 @@ export async function usualMergeCheck(db: Db, companyId: string, now: Date): Pro
 const MIN_LEFT_MS = 60_000;
 
 /**
- * BOS-2505: when the last ticket of the merge line is expected to land (epoch ms), the one estimate the banner uses. Pure.
- * A running check has the usual check time less what it has run; a queued one starts when a slot frees and then takes the
- * usual time. Each landing then needs one usual GitHub wait, one landing at a time; tickets whose checks end before a landing's
- * GitHub run starts ride that run (one wait for all, as the train does). A ticket already in its GitHub wait lands one usual
- * wait after the run began. Null without a usual check time and a usual wait (nothing is guessed) or with an empty line.
+ * BOS-2505: when the last ticket of the merge line is expected to land (epoch ms), the one estimate the banner and the Merge
+ * queue page show. Pure, and it does not use landing turns (there are none while the merge train runs, BOS-2360).
+ * In the train a ticket's merge check and its GitHub run go side by side from the moment it is seated, and landings follow
+ * train order, so a ticket lands when both are done and not before the ticket ahead of it. That makes the last landing the
+ * latest of the tickets' ready times, and tickets that finish together land together (counted once).
+ *  - running check: ready when the usual check time has passed (at least a minute from now) and its GitHub run (usual wait
+ *    from when it began, else from the check's start) is done;
+ *  - ticket in its GitHub wait with no check left: one usual wait after the run began;
+ *  - queued for a slot or a seat: takes the slot that frees first, then needs the longer of check and GitHub wait.
+ * Null without a usual check time and a usual wait (nothing is guessed) or with an empty line.
  */
 export function lineClearAt(p: {
   nowMs: number;
   usualCheckMs: number | null;
   usualCiMs: number | null;
   slots: number;
+  /** Checks running now; ciSinceMs is when its GitHub run began (null: not known, taken as the check's start). */
   running: Array<{ startedMs: number; ciSinceMs: number | null }>;
+  /** Landings whose check has ended and whose GitHub run is still open (they hold no slot): when each run began. */
+  ciOnlySinceMs: number[];
+  /** Tickets waiting for a check slot or a train seat. */
   queued: number;
 }): number | null {
   if (p.usualCheckMs === null || p.usualCiMs === null) return null;
   const check = p.usualCheckMs;
   const ci = p.usualCiMs;
-  const inCi = p.running.filter((r) => r.ciSinceMs !== null).map((r) => Math.max(p.nowMs + MIN_LEFT_MS, r.ciSinceMs! + ci));
-  const checking = p.running.filter((r) => r.ciSinceMs === null).map((r) => Math.max(p.nowMs + MIN_LEFT_MS, r.startedMs + check));
-  // Queued checks take the slots as they free (slots held by a check or a GitHub wait: the check runs only while checking).
-  const free = [...checking, ...Array<number>(Math.max(0, p.slots - p.running.length)).fill(p.nowMs)].sort((a, b) => a - b);
-  const ready = [...checking];
+  const soonest = p.nowMs + MIN_LEFT_MS;
+  const ends = p.running.map((r) => Math.max(soonest, r.startedMs + check));
+  const ready = p.running.map((r, i) => Math.max(ends[i]!, Math.max(soonest, (r.ciSinceMs ?? r.startedMs) + ci)));
+  for (const since of p.ciOnlySinceMs) ready.push(Math.max(soonest, since + ci));
+  // Queued tickets take the slots as they free; each then needs the longer of its check and its GitHub run.
+  const free = [...ends, ...Array<number>(Math.max(0, p.slots - p.running.length)).fill(p.nowMs)].sort((a, b) => a - b);
   for (let i = 0; i < p.queued; i++) {
     const at = free.length ? free.shift()! : p.nowMs;
-    const end = at + check;
-    ready.push(end);
-    free.push(end);
+    ready.push(at + Math.max(check, ci));
+    free.push(at + check);
     free.sort((a, b) => a - b);
   }
-  ready.sort((a, b) => a - b);
-  let last = inCi.length ? Math.max(...inCi) : null;
-  let cursor = last ?? p.nowMs;
-  for (let i = 0; i < ready.length; ) {
-    const start = Math.max(cursor, ready[i]!);
-    cursor = start + ci;
-    last = cursor;
-    while (i < ready.length && ready[i]! <= start) i++; // the ones ready by then ride this run
-  }
-  return last;
+  return ready.length ? Math.max(...ready) : null;
 }
 
 /**

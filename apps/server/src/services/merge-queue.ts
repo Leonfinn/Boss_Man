@@ -273,6 +273,8 @@ export type MergeQueueView = {
   running: RunningNow[];
   waiting: WaitingRow[];
   recent: RecentRow[];
+  /** BOS-2505: when the last ticket of the line is expected to land (ISO), the same figure as the banner's; null when it can't be told. */
+  clearAt?: string | null;
   /** How many approved tickets are waiting to merge, not counting running ones (the start hold's figure). */
   waitingCount: number;
   /**
@@ -1023,13 +1025,16 @@ export function mergeQueueService(
       // BOS-2505: when the last one lands, from the same usual times as the landing estimates above (check time, GitHub wait).
       const mergeRunning = running.filter((r) => r.what === "merge_check");
       const queuedForCheck = waiting.filter((w) => w.actor === "system" && !w.decisionId && (w.state === "waiting_for_check_capacity" || w.state === "waiting_for_seat" || w.state === "waiting_for_slot")).length;
-      const [usualCheckT, usualCiT] = mergeRunning.length + queuedForCheck > 0 && deps.usualMergeCheck && deps.usualCiWait ? await Promise.all([deps.usualMergeCheck(companyId).catch(() => null), deps.usualCiWait(companyId).catch(() => null)]) : [null, null];
+      // A running check carries its GitHub run beside it (r.ci, minutes so far); a landing past its check is in ciWait.
+      const ciOnlySinceMs = [...ciWait.values()].map((c) => Date.parse(c.since));
+      const [usualCheckT, usualCiT] = mergeRunning.length + queuedForCheck + ciOnlySinceMs.length > 0 && deps.usualMergeCheck && deps.usualCiWait ? await Promise.all([deps.usualMergeCheck(companyId).catch(() => null), deps.usualCiWait(companyId).catch(() => null)]) : [null, null];
       const clearAt = lineClearAt({
         nowMs: t.getTime(),
         usualCheckMs: usualCheckT?.ms ?? null,
         usualCiMs: usualCiT?.ms ?? null,
         slots: Math.max(1, slots),
-        running: mergeRunning.map((r) => ({ startedMs: Date.parse(r.startedAt), ciSinceMs: ciWait.get(r.ticketId) ? Date.parse(ciWait.get(r.ticketId)!.since) : null })),
+        running: mergeRunning.map((r) => ({ startedMs: Date.parse(r.startedAt), ciSinceMs: r.ci ? t.getTime() - r.ci.minutes * 60_000 : null })),
+        ciOnlySinceMs,
         queued: queuedForCheck,
       });
       const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix, pause, clearAt });
@@ -1054,6 +1059,8 @@ export function mergeQueueService(
         // BOS-1594: the side-menu "stuck" badge follows the same verdict as the banner: 1 while the line is stuck, 0 when merging (even slowly) or healthy.
         stuckCount: line.state === "stuck" ? 1 : 0,
         line,
+        /** BOS-2505: when the last ticket of the line is expected to land (ISO); the figure the banner gives too. Null when it can't be told or the line is empty. */
+        clearAt: clearAt === null ? null : new Date(clearAt).toISOString(),
         ...(landingTurns.length ? { landingTurns } : {}),
       };
     },

@@ -23,7 +23,7 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; ranOn?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string; stageLine?: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine; landingTurns?: LandingTurn[] };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; serverHost?: string | null; slotSplit?: Array<{ ranOn: string; slots: number }>; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; lineCount?: number; line?: MergeLine; clearAt?: string | null; landingTurns?: LandingTurn[] };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted", retrying_git: "retrying after a push/fetch failure to the git host" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
@@ -596,6 +596,9 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
                 </div>
               )}
               <NeedsYou rows={needsYou} />
+              {data.clearAt && !pausedLine ? (
+                <p className="muted" data-clear-at={data.clearAt}>Everything in the line is expected to have landed by about {clockText(data.clearAt)} (from the usual check time and GitHub wait).</p>
+              ) : null}
               {pausedLine && (
                 <p className="mq-held-fix" role="status" data-merge-paused="true"><strong>{pausedText(pausedLine)}</strong> {pausedWaitText(pausedLine)}</p>
               )}

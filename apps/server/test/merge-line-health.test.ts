@@ -69,6 +69,16 @@ describe("mergeLineHealth", () => {
     expect(slowText(line as never, (iso) => (iso === ago(7) ? "19:03" : "00:50"))).toBe("Merging, but slowly: 17 for Boss Man to merge, the last one expected by about 00:50, last landed 19:03.");
   });
 
+  it("BOS-2505: past landings, bursts or not, do not change the figure: it comes from the line's own times", () => {
+    const clearAt = NOW.getTime() + 75 * 60_000;
+    const burst = [merged(300, 1), merged(300, 2), merged(300, 3), merged(299, 4), merged(299, 5), merged(120, 6), merged(7, 7)];
+    const sparse = [merged(7, 1), merged(67, 2), merged(127, 3)];
+    const a = mergeLineHealth(input({ waiting: queue(3), recent: burst }), { now: NOW, clearAt });
+    const b = mergeLineHealth(input({ waiting: queue(3), recent: sparse }), { now: NOW, clearAt });
+    expect(a).toMatchObject({ etaMinutes: 75, etaAt: new Date(clearAt).toISOString() });
+    expect(b).toMatchObject({ etaMinutes: 75, etaAt: new Date(clearAt).toISOString() });
+  });
+
   it("BOS-2505: a burst of landings no longer sets the figure: with no usual times the line says no estimate yet", () => {
     // Seven merges within half a minute, then three more: the old rate (span / landings) said a few minutes per ticket.
     const burst = [merged(300, 1), merged(300, 2), merged(300, 3), merged(299, 4), merged(299, 5), merged(120, 6), merged(7, 7)];
