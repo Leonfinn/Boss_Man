@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitAuthEnv } from "../src/workspace.js";
-import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, pnpmStoreDir, probeLandlock, pruneStore, pruneStores, repoGrant, runnerFence, sandboxSelfTest, shortTmpName, SOCKET_SUFFIX_ROOM, SUN_PATH_MAX, worktreeAdmin } from "../src/fence.js";
+import { addGitConfig, applyCheckSlots, APP_ROOT, checkQueueDirs, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, pnpmStoreDir, probeLandlock, pruneStore, pruneStores, repoGrant, runnerFence, sandboxSelfTest, shortTmpName, SOCKET_SUFFIX_ROOM, SUN_PATH_MAX, worktreeAdmin } from "../src/fence.js";
 import { randomUUID } from "node:crypto";
 
 const { abi } = probeLandlock();
@@ -363,6 +363,23 @@ print "NOT FOUND\\n";
     expect(report.landlockAbi).toBe(abi);
     expect(report.probe).toBe(true);
     expect(report.level).toBe(levelFor(abi).level);
+  });
+});
+
+describe("checkQueueDirs (the check queue's folders)", () => {
+  it("puts the slot queue and the stored results side by side under the coordinator folder", () => {
+    expect(checkQueueDirs("/srv/example-coord")).toEqual({ queue: "/srv/example-coord/queue", gate: "/srv/example-coord/gate" });
+    expect(checkQueueDirs("/data/coord")).toEqual({ queue: "/data/coord/queue", gate: "/data/coord/gate" });
+  });
+
+  it("normalises a trailing slash instead of making a double or empty name", () => {
+    expect(checkQueueDirs("/srv/example-coord/")).toEqual({ queue: "/srv/example-coord/queue", gate: "/srv/example-coord/gate" });
+    expect(checkQueueDirs("/srv/example-coord//")).toEqual({ queue: "/srv/example-coord/queue", gate: "/srv/example-coord/gate" });
+  });
+
+  it("keeps a coordinator folder already called queue or gate beneath itself", () => {
+    expect(checkQueueDirs("/srv/queue")).toEqual({ queue: "/srv/queue/queue", gate: "/srv/queue/gate" });
+    expect(checkQueueDirs("/srv/gate")).toEqual({ queue: "/srv/gate/queue", gate: "/srv/gate/gate" });
   });
 });
 

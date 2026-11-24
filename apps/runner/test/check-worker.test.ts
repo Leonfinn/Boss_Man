@@ -6,7 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RunnerCommand } from "@boss-man/shared";
 import { checkLimitsEnv } from "../src/check-jobs.js";
-import { workerHandles, workerUrl } from "../src/check-worker.js";
+import { workerHandles, workerHttpBase, workerUrl } from "../src/check-worker.js";
 import { describeConnectError } from "../src/connection.js";
 import { safeWorkerToken } from "../src/token.js";
 
@@ -66,6 +66,25 @@ describe("check worker role (BOS-1435)", () => {
     expect(guard).toBeGreaterThan(-1);
     // Nothing that fetches secrets, starts sessions or reads the runner token runs before the hand-over.
     for (const later of ["safeRunnerToken(env)", "new SessionManager(", "/api/runner/env", "new Journal("]) expect(main.indexOf(later)).toBeGreaterThan(guard);
+  });
+});
+
+describe("the worker's HTTP base (BOS-1436)", () => {
+  it("turns the socket's scheme into HTTP: ws becomes http and wss becomes https", () => {
+    expect(workerHttpBase("ws://bossman.example.com/other")).toBe("http://bossman.example.com/other");
+    expect(workerHttpBase("wss://bossman.example.com/other")).toBe("https://bossman.example.com/other");
+  });
+
+  it("removes the connect path, so bundles are fetched from the server's own address", () => {
+    expect(workerHttpBase("wss://bossman.example.com/api/check-worker/connect")).toBe("https://bossman.example.com");
+    expect(workerHttpBase("ws://192.168.1.50:3100/api/check-worker/connect")).toBe("http://192.168.1.50:3100");
+    expect(workerHttpBase("wss://bossman.example.com:8443/team/api/check-worker/connect")).toBe("https://bossman.example.com:8443/team");
+  });
+
+  it("leaves a URL without that path alone, apart from the scheme", () => {
+    expect(workerHttpBase("wss://bossman.example.com/api/runner/connect")).toBe("https://bossman.example.com/api/runner/connect");
+    expect(workerHttpBase("ws://bossman.example.com/api/check-worker/connect/")).toBe("http://bossman.example.com/api/check-worker/connect/");
+    expect(workerHttpBase("wss://bossman.example.com/")).toBe("https://bossman.example.com/");
   });
 });
 
