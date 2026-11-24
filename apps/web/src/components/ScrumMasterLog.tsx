@@ -5,6 +5,7 @@ import { usePoll } from "../hooks";
 import { when } from "../pages/Runs";
 import { Loader } from "./Loader";
 import { LoadError } from "./LoadError";
+import { ScrumMasterSummary } from "./ScrumMasterSummary";
 
 export type SmAction = {
   id: string;
@@ -80,9 +81,9 @@ export function smSummary(groups: Array<{ issueKey: string | null; status: SmAct
 }
 
 /** What the Scrum Master and the watchdog did, each with its one-line reason and an undo while one is possible. */
-export function ScrumMasterLog({ companyId, ticketId, heading, folded, filterable }: { companyId: string; ticketId?: string; heading?: string; folded?: boolean; filterable?: boolean }) {
+export function ScrumMasterLog({ companyId, ticketId, heading, folded, filterable, summary }: { companyId: string; ticketId?: string; heading?: string; folded?: boolean; filterable?: boolean; summary?: boolean }) {
   // Folded, every action is listed so an older open issue can still be found, so take more than a screenful.
-  const log = usePoll((signal) => api<SmAction[]>(`/api/companies/${companyId}/watchdog/actions?limit=${folded ? 500 : 100}${ticketId ? `&ticketId=${ticketId}` : "&excludeKind=sweep_wake"}`, { signal }), 15_000, `sm-log-${companyId}-${ticketId ?? "all"}-${folded ? "folded" : "full"}`);
+  const log = usePoll((signal) => api<SmAction[]>(`/api/companies/${companyId}/watchdog/actions?limit=${folded || summary ? 500 : 100}${ticketId ? `&ticketId=${ticketId}` : "&excludeKind=sweep_wake"}`, { signal }), 15_000, `sm-log-${companyId}-${ticketId ?? "all"}-${folded ? "folded" : "full"}`);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [all, setAll] = useState(false);
@@ -198,6 +199,7 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded, filterabl
   return (
     <section aria-label="Scrum Master activity">
       {heading && <h2 className="section-label">{heading}</h2>}
+      {summary && !ticketId && <ScrumMasterSummary actions={loaded} />}
       {filterable && (
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <label htmlFor="sm-log-filter">Filter</label>
