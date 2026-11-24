@@ -187,6 +187,12 @@ reads:
   - /api/companies/:id/watchdog/actions
   - /api/companies/:id/watchdog/issues
 
+## #/search
+sections: 
+  - Search
+reads: 
+  - /api/companies/:id/search
+
 ## #/settings
 sections: 
   - Settings
