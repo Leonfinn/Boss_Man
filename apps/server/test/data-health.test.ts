@@ -68,6 +68,19 @@ describe("server health", () => {
     expect(h.warnings).toEqual([]);
   });
 
+  it("returns the last 14 daily readings, oldest first", async () => {
+    const { svc, db } = await setup({ at: new Date("2026-11-23T09:00:00Z") });
+    for (let i = 1; i <= 20; i++) {
+      const day = new Date(Date.UTC(2026, 10, 23) - i * 86_400_000).toISOString().slice(0, 10);
+      await db.insert(serverSizeReadings).values({ day, dbBytes: 1000 + i, recordedAt: new Date() });
+    }
+    const h = await svc.read();
+    expect(h.history).toHaveLength(14);
+    expect(h.history[0]!.day).toBe("2026-11-10");
+    expect(h.history[13]!.day).toBe("2026-11-23");
+    expect(h.history[12]).toEqual({ day: "2026-11-22", bytes: 1001 });
+  });
+
   it("warns below 10% or 5 GB free, once a day per company", async () => {
     const low = await setup({ freeGb: 9 }); // 9% of 100 GB
     expect(await low.svc.checkWarnings()).toBe(1);
