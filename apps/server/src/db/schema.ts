@@ -485,6 +485,8 @@ export const tickets = pgTable(
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /** BOS-2485: a standing, repeated job that stays on the board for good; only a label, no behaviour. */
+    recurring: boolean("recurring").notNull().default(false),
     /** BOS-1516: the owner's "Priority 1" switch. It is the urgent mark plus this flag (set by the owner only); tiers read `urgent`, only the merge page reads this. */
     urgentByOwner: boolean("urgent_by_owner").notNull().default(false),
     /**

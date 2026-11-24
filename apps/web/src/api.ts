@@ -288,6 +288,8 @@ export type Ticket = {
   waitingDecisionId?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold. */
   urgent?: boolean;
+  /** BOS-2485: a standing, repeated job; shown with a "Recurring" label. */
+  recurring?: boolean;
   /** BOS-1516: the urgent mark is the owner's "Priority 1" switch. */
   urgentByOwner?: boolean;
   /** A held wake's reset time and why, when routine work is paused by the quota hold. */

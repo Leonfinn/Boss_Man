@@ -31,6 +31,7 @@ import { when } from "./Runs";
 import { ago } from "./Dashboard";
 import { StatusLineView, type StatusLine } from "./MergeQueue";
 import { CopyLinkButton } from "../components/CopyLinkButton";
+import { RecurringTag } from "../components/RecurringTag";
 import { TicketDownloadButton } from "../components/TicketDownloadButton";
 
 /** The mark for one verdict on a "Done when" checklist row. */
@@ -935,6 +936,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           )}
 
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+            <input type="checkbox" checked={!!t.recurring} disabled={busy} onChange={(e) => patch({ recurring: e.target.checked })} />
+            <span>
+              Recurring <span className="muted">(a standing job that stays on the board; shows a Recurring label, changes nothing else)</span>
+            </span>
+          </label>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
             <span>
               Priority 1<span className="muted">: goes first everywhere (runs past the subscription limit, first in the check queue and the merge line, keeps its place after a send-back) and you get one page when it has merged and is ready to put live</span> <code className="mono">quota hold</code>
@@ -1177,6 +1185,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </dt>
             <dd>
               <span className={`tag ${t.systemState === "review" && (t.signoff === "waiting" || t.signoff === "missing") ? "amber" : (STATE_TONE[t.systemState] ?? "")}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
+              {t.recurring && <RecurringTag />}
               <select aria-label="Change status" value="" onChange={(e) => e.target.value && void moveTo(e.target.value)}>
                 <option value="">Change…</option>
                 {Object.entries(STATE_LABEL).map(([k, label]) => (

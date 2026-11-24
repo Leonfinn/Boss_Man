@@ -2153,6 +2153,7 @@ export async function buildApp(opts: AppOptions) {
       ownerSetupIfSkipped: z.string().max(240).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
+      recurring: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
       size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).nullable(),
       planFirst: z.boolean(),

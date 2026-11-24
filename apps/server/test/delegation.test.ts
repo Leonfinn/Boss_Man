@@ -207,6 +207,24 @@ describe("CEO rates risk", () => {
 describe("CEO reorganises tickets", () => {
   const update = (c: Client, args: Record<string, unknown>) => c.callTool({ name: "update_ticket", arguments: { reason: "Backlog review.", ...args } });
 
+  it("marks a ticket recurring and clears it, logging each change; a plain worker can't (BOS-2485)", async () => {
+    const t = await ctx.ticket();
+    expect((await row(t.id)).recurring).toBe(false);
+    const c = await agent(ctx.co.ceo.id);
+    expect((await update(c, { ticketId: t.id, recurring: true })).isError).toBeFalsy();
+    expect((await row(t.id)).recurring).toBe(true);
+    expect((await update(c, { ticketId: t.id, recurring: false })).isError).toBeFalsy();
+    expect((await row(t.id)).recurring).toBe(false);
+    const log = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary);
+    expect(log.some((s) => s.includes("(marked recurring)"))).toBe(true);
+    expect(log.some((s) => s.includes("(no longer marked recurring)"))).toBe(true);
+    const worker = await agent(ctx.dev.id);
+    expect((await update(worker, { ticketId: t.id, recurring: true })).isError).toBe(true);
+    expect((await row(t.id)).recurring).toBe(false);
+    await c.close();
+    await worker.close();
+  });
+
   it("moves a ticket with its sub-tasks to another project, keeping state, and records why", async () => {
     const from = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/projects`, { name: "Imported" })).json() as { id: string };
     const to = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/projects`, { name: "Main" })).json() as { id: string };

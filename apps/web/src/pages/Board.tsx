@@ -26,6 +26,7 @@ import { ago } from "./Dashboard";
 import { ageShort } from "../age";
 import { yourReviewFirst } from "../board-lane-order";
 import { WorkStands } from "../components/WorkStands";
+import { RecurringTag } from "../components/RecurringTag";
 import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
 const DONE_SHOWN = 8;
@@ -497,7 +498,7 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
 
 const FILTERS_KEY = "board-filters";
 type BoardView = "all" | "features" | "tasks";
-type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string; stuckOnly: boolean };
+type SavedFilters = { feature: string; working: boolean; view: BoardView; assignee: string; stuckOnly: boolean; hideRecurring: boolean };
 /** The view, Assigned to, feature and "working now" filters, kept for the browser session like the feature states below. */
 function readFilters(): SavedFilters {
   try {
@@ -508,9 +509,10 @@ function readFilters(): SavedFilters {
       view: saved?.view === "features" || saved?.view === "tasks" ? saved.view : "all",
       assignee: typeof saved?.assignee === "string" && saved.assignee ? saved.assignee : "anyone",
       stuckOnly: saved?.stuckOnly === true,
+      hideRecurring: saved?.hideRecurring === true,
     };
   } catch {
-    return { feature: "any", working: false, view: "all", assignee: "anyone", stuckOnly: false };
+    return { feature: "any", working: false, view: "all", assignee: "anyone", stuckOnly: false, hideRecurring: false };
   }
 }
 
@@ -722,6 +724,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
             {t.urgentByOwner ? "Priority 1" : "Urgent"}
           </span>
         )}
+        {t.recurring && <RecurringTag />}
         {t.number && <span className="mono muted ref">{ticketRef(prefix, t.number)}</span>}
       </div>
       <h3>
@@ -939,9 +942,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     if (phone) setFilterOpen(false);
   }, [phone]);
   const filterCompany = companies.find((c) => c.id === current?.companyId);
-  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0);
+  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0) + (filters.hideRecurring ? 1 : 0);
   const clearFilters = () => {
-    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false, stuckOnly: false });
+    setFilter({ view: "all", assignee: "anyone", feature: "any", working: false, stuckOnly: false, hideRecurring: false });
   };
   const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
   const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
@@ -950,6 +953,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     ...(assignee !== "anyone" ? [{ key: "assignee", label: `Assigned: ${assigneeName}`, remove: `assigned to ${assigneeName}`, clear: () => setAssignee("anyone") }] : []),
     ...(featureFilter !== "any" ? [{ key: "feature", label: `Feature: ${featureName}`, remove: `feature ${featureName}`, clear: () => setFilter({ feature: "any" }) }] : []),
     ...(filters.working ? [{ key: "working", label: "Working now", remove: "working now", clear: () => setFilter({ working: false }) }] : []),
+    ...(filters.hideRecurring ? [{ key: "recurring", label: "Recurring hidden", remove: "recurring hidden", clear: () => setFilter({ hideRecurring: false }) }] : []),
   ];
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   // Every word must appear in the ticket's reference, title, feature or description.
@@ -958,6 +962,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) &&
     (!filters.working || !!t.working?.length) &&
     (!filters.stuckOnly || !!t.looksStuck) &&
+    (!filters.hideRecurring || !t.recurring) &&
     (!words.length || words.every((w) => [t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w)));
   // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
   // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
@@ -1301,6 +1306,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
               onFeature={(v) => setFilter({ feature: v })}
               working={filters.working}
               onWorking={(v) => setFilter({ working: v })}
+              showRecurring={!filters.hideRecurring}
+              onShowRecurring={(v) => setFilter({ hideRecurring: !v })}
               agents={company?.agents ?? []}
               features={featureList}
               workingCount={board.data?.workingAgents}
