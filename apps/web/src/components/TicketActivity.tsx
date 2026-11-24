@@ -635,7 +635,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
               <button type="button" className="linkish msg-link-btn" onClick={() => void copyMessageLink(m!.id)}>
                 {copied === m!.id ? "Link copied" : "Copy link"}
               </button>
-              {linkShown?.id === m!.id && (
+              {linkShown && linkShown.id === m!.id && (
                 <label className="msg-link-box">
                   Couldn't copy here. Copy the link by hand:
                   <input className="mono" readOnly autoFocus value={linkShown.link} onFocus={(e) => e.currentTarget.select()} />
