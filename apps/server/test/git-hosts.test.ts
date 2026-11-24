@@ -557,6 +557,14 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
     await expect(host(() => json(403, { message: "Resource not accessible" })).compareDetail(cfg("github"), "t", "a", "b")).rejects.toMatchObject({ status: 403 });
   });
 
+  it("asks for the page it is given (BOS-2468)", async () => {
+    const asked: string[] = [];
+    const h = host((p) => (asked.push(p), json(200, { workflow_runs: [] })));
+    await h.workflowRuns(cfg("github"), "t", "main", 100, 3);
+    await h.workflowRuns(cfg("github"), "t", "main");
+    expect(asked).toEqual(["/actions/runs?branch=main&per_page=100&page=3", "/actions/runs?branch=main&per_page=30"]);
+  });
+
   it("throws a GitHostError when the token can't read the runs", async () => {
     await expect(host(() => json(403, { message: "Resource not accessible" })).workflowRuns(cfg("github"), "t", "main")).rejects.toMatchObject({ status: 403 });
   });
