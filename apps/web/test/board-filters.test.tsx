@@ -35,7 +35,7 @@ function stub(extra: Record<string, unknown> = {}) {
               id: "col1", name: "Ready", systemState: "ready", wipLimit: null,
               tickets: [
                 card({ id: "t1", title: "Alpha task", featureId: "f1", featureTitle: "Dark mode", working: ["Developer working"], workingSince: since, assigneeAgentId: "a1" }),
-                card({ id: "t2", title: "Beta task", featureId: "f1", featureTitle: "Dark mode", assigneeAgentId: "a1" }),
+                card({ id: "t2", title: "Beta task", featureId: "f1", featureTitle: "Dark mode", assigneeAgentId: "a1", recurring: true }),
                 card({ id: "t3", title: "Gamma task", featureId: "f2", featureTitle: "Export", working: ["Developer working"], workingSince: since }),
                 card({ id: "t4", title: "Delta task" }),
               ],
@@ -166,6 +166,27 @@ describe("board filters", () => {
     expect(screen.getByText("Working now", { selector: ".filter-chip span" })).toBeTruthy();
     openPanel("Filter, 2 on");
     expect(screen.getByRole("switch", { name: /^Working now/ }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("labels a recurring card, and the Recurring switch hides those cards and is kept (BOS-2485)", async () => {
+    stub();
+    open();
+    await screen.findByText("Beta task", { selector: "h3 a" });
+    // Only the recurring card carries the label; everything shows by default.
+    expect(screen.getAllByTestId("recurring-tag")).toHaveLength(1);
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+    openPanel();
+    const sw = screen.getByRole("switch", { name: /^Recurring/ });
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(sw);
+    expect(shown()).toEqual(["Alpha", "Gamma", "Delta"]);
+    expect(screen.getByRole("button", { name: "Filter, 1 on" })).toBeTruthy();
+    cleanup();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    expect(shown()).toEqual(["Alpha", "Gamma", "Delta"]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter: recurring hidden" }));
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
   });
 
   it("removes a filter from its chip, and Clear all leaves the search text alone", async () => {
