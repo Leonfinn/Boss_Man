@@ -62,9 +62,9 @@ describe("Answered list", () => {
       expect(urls[0]).toContain("q=pay");
       expect(urls[0]).toContain("companyId=11111111");
       const lines = (await (saved as unknown as Blob).text()).trim().split("\r\n");
-      expect(lines[0]).toBe("Answered at,Company,Ticket,Question,Answer,Note,Answered by");
+      expect(lines[0]).toBe("Answered at,Company,Ticket,Question,Answer,Note,Answered by,Waited (minutes)");
       expect(lines).toHaveLength(3);
-      expect(lines[1]).toBe('2026-11-01T10:00:00.000Z,App Co,BOS-1,"Pay, now?",Stripe,"Use the test key, please",owner');
+      expect(lines[1]).toBe('2026-11-01T10:00:00.000Z,App Co,BOS-1,"Pay, now?",Stripe,"Use the test key, please",owner,');
       expect(lines[2]).toContain("Yes");
       expect(lines[2]).toContain("Casey");
     } finally {

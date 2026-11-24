@@ -28,6 +28,8 @@ export function maskQuery(text: string): string {
 export type DataHealth = {
   disk: { freeBytes: number; totalBytes: number; freePercent: number } | null;
   database: { bytes: number | null; dayAgoBytes: number | null; weekAgoBytes: number | null; growthPercent7d: number | null };
+  /** The last 14 daily readings, oldest first. */
+  history: { day: string; bytes: number }[];
   limits: { statementTimeouts: number; poolFull: number; since: "last 24 hours (since the server started if less)" };
   slowQueries: { seconds: number; query: string }[];
   warnings: string[];
@@ -78,10 +80,11 @@ export function dataHealthService(db: Db, deps: { dataDir?: string; now?: () => 
   async function recordAndRead(bytes: number | null) {
     const at = now();
     if (bytes !== null) await db.insert(serverSizeReadings).values({ day: dayKey(at), dbBytes: bytes, recordedAt: at }).onConflictDoNothing();
-    const since = dayKey(new Date(at.getTime() - 8 * DAY_MS));
+    const since = dayKey(new Date(at.getTime() - 13 * DAY_MS));
     const rows = await db.select().from(serverSizeReadings).where(gte(serverSizeReadings.day, since)).orderBy(desc(serverSizeReadings.day));
     const near = (days: number) => rows.find((r) => r.day === dayKey(new Date(at.getTime() - days * DAY_MS)))?.dbBytes ?? null;
-    return { dayAgo: near(1), weekAgo: near(7) };
+    const history = rows.slice(0, 14).reverse().map((r) => ({ day: r.day, bytes: Number(r.dbBytes) }));
+    return { dayAgo: near(1), weekAgo: near(7), history };
   }
 
   function warningsFor(d: ReturnType<typeof disk>, bytes: number | null, weekAgo: number | null): string[] {
@@ -100,10 +103,11 @@ export function dataHealthService(db: Db, deps: { dataDir?: string; now?: () => 
     async read(): Promise<DataHealth> {
       const d = disk();
       const bytes = await dbBytes();
-      const { dayAgo, weekAgo } = await recordAndRead(bytes);
+      const { dayAgo, weekAgo, history } = await recordAndRead(bytes);
       return {
         disk: d,
         database: { bytes, dayAgoBytes: dayAgo, weekAgoBytes: weekAgo, growthPercent7d: bytes !== null && weekAgo ? Math.round((bytes / weekAgo - 1) * 100) : null },
+        history,
         limits: { ...limitCounts(now().getTime()), since: "last 24 hours (since the server started if less)" },
         slowQueries: await slowQueries(),
         warnings: warningsFor(d, bytes, weekAgo),

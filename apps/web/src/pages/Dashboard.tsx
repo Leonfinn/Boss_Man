@@ -45,7 +45,7 @@ export function OldestBlocked({ oldest, now = Date.now() }: { oldest?: { at: str
   if (!oldest) return null;
   return (
     <small className="stat-oldest muted">
-      <a href={`#/tickets/${oldest.ticketId}`}>Oldest block: {oldest.ref ? `${oldest.ref}, ` : ""}{ago(oldest.at, now)}</a>
+      <a href={`#/tickets/${oldest.ticketId}`}>Oldest block: {oldest.ref ? <><span className="nowrap">{oldest.ref}</span>, </> : ""}<span className="nowrap">{ago(oldest.at, now)}</span></a>
     </small>
   );
 }

@@ -22,9 +22,11 @@ done
 for v in BOSSMAN_DATA BOSSMAN_DEPLOYER; do [ -n "${!v:-}" ] || export "$v=/check-compose-placeholder"; done
 # The image install (BOS-974) names images by registry and digest, which must look like real ones.
 [ -n "${BOSSMAN_REGISTRY:-}" ] || export BOSSMAN_REGISTRY=registry.invalid/check-compose
-for v in BOSSMAN_SERVER_DIGEST BOSSMAN_LAUNCHER_DIGEST BOSSMAN_NETGUARD_DIGEST BOSSMAN_RUNNER_DIGEST; do
+for v in BOSSMAN_SERVER_DIGEST BOSSMAN_LAUNCHER_DIGEST BOSSMAN_NETGUARD_DIGEST BOSSMAN_RUNNER_DIGEST BOSSMAN_UPDATER_DIGEST; do
   [ -n "${!v:-}" ] || export "$v=sha256:0000000000000000000000000000000000000000000000000000000000000000"
 done
+# The updater (BOS-1227) also names the repository that signed the release.
+[ -n "${BOSSMAN_UPDATER_REPO:-}" ] || export BOSSMAN_UPDATER_REPO=example/check-compose
 [ -n "${PENPOT_BIND:-}" ] || export PENPOT_BIND=127.0.0.1
 # A stray COMPOSE_FILE or COMPOSE_PROFILES from the caller would change what -f means.
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME

@@ -2,6 +2,7 @@
 // settings) swaps the server colours through the Docker API, then updates itself last (design sections 5 and 8).
 import { loadConfig, UpdaterError } from "./config.js";
 import { dockerClient, socketTransport } from "./docker.js";
+import { converge, firstStart, reconcile } from "./firststart.js";
 import { recover, runMove, type MoveDeps } from "./move.js";
 import { callHandover, newGate, OLD_SUFFIX } from "./selfupdate.js";
 import { createServer } from "./server.js";
@@ -22,6 +23,7 @@ async function main() {
     networks: sw ? [cfg.network, sw.frontNetwork, sw.launcherNetwork, sw.selfNetwork] : [cfg.network],
     volumes: sw ? [...sw.serverMounts, ...sw.selfMounts].map((m) => m.source) : [],
     socketBind: sw ? `${sw.socketHostPath}:/var/run/docker.sock` : undefined,
+    launcherVolumes: sw?.helpers ? sw.helpers.launcherMounts.map((m) => m.source) : [],
   });
   const state = stateStore(cfg.stateDir);
   const gate = newGate();
@@ -48,6 +50,28 @@ async function main() {
     void runMove(deps, pending);
   }
   void idle;
+  // BOS-1227: first start (the launcher and the first server colour, when compose did not make them), reconcile, and the retry of a
+  // deferred helper move. Never stops the updater: a failure is a note in the status and a retry.
+  if (sw) {
+    let settling = false;
+    const settle = async (atStart: boolean) => {
+      // A tick that fires while the previous one still waits (a busy launcher is waited on for up to 10 minutes) is skipped.
+      if (settling) return;
+      settling = true;
+      try {
+        // Only at start: firstStart removes a half-made `launcher-next`, which at any other time could be a move's own.
+        if (atStart) for (const n of await firstStart(deps)) log(n);
+        for (const n of await reconcile(deps)) log(n);
+        await converge(deps);
+      } catch (e) {
+        log(`reconcile failed: ${String((e as Error)?.message ?? e)}`);
+      } finally {
+        settling = false;
+      }
+    };
+    void settle(true);
+    setInterval(() => void settle(false), 5 * 60_000).unref();
+  }
   const stop = () => server.close(() => process.exit(0));
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);

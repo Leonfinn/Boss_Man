@@ -47,6 +47,8 @@ export async function selfUpdate(d: SwapDeps, release: Release, pending: { versi
     await docker.remove(nextName);
     await docker.createServer(nextName, updaterSpec(cfg, imageRef(cfg.registry, "boss-man-updater", entry.digest), release.version, entry.digest), "updater");
     await docker.connect(cfg.swap.frontNetwork, nextName, []);
+    // BOS-1227: the next updater asks the launcher whether a run is starting, so it needs the launcher's network (and key, a self mount).
+    if (cfg.swap.helpers) await docker.connect(cfg.swap.launcherNetwork, nextName, []);
     await docker.start(nextName);
   } catch (e) {
     await docker.remove(nextName).catch(() => undefined);

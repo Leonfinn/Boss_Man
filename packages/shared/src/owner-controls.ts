@@ -99,7 +99,7 @@ export const OWNER_CONTROLS = {
     // "Copy link" under each message, "Link copied" for a moment after a copy (BOS-2456).
     "Link copied",
     // The Scrum Master's log of this ticket.
-    "Undo", "Undoing", "Scrum Master", "Show all …",
+    "Undo", "Undoing", "Scrum Master", "Show all …", "Download CSV",
     // The header's "Copy link", "Copied" for a moment after a copy (BOS-2233).
     "Copy link", "Copied",
     // The header's "Download": the ticket as Markdown, "Preparing" while it fetches the conversation (BOS-2314).
@@ -117,7 +117,7 @@ export const OWNER_CONTROLS = {
   Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
-  Engagements: [],
+  Engagements: ["Download CSV"],
   Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV", "Start now", "Cancel", "Starting", "Cancelling"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
@@ -165,7 +165,7 @@ export const OWNER_CONTROLS = {
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",
     "Add a skill", "Discard draft",
   ],
-  "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …"],
+  "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …", "Download CSV"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
   Settings: [
     // "Server and runner" is the name of the last group, not a page (BOS-1492); its pages are Updates … Devices and privacy.
@@ -286,7 +286,7 @@ export const OWNER_FIELDS = {
     "Assign to", "Risk", "Project", "Assigned to", "Feature", "Spending limit per month (USD)", "At the limit",
   ],
   Ticket: [
-    "Filter", "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
+    "Filter", "Undone only", "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
     "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
@@ -347,7 +347,7 @@ export const OWNER_FIELDS = {
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip", "Filter",
   ],
-  "Scrum Master": ["Filter"],
+  "Scrum Master": ["Filter", "Undone only"],
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background agents at once (0 to 16)",

@@ -45,6 +45,28 @@ export type SwapConfig = {
   stopGraceSeconds: number;
   handoverCallSeconds: number;
   backupsKeep: number;
+  /** BOS-1227 (941c): the launcher and the first start. Null when the install does not define the launcher's spec. */
+  helpers: HelpersConfig | null;
+};
+
+/** What setup defines for the launcher (design section 5, "The whole release moves"): the same pattern as the server colour's values. */
+export type HelpersConfig = {
+  launcherName: string;
+  /** KEY=value lines for the launcher (never BOSSMAN_RUNNER_IMAGE / BOSSMAN_NETGUARD_IMAGE: the updater sets those from the release). */
+  launcherEnv: string[];
+  /** Named volumes the launcher mounts (data, its key folder, the updater's state folder read-only for `release-current`). */
+  launcherMounts: { source: string; target: string; readOnly: boolean }[];
+  /** Where the updater reaches the launcher, and the file holding the key it sends. */
+  launcherUrl: string;
+  launcherKeyFile: string;
+  launcherMemory: number;
+  /** How long a launcher move waits for "a run is starting" to clear, and how often it asks. */
+  busyWaitSeconds: number;
+  busyPollSeconds: number;
+  launcherReadySeconds: number;
+  /** First start: the release this install file was made from (digests, no signature check: the install file is the trust). */
+  first: { server: string; launcher: string; runner: string; netguard: string } | null;
+  dbReadySeconds: number;
 };
 
 export type Config = {
@@ -152,7 +174,34 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       stopGraceSeconds: num("UPDATER_STOP_GRACE_SECONDS", 60),
       handoverCallSeconds: num("UPDATER_HANDOVER_CALL_SECONDS", 60),
       backupsKeep: num("UPDATER_BACKUPS_KEEP", 3),
+      helpers: null,
     };
+    if (lines("UPDATER_LAUNCHER_MOUNTS").length > 0) {
+      const launcherEnv = lines("UPDATER_LAUNCHER_ENV");
+      for (const l of launcherEnv) {
+        if (!/^[A-Z][A-Z0-9_]*=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV has a line that is not KEY=value.");
+        if (/^BOSSMAN_(RUNNER|NETGUARD)_IMAGE=/.test(l)) throw new UpdaterError("config", "UPDATER_LAUNCHER_ENV must not set the runner or guard image: the updater sets them from the release.");
+      }
+      const dg = (name: string) => {
+        const v = env[name]?.trim();
+        if (v && !/^sha256:[0-9a-f]{64}$/.test(v)) throw new UpdaterError("config", `${name} must be sha256: followed by 64 lower-case hex characters.`);
+        return v;
+      };
+      const f = { server: dg("UPDATER_FIRST_SERVER_DIGEST"), launcher: dg("UPDATER_FIRST_LAUNCHER_DIGEST"), runner: dg("UPDATER_FIRST_RUNNER_DIGEST"), netguard: dg("UPDATER_FIRST_NETGUARD_DIGEST") };
+      swap.helpers = {
+        launcherName: env["UPDATER_LAUNCHER_NAME"]?.trim() || "launcher",
+        launcherEnv,
+        launcherMounts: mounts("UPDATER_LAUNCHER_MOUNTS"),
+        launcherUrl: (env["UPDATER_LAUNCHER_URL"]?.trim() || "http://launcher:3105").replace(/\/$/, ""),
+        launcherKeyFile: env["UPDATER_LAUNCHER_KEY_FILE"]?.trim() || "/run/launcher/key",
+        launcherMemory: Number(env["UPDATER_LAUNCHER_MEMORY"] || 0) || 128 * 1024 * 1024,
+        busyWaitSeconds: num("UPDATER_BUSY_WAIT_SECONDS", 600),
+        busyPollSeconds: num("UPDATER_BUSY_POLL_SECONDS", 10),
+        launcherReadySeconds: num("UPDATER_LAUNCHER_READY_SECONDS", 60),
+        first: f.server && f.launcher && f.runner && f.netguard ? { server: f.server, launcher: f.launcher, runner: f.runner, netguard: f.netguard } : null,
+        dbReadySeconds: num("UPDATER_DB_READY_SECONDS", 120),
+      };
+    }
   }
   return {
     swap,
