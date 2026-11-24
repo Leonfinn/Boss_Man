@@ -551,6 +551,14 @@ export function deploysService(
       return last;
     },
 
+    /** Each target's newest deploy of any status (BOS-2464), so a row can say the newest one failed or waits. */
+    async latestAttempts(companyId: string): Promise<Map<string, Deploy>> {
+      const rows = await db.select().from(deploys).where(eq(deploys.companyId, companyId)).orderBy(desc(deploys.createdAt), desc(deploys.id));
+      const latest = new Map<string, Deploy>();
+      for (const r of rows) if (!latest.has(r.targetId)) latest.set(r.targetId, r);
+      return latest;
+    },
+
     /** An agent asks to ship a ref. Production (or a target that asks for it) waits for the owner (R15). */
     async request(
       actor: { companyId: string; agentId: string | null; runId?: string | null },

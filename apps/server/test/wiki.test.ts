@@ -391,6 +391,22 @@ describe("wiki append, history and restore (BOS-430)", () => {
     expect((await c.wiki.get(c.company.id, "log")).revisions).toHaveLength(4);
   });
 
+  it("wiki get says who started a page and how many people edited it (BOS-2466)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    await c.wiki.write(c.company.id, { title: "Origin", body: "one", agentId: null, runId: null });
+    await c.wiki.write(c.company.id, { title: "Origin", body: "two", agentId: c.worker.id, runId: null });
+    await c.wiki.write(c.company.id, { title: "Origin", body: "three", agentId: c.worker.id, runId: null });
+    const page = await c.wiki.get(c.company.id, "origin");
+    expect(page.createdBy).toBe("you");
+    expect(page.editors).toBe(2);
+    expect(page.revisionCount).toBe(3);
+    await c.wiki.write(c.company.id, { title: "Mine", body: "x", agentId: c.worker.id, runId: null });
+    const mine = await c.wiki.get(c.company.id, "mine");
+    expect(mine.createdBy).toBe("Engineer");
+    expect(mine.editors).toBe(1);
+  });
+
   it("an append naming intro is refused and the page is left byte-for-byte alone", async () => {
     // Adversarial round 6: "intro" is the text before the first heading, and the newest-first path glued
     // the entry onto the next heading line, silently losing it. The page grows, so the shrink guard can't catch it.

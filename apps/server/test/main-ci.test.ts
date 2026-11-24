@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, projects, ticketMessages, tickets } from "../src/db/schema.js";
+import { activity, agents, projects, settings, ticketMessages, tickets } from "../src/db/schema.js";
 import { areaOf, errorLines, knownRedOnly, mainCiFailures, mainCiService, namedFiles, NEVER_WEAKEN, redScope, type OpenFailure } from "../src/services/main-ci.js";
 import { GitHostError, type CompareDetail, type WorkflowJob, type WorkflowRun } from "../src/services/git-hosts.js";
 
@@ -63,10 +63,11 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
       if (!d) throw new GitHostError(403, "Resource not accessible by personal access token");
       return d;
     },
-    workflowRuns: async () => {
+    // Pages like GitHub: newest first, `limit` a page.
+    workflowRuns: async (_c: unknown, _t: unknown, _b: string, limit = 30, page = 1) => {
       gh.calls++;
       if (gh.runsError) throw gh.runsError;
-      return gh.runs;
+      return gh.runs.slice((page - 1) * limit, page * limit);
     },
     runJobs: async (_c: unknown, _t: unknown, id: number) => gh.jobs[id] ?? [],
     jobLog: async () => {
@@ -459,6 +460,98 @@ describe("the main-CI watcher", () => {
     await c.service.run();
     expect(await c.failingTickets()).toHaveLength(1); // only the hand-made one
     expect((await c.failingTickets())[0]!.title).not.toContain("CI / images");
+  });
+
+  // BOS-2468: main's red runs 45086716176 (CI #4297) and 45306147031 (#4668) started before a newer run and finished
+  // after it. The single "last seen" mark had moved to the newer run, and only runs listed above it were read.
+  it("reads a red run that finished after a newer run the last pass already read (BOS-2468)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(4296, "success", sha("a"), { updatedAt: "2026-11-23T00:04:00Z" })];
+    await c.service.run();
+    // 00:20: #4298 (started 24 s after #4297) has finished green; #4297 is still going.
+    c.gh.runs = [run(4298, "success", sha("c"), { updatedAt: "2026-11-23T00:13:05Z" }), run(4297, null, sha("b"), { createdAt: new Date().toISOString() }), ...c.gh.runs];
+    await c.service.run();
+    expect(await c.failingTickets()).toHaveLength(0);
+    // 00:30: #4297 has finished red, after #4298 and #4299.
+    c.gh.runs = [run(4299, "success", sha("d"), { updatedAt: "2026-11-23T00:24:29Z" }), run(4298, "success", sha("c"), { updatedAt: "2026-11-23T00:13:05Z" }), run(4297, "failure", sha("b"), { updatedAt: "2026-11-23T00:25:27Z" }), run(4296, "success", sha("a"), { updatedAt: "2026-11-23T00:04:00Z" })];
+    c.gh.jobs[4297] = [job("check-worker-image", [["Set up", "success"], ["The project's typecheck and tests inside the worker image", "failure"]])];
+    await c.service.run();
+    const made = await c.failingTickets();
+    expect(made.map((t) => t.title)).toEqual(["Main's CI is failing: CI / check-worker-image / The project's typecheck and tests inside the worker image"]);
+    expect(made[0]!.body).toContain("actions/runs/4297");
+    // Read once: the next pass adds nothing.
+    await c.service.run();
+    expect(await c.failingTickets()).toHaveLength(1);
+    expect(await c.notesOn(made[0]!.id)).toEqual([]);
+  });
+
+  it("pages back to the last pass's mark when more runs than one page started meanwhile (BOS-2468)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(1000, "success", sha("a"))];
+    await c.service.run();
+    // A long server update: 150 green runs start after a red one, all finished by the next pass.
+    failedRun(c, 1001, sha("b"));
+    for (let id = 1002; id <= 1151; id++) c.gh.runs.unshift(run(id, "success", sha("c")));
+    c.gh.calls = 0;
+    await c.service.run();
+    expect(c.gh.calls).toBe(2);
+    const made = await c.failingTickets();
+    expect(made).toHaveLength(1);
+    expect(made[0]!.body).toContain("actions/runs/1001");
+  });
+
+  it("records why runs weren't read when more ran between two passes than it pages back through (BOS-2468)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(1000, "success", sha("a"))];
+    await c.service.run();
+    failedRun(c, 1001, sha("b"));
+    for (let id = 1002; id <= 1601; id++) c.gh.runs.unshift(run(id, "success", sha("c")));
+    await c.service.run();
+    // The red run is past the 500 runs read: no ticket, but a recorded reason, on the activity log and the Settings line.
+    expect(await c.failingTickets()).toHaveLength(0);
+    const gaps = (await c.db.select().from(activity).where(eq(activity.companyId, c.company.id))).filter((a) => a.kind === "main_ci_gap");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]!.summary).toContain("more than 500 runs");
+    const [s] = await c.service.statuses();
+    expect("detail" in s!.status ? s!.status.detail : "").toContain("weren't checked");
+    // Said once: the next pass starts from where this one read to.
+    c.gh.calls = 0;
+    await c.service.run();
+    expect(c.gh.calls).toBe(1);
+    expect((await c.db.select().from(activity).where(eq(activity.companyId, c.company.id))).filter((a) => a.kind === "main_ci_gap")).toHaveLength(1);
+  });
+
+  it("carries the old single mark over: a red run below it that finished late is read, older ones are not (BOS-2468)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    await c.db.insert(settings).values({ key: `main_ci:${c.project.id}`, value: { status: { state: "green", detail: "", at: "" }, seen: { CI: "100:1" }, open: {} } });
+    c.gh.runs = [run(102, "success", sha("d")), run(101, "failure", sha("c")), run(100, "success", sha("b")), run(99, "failure", sha("a"))];
+    c.gh.jobs[101] = [job("test", [["Run tests", "failure"]])];
+    c.gh.jobs[99] = [job("old", [["Run tests", "failure"]])];
+    await c.service.run();
+    const made = await c.failingTickets();
+    expect(made.map((t) => t.title)).toEqual(["Main's CI is failing: CI / test / Run tests"]);
+  });
+
+  it("reads a run held back by a still-going older run once that finishes, however many passes later (BOS-2468)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    c.gh.runs = [run(200, "success", sha("a"))];
+    await c.service.run();
+    c.gh.runs.unshift(run(201, null, sha("b"), { createdAt: new Date().toISOString() }));
+    for (let id = 202; id <= 260; id++) c.gh.runs.unshift(run(id, "success", sha("c")));
+    await c.service.run();
+    for (let id = 261; id <= 340; id++) c.gh.runs.unshift(run(id, "success", sha("c")));
+    await c.service.run();
+    // Run 201 is now on page 2: the mark stayed below it, so the pass pages back and reads it.
+    const at = c.gh.runs.findIndex((r) => r.id === 201);
+    c.gh.runs[at] = run(201, "failure", sha("b"));
+    c.gh.jobs[201] = [job("test", [["Run tests", "failure"]])];
+    await c.service.run();
+    expect((await c.failingTickets()).map((t) => t.body)).toEqual([expect.stringContaining("actions/runs/201")]);
   });
 
   it("ignores pull request runs and runs that are still going", async () => {

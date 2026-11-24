@@ -24,9 +24,15 @@ import { OUTLINE_MIN, headingAt, readOutline, sectionHash, sectionLink, type Out
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
 // revisionCount is every version, which can be more than the first page the page carries (BOS-496).
-type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }>; links?: string[]; missingLinks?: string[]; linkedFrom?: string[] };
+type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; createdAt?: string; createdBy?: string | null; editors?: number; revisions: Revision[]; revisionCount?: number; tickets: Array<{ id: string; title: string }>; links?: string[]; missingLinks?: string[]; linkedFrom?: string[] };
 
 /** Under the page body: the pages it links to, its [[slug]]s to no page, and the pages that link to it (BOS-2366). */
+/** "12 versions, 4 people"; just the count when the server did not say how many people edited. */
+function historyLabel(versions: number, editors?: number): string {
+  if (!editors) return String(versions);
+  return `${versions} ${versions === 1 ? "version" : "versions"}, ${editors} ${editors === 1 ? "person" : "people"}`;
+}
+
 function PageLinks({ companyId, p }: { companyId: string; p: PageDetail }) {
   const rows: Array<[string, string[], boolean]> = [
     ["Links to", p.links ?? [], true],
@@ -306,6 +312,12 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           )}
           <h2 style={{ fontSize: 22, fontWeight: 600 }}>{p.title}</h2>
           <p className="muted" style={{ fontSize: 13 }}>
+            {p.createdAt && (
+              <>
+                Created {new Date(p.createdAt).toLocaleDateString(undefined, { day: "numeric", month: "short" })}
+                {p.createdBy ? ` by ${p.createdBy}` : ""} ·{" "}
+              </>
+            )}
             Changed {when(p.updatedAt)} by {p.updatedBy ?? "you"}
             {p.tickets.length > 0 && (
               <>
@@ -329,7 +341,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
             New page here
           </button>
           <button type="button" className="btn" aria-expanded={history} onClick={() => setHistory((h) => !h)}>
-            History ({p.revisionCount ?? p.revisions.length})
+            History ({historyLabel(p.revisionCount ?? p.revisions.length, p.editors)})
           </button>
           <button type="button" className="btn" onClick={() => download(`${p.slug.replace(/\//g, "-")}.md`, p.body, "text/markdown;charset=utf-8")}>
             Download

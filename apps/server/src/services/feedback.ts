@@ -491,7 +491,29 @@ export function feedbackService(
 
     // ---- Notes and insights ----
     createNote,
-    async notes(companyId: string, opts: { state?: "unprocessed" | "processed" | "archived"; q?: string; before?: Date; limit?: number; delivered?: boolean } = {}) {
+    /** The inbox's summary line: notes waiting to be triaged, the oldest of them, and this week's notes by where they came from. */
+    async inboxSummary(companyId: string, now: Date = new Date()) {
+      const [waiting] = await db.select({ n: count() }).from(feedbackNotes).where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.state, "unprocessed"), counted));
+      const [oldest] = await db
+        .select({ id: feedbackNotes.id, title: feedbackNotes.title, text: feedbackNotes.text, createdAt: feedbackNotes.createdAt })
+        .from(feedbackNotes)
+        .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.state, "unprocessed"), counted))
+        .orderBy(asc(feedbackNotes.createdAt))
+        .limit(1);
+      const since = new Date(now.getTime() - 7 * 86_400_000);
+      const week = await db
+        .select({ github: sql<boolean>`${feedbackNotes.externalId} like 'github:%'`, source: feedbackNotes.source, n: count() })
+        .from(feedbackNotes)
+        .where(and(eq(feedbackNotes.companyId, companyId), counted, gt(feedbackNotes.createdAt, since)))
+        .groupBy(sql`${feedbackNotes.externalId} like 'github:%'`, feedbackNotes.source);
+      const sum = (f: (r: (typeof week)[number]) => boolean) => week.filter(f).reduce((a, r) => a + Number(r.n), 0);
+      return {
+        waiting: Number(waiting?.n ?? 0),
+        oldest: oldest ? { id: oldest.id, title: oldest.title ?? oldest.text.slice(0, 70), createdAt: oldest.createdAt } : null,
+        week: { portal: sum((r) => !r.github && r.source === "portal"), github: sum((r) => !!r.github), owner: sum((r) => !r.github && r.source === "owner") },
+      };
+    },
+    async notes(companyId: string, opts: { state?: "unprocessed" | "processed" | "archived"; q?: string; before?: Date; after?: Date; oldestFirst?: boolean; limit?: number; delivered?: boolean } = {}) {
       const q = opts.q?.trim();
       // Delivered: at least one linked feature, and none that is not released.
       const delivered = opts.delivered
@@ -509,10 +531,12 @@ export function feedbackService(
             opts.state ? eq(feedbackNotes.state, opts.state) : undefined,
             delivered,
             opts.before ? lt(feedbackNotes.createdAt, opts.before) : undefined,
+            // The cursor is a JS Date (milliseconds); compare at that precision so the last row shown is not listed again.
+            opts.after ? sql`date_trunc('milliseconds', ${feedbackNotes.createdAt}) > ${opts.after}` : undefined,
             like ? or(ilike(feedbackNotes.text, like), ilike(feedbackNotes.title, like), ilike(feedbackCustomers.name, like)) : undefined,
           ),
         )
-        .orderBy(desc(feedbackNotes.createdAt))
+        .orderBy(opts.oldestFirst ? asc(feedbackNotes.createdAt) : desc(feedbackNotes.createdAt))
         .limit(Math.min(opts.limit ?? 50, 200));
       // One query for every listed note's linked features.
       const links = rows.length

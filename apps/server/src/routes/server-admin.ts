@@ -68,6 +68,8 @@ export function serverAdminRoutes(
 
   // The runner update hold (docs/09-self-deploy.md, phase 2): the banner's numbers, a manual start, and cancel.
   owner.get("/api/maintenance", async () => maintenance.status());
+  // BOS-2408: each past update wait, kept in the database (start, swap tries, notable moments, how it ended).
+  owner.get("/api/maintenance/history", async (req) => ({ holds: await maintenance.history(z.coerce.number().int().min(1).max(100).catch(20).parse((req.query as { limit?: string }).limit)) }));
   // The Settings → Runner update panel: the live state first, then the last update as history (BOS-465).
   owner.get("/api/runner-report", async () => runnerReport.updatePanel());
   owner.post("/api/maintenance/start", async (req, reply) => {
@@ -182,10 +184,13 @@ export function serverAdminRoutes(
   };
   owner.get("/api/companies/:id/deploy-targets", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
+    const [targets, last, latest] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id), deploysSvc.latestAttempts(id)]);
     return targets.map((t) => {
       const d = last.get(t.id);
-      return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
+      const n = latest.get(t.id);
+      // BOS-2464: only when the newest deploy is not the last success (failed, refused, waiting or running).
+      const latestAttempt = n && n.id !== d?.id ? { status: n.status, outcome: n.outcome, at: (n.finishedAt ?? n.createdAt).toISOString() } : null;
+      return { ...t, latestAttempt, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
     });
   });
   owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {

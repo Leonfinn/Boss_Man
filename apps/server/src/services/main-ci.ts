@@ -22,6 +22,14 @@ const EVENTS = new Set(["push", "schedule", "workflow_dispatch", "workflow_run"]
 const BAD = new Set(["failure", "timed_out", "startup_failure"]);
 /** How many older runs are read to find the first one that broke. */
 const LOOK_BACK = 10;
+/** Runs per page, and the most pages read back to the last pass's mark (BOS-2468): 500 runs, many hours of a busy main. */
+const PER_PAGE = 100;
+const MAX_PAGES = 5;
+/** A run still unfinished this long after it was created (stuck in GitHub's queue) stops holding the mark back. */
+const STUCK_MS = 24 * 60 * 60_000;
+/** How many read gaps are kept, and how long one is named on the Settings line. */
+const MAX_GAPS = 10;
+const GAP_SHOWN_MS = 7 * 24 * 60 * 60_000;
 
 /** The parent's rule, carried on every ticket this opens. */
 export const NEVER_WEAKEN = "Fix the cause. Never make CI green by weakening a test: no skipping, loosening an assertion, raising a time limit or deleting the check just to pass.";
@@ -48,7 +56,16 @@ export type Suspect = { sha: string; message: string; reason: string };
  * absent means unknown, and an unknown scope holds every merge, as before R40.
  */
 export type OpenFailure = { ticketId: string; workflow: string; runs: string[]; mainAt?: string; lastGreen?: string | null; suspects?: Suspect[]; job?: string; step?: string; named?: string[]; scope?: string[] | null };
-type ProjectState = { status: MainCiStatus & { at: string }; seen: Record<string, string>; open: Record<string, OpenFailure> };
+/** Runs between two ids that were never read because they fell off the pages read (BOS-2468): the recorded reason they got no ticket. */
+export type ReadGap = { afterId: number; beforeId: number; at: string };
+/**
+ * What has been read (BOS-2468). `low`: every main run with an id at or below it was judged (or came before the
+ * watcher's record began). `judged`: run id → the attempt judged, for the runs still on the pages read. GitHub
+ * lists runs by when they started, but they finish in any order (main's CI takes 7 to 30 minutes per push), so a run
+ * is read when it finishes, whatever finished before it. `seen` is the old single mark per workflow, read once to
+ * carry the record over.
+ */
+type ProjectState = { status: MainCiStatus & { at: string }; seen?: Record<string, string>; open: Record<string, OpenFailure>; low?: number; judged?: Record<string, number>; gaps?: ReadGap[] };
 
 /** The project's open main-CI failures (R40), keyed by failing step. A settings read only. */
 export async function mainCiFailures(db: Db, projectId: string): Promise<OpenFailure[]> {
@@ -306,8 +323,8 @@ export function mainCiService(
   };
 
   async function watchProject(p: { id: string; companyId: string; name: string; repoUrl: string | null; gitHost: string | null; gitApiBase: string | null; defaultBranch: string }) {
-    const prev = (await readState(p.id)) ?? { status: { state: "green" as const, detail: "", at: "" }, seen: {}, open: {} };
-    const state: ProjectState = { status: prev.status, seen: { ...prev.seen }, open: { ...prev.open } };
+    const prev: ProjectState = (await readState(p.id)) ?? { status: { state: "green" as const, detail: "", at: "" }, open: {} };
+    const state: ProjectState = { status: prev.status, open: { ...prev.open }, judged: { ...prev.judged }, gaps: [...(prev.gaps ?? [])], ...(prev.low !== undefined ? { low: prev.low } : {}), ...(prev.seen ? { seen: prev.seen } : {}) };
     const stamp = now().toISOString();
     const setStatus = (s: MainCiStatus) => (state.status = { ...s, at: stamp });
     const addr = p.repoUrl ? parseRepoUrl(p.repoUrl) : null;
@@ -321,17 +338,59 @@ export function mainCiService(
       return writeState(p.id, state);
     }
     const cfg: GitHostConfig = { kind: p.gitHost as GitHostKind, apiBase: p.gitApiBase, owner: addr.owner, repo: addr.repo };
-    let runs: WorkflowRun[];
+    // The old single mark per workflow (before BOS-2468), carried over once: the lowest of them is the new mark.
+    const oldSeen = state.low === undefined && state.seen ? Object.entries(state.seen).map(([w, k]) => ({ workflow: w, id: Number(k.split(":")[0]) })).filter((s) => s.id > 0) : [];
+    if (oldSeen.length) state.low = Math.min(...oldSeen.map((s) => s.id));
+    const judged = state.judged!;
+    let fetched: WorkflowRun[] = [];
+    // True when the pages read go back to the mark, or hold main's whole history.
+    let reached = state.low === undefined;
     try {
-      runs = (await deps.gitHosts.workflowRuns(cfg, token, p.defaultBranch)).filter((r) => EVENTS.has(r.event));
+      // not state: a per-pass local that drops a run that moved onto the next page while it was read.
+      const ids = new Set<number>();
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const rows = await deps.gitHosts.workflowRuns(cfg, token, p.defaultBranch, PER_PAGE, page);
+        for (const r of rows) if (!ids.has(r.id)) ids.add(r.id), fetched.push(r);
+        if (rows.length < PER_PAGE || (state.low !== undefined && rows.some((r) => r.id <= state.low!))) {
+          reached = true;
+          break;
+        }
+        if (state.low === undefined) break;
+      }
     } catch (err) {
       setStatus({ state: "unreadable", detail: `The token can't read main's CI runs (${(err as Error).message}).` });
       return writeState(p.id, state);
     }
+    fetched = fetched.sort((a, b) => b.id - a.id);
+    const runs = fetched.filter((r) => EVENTS.has(r.event));
     if (!runs.length) {
       setStatus({ state: "no_ci", detail: "No CI runs on main were found." });
       return writeState(p.id, state);
     }
+    if (oldSeen.length) {
+      // What the old mark had judged: each workflow's marked run and every run of it listed below.
+      for (const s of oldSeen) for (const r of runs) if (r.name === s.workflow && r.id <= s.id && r.status === "completed") judged[r.id] = r.attempt;
+      delete state.seen;
+    }
+    const oldest = fetched[fetched.length - 1]!;
+    if (state.low === undefined) {
+      // First pass with no record: only each workflow's newest finished run is read, as before; older finished runs
+      // count as judged. A run still going is read when it finishes (BOS-2468).
+      // not state: a per-pass local, each workflow's newest finished run id.
+      const newestOf = new Map<string, number>();
+      for (const r of runs) if (r.status === "completed" && !newestOf.has(r.name)) newestOf.set(r.name, r.id);
+      for (const r of runs) if (r.status === "completed" && newestOf.get(r.name) !== r.id) judged[r.id] = r.attempt;
+      state.low = oldest.id - 1;
+    } else if (!reached) {
+      // More runs since the last pass than the pages hold: the ones in between are never read. Said where the owner
+      // and the CEO can see it, so a red among them has a recorded reason rather than silence.
+      const gap: ReadGap = { afterId: state.low, beforeId: oldest.id, at: stamp };
+      state.gaps = [...state.gaps!, gap].slice(-MAX_GAPS);
+      deps.log?.(`main CI: runs on ${p.defaultBranch} after ${gap.afterId} and before ${gap.beforeId} were not read: more than ${MAX_PAGES * PER_PAGE} runs since the last pass`);
+      await record(db, { companyId: p.companyId, kind: "main_ci_gap", summary: `Main's CI watcher couldn't read every run on ${p.defaultBranch} in ${p.name}: more than ${MAX_PAGES * PER_PAGE} runs since its last pass, so runs started before ${oldest.createdAt} that finished since were not checked.`, detail: gap, at: now() });
+      state.low = oldest.id - 1;
+    }
+    const low = state.low!;
 
     // The newest finished run of each workflow is what main looks like now.
     const latest = new Map<string, WorkflowRun>();
@@ -339,20 +398,19 @@ export function mainCiService(
     let failing = 0;
     for (const [workflow, newest] of latest) {
       if (BAD.has(String(newest.conclusion))) failing++;
-      // Every finished run since the last one looked at, oldest first: a newer run that is green, cancelled or
-      // skipped must not hide an older red one the watcher never saw (BOS-1703). With no record, only the newest.
-      const finished = runs.filter((r) => r.name === workflow && r.status === "completed");
-      const seenId = Number((state.seen[workflow] ?? "").split(":")[0]);
-      const at = finished.findIndex((r) => r.id === seenId);
-      const pending = at < 0 ? [newest] : finished.slice(0, at + (`${finished[at]!.id}:${finished[at]!.attempt}` === state.seen[workflow] ? 0 : 1)).reverse();
-      // Left in the log so the next missed run can be told apart: not polled, not seen, or seen and judged.
-      if (pending.length) deps.log?.(`main CI: ${workflow}: reading ${pending.map((r) => `${r.id}:${r.conclusion}`).join(", ")} (last seen ${state.seen[workflow] ?? "none"})`);
+      // Every finished run not judged yet, in the order they finished: a newer run that finished first (green,
+      // cancelled or skipped) must not hide an older red one (BOS-1703, BOS-2468). A re-run (a new attempt) of a run
+      // still on the pages is read again.
+      const pending = runs
+        .filter((r) => r.name === workflow && r.status === "completed" && judged[r.id] !== r.attempt && (r.id > low || judged[r.id] !== undefined))
+        .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id - b.id);
+      // Left in the log so the next missed run can be told apart: not polled, not finished, or read and judged.
+      if (pending.length) deps.log?.(`main CI: ${workflow}: reading ${pending.map((r) => `${r.id}:${r.conclusion}`).join(", ")} (mark ${low})`);
       for (const run of pending) {
-      const seenKey = `${run.id}:${run.attempt}`;
       const bad = BAD.has(String(run.conclusion));
       if (!bad && run.conclusion !== "success") {
         // Cancelled or skipped: says nothing either way.
-        state.seen[workflow] = seenKey;
+        judged[run.id] = run.attempt;
         continue;
       }
       let found: Failure[] = [];
@@ -451,10 +509,18 @@ export function mainCiService(
         if (who.agentId && deps.notify) await deps.notify(who.agentId, { ticketId: t.id, reason: "main CI failed", note: `Main's CI failed at ${f.job} → ${f.step}. ${NEVER_WEAKEN}`, priority: 2 }).catch(() => undefined);
         await wakeWatchers(db, deps.notify, "github_main_failed", `${f.job} → ${f.step} on ${p.defaultBranch}, ticket ${t.id}`, { exceptTicketId: t.id }).catch(() => undefined);
       }
-      state.seen[workflow] = seenKey;
+      judged[run.id] = run.attempt;
       }
     }
-    setStatus(failing ? { state: "failing", detail: `Main's CI is failing in ${failing} workflow${failing === 1 ? "" : "s"}.` } : { state: "green", detail: "Main's CI is green." });
+    // Move the mark up to just below the oldest run not judged yet (still going, or its jobs couldn't be read), so
+    // the next pass pages back to it however many runs start meanwhile. A run stuck unfinished for a day stops holding it.
+    const holding = runs.filter((r) => r.id > low && judged[r.id] !== r.attempt && !(r.status !== "completed" && now().getTime() - Date.parse(r.createdAt) > STUCK_MS));
+    state.low = holding.length ? Math.min(...holding.map((r) => r.id)) - 1 : Math.max(low, fetched[0]!.id);
+    // Only runs still on the pages can come round again (a re-run); older entries are dropped.
+    for (const id of Object.keys(judged)) if (Number(id) < oldest.id) delete judged[id];
+    const shownGap = [...state.gaps!].reverse().find((g) => now().getTime() - Date.parse(g.at) < GAP_SHOWN_MS);
+    const gapNote = shownGap ? ` Some runs on ${p.defaultBranch} weren't checked (more than ${MAX_PAGES * PER_PAGE} runs between two passes, ${shownGap.at.slice(0, 16).replace("T", " ")} UTC).` : "";
+    setStatus(failing ? { state: "failing", detail: `Main's CI is failing in ${failing} workflow${failing === 1 ? "" : "s"}.${gapNote}` } : { state: "green", detail: `Main's CI is green.${gapNote}` });
     await writeState(p.id, state);
   }
 

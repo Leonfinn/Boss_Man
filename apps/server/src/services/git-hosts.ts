@@ -513,9 +513,9 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
      * nightly schedule alike. GitHub only: returns [] elsewhere, so a watcher can say plainly that
      * there is nothing to read.
      */
-    async workflowRuns(cfg: GitHostConfig, token: string, branch: string, limit = 30): Promise<WorkflowRun[]> {
+    async workflowRuns(cfg: GitHostConfig, token: string, branch: string, limit = 30, page = 1): Promise<WorkflowRun[]> {
       if (cfg.kind !== "github") return [];
-      const res = await call(cfg, token, "GET", `/actions/runs?branch=${encodeURIComponent(branch)}&per_page=${Math.max(1, Math.min(100, limit))}`);
+      const res = await call(cfg, token, "GET", `/actions/runs?branch=${encodeURIComponent(branch)}&per_page=${Math.max(1, Math.min(100, limit))}${page > 1 ? `&page=${page}` : ""}`);
       const body = res.json && !Array.isArray(res.json) ? res.json : null;
       const rows = body?.workflow_runs as Array<Record<string, unknown>> | undefined;
       if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the workflow runs on ${branch}: ${messageOf(res.json, res.status)}`);

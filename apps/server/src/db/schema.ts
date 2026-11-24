@@ -350,6 +350,20 @@ export const keyResults = pgTable("key_results", {
   checkSpec: jsonb("check_spec"),
 });
 
+/** Every value a key result has been given, with when and who (BOS-2458). byKind: owner, agent or check. */
+export const keyResultReadings = pgTable(
+  "key_result_readings",
+  {
+    id: id(),
+    keyResultId: uuid("key_result_id").notNull().references(() => keyResults.id, { onDelete: "cascade" }),
+    value: real("value").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    byKind: text("by_kind").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  },
+  (t) => [index("key_result_readings_kr_at").on(t.keyResultId, t.at)],
+);
+
 export const roadmapHorizon = pgEnum("roadmap_horizon", ["now", "next", "later"]);
 
 export const milestones = pgTable("milestones", {
@@ -2339,9 +2353,48 @@ export const deviceProfiles = pgTable(
   (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
 );
 
+/** One row per runner-update hold (BOS-2408): what it was, each swap try, notable moments, and how it ended. Kept after the hold's settings row is gone, so a restart can't erase why an update waited. */
+export const updateHolds = pgTable(
+  "update_holds",
+  {
+    id: id(),
+    /** The hold's own `since`: one hold, one row. */
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    kind: text("kind").notNull(),
+    reason: text("reason").notNull(),
+    deadline: timestamp("deadline", { withTimezone: true }),
+    minutes: integer("minutes"),
+    /** Each swap attempt: runner slug, try number, when, the error, and the outcome. */
+    swapTries: jsonb("swap_tries").$type<{ slug: string; n: number; at: string; outcome: string; error?: string }[]>().notNull().default(sql`'[]'::jsonb`),
+    /** Short timestamped moments (at most 200): wait on nothing nameable, owner answers, force, cap. */
+    events: jsonb("events").$type<{ at: string; text: string }[]>().notNull().default(sql`'[]'::jsonb`),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    endOk: boolean("end_ok"),
+    endTitle: text("end_title"),
+    endBody: text("end_body"),
+    /** The hold's swapped and failed maps as they stood at the end. */
+    finalState: jsonb("final_state").$type<{ swapped?: Record<string, string>; failed?: Record<string, string> }>(),
+  },
+  (t) => [uniqueIndex("update_holds_started").on(t.startedAt)],
+);
+
 /** BOS-2380: one reading of the database's size per day (UTC), so the 7-day growth in the server health box survives a restart. */
 export const serverSizeReadings = pgTable("server_size_readings", {
   day: text("day").primaryKey(),
   dbBytes: bigint("db_bytes", { mode: "number" }).notNull(),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** BOS-2459: each time a runner's socket was up. droppedAt is null while it is up; endedHow says why it ended. Pruned after 30 days. */
+export const runnerConnections = pgTable(
+  "runner_connections",
+  {
+    id: id(),
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
+    droppedAt: timestamp("dropped_at", { withTimezone: true }),
+    /** "dropped" | "stopped" (the owner stopped it) | "server restart"; null while connected. */
+    endedHow: text("ended_how"),
+  },
+  (t) => [index("runner_connections_runner_connected").on(t.runnerId, t.connectedAt)],
+);

@@ -13,6 +13,7 @@ import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 import { untrusted } from "@boss-man/shared";
 import { chatRunsByCompany, runnerBusy, runnerChecks, runsByCompany, updateWaitCountsRun, type RunnerCheck } from "./runner-busy.js";
+import { updateHoldHistory } from "./update-hold-history.js";
 import { drainEndsAt, STANDALONE_WRAPUP_MS, SWAP_WHEN_DONE_CAP_MINUTES, WAIT_RULES } from "./update-waits.js";
 
 export const MAINTENANCE_KEY = "maintenance";
@@ -314,7 +315,12 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   /** BOS-1955: update-runner.sh drops this when its build fails; it ends a building hold and never a real drain. */
   const cancelTrigger = deps.dir && path.join(deps.dir, "inbox", "drain-cancel.json");
 
-  const save = (h: Hold) => db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
+  /** BOS-2408: each hold's own record, kept after its settings row is deleted. */
+  const history = updateHoldHistory(db, now, deps.log);
+  const save = async (h: Hold) => {
+    await db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
+    await history.upsert(h);
+  };
 
   /**
    * Live runs per company. `workOnly` leaves out the owner's chat and the CEO's reply lane (BOS-349):
@@ -459,6 +465,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     if (h && h.kind !== "wrapup" && h.wrapSince) body = `${body} The wrap-up you asked for ended with it: work has restarted.`;
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
     await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
+    if (h) await history.close(h.since, { ok: last.ok, title, body, swapped: h.swapped, failed: h.failed });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
     await deps.notify({ companyId: null, level, title, body, link: "#/settings/updates" });
@@ -560,6 +567,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   }
 
   const self = {
+    /** BOS-2408: the past holds, newest first. */
+    history: (limit?: number) => history.list(limit),
+
     /** Turns the hold on. Idempotent: a second call returns the hold that is already on. // leader-only */
     async start(opts: { reason?: string; minutes?: number; kind?: HoldKind } = {}): Promise<Hold> {
       const kind = opts.kind ?? "update";
@@ -605,6 +615,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // start message goes out below, so an agent that missed the wrap-up is told again by the update.
         if ((kind === "update" || kind === "settings") && have.kind === "wrapup") {
           const up: Hold = { ...have, kind, reason: kind === "settings" ? SETTINGS_REASON : "runner update", since: now().toISOString() };
+          // The wrap-up's own record ends here (its start time is the key); the update opens a new one below.
+          await history.close(have.since, { ok: true, title: "Taken over by a runner update (the wrap-up carries on as part of it)", body: "" });
           await save(up);
           await tellOnce(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP, up);
           return up;
@@ -846,7 +858,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         // Re-read, so the hold carries who its start message already reached (BOS-988): the pass below tells the rest.
         h = await getHold(db);
       }
-      if (!h) return;
+      if (!h) {
+        // BOS-2408: no live hold, so a record still open is one that lost its end (a restart): close it, don't leave it open.
+        await history.closeOrphans();
+        return;
+      }
       // BOS-1955: the early hold ends by itself when the build never reached a drain (the script was killed, a host reboot).
       if (h.kind === "building") {
         if (now() >= new Date(h.deadline)) await end("Runner update build hold ended", "note", `The new image was not ready within ${h.minutes} minutes, so new runs have started again. Press Build and update runners again when you like.`);
@@ -1020,10 +1036,12 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           if (r.companyId) await expectRestart(db, r.companyId, h.kind === "settings" ? "setting change" : "update", now());
           await deps.recreate(r.slug); // leader-only
           swapped[r.slug] = now().toISOString();
+          await history.swapTry(h.since, { slug: r.slug, n: (tries[r.slug]?.n ?? 0) + 1, outcome: "recreated" });
           delete tries[r.slug];
         } catch (err) {
           const why = (err as Error).message;
           const n = (tries[r.slug]?.n ?? 0) + 1;
+          await history.swapTry(h.since, { slug: r.slug, n, outcome: "failed", error: why });
           deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${swapTries}): ${why}`);
           // A network guard failure is not the new image's fault: the previous image starts behind the same guard,
           // so trying again or going back can't help. It is reported at once.
@@ -1042,6 +1060,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug] && !tries[r.slug]);
       // BOS-1982: nothing counted (no run, check or merge) and runners still wait: the swap is held up by something Boss Man
       // can't name (a scheduling pass that never ends). The wake above needs counted work, so wake each such company's CEO once.
+      // BOS-2408: the record keeps that the wait was on nothing Boss Man could name (once per hold), with how long it had waited.
+      if (waiting.length && total === 0 && (await landing()).size === 0 && unknownWait(h, t, reconnectMs)) {
+        await history.event(h.since, `Waiting on nothing Boss Man can name (no run, check or merge going); ${waiting.map((r) => r.slug).join(", ")} not swapped yet`);
+      }
       if (waiting.length && !h.ceoWokenAt && deps.wakeCeo && total === 0 && (await landing()).size === 0) {
         const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
         const idleCompanies = [...new Set(waiting.map((r) => r.companyId).filter((id): id is string => !!id && !(active.get(id) ?? 0)))];

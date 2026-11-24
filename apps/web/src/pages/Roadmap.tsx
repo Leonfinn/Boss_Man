@@ -262,6 +262,20 @@ function AddMilestone({ objectiveId, onAdded, horizon }: { objectiveId: string; 
   );
 }
 
+const STALE_KEY_RESULT_DAYS = 14;
+
+/** A small line of recent values, left oldest (BOS-2458). */
+function Sparkline({ values, label }: { values: number[]; label: string }) {
+  const lo = Math.min(...values);
+  const span = Math.max(...values) - lo || 1;
+  const pts = values.map((v, i) => `${(i / (values.length - 1)) * 60},${16 - ((v - lo) / span) * 14 - 1}`).join(" ");
+  return (
+    <svg width={60} height={16} role="img" aria-label={label} style={{ verticalAlign: "middle" }}>
+      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth={1.5} />
+    </svg>
+  );
+}
+
 /** A key result with "Change" (an inline form) and "Remove" (asks first). BOS-2250. */
 function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][number]; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
@@ -316,6 +330,11 @@ function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][numb
         </form>
       </li>
     );
+  const readings = k.readings ?? [];
+  const last = readings.length ? readings[readings.length - 1]! : null;
+  const days = last ? Math.max(0, Math.floor((Date.now() - new Date(last.at).getTime()) / 86_400_000)) : null;
+  const stale = days === null || days >= STALE_KEY_RESULT_DAYS;
+  const spark = readings.slice(-12).map((r) => r.value);
   return (
     <li>
       <span>{k.title}</span>
@@ -329,6 +348,9 @@ function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][numb
         {k.target !== null ? ` / ${k.target}` : ""}
         {k.unit ? ` ${k.unit}` : ""}
       </span>
+      {spark.length >= 2 && <Sparkline values={spark} label={`Last ${spark.length} readings of ${k.title}`} />}
+      <span className="muted">{days === null ? "never updated" : days === 0 ? "updated today" : `updated ${days} day${days === 1 ? "" : "s"} ago`}</span>
+      {stale && <span className="tag">Not updated in {STALE_KEY_RESULT_DAYS} days</span>}
       <button type="button" className="btn small" aria-label={`Change the key result ${k.title}`} onClick={open}>
         Change
       </button>
@@ -341,6 +363,19 @@ function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][numb
         Remove
       </button>
       {error && <span className="error">{error}</span>}
+      {readings.length > 0 && (
+        <details style={{ width: "100%" }}>
+          <summary className="muted">Readings ({readings.length})</summary>
+          <ul>
+            {[...readings].reverse().map((r) => (
+              <li key={`${r.at}-${r.value}-${r.by}`} className="muted">
+                {new Date(r.at).toLocaleString()}: {r.value}
+                {k.unit ? ` ${k.unit}` : ""} ({r.by})
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </li>
   );
 }

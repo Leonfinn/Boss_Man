@@ -91,6 +91,25 @@ describe("deploy summary and status filter (BOS-2409)", () => {
   });
 });
 
+describe("deploy targets list: latestAttempt (BOS-2464)", () => {
+  it("is set only when the newest deploy is not the last success, and never from another company", async () => {
+    const c = (ctx = await setup());
+    const a = await c.mk("Zeta");
+    const b = await c.mk("Eta");
+    const at = (n: number) => new Date(Date.now() - n * 60_000);
+    await c.db.insert(deploys).values([
+      { companyId: a.company.id, targetId: a.target.id, ref: "ok", status: "succeeded", createdAt: at(5), finishedAt: at(4) },
+      { companyId: a.company.id, targetId: a.target.id, ref: "bad", status: "failed", outcome: "boom", createdAt: at(2), finishedAt: at(1) },
+      { companyId: b.company.id, targetId: b.target.id, ref: "fine", status: "succeeded", createdAt: at(3), finishedAt: at(2) },
+    ]);
+    const login = await c.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${login.cookies.find((x) => x.name === "bm_session")!.value}`;
+    const list = async (id: string) => (await c.app.inject({ method: "GET", url: `/api/companies/${id}/deploy-targets`, headers: { cookie } })).json() as Array<{ latestAttempt: { status: string; outcome: string | null; at: string } | null }>;
+    expect((await list(a.company.id))[0]!.latestAttempt).toMatchObject({ status: "failed", outcome: "boom" });
+    expect((await list(b.company.id))[0]!.latestAttempt).toBeNull();
+  });
+});
+
 describe("deploy summary: companies and paging (BOS-2409)", () => {
   it("never counts another company's deploys, and pages within the status filter", async () => {
     const c = (ctx = await setup());

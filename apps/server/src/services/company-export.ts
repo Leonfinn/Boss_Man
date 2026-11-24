@@ -6,6 +6,7 @@ import { strToU8, zipSync } from "fflate";
 import { readWatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { liveTagOf, type TargetRules } from "./deploys.js";
+import { readingsFor } from "./key-result-readings.js";
 import { agentAvatars, agentSkills, agents, companies, deployTargets, policyRules, features, keyResults, mcpServers, milestones, objectives, projects, secretGrantAgents, secretGrants, secrets, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { liveWikiPage, slugify } from "./wiki.js";
 import { exportSettings } from "./company-settings-package.js";
@@ -87,6 +88,7 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
   const objs = await db.select().from(objectives).where(eq(objectives.companyId, companyId)).orderBy(asc(objectives.createdAt));
   const ids = objs.map((o) => o.id);
   const krs = ids.length ? await db.select().from(keyResults).where(inArray(keyResults.objectiveId, ids)) : [];
+  const readings = await readingsFor(db, krs.map((k) => k.id));
   const ms = ids.length ? await db.select().from(milestones).where(inArray(milestones.objectiveId, ids)) : [];
   const feats = await db.select().from(features).where(eq(features.companyId, companyId)).orderBy(asc(features.createdAt));
   files["plan.json"] = json({
@@ -96,7 +98,7 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
       priority: o.priority,
       status: o.status,
       project: o.projectId ? (projectSlug.get(o.projectId) ?? null) : null,
-      keyResults: krs.filter((k) => k.objectiveId === o.id).map((k) => ({ title: k.title, target: k.target, current: k.current, unit: k.unit, method: k.method, checkSpec: k.checkSpec })),
+      keyResults: krs.filter((k) => k.objectiveId === o.id).map((k) => ({ title: k.title, target: k.target, current: k.current, unit: k.unit, method: k.method, checkSpec: k.checkSpec, readings: (readings.get(k.id) ?? []).map((r) => ({ at: r.at, value: r.value, by: r.by })) })),
       milestones: ms.filter((m) => m.objectiveId === o.id).map((m) => ({ ref: m.id, title: m.title, targetDate: m.targetDate, horizon: m.horizon })),
     })),
     features: feats.map((f) => ({ ref: f.id, title: f.title, description: f.description, status: f.status, effort: f.effort, parent: f.parentId, objective: f.objectiveId, milestone: f.milestoneId })),

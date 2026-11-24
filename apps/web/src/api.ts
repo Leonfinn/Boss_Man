@@ -516,7 +516,7 @@ export type RoadmapObjective = {
   title: string;
   priority: number;
   status: "active" | "done" | "dropped";
-  keyResults: Array<{ id: string; title: string; current: number | null; target: number | null; unit: string | null; progress: number | null }>;
+  keyResults: Array<{ id: string; title: string; current: number | null; target: number | null; unit: string | null; progress: number | null; readings: Array<{ at: string; value: number; by: string }> }>;
   milestones: RoadmapMilestone[];
 };
 export type RoadmapCompany = { id: string; name: string; objectives: RoadmapObjective[] };

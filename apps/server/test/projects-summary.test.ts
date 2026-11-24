@@ -35,6 +35,10 @@ describe("GET /api/companies/:id/projects-summary", () => {
       { ...base, title: "Done lately", systemState: "done", size: 8, mergedAt, stateChangedAt: mergedAt },
       { ...base, title: "Done long ago", systemState: "done", size: 2, stateChangedAt: new Date(now.getTime() - 60 * 86_400_000) },
       { ...base, title: "Cancelled", systemState: "done", outcome: "cancelled", stateChangedAt: mergedAt },
+      // BOS-2463: two really blocked; one merged and only waiting for a live check, which "blocked" leaves out.
+      { ...base, title: "Stuck", systemState: "blocked", size: 1 },
+      { ...base, title: "Also stuck", systemState: "blocked", size: 1 },
+      { ...base, title: "Waiting to go live", systemState: "blocked", size: 1, mergeCommit: "abc1234" },
     ]);
     const [src] = await db.insert(fundingSources).values({ name: "API", kind: "api_credit", provider: "anthropic" }).returning();
     const [t] = await db.select().from(tickets).limit(1);
@@ -47,8 +51,8 @@ describe("GET /api/companies/:id/projects-summary", () => {
     expect(list.map((p) => p.projectId).sort()).toEqual([busy.id, idle.id].sort());
     expect(list.some((p) => p.projectId === foreign.id)).toBe(false);
     const b = list.find((p) => p.projectId === busy.id)!;
-    expect(b).toMatchObject({ open: 3, inReview: 2, pointsLeft: 8, unsized: 1, finishedLast30Days: 1, monthMicros: 42_000_000, monthlyCapMicros: 100_000_000, lastMergeAt: mergedAt.toISOString() });
+    expect(b).toMatchObject({ open: 6, inReview: 2, blocked: 2, pointsLeft: 11, unsized: 1, finishedLast30Days: 1, monthMicros: 42_000_000, monthlyCapMicros: 100_000_000, lastMergeAt: mergedAt.toISOString() });
     const i = list.find((p) => p.projectId === idle.id)!;
-    expect(i).toMatchObject({ open: 0, inReview: 0, pointsLeft: 0, unsized: 0, finishedLast30Days: 0, monthMicros: 0, monthlyCapMicros: null, lastMergeAt: null });
+    expect(i).toMatchObject({ open: 0, inReview: 0, blocked: 0, pointsLeft: 0, unsized: 0, finishedLast30Days: 0, monthMicros: 0, monthlyCapMicros: null, lastMergeAt: null });
   });
 });

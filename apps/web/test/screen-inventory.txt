@@ -125,6 +125,7 @@ reads:
   - /api/companies/:id/feedback
   - /api/companies/:id/feedback-customers
   - /api/companies/:id/feedback-settings
+  - /api/companies/:id/feedback-summary
   - /api/feedback/:id
   - /api/feedback/unprocessed
   - /api/host-facts
@@ -186,6 +187,7 @@ reads:
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
+  - /api/runs/reasons
   - /api/runs/recent
 
 ## #/scrum-master
@@ -359,6 +361,7 @@ reads:
   - /api/companies/:id/chapters
   - /api/companies/:id/retro-settings
   - /api/companies/:id/standing-rules
+  - /api/companies/:id/standing-rules/history
 
 ## #/settings/<company>/tools
 sections: 
@@ -392,6 +395,7 @@ reads:
   - /api/data-health
   - /api/kill-switch
   - /api/maintenance
+  - /api/maintenance/history
   - /api/runner-report
   - /api/self-deploy
   - /api/self-deploy/history

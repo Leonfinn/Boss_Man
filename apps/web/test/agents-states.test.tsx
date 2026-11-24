@@ -93,14 +93,15 @@ describe("Undo, picture and Refresh guards (BOS-2103)", () => {
 });
 
 describe("Record fold (BOS-2389)", () => {
-  const rec = { days: 30, finished: 3, passedFirstTime: 2, sendBacks: 1, medianMergeMs: 4 * 3_600_000, costPerFinishedMicros: 1_500_000, recent: [{ id: "t-1", ref: "BOS-9", title: "Fix the thing", size: 3, finishedAt: "2026-11-20T10:00:00Z", sendBacks: 1, costMicros: 2_000_000 }] };
+  const rec = { days: 30, finished: 3, runs: 5, failedRuns: 2, passedFirstTime: 2, sendBacks: 1, medianMergeMs: 4 * 3_600_000, costPerFinishedMicros: 1_500_000, recent: [{ id: "t-1", ref: "BOS-9", title: "Fix the thing", size: 3, finishedAt: "2026-11-20T10:00:00Z", sendBacks: 1, costMicros: 2_000_000 }] };
 
   it("shows the figures and a linked ticket table", async () => {
     stub((url) => (url.includes("/record") ? json(rec) : (undefined as never)), [{ ...base, id: "a-rec" }]);
     render(<Agents company={company} onChanged={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Bramble" }));
     await screen.findByText("Record (last 30 days)");
-    expect(await screen.findByText(/3 finished · 2 passed review first time · 1 send-backs · median 4\.0h to merge · \$1\.50 per finished ticket/)).toBeTruthy();
+    const line = await screen.findByText((_, el) => el?.tagName === "P" && /^3 finished · 5 runs · 2 failed \(40%\) · 2 passed review first time · 1 send-backs · median 4\.0h to merge · \$1\.50 per finished ticket$/.test(el.textContent ?? ""));
+    expect(line).toBeTruthy();
     expect(screen.getByRole("link", { name: "BOS-9" }).getAttribute("href")).toBe("#/tickets/t-1");
     expect(screen.getByText("Fix the thing")).toBeTruthy();
   });
