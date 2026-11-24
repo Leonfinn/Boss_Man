@@ -5,9 +5,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { eq } from "drizzle-orm";
-import { companies, deploys, settings } from "../src/db/schema.js";
+import { companies, deploys } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { FAILURE_HOLD_KEY, readFailureHold } from "../src/services/self-deploy.js";
+import { currentHold, openHold } from "../src/services/owner-holds.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -74,8 +74,8 @@ describe("deploy tool: history", () => {
   });
 });
 
-describe("deploy tool: release_update_hold (BOS-2554)", () => {
-  it("releases the held server update for Boss Man's own company only, with the agent's reason", async () => {
+describe("deploy tool: release_hold (BOS-2554, DR-076 A)", () => {
+  it("releases a held update for Boss Man's own company only, with an outcome and the agent's words", async () => {
     const c = (ctx = await setup());
     const home = await c.mk("Home"); // the oldest company is Boss Man's own
     const other = await c.mk("Other");
@@ -83,17 +83,37 @@ describe("deploy tool: release_update_hold (BOS-2554)", () => {
     await c.db.update(companies).set({ createdAt: new Date("2026-01-01T00:00:00Z") }).where(eq(companies.id, home.company.id));
     const call = async (x: typeof home, args: Record<string, unknown>) => {
       const client = await c.mcp(x);
-      const r = (await client.callTool({ name: "deploy", arguments: { action: "release_update_hold", ...args } })) as { isError?: boolean };
+      const r = (await client.callTool({ name: "deploy", arguments: { action: "release_hold", ...args } })) as { isError?: boolean };
       await client.close();
       return { error: !!r.isError, text: textOf(r) };
     };
-    expect(await call(home, { notes: "fine" })).toMatchObject({ error: true, text: expect.stringContaining("No server update is held") });
-    await c.db.insert(settings).values({ key: FAILURE_HOLD_KEY, value: { commit: "b".repeat(40), result: "failed", at: new Date().toISOString(), message: "Building green failed." } });
-    expect(await call(other, { notes: "fine" })).toMatchObject({ error: true, text: expect.stringContaining("Only Boss Man's own company") });
-    expect(await call(home, {})).toMatchObject({ error: true, text: expect.stringContaining("Give notes") });
-    expect(await readFailureHold(c.db)).not.toHaveProperty("released");
-    expect(await call(home, { notes: "Disk was full; freed." })).toMatchObject({ error: false, text: expect.stringContaining("Released.") });
-    expect((await readFailureHold(c.db))?.released).toMatchObject({ by: "Home engineer", reason: "Disk was full; freed." });
+    const ok = { outcome: "retry_safe", ownerText: "fine" };
+    expect(await call(home, ok)).toMatchObject({ error: true, text: expect.stringContaining("Nothing is held") });
+    await openHold(c.db, { subject: "server_deploy", commit: "b".repeat(40), result: "failed", reason: "Building green failed." });
+    expect(await call(other, ok)).toMatchObject({ error: true, text: expect.stringContaining("Only Boss Man's own company") });
+    expect(await call(home, { ownerText: "fine" })).toMatchObject({ error: true, text: expect.stringContaining("Give outcome") });
+    expect(await call(home, { outcome: "retry_safe" })).toMatchObject({ error: true, text: expect.stringContaining("Give ownerText") });
+    expect((await currentHold(c.db, "server_deploy"))?.releasedAt).toBeNull();
+    expect(await call(home, { outcome: "retry_safe", ownerText: "Disk was full; freed." })).toMatchObject({ error: false, text: expect.stringContaining("Released.") });
+    expect(await currentHold(c.db, "server_deploy")).toMatchObject({ releasedBy: "Home engineer", outcome: "retry_safe", ownerText: "Disk was full; freed." });
+    // Already released: a second call says so and changes nothing.
+    expect(await call(home, { outcome: "do_not_retry", ownerText: "x" })).toMatchObject({ error: true, text: expect.stringContaining("Nothing is held") });
+  });
+
+  it("asks which one when both the server and the runner update are held", async () => {
+    const c = (ctx = await setup());
+    const home = await c.mk("Home");
+    await openHold(c.db, { subject: "server_deploy", commit: "b".repeat(40), result: "failed", reason: "x" });
+    await openHold(c.db, { subject: "runner_update", commit: "c".repeat(40), result: "failed", reason: "y" });
+    const client = await c.mcp(home);
+    const both = (await client.callTool({ name: "deploy", arguments: { action: "release_hold", outcome: "retry_safe", ownerText: "ok" } })) as { isError?: boolean };
+    expect(both.isError).toBe(true);
+    expect(textOf(both)).toContain("Name the one you diagnosed");
+    const one = (await client.callTool({ name: "deploy", arguments: { action: "release_hold", subject: "runner_update", outcome: "do_not_retry", ownerText: "Bad image." } })) as { isError?: boolean };
+    await client.close();
+    expect(one.isError).toBeFalsy();
+    expect((await currentHold(c.db, "runner_update"))?.outcome).toBe("do_not_retry");
+    expect((await currentHold(c.db, "server_deploy"))?.releasedAt).toBeNull();
   });
 });
 
