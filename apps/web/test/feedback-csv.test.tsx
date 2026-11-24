@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Company, NoteSummary } from "../src/api";
-import { Feedback, fetchAllNotes, notesToCsv } from "../src/pages/Feedback";
+import { Feedback, fetchAllNotes, noteFilter, notesToCsv } from "../src/pages/Feedback";
 
 beforeEach(() => localStorage.clear());
 afterEach(() => {
@@ -23,6 +23,7 @@ const note = (over: Partial<NoteSummary>): NoteSummary => ({
   createdAt: "2026-11-08T12:00:00Z",
   customer: "Sam",
   insightCount: 2,
+  features: [],
   ...over,
 });
 
@@ -98,5 +99,30 @@ describe("Download CSV button", () => {
     expect(rows).toHaveLength(220);
     expect(urls[0]).toContain("state=archived&limit=200&q=export");
     expect(urls[1]).toContain("before=");
+  });
+});
+
+describe("linked feature states", () => {
+  it("shows status tags, 'Not linked yet', and the delivered line on the Delivered tab", async () => {
+    const linked = note({ id: "n1", text: "Wants dark mode", features: [{ id: "f1", title: "Dark mode", status: "released" }] });
+    const bare = note({ id: "n2", text: "Wants nothing yet", features: [] });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const body = url.includes("delivered=true") ? [linked] : url.includes("/feedback?") ? [linked, bare] : url.includes("/feedback/unprocessed") ? {} : url.includes("/features") ? null : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    }));
+    render(<Feedback companies={companies} companyId="co-1" noteId={undefined} go={() => {}} />);
+    await screen.findByText("Wants nothing yet");
+    expect(screen.getByText("Dark mode: Released")).toBeTruthy();
+    expect(screen.getByText("Not linked yet")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("tab").find((t) => /delivered/i.test(t.textContent ?? ""))!);
+    await screen.findByText("1 note is delivered: their features are all released.");
+    expect(screen.queryByText("Wants nothing yet")).toBeNull();
+  });
+});
+
+describe("noteFilter", () => {
+  it("maps the Delivered tab to delivered=true and the others to a state", () => {
+    expect(noteFilter("delivered")).toBe("delivered=true");
+    expect(noteFilter("processed")).toBe("state=processed");
   });
 });
