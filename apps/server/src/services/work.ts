@@ -521,7 +521,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // BOS-1907: a split-out check ticket joins the "Merged, watching" lane through its parent's merge; the card shows the watch.
         checksParentMerged: (() => {
           const parent = t.checksTicketId ? byId.get(t.checksTicketId) : undefined;
-          return !!parent?.mergeCommit && parent.systemState !== "done";
+          // BOS-2417: a parent closed at go-live leaves its check here; a cancelled parent takes it out.
+          return !!parent?.mergeCommit && !(parent.systemState === "done" && parent.outcome === "cancelled");
         })(),
         watchEndsAt: t.mergeCommit ? (watchEndsAt(t)?.toISOString() ?? null) : null,
         // BOS-1910: null for Being checked, Merged watching (before its date) and Next up, whatever the watchdog holds.

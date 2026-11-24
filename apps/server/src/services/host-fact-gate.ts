@@ -17,11 +17,13 @@ export function hostFactRefusal(
   rec: Pick<HostFactsRecord, "facts" | "reportedAt">,
   liveSince: Date | null,
   note: string,
+  /** BOS-2417: 0-based criteria settled later by an open check ticket, so not checked at this close. */
+  tied: ReadonlySet<number> = new Set(),
 ): string | null {
   const lines: string[] = [];
   const verdicts = readVerdicts(criteria, note);
   for (const [i, c] of criteria.entries()) {
-    if (!isAfterMerge(c)) continue;
+    if (!isAfterMerge(c) || (tied.has(i) && verdicts[i]?.verdict == null)) continue;
     // Reporting the criterion as fail is the honest way out: Boss Man opens the follow-up for it.
     if (verdicts[i]?.verdict === "fail") continue;
     const clauses = factClauses(criterionText(c));
