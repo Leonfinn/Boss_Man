@@ -412,7 +412,9 @@ jobs:
           done
           jq -n --argjson images "$images" --arg reg "$reg" '{schema: 1, version: "ci", registries: [$reg], images: $images}' > "$RUNNER_TEMP/release.json"
           cat "$RUNNER_TEMP/release.json"
-          INSTALL_RELEASE_JSON="$RUNNER_TEMP/release.json" scripts/test-shell.sh scripts/install-images.test.sh
+          # BOS-2528: INSTALL_HELPER_MOVE=1 also runs scripts/helper-move-live.sh on the live stack (BOS-1227 criterion 4: the launcher
+          # is recreated while a runner lives, egress stays closed, and a guard image that fails its check changes nothing).
+          INSTALL_HELPER_MOVE=1 INSTALL_RELEASE_JSON="$RUNNER_TEMP/release.json" scripts/test-shell.sh scripts/install-images.test.sh
       - name: Save the images for the join job (a one-day build file inside this repo's CI, never published; the runner image is left out because it holds Claude Code, DR-050)
         run: |
           mkdir -p "$RUNNER_TEMP/img"

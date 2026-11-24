@@ -21,6 +21,8 @@ for t in "${tests[@]}"; do
   # The real-install opt-ins of install-images.test.sh (BOS-974): without INSTALL_RELEASE_JSON it only reads the compose file.
   [ -z "${INSTALL_RELEASE_JSON:-}" ] || extra+=("INSTALL_RELEASE_JSON=$INSTALL_RELEASE_JSON")
   [ -z "${INSTALL_REGISTRY:-}" ] || extra+=("INSTALL_REGISTRY=$INSTALL_REGISTRY")
+  # BOS-2528: also run the helper move (launcher recreated, failing guard check) on the live stack.
+  [ -z "${INSTALL_HELPER_MOVE:-}" ] || extra+=("INSTALL_HELPER_MOVE=$INSTALL_HELPER_MOVE")
   began=$SECONDS; rc=0
   out=$(mktemp)
   env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG=C.UTF-8 "${extra[@]}" "$t" >"$out" 2>&1 || rc=$?

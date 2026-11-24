@@ -165,5 +165,22 @@ out="$(call PUT /runners/smoke "{\"token\":\"$tok\"}" 2>&1)" && ok "the launcher
 img="$(docker inspect --format '{{.Config.Image}}' boss-man-runner-smoke 2>/dev/null)"
 want="$(grep '^BOSSMAN_REGISTRY=' "$T/run.env" | cut -d= -f2)/boss-man-runner@$(grep '^BOSSMAN_RUNNER_DIGEST=' "$T/run.env" | cut -d= -f2)"
 [ "$img" = "$want" ] && ok "the runner runs the digest from release.json" || bad "runner image is '$img', wanted '$want'"
+# BOS-2528 (BOS-1227 criterion 4): with INSTALL_HELPER_MOVE=1 the live stack is used once more, before the runner is removed: the updater's
+# helper move recreates the launcher while this runner lives, then a move whose guard fails its check changes nothing. Needs a registry
+# that takes pushes (CI's local one); see scripts/helper-move-live.sh.
+#   Default: on when the registry is a local one (localhost or 127.0.0.1, which CI's is, and which takes pushes). It is on by default so the
+#   proof also runs on GitHub's pre-review run, which uses main's workflow file with this branch's scripts. INSTALL_HELPER_MOVE=0 turns it
+#   off; INSTALL_HELPER_MOVE=1 forces it for another registry that takes pushes.
+reg_host="$(grep '^BOSSMAN_REGISTRY=' "$T/run.env" | cut -d= -f2)"
+case "${INSTALL_HELPER_MOVE:-auto}:$reg_host" in
+  0:*) run_move=0 ;;
+  auto:localhost:*|auto:127.0.0.1:*|auto:localhost/*|auto:127.0.0.1/*) run_move=1 ;;
+  auto:*) run_move=0 ;;
+  *) run_move=1 ;;
+esac
+if [ "$run_move" = 1 ]; then
+  echo "--- helper move on the live stack (BOS-1227 criterion 4)"
+  scripts/helper-move-live.sh "$P" "$T/run.env" || bad "helper move on the live stack"
+fi
 call DELETE /runners/smoke >/dev/null 2>&1 || true
 exit "$fail"
