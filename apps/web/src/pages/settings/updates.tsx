@@ -69,7 +69,7 @@ export function drainTiming(m: { since?: string; phase?: "waiting" | "swapping";
   if (m.phase === "swapping") {
     // BOS-2531: phase "swapping" only means nothing counted is left. A runner is being recreated when chatOpen is false.
     if (m.chatOpen === true) return "The runners are swapped next.";
-    return m.chatBackBy ? `The runners are being swapped now, back by ${atTime(m.chatBackBy)} at the latest.` : "The runners are being swapped now.";
+    return m.chatBackBy ? `Back by ${atTime(m.chatBackBy)} at the latest.` : "";
   }
   const started = m.since ? `Started ${atTime(m.since)}. ` : "";
   if (m.overdue) return `${started}This is taking longer than expected.`;

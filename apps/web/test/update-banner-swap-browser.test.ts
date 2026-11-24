@@ -27,7 +27,7 @@ const banner = async (maintenance: object, width: number, height: number, name: 
   const page = await browser!.newPage({ viewport: { width, height } });
   try {
     await stubApi(page, { ...API, "/api/maintenance": maintenance });
-    await page.goto(`${server!.resolvedUrls.local[0]}#/`, { waitUntil: "networkidle" });
+    await page.goto(`${server!.resolvedUrls.local[0]}#/decisions`, { waitUntil: "networkidle" });
     await page.waitForSelector(".banner", { timeout: 15_000 });
     const text = ((await page.textContent(".banner")) ?? "").replace(/\s+/g, " ").trim();
     if (shots) {
@@ -49,7 +49,7 @@ describe.skipIf(!browser || !server)("BOS-2531 update banner: 'being swapped now
     for (const [w, h, n] of [[1280, 800, "desktop"], [380, 800, "phone"]] as const) {
       const text = await banner(midSwap, w, h, `bos-2531-${n}-mid-swap`);
       expect(text).toContain("swapping the runners now");
-      expect(text).toMatch(/The runners are being swapped now, back by \d{1,2}[:.]\d{2}.* at the latest\./);
+      expect(text).toMatch(/swapping the runners now\. Back by \d{1,2}[:.]\d{2}.* at the latest\./);
     }
   });
 

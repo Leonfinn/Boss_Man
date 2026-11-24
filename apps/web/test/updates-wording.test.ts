@@ -15,7 +15,7 @@ describe("drainTiming (BOS-1877)", () => {
     expect(drainTiming({ runs: 0, since: iso(-30), phase: "waiting", expectedFinishAt: null, overdue: true })).toBe(`Started ${hhmm(iso(-30))}. This is taking longer than expected.`);
     expect(drainTiming({ runs: 2, since: iso(-5), phase: "waiting", expectedFinishAt: null })).toMatch(/No time estimate/);
     // BOS-2531: "being swapped now" only while a runner is really being recreated (chatOpen false), with a back-by time.
-    expect(drainTiming({ runs: 0, phase: "swapping", chatOpen: false, chatBackBy: iso(2) })).toBe(`The runners are being swapped now, back by ${hhmm(iso(2))} at the latest.`);
+    expect(drainTiming({ runs: 0, phase: "swapping", chatOpen: false, chatBackBy: iso(2) })).toBe(`Back by ${hhmm(iso(2))} at the latest.`);
     expect(drainTiming({ runs: 0, phase: "swapping", chatOpen: true, chatBackBy: null })).toBe("The runners are swapped next.");
     expect(drainTiming({ runs: 0 })).toBe("");
   });
