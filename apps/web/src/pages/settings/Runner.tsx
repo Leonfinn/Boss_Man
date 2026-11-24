@@ -3,6 +3,7 @@ import { RUNNER_ADDONS, type AddonReport } from "@boss-man/shared";
 import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
+import { spanText } from "../../components/TicketStateHistory";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
 import type { UpdateRow } from "./updates";
@@ -13,7 +14,7 @@ type Launched = { slug: string; container: { state: string; status: string; imag
 type RunnerLiveState = "connected" | "updating" | "paused" | "failed" | "offline" | "none";
 type CompanyReport = { live: { ok: boolean; text: string; state?: RunnerLiveState }; last: UpdateRow | null };
 const liveTag = (l: CompanyReport["live"]) => (l.state === "updating" ? "tag amber" : l.ok ? undefined : "tag red");
-type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; safety?: Safety; report?: CompanyReport | null }) & { launcher?: Launched };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; connection?: ConnectionHistory; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; safety?: Safety; report?: CompanyReport | null }) & { launcher?: Launched };
 
 /** BOS-1583: what the host knows of the add-on choice: the owner's saved ticks, and what the last build held (null = no file). */
 type AddonSelection = { enabled: boolean; saved: string[] | null; built: string[] | null };
@@ -99,6 +100,69 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
 function Since({ connected, at }: { connected: boolean; at: string | null }) {
   if (!at) return null;
   return <span className="muted">{connected ? `since ${when(at)}` : `last connected ${when(at)}`}</span>;
+}
+
+/** BOS-2459: the last 7 days of the runner's connection: share of time connected, drops, longest gap and the last 10 gaps. */
+type ConnectionHistory = {
+  since: string | null;
+  percentConnected: number | null;
+  drops: number;
+  longestGapMs: number;
+  gaps: Array<{ from: string; to: string | null; ms: number; how: "dropped" | "stopped" | "server restart" | null }>;
+  shortGaps: number;
+};
+const HOW: Record<string, string> = { dropped: "Connection dropped", stopped: "Stopped by you", "server restart": "Boss Man restarted" };
+
+export function ConnectionFold({ history }: { history: ConnectionHistory | undefined }) {
+  if (!history) return null;
+  return (
+    <details data-testid="runner-connection">
+      <summary style={{ fontSize: 14 }}>Connection, last 7 days{history.percentConnected != null ? `: ${history.percentConnected}% connected` : ""}</summary>
+      {history.percentConnected == null ? (
+        <p className="muted" style={{ fontSize: 14 }}>Nothing recorded yet. The history starts when the runner next connects.</p>
+      ) : (
+        <>
+          <dl className="facts">
+            <dt>Connected</dt>
+            <dd>{history.percentConnected}% of the time since {when(history.since!)}</dd>
+            <dt>Times it dropped</dt>
+            <dd>{history.drops}</dd>
+            <dt>Longest gap</dt>
+            <dd>{history.drops || history.longestGapMs ? spanText(history.longestGapMs) : "none"}</dd>
+          </dl>
+          {history.gaps.length === 0 ? (
+            <p className="muted" style={{ fontSize: 14 }}>No gaps of 30 seconds or more.</p>
+          ) : (
+            <table style={{ fontSize: 14 }}>
+              <thead>
+                <tr>
+                  <th>Gone</th>
+                  <th>Back</th>
+                  <th>Length</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.gaps.map((g) => (
+                  <tr key={g.from}>
+                    <td>{when(g.from)}</td>
+                    <td>{g.to ? when(g.to) : "Still away"}</td>
+                    <td>{spanText(g.ms)}</td>
+                    <td>{g.how ? HOW[g.how] : "Connection dropped"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {history.shortGaps > 0 && (
+            <p className="muted" style={{ fontSize: 14 }}>
+              {history.shortGaps} shorter gap{history.shortGaps === 1 ? "" : "s"} (under 30 seconds) counted, not listed.
+            </p>
+          )}
+        </>
+      )}
+    </details>
+  );
 }
 
 /**
@@ -273,6 +337,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </div>
+        {s?.registered && <ConnectionFold history={s.connection} />}
         {s?.registered && <RunnerAddons report={s.addons} />}
         {act.view}
       </Section>
@@ -329,6 +394,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
         </button>
       )}
       {s?.registered && <SafetyCards companyId={company.id} safety={s.safety} connected={s.connected} onChanged={status.reload} />}
+      {s?.registered && <ConnectionFold history={s.connection} />}
       {s?.registered && <RunnerAddons report={s.addons} />}
       {act.view}
     </Section>

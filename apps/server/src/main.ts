@@ -6,6 +6,7 @@ import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
 import { parseClientHeader, parseTrustedProxies } from "./portal-ip.js";
+import { closeOpenOnStart, pruneConnections } from "./services/runner-connections.js";
 import { failureSignaturesDays, pruneExpiredPolicyRules, pruneFailureSignatures, prunePermissionDecisions, permissionLogDays, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
 import { checkLimitReconciler, readRunnerAgents } from "./services/check-limit.js";
@@ -152,6 +153,8 @@ const bg = createBackground(
     { name: "permission decisions prune", everyMs: 24 * 3_600_000, firstAfterMs: 20 * 60_000, run: () => prunePermissionDecisions(db, { days: permissionLogDays(env.BOSSMAN_PERMISSION_LOG_DAYS), stop: () => leader.role() !== "leader" }) },
     // Timed allow rules that ended more than 7 days ago (BOS-2188). // leader-only
     { name: "expired permission rules prune", everyMs: 24 * 3_600_000, firstAfterMs: 25 * 60_000, run: () => pruneExpiredPolicyRules(db, { stop: () => leader.role() !== "leader" }) },
+    // Runner connection history older than 30 days (BOS-2459). // leader-only
+    { name: "runner connections prune", everyMs: 24 * 3_600_000, firstAfterMs: 30 * 60_000, run: () => pruneConnections(db) },
     { name: "runner events prune", everyMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneRunnerEvents(db, { days: runnerEventsDays(env.BOSSMAN_RUNNER_EVENTS_DAYS), stop: () => leader.role() !== "leader" }) },
     // Failure signatures are only read over the two-hour loop-guard window (loop-guards.ts, BOS-611); the rest go daily, in small batches. // leader-only
     { name: "failure signatures prune", everyMs: Number(env.BOSSMAN_FAILURE_SIGNATURES_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneFailureSignatures(db, { days: failureSignaturesDays(env.BOSSMAN_FAILURE_SIGNATURES_DAYS), stop: () => leader.role() !== "leader" }) },
@@ -165,6 +168,7 @@ const bg = createBackground(
 // shortcut: real cross-request state, but lost on restart harmlessly: a restarted leader promotes again and resets this to now, then resumes merges from then (BOS-907).
 let resumeMergesSince: Date | null = null;
 // BOS-1399: why this server took charge, for the merge-line "takeover" rows. SIGUSR2 is the deployer's switch.
+const processStartedAt = new Date(); // shortcut: this process's own start time, lost with it, which is exactly what it marks.
 let promotions = 0; // shortcut: lost on restart, harmless because a fresh process is always its first promotion (cause "restart" or "deployer_switch").
 let signalled = false; // shortcut: lost on restart, harmless because it only marks a SIGUSR2 promotion in flight and is reset right after.
 leader.onPromote(async () => {
@@ -173,6 +177,7 @@ leader.onPromote(async () => {
   const cause = await takeoverCause(db, { first: promotions++ === 0, signalled, commit });
   signalled = false;
   await recordTakeover(db, { cause, commit }); // one row per company, merge waiting or not
+  await closeOpenOnStart(db, processStartedAt).catch((err) => app.log.warn({ err }, "closing runner connection rows left open failed")); // BOS-2459
   bg.startBackground();
   void launcher.syncAll(); // once per promotion: runners that outlived a deploy get their allow list (git hosts) without a restart
 });

@@ -7,6 +7,7 @@ import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { checkEndedRun } from "./cost-check.js";
+import { closeConnection, openConnection } from "./runner-connections.js";
 import { recordRestart, type HelloRestart, type LastRestart } from "./runner-restarts.js";
 import { redact } from "./error-buffer.js";
 import { costEvents, decisions, engagements, notifications, runnerEventAttempts, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
@@ -535,8 +536,12 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       connectedAt.set(runnerId, Date.now());
       features.set(runnerId, feats);
       for (const l of [...connectListeners]) void Promise.resolve(l(runnerId)).catch(() => {});
+      // BOS-2459: the connection history; a failed write only loses one row of it.
+      const opened = openConnection(db, runnerId).catch(() => null);
       return () => {
         if (connected.get(runnerId) === send) {
+          const at = new Date();
+          void opened.then((rowId) => (rowId ? closeConnection(db, rowId, at) : undefined)).catch(() => {});
           connected.delete(runnerId);
           failPending(runnerId, "The runner disconnected while this was running.");
         }

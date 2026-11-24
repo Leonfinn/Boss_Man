@@ -25,6 +25,7 @@ import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions, checkWorkers } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
+import { connectionSummary } from "./services/runner-connections.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { watchCiTokenGrant } from "./services/ci-identity-card.js";
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
@@ -1888,7 +1889,8 @@ export async function buildApp(opts: AppOptions) {
       // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
       const [co] = await db.select().from(companies).where(eq(companies.id, id));
       const safety = co ? featureStates(co, r.sandbox) : null;
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
+      const connection = await connectionSummary(db, r.id);
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), connection, lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
     });
 
     // Settings → Server and runner: the two buttons on a safety-feature card (DR-049 point 1). "run" is "Run agents without ...";
