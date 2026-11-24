@@ -47,6 +47,37 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 /** One request, no sharing: what `api` sends for a write, or a path nothing else should join. */
 export async function apiOnce<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+  // A read that never answers must fail like an error, so a poll waiting on it retries on its next tick
+  // instead of sitting on "Checking…" until the tab is reloaded (BOS-2559). Reads only: a write may be slow.
+  if (!readOnly(init)) return sendOnce<T>(path, init);
+  const guard = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    guard.abort();
+  }, READ_TIMEOUT_MS);
+  const forward = () => guard.abort();
+  if (init.signal?.aborted) guard.abort();
+  else init.signal?.addEventListener("abort", forward, { once: true });
+  try {
+    return await sendOnce<T>(path, { ...init, signal: guard.signal });
+  } catch (err) {
+    if (timedOut && (err as Error).name === "AbortError") {
+      const slow = new ApiError(0, "Boss Man took too long to answer. It will try again shortly.");
+      reportFailure(slow);
+      throw slow;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", forward);
+  }
+}
+
+/** How long a read may wait for its answer (the whole body included). Under the shared-read hold of 60 s (shared-get.ts). */
+export const READ_TIMEOUT_MS = 30_000;
+
+async function sendOnce<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal }): Promise<T> {
   let res: Response;
   // How long the server took, so a stall that still answers shows the banner (BOS-637).
   const started = Date.now();
