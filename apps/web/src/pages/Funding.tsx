@@ -3,6 +3,7 @@ import { api, usd, type BudgetRow, type Company, type FundingSource, type Fundin
 import { usePoll } from "../hooks";
 import { windowHasReset, windowLabel } from "@boss-man/shared";
 import { ageLabel } from "../age";
+import { buildCsv, download } from "../csv";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 
@@ -71,6 +72,25 @@ const holdLength = (ms: number) => {
   return m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
 };
 
+export const WEEKS_CSV_HEAD = ["week_start", "plan_use_percent", "resets", "spend_usd", "holds", "held_minutes"];
+
+/** One row per week, oldest first (the status lists newest first). Plan use is the highest reading at a reset that week, blank if none. */
+export function weeksToCsvRows(weeks: NonNullable<FundingStatus["weeks"]>): Array<Array<string | number>> {
+  return [...weeks].reverse().map((w) => [
+    w.start.slice(0, 10),
+    w.plans.length ? Math.round(Math.max(...w.plans.map((p) => p.peak)) * 100) : "",
+    w.plans.reduce((n, p) => n + p.resets, 0),
+    (w.spendMicros / 1_000_000).toFixed(2),
+    w.holds.length,
+    Math.round(w.holds.reduce((n, h) => n + h.ms, 0) / 60_000),
+  ]);
+}
+
+export function weeksFileName(sourceName: string, now = new Date()): string {
+  const slug = sourceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "source";
+  return `funding-${slug}-8-weeks-${now.toISOString().slice(0, 10)}.csv`;
+}
+
 /** The last 8 weeks of this source: plan use at each reset, spend, and the times work was held for its quota. */
 function Weeks({ s }: { s: FundingStatus }) {
   const weeks = s.weeks ?? [];
@@ -104,6 +124,11 @@ function Weeks({ s }: { s: FundingStatus }) {
             </li>
           ))}
         </ul>
+      )}
+      {hasData && (
+        <button type="button" className="btn" style={{ marginTop: 8 }} onClick={() => download(weeksFileName(s.source.name), buildCsv(WEEKS_CSV_HEAD, weeksToCsvRows(weeks)))}>
+          Download CSV
+        </button>
       )}
     </details>
   );
