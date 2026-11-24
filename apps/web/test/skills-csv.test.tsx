@@ -77,6 +77,17 @@ describe("skillsToCsv", () => {
     ]);
   });
 
+  it("quotes a name or description holding a comma or a quote, and guards one starting with =", () => {
+    const csv = skillsToCsv(
+      [mk("a", "Rack, shelf 2", { hasInstructions: true, description: 'Says "hi", then stops.' }), mk("b", "=SUM(A1)", { hasInstructions: true })],
+      {} as never,
+      harness,
+    );
+    const lines = csv.split("\r\n");
+    expect(lines[1]).toBe('"Rack, shelf 2","Says ""hi"", then stops.",Written here,,,3,2.0 KB,2026-11-21,Kate - Claude,');
+    expect(lines[2]!.startsWith("'=SUM(A1),")).toBe(true);
+  });
+
   it("puts every reason the row would flag in needs attention, joined with ; , and nothing for a healthy skill", () => {
     const s = mk("x", "mixed", { hasInstructions: true, instructionsUnreadable: true, agents: [] });
     expect(why(s, harness)).toEqual(["Instructions unreadable", "Nobody has it"]);
