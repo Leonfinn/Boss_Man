@@ -5,7 +5,7 @@
 import { eq, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, runners as runnersTable, settings } from "../db/schema.js";
-import { getHold, SWAP_PUT_BACK, SWAP_PUT_BACK_FAILED, SWAP_PUT_BACK_RUNNING, SWAP_WINDOW_MS, type Hold, type LastUpdate } from "./maintenance.js";
+import { getHold, SWAP_PUT_BACK, SWAP_PUT_BACK_FAILED, SWAP_PUT_BACK_RUNNING, midSwap, type Hold, type LastUpdate } from "./maintenance.js";
 
 /** Whether the runner's image is the one an update installed, or newer (both are date-time stamps, so they sort as strings). */
 export function imageAtLeast(have: string | null | undefined, want: string | null | undefined): boolean | null {
@@ -35,6 +35,8 @@ export type RunnerLive = {
   swapFailed?: string | null;
   /** BOS-382 slice A: the launcher froze this runner because its network guard isn't healthy. */
   guard?: { reason: string; since: string | null } | null;
+  /** BOS-2533: this company's place in the update, in one field (see phaseFor); null when no hold affects it. */
+  phase?: SwapPhase | null;
 };
 
 /** What the panel shows now: drives the tag colour and whether Start runner may be pressed. */
@@ -140,16 +142,30 @@ export function describeLive(r: RunnerLive | null, launcherOn = true): { ok: boo
  * only waiting for busy agents, a wrap-up hold, or a runner that crashed after it was swapped is not a swap:
  * that runner is just down, and Start runner must stay available.
  */
-export function swapFor(hold: Hold | null, slug: string | undefined, nowMs: number = Date.now()): Pick<RunnerLive, "swap" | "swapFailed"> {
+export function swapFor(hold: Hold | null, slug: string | undefined, nowMs: number = Date.now(), connected = false): Pick<RunnerLive, "swap" | "swapFailed"> {
   const none = { swap: null, swapFailed: null };
   if (!hold || !slug || hold.kind === "wrapup" || hold.kind === "building") return none;
   const failed = hold.failed?.[slug];
   if (failed) return { swap: null, swapFailed: failed };
+  // BOS-2533: one rule (midSwap) says whether it is swapping: a runner that is connected again is not.
+  if (!midSwap(hold, slug, nowMs, connected)) return none;
   const t = hold.tries?.[slug];
-  if (t) return { swap: { retryAt: t.next, tries: t.n }, swapFailed: null };
-  const at = hold.swapped?.[slug];
-  if (at && nowMs - new Date(at).getTime() < SWAP_WINDOW_MS) return { swap: { retryAt: null, tries: 0 }, swapFailed: null };
-  return none;
+  return { swap: t ? { retryAt: t.next, tries: t.n } : { retryAt: null, tries: 0 }, swapFailed: null };
+}
+
+/**
+ * BOS-2533: where this company's runner is in the update, in one field so screens need not combine flags.
+ * null: no update hold affects it. "waiting for runs": a hold is on and this runner has not been recreated yet.
+ * "swapping": midSwap. "back on new image": it was recreated and is connected again. "failed": its swap failed.
+ */
+export type SwapPhase = "waiting for runs" | "swapping" | "back on new image" | "failed";
+export function phaseFor(hold: Hold | null, slug: string | undefined, nowMs: number, connected: boolean): SwapPhase | null {
+  if (!hold || !slug || hold.kind === "wrapup") return null;
+  if (hold.failed?.[slug] && !connected) return "failed";
+  if (midSwap(hold, slug, nowMs, connected)) return "swapping";
+  const touched = !!(hold.swapped?.[slug] || hold.tries?.[slug] || hold.failed?.[slug]);
+  if (touched) return connected ? "back on new image" : null; // recreated, away past the window, not failed: just down, no phase
+  return "waiting for runs";
 }
 
 type MaintenanceLike = { status: () => Promise<{ last?: LastUpdate | null }> };
@@ -187,14 +203,16 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
     if (!runner) return { registered: false, connected: false, at: null, imageVersion: null, fault };
     const connected = deps.isConnected(runner.id);
     const since = connected ? deps.connectedSince(runner.id) : null;
-    return { registered: true, connected, at: (since ?? runner.lastSeenAt)?.toISOString() ?? null, imageVersion: runner.imageVersion, fault, guard, ...swapFor(hold ?? null, slug, nowMs()) };
+    return { registered: true, connected, at: (since ?? runner.lastSeenAt)?.toISOString() ?? null, imageVersion: runner.imageVersion, fault, guard, ...swapFor(hold ?? null, slug, nowMs(), connected), phase: phaseFor(hold ?? null, slug, nowMs(), connected) };
   }
 
   return {
     /** Whether this company's own runner swap is under way right now (server_status `swapping`). */
     async swappingFor(companyId: string): Promise<boolean> {
       const slug = (await slugs()).get(companyId);
-      return !!swapFor(await getHold(db), slug, nowMs()).swap;
+      const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+      const connected = runner ? deps.isConnected(runner.id) : false;
+      return !!swapFor(await getHold(db), slug, nowMs(), connected).swap;
     },
 
     /** The update panel: every runner's live state first, then the last update as history. */
