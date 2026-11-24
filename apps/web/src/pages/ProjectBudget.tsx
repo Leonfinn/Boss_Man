@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { api, usd, type Project } from "../api";
+import { buildCsv, download } from "../csv";
 import { useAction } from "./settings/shared";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
@@ -24,6 +25,18 @@ type Spend = { months?: ProjectMonth[]; costCheck?: { outOfBand: number; checked
 const PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", synthetic: "Synthetic" };
 
 const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+type TopTicket = { id: string; title: string; micros: number; planMicros: number };
+
+/** The "Costliest tasks" list as CSV (BOS-2543), one row per task in the page's order, dollars like the page. */
+export function costliestTasksCsv(rows: TopTicket[]): string {
+  return buildCsv(
+    ["rank", "task", "ticket_id", "pay_as_you_go_usd", "subscriptions_at_list_usd", "both_together_usd"],
+    rows.map((t, i) => [i + 1, t.title, t.id, (t.micros / 1e6).toFixed(2), (t.planMicros / 1e6).toFixed(2), ((t.micros + t.planMicros) / 1e6).toFixed(2)]),
+  );
+}
+
+export const costliestTasksCsvName = (project: string, now: Date = new Date()) => `${project.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "project"}-costliest-tasks-${new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(now)}.csv`;
 
 /** Add a monthly spending limit for one project (the only screen that calls POST /api/budget-policies, BOS-1564). It then shows under Settings → Funding → Spending limits. */
 export function ProjectLimitForm({ project }: { project: Project }) {
@@ -128,7 +141,14 @@ export function ProjectBudget({ project }: { project: Project }) {
           </dl>
         </>
       )}
-      <h2 style={{ fontSize: 16, marginTop: 24 }}>Costliest tasks</h2>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+        <h2 style={{ fontSize: 16, marginTop: 24 }}>Costliest tasks</h2>
+        {s.topTickets.length > 0 && (
+          <button type="button" className="btn" onClick={() => download(costliestTasksCsvName(project.name), costliestTasksCsv(s.topTickets))}>
+            Download CSV
+          </button>
+        )}
+      </div>
       <p className="muted" style={{ fontSize: 13, margin: 0 }}>Pay-as-you-go spend, and on subscriptions what the runs would have cost at list prices (about). Ranked by the two together.</p>
       {s.topTickets.length ? (
         <ol>
