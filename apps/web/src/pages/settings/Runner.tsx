@@ -3,10 +3,13 @@ import { RUNNER_ADDONS, type AddonReport } from "@boss-man/shared";
 import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
+import { buildCsv, download } from "../../csv";
 import { spanText } from "../../components/TicketStateHistory";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
 import type { UpdateRow } from "./updates";
+
+const csvDay = () => new Date().toISOString().slice(0, 10);
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" | "retrying" | "frozen" } | null; error?: string } | null;
@@ -113,6 +116,16 @@ type ConnectionHistory = {
 };
 const HOW: Record<string, string> = { dropped: "Connection dropped", stopped: "Stopped by you", "server restart": "Boss Man restarted" };
 
+/** The gaps listed (gone, back, length, why), then a blank line and the summary the fold shows. Times are ISO; "back" is empty while still away. */
+export function connectionToCsv(h: ConnectionHistory): string {
+  const rows = h.gaps.map((g) => [g.from, g.to ?? "", Math.round(g.ms / 1000), spanText(g.ms), g.how ? HOW[g.how] ?? "Connection dropped" : "Connection dropped"]);
+  const summary = buildCsv(
+    ["percent_connected", "since", "times_dropped", "longest_gap_seconds", "longest_gap", "shorter_gaps_not_listed"],
+    [[h.percentConnected ?? "", h.since ?? "", h.drops, Math.round(h.longestGapMs / 1000), h.drops || h.longestGapMs ? spanText(h.longestGapMs) : "none", h.shortGaps]],
+  );
+  return `${buildCsv(["gone", "back", "length_seconds", "length", "why"], rows)}\r\n${summary}`;
+}
+
 export function ConnectionFold({ history }: { history: ConnectionHistory | undefined }) {
   if (!history) return null;
   return (
@@ -153,6 +166,13 @@ export function ConnectionFold({ history }: { history: ConnectionHistory | undef
                 ))}
               </tbody>
             </table>
+          )}
+          {history.gaps.length > 0 && (
+            <div style={{ margin: "8px 0" }}>
+              <button type="button" className="btn" onClick={() => download(`runner-connection-${csvDay()}.csv`, connectionToCsv(history))}>
+                Download CSV
+              </button>
+            </div>
           )}
           {history.shortGaps > 0 && (
             <p className="muted" style={{ fontSize: 14 }}>

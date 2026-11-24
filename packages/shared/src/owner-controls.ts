@@ -179,7 +179,7 @@ export const OWNER_CONTROLS = {
     "Run the setup wizard", "Clear",
   ],
   "Server and runner": [
-    "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
+    "Reconnect runner", "Start runner", "Restart", "Stop", "Download CSV", "Copy token", "Issue a new runner token", "Register a runner",
     "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",
