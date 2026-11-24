@@ -320,6 +320,7 @@ describe("runner swap in progress: every part of the page agrees (BOS-1558)", ()
     const none = [row("a", OLD), row("b", OLD), row("c", NEW, { connected: false })];
     expect(tagFor(none)).toBe("Swapping (0 of 3 companies done)");
 
+    // Held but every runner already connected on the new image: the hold has not lifted yet, so "3 of 3" still reads "Swapping".
     const all = [row("a", NEW), row("b", NEW), row("c", NEW)];
     expect(tagFor(all)).toBe("Swapping (3 of 3 companies done)");
     expect(connectedCount(all)).toBe(3);
