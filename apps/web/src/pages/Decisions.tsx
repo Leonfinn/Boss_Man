@@ -1688,7 +1688,7 @@ export function Decisions({ decisions, companies, loaded, loadError = false, age
   );
 }
 
-type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; companyName?: string; note?: string | null; at: string; ticket: { id: string; title: string; ref: string | null } | null; kind?: string; outcome?: "merged" | "closed" | "open" | null; state?: string | null };
+type AnsweredItem = { id: string; question: string; status: "answered" | "withdrawn"; answer: string | null; by: "owner" | "ceo" | "auto" | "withdrawn"; byName: string | null; companyName?: string; note?: string | null; at: string; askedAt?: string; ticket: { id: string; title: string; ref: string | null } | null; kind?: string; outcome?: "merged" | "closed" | "open" | null; state?: string | null };
 type CeoWeek = { total: number; byKind: Array<{ kind: string; count: number }> };
 
 /** (BOS-2382) The kinds of card the Answered filter offers, by the key the server sends. */
@@ -1712,11 +1712,50 @@ const outcomeText = (i: AnsweredItem) => (i.outcome === "merged" ? "The ticket m
 const answeredBy = (i: AnsweredItem) => (i.by === "owner" ? "You" : i.by === "ceo" ? i.byName ?? "The CEO" : i.by === "auto" ? "Automatically" : "Withdrawn by the team");
 const answeredWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-/** (BOS-2312) The Answered list as CSV: when, company, ticket, question, answer, note, who answered. */
+/** (BOS-2488) Whole minutes an answered card waited; null for a withdrawn card or when the server sent no asked time. */
+export function waitedMinutes(i: AnsweredItem): number | null {
+  if (i.status !== "answered" || !i.askedAt) return null;
+  const ms = Date.parse(i.at) - Date.parse(i.askedAt);
+  return Number.isNaN(ms) ? null : Math.max(0, Math.round(ms / 60_000));
+}
+
+/** "3 h": minutes under an hour, hours under two days, then days. */
+export function waitText(minutes: number): string {
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 2 * 1440) return `${Math.round(minutes / 60)} h`;
+  return `${Math.round(minutes / 1440)} days`;
+}
+
+const medianOf = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+};
+
+/** (BOS-2488) "N answered · median wait 2 h · slowest: Permission cards (median 9 h)" for the rows shown; null with no answered row. */
+export function answeredSummary(rows: AnsweredItem[]): string | null {
+  const waits = rows.map((i) => ({ i, w: waitedMinutes(i) })).filter((x): x is { i: AnsweredItem; w: number } => x.w !== null);
+  if (!waits.length) return null;
+  const parts = [`${waits.length} answered`, `median wait ${waitText(Math.round(medianOf(waits.map((x) => x.w))))}`];
+  const byKind = new Map<string, number[]>();
+  for (const { i, w } of waits) byKind.set(i.kind ?? "other", [...(byKind.get(i.kind ?? "other") ?? []), w]);
+  let slow: { kind: string; m: number } | null = null;
+  for (const [kind, ws] of byKind) {
+    const m = medianOf(ws);
+    if (!slow || m > slow.m) slow = { kind, m };
+  }
+  if (slow && byKind.size > 1) {
+    const label = ANSWERED_KINDS.find((x) => x[0] === slow!.kind)?.[1];
+    parts.push(`slowest: ${label ? `${label} cards` : slow.kind.replace(/_/g, " ") + " cards"} (median ${waitText(Math.round(slow.m))})`);
+  }
+  return parts.join(" · ");
+}
+
+/** (BOS-2312) The Answered list as CSV: when, company, ticket, question, answer, note, who answered, minutes waited. */
 export function answeredToCsv(rows: AnsweredItem[]): string {
   return buildCsv(
-    ["Answered at", "Company", "Ticket", "Question", "Answer", "Note", "Answered by"],
-    rows.map((i) => [i.at, i.companyName ?? "", i.ticket?.ref ?? "", i.question, i.status === "answered" ? i.answer ?? "" : "(withdrawn)", i.note ?? "", i.by === "owner" ? "owner" : i.by === "ceo" ? i.byName ?? "CEO" : i.by === "auto" ? "automatic" : "withdrawn"]),
+    ["Answered at", "Company", "Ticket", "Question", "Answer", "Note", "Answered by", "Waited (minutes)"],
+    rows.map((i) => [i.at, i.companyName ?? "", i.ticket?.ref ?? "", i.question, i.status === "answered" ? i.answer ?? "" : "(withdrawn)", i.note ?? "", i.by === "owner" ? "owner" : i.by === "ceo" ? i.byName ?? "CEO" : i.by === "auto" ? "automatic" : "withdrawn", String(waitedMinutes(i) ?? "")]),
   );
 }
 
@@ -1847,6 +1886,7 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
         {error && (
           <LoadError what="answered cards" message={error} onRetry={() => void load(null, text)} />
         )}
+        {!pinned && answeredSummary(items) && <p data-testid="answered-summary" style={{ margin: "0 0 8px" }}>{answeredSummary(items)}</p>}
         {done && items.length === 0 && !error && <p className="muted">{pinned ? "That card is not among the answered cards." : text.trim() ? "No answered card matches that." : "No card has been answered yet."}</p>}
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
           {items.map((i) => (
@@ -1861,6 +1901,7 @@ export function AnsweredList({ companyId, linkedId }: { companyId?: string | nul
                   <span className="muted">{answeredBy(i)}</span>
                 )}{" "}
                 <span className="muted">· {answeredWhen(i.at)}</span>
+                {waitedMinutes(i) !== null && <span className="muted" data-testid="answered-wait"> · answered after {waitText(waitedMinutes(i)!)}</span>}
               </div>
               {i.by === "ceo" && i.note && <div className="muted" data-testid="ceo-reason">Reason: {i.note}</div>}
               {i.ticket && (

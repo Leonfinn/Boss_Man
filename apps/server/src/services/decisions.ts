@@ -2400,6 +2400,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           companyName,
           note: d.status === "answered" ? c.settled?.note ?? c.answerNote ?? null : null,
           at: new Date(at).toISOString(),
+          // (BOS-2488) When the card was raised, so the list can say how long it waited.
+          askedAt: new Date(d.createdAt).toISOString(),
           ticket: t ? { id: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) } : null,
           kind,
           outcome,
