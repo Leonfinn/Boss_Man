@@ -37,9 +37,10 @@ const GROUP_MAX: Record<SearchKind, number> = { tickets: SEARCH_GROUP_MAX, wiki:
  * counts). `since` keeps only what changed from then on, by the date each kind is sorted by: a ticket's last move, a wiki
  * page's or feature's or skill's last edit, a message's or decision's or agent's creation, a run's start.
  */
-export type SearchOptions = { kind?: SearchKind; offset?: number; limit?: number; since?: Date };
+export type SearchOptions = { kind?: SearchKind; offset?: number; limit?: number; since?: Date; open?: boolean };
 
-export type SearchHit = { id: string; title: string; snippet: string; link: string; ref?: string | null; exact?: boolean; who?: string; at?: string };
+/** `state` and `outcome` (BOS-2477) are a ticket's only: its board state, and how a done one ended ("cancelled"). */
+export type SearchHit = { id: string; title: string; snippet: string; link: string; ref?: string | null; exact?: boolean; who?: string; at?: string; state?: string; outcome?: string | null };
 /** `counts` is every match of each kind (with `since` applied), not just the ones returned. */
 export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[]; features: SearchHit[]; decisions: SearchHit[]; runs: SearchHit[]; agents: SearchHit[]; skills: SearchHit[]; feedback: SearchHit[]; counts: Record<SearchKind, number> };
 
@@ -115,11 +116,13 @@ export async function search(db: Db, companyId: string, rawQ: string, opts: Sear
   const shown = (k: SearchKind) => !opts.kind || k === opts.kind;
   const total = sql<number>`count(*) over()`.mapWith(Number);
 
-  const ticketCols = { id: tickets.id, title: tickets.title, number: tickets.number, body: around(tickets.body, q), titleHit: sql<boolean>`${tickets.title} ilike ${like}` };
+  const ticketCols = { id: tickets.id, title: tickets.title, number: tickets.number, state: tickets.systemState, outcome: tickets.outcome, body: around(tickets.body, q), titleHit: sql<boolean>`${tickets.title} ilike ${like}` };
+  // (BOS-2477) "Open tickets only" leaves out done ones, the exact reference too, so the count matches the list.
+  const openOnly = opts.open ? ne(tickets.systemState, "done") : undefined;
   const [top] =
     exactNumber === null
       ? []
-      : await db.select(ticketCols).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.number, exactNumber), since(tickets.stateChangedAt))).limit(1);
+      : await db.select(ticketCols).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.number, exactNumber), since(tickets.stateChangedAt), openOnly)).limit(1);
   // The exact ticket is the list's first entry, so the text matches (which leave it out) start one later. At least
   // one row is read even when the exact ticket fills the page, so the count still comes back.
   const tp = page("tickets");
@@ -129,7 +132,7 @@ export async function search(db: Db, companyId: string, rawQ: string, opts: Sear
     db
       .select({ ...ticketCols, total })
       .from(tickets)
-      .where(and(eq(tickets.companyId, companyId), or(sql`${tickets.title} ilike ${like}`, sql`${tickets.body} ilike ${like}`), since(tickets.stateChangedAt), top ? ne(tickets.id, top.id) : undefined))
+      .where(and(eq(tickets.companyId, companyId), or(sql`${tickets.title} ilike ${like}`, sql`${tickets.body} ilike ${like}`), since(tickets.stateChangedAt), openOnly, top ? ne(tickets.id, top.id) : undefined))
       // Title matches first, then the most recently moved; the id keeps pages from overlapping on a tie.
       .orderBy(sql`(${tickets.title} ilike ${like}) desc`, desc(tickets.stateChangedAt), tickets.id)
       .limit(ticketLimit)
@@ -229,7 +232,7 @@ export async function search(db: Db, companyId: string, rawQ: string, opts: Sear
 
   const ticketHit = (t: NonNullable<typeof top>, isExact: boolean): SearchHit => {
     const ref = ticketRef(company.prefix, t.number);
-    return { id: t.id, title: t.title, ref, snippet: t.titleHit || !t.body ? "" : snippetOf(t.body, q), link: `tickets/${t.id}`, ...(isExact ? { exact: true } : {}) };
+    return { id: t.id, title: t.title, ref, snippet: t.titleHit || !t.body ? "" : snippetOf(t.body, q), link: `tickets/${t.id}`, state: t.state, outcome: t.state === "done" ? t.outcome : null, ...(isExact ? { exact: true } : {}) };
   };
   return {
     q,
@@ -269,15 +272,17 @@ export function searchRoutes(owner: FastifyInstance, db: Db) {
   owner.get("/api/companies/:id/search", async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     // kind, offset, limit and since are the Search page's (BOS-2378); offset and limit count only with a kind.
-    const { q, ...opts } = z
+    // open=1 (BOS-2477) keeps only tickets not done; the other kinds are unchanged.
+    const { q, open, ...opts } = z
       .object({
         q: z.string().max(200).default(""),
         kind: z.enum(SEARCH_KINDS).optional(),
         offset: z.coerce.number().int().min(0).max(100_000).optional(),
         limit: z.coerce.number().int().min(1).max(SEARCH_PAGE_MAX).optional(),
         since: z.coerce.date().optional(),
+        open: z.enum(["0", "1"]).optional(),
       })
       .parse(req.query);
-    return search(db, id, q, opts);
+    return search(db, id, q, { ...opts, open: open === "1" });
   });
 }

@@ -1,14 +1,15 @@
 // The Search page (BOS-2378): every match for some words, where the Ctrl+K box (SearchPalette) shows only the top few.
-// #/search?q=…&kind=…&since=…&n=… — with no kind, each kind's first few hits and its count, with a link to see that
+// #/search?q=…&kind=…&since=…&open=1&n=… — with no kind, each kind's first few hits and its count, with a link to see that
 // kind alone; with a kind, `n` of its hits (25 more per "Show more"). The address holds everything, so Back, a
 // bookmark and a reload all land on the same list.
 //
-// Only links and selects (the owner-control rules for this page): a hit is a link to the place the box opens,
-// "Show more" is a link that raises `n`, and the words box submits with Enter.
+// No buttons (the owner-control rules for this page): a hit is a link to the place the box opens, "Show more" is a
+// link that raises `n`, and the words box submits with Enter. Its one listed field is the "Open tickets only" tick
+// box (BOS-2477), on the Search screen in packages/shared/src/owner-controls.ts.
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { LoadError } from "../components/LoadError";
-import { GROUPS, rememberSearch, SEARCH_MIN, searchAddress, TIMED, when, type SearchHit, type SearchKind, type SearchResults, type SearchSince } from "../components/SearchPalette";
+import { GROUPS, HitState, rememberSearch, SEARCH_MIN, searchAddress, TIMED, when, type SearchHit, type SearchKind, type SearchResults, type SearchSince } from "../components/SearchPalette";
 import { hashQuery } from "../hooks";
 
 /** Hits per "Show more". */
@@ -22,7 +23,8 @@ const SINCE_OPTIONS: Array<{ value: SearchSince; label: string }> = [
   { value: "30d", label: "Last 30 days" },
 ];
 
-type Params = { q: string; kind: SearchKind | ""; since: SearchSince; n: number };
+/** `open` (BOS-2477): "Open tickets only", open=1 in the address; it leaves out done tickets and touches no other kind. */
+type Params = { q: string; kind: SearchKind | ""; since: SearchSince; open: boolean; n: number };
 
 /** What the address asks for; anything it can't read falls back to the plain search. */
 export function readSearchParams(qs: URLSearchParams = hashQuery()): Params {
@@ -33,6 +35,7 @@ export function readSearchParams(qs: URLSearchParams = hashQuery()): Params {
     q: qs.get("q") ?? "",
     kind: GROUPS.some((g) => g.key === kind) ? (kind as SearchKind) : "",
     since: since in SINCE_DAYS ? (since as SearchSince) : "",
+    open: qs.get("open") === "1",
     n: Number.isFinite(n) && n > SEARCH_PAGE ? n : SEARCH_PAGE,
   };
 }
@@ -60,7 +63,7 @@ export function SearchPage({ companyId, go }: { companyId: string | undefined; g
   const asked = useRef(0);
 
   const term = p.q.trim();
-  const key = `${companyId}|${term}|${p.kind}|${p.since}`;
+  const key = `${companyId}|${term}|${p.kind}|${p.since}|${p.open ? 1 : 0}`;
   useEffect(() => {
     const n = ++asked.current;
     if (!companyId || term.length < SEARCH_MIN) {
@@ -82,6 +85,7 @@ export function SearchPage({ companyId, go }: { companyId: string | undefined; g
       qs.set("limit", String(Math.min(ASK_MAX, p.n - offset)));
     }
     if (since) qs.set("since", since);
+    if (p.open) qs.set("open", "1");
     setLoading(true);
     setError(null);
     api<SearchResults>(`/api/companies/${companyId}/search?${qs}`).then(
@@ -140,6 +144,9 @@ export function SearchPage({ companyId, go }: { companyId: string | undefined; g
             </option>
           ))}
         </select>
+        <label className="search-open">
+          <input type="checkbox" checked={p.open} onChange={(e) => to({ open: e.target.checked })} /> Open tickets only
+        </label>
       </form>
 
       {!companyId && <p className="muted">Pick a company first.</p>}
@@ -199,6 +206,7 @@ function HitList({ kind, hits }: { kind: SearchKind; hits: SearchHit[] }) {
         <li key={hit.link}>
           <a href={`#/${hit.link}`}>
             <span className="search-title">
+              <HitState hit={hit} />
               {hit.ref && <span className="mono">{hit.ref} </span>}
               {hit.title}
             </span>

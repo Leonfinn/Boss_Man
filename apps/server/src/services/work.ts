@@ -97,6 +97,8 @@ type TicketPatch = {
   fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
+  /** BOS-2485: a standing, repeated job; shown as a "Recurring" label. */
+  recurring?: boolean;
   /** BOS-1516: the urgent mark was set by the owner ("Priority 1"). Only the owner's routes pass it; clearing urgent clears it too. */
   urgentByOwner?: boolean;
   /** Move past a full column anyway. */

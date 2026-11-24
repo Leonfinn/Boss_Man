@@ -118,8 +118,64 @@ describe("Search page (BOS-2378)", () => {
   });
 
   it("reads only the kinds and dates it knows from the address", () => {
-    expect(readSearchParams(new URLSearchParams("q=a&kind=emails&since=yesterday&n=abc"))).toEqual({ q: "a", kind: "", since: "", n: 25 });
-    expect(readSearchParams(new URLSearchParams("q=a&kind=runs&since=30d&n=75"))).toEqual({ q: "a", kind: "runs", since: "30d", n: 75 });
+    expect(readSearchParams(new URLSearchParams("q=a&kind=emails&since=yesterday&n=abc&open=yes"))).toEqual({ q: "a", kind: "", since: "", open: false, n: 25 });
+    expect(readSearchParams(new URLSearchParams("q=a&kind=runs&since=30d&n=75&open=1"))).toEqual({ q: "a", kind: "runs", since: "30d", open: true, n: 75 });
+  });
+});
+
+describe("ticket states and Open tickets only (BOS-2477)", () => {
+  const states: SearchHit[] = [
+    { ...ticket(1), state: "in_progress", outcome: null },
+    { ...ticket(2), state: "review", outcome: null },
+    { ...ticket(3), state: "done", outcome: "completed" },
+    { ...ticket(4), state: "done", outcome: "cancelled" },
+  ];
+  const stateTags = () => [...document.querySelectorAll(".search-state")].map((e) => e.textContent);
+
+  it("the Search page tags each ticket with its state, a cancelled one as Cancelled, and nothing on other kinds", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...base, tickets: states, wiki: [{ id: "birds", title: "Birds", snippet: "", link: "wiki/c1/birds" }] })));
+    window.location.hash = "#/search?q=osprey";
+    render(<SearchPage companyId="c1" go={() => {}} />);
+    await screen.findByText("Birds");
+    expect(stateTags()).toEqual(["In progress", "In review", "Done", "Cancelled"]);
+  });
+
+  it("the Ctrl+K box tags ticket hits too, and a server that sends no state shows no tag", async () => {
+    let hits: SearchHit[] = states;
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...base, tickets: hits })));
+    render(<SearchPalette companyId="c1" go={() => {}} />);
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "osprey" } });
+    await screen.findByText("Osprey task 4");
+    expect(stateTags()).toEqual(["In progress", "In review", "Done", "Cancelled"]);
+    hits = [ticket(9)];
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "osprey 9" } });
+    await screen.findByText("Osprey task 9");
+    expect(stateTags()).toEqual([]);
+  });
+
+  it("the tick box puts open=1 in the address, keeps it through other filters, and sends it to the server", async () => {
+    const f = vi.fn(async () => json({ ...base, tickets: [states[0]!] }));
+    vi.stubGlobal("fetch", f);
+    const go = vi.fn();
+    window.location.hash = "#/search?q=osprey&kind=tickets";
+    render(<SearchPage companyId="c1" go={go} />);
+    await screen.findByText("Osprey task 1");
+    expect(asked(f)[0]!.get("open")).toBeNull();
+    const box = screen.getByRole("checkbox", { name: "Open tickets only" }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    expect(go).toHaveBeenLastCalledWith("search?q=osprey&kind=tickets&open=1");
+
+    await open("#/search?q=osprey&kind=tickets&open=1");
+    await waitFor(() => expect(f).toHaveBeenCalledTimes(2));
+    expect(asked(f)[1]!.get("open")).toBe("1");
+    expect((screen.getByRole("checkbox", { name: "Open tickets only" }) as HTMLInputElement).checked).toBe(true);
+    // Another filter keeps it; unticking drops it.
+    fireEvent.change(screen.getByRole("combobox", { name: "When" }), { target: { value: "30d" } });
+    expect(go).toHaveBeenLastCalledWith("search?q=osprey&kind=tickets&since=30d&open=1");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Open tickets only" }));
+    expect(go).toHaveBeenLastCalledWith("search?q=osprey&kind=tickets");
   });
 });
 

@@ -309,8 +309,32 @@ describe("the Search page's asks: counts, one kind a page at a time, a date filt
     expect(recent.chats.map((x) => x.snippet)).toEqual(["gannet now"]);
   });
 
+  it("gives each ticket its state and a done one's outcome; open=1 leaves out done tickets, the exact reference and the count too (BOS-2477)", async () => {
+    await t.db.insert(tickets).values([
+      { companyId: A.company, projectId: A.project, title: "Merlin live", number: 6060, systemState: "in_progress" },
+      { companyId: A.company, projectId: A.project, title: "Merlin shipped", number: 6061, systemState: "done", outcome: "completed" },
+      { companyId: A.company, projectId: A.project, title: "Merlin dropped", number: 6062, systemState: "done", outcome: "cancelled" },
+      { companyId: A.company, projectId: A.project, title: "Merlin waiting", number: 6063, systemState: "review", outcome: "stale text" },
+    ]);
+    await t.db.insert(wikiPages).values({ companyId: A.company, slug: "merlin", title: "Merlin notes", body: "Hovers." });
+    const all = await find(A.company, "merlin");
+    const byTitle = Object.fromEntries(all.tickets.map((x) => [x.title, [x.state, x.outcome]]));
+    // A ticket that isn't done sends no outcome, whatever the column holds.
+    expect(byTitle).toEqual({ "Merlin live": ["in_progress", null], "Merlin shipped": ["done", "completed"], "Merlin dropped": ["done", "cancelled"], "Merlin waiting": ["review", null] });
+    expect(all.wiki[0]!.state).toBeUndefined();
+    const open = await ask(A.company, "q=merlin&open=1");
+    expect(open.tickets.map((x) => x.title).sort()).toEqual(["Merlin live", "Merlin waiting"]);
+    expect(open.counts).toMatchObject({ tickets: 2, wiki: 1 });
+    expect(open.wiki).toHaveLength(1);
+    // A done ticket's own reference is left out too; an open one's still comes first.
+    expect((await ask(A.company, "q=BOS-6061&open=1")).tickets).toEqual([]);
+    expect((await ask(A.company, "q=BOS-6060&open=1")).tickets[0]).toMatchObject({ ref: "BOS-6060", exact: true, state: "in_progress" });
+    // open=0 is the plain search.
+    expect((await ask(A.company, "q=merlin&open=0")).counts.tickets).toBe(4);
+  });
+
   it("refuses a kind it doesn't know, a limit over the max and a date it can't read", async () => {
-    for (const query of ["q=gannet&kind=emails", "q=gannet&kind=tickets&limit=101", "q=gannet&since=yesterday", "q=gannet&offset=-1"]) {
+    for (const query of ["q=gannet&kind=emails", "q=gannet&kind=tickets&limit=101", "q=gannet&since=yesterday", "q=gannet&offset=-1", "q=gannet&open=yes"]) {
       const res = await t.app.inject({ method: "GET", url: `/api/companies/${A.company}/search?${query}`, headers: { cookie } });
       expect(res.statusCode, query).toBeGreaterThanOrEqual(400);
       expect(res.statusCode, query).toBeLessThan(500);

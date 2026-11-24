@@ -997,6 +997,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .wiki-list details > summary { cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
 .wiki-list details > summary:hover { background: var(--ground); }
 .wiki-list details > ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }
+/* "N need attention" and its switch (BOS-2518): one line beside the filter box, counted, never pushed off. */
+.wiki-list .skills-attention { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.wiki-list .skills-attention-count { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.wiki-list .skills-attention .muted { font-size: 13px; }
 
 /* Chat as a messenger (R70) */
 /* The page fills the window under the heading (BOS-270): the panel takes the room left over instead
@@ -1007,6 +1011,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger-chat > .chat-log { min-height: 160px; }
 .messenger-list { border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
 .messenger-list ul { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.messenger-list .team-find { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 8px 0; }
+.messenger-list .team-find input[type="search"] { flex: 1 1 140px; min-width: 0; }
+.messenger-list .team-unread { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.messenger-list .team-none { margin: 8px 12px; font-size: 13px; }
 .messenger-list a { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
 .messenger-list a:hover { background: var(--ground); }
 .messenger-list a[aria-current="page"] { background: var(--accent-soft); }
@@ -1871,6 +1879,8 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .search-results li { display: flex; flex-direction: column; gap: 2px; padding: 8px 16px; cursor: pointer; min-height: 44px; justify-content: center; }
 .search-results li.active { background: var(--accent-soft); }
 .search-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A ticket hit's state (BOS-2477), first on the title line so a long title's "…" never hides it. */
+.search-title .search-state { margin-right: 6px; font-weight: 500; vertical-align: 1px; }
 /* Keyboard shortcuts list (BOS-2321): reuses the search box's back and panel. */
 .shortcuts-title { flex: 1; margin: 0; font-size: 16px; }
 .shortcuts-list { margin: 0; padding: 8px 16px; overflow-y: auto; }
@@ -1886,7 +1896,8 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 /* The box's "See all N results" link and the Search page (BOS-2378). */
 .search-all { margin: 0; padding: 10px 16px; border-top: 1px solid var(--line); }
 .search-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 16px; }
-.search-filters input { flex: 1 1 260px; min-width: 0; }
+.search-filters input[type="search"] { flex: 1 1 260px; min-width: 0; }
+.search-open { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; }
 .search-group { margin: 0 0 20px; }
 .search-group h2 { font-size: 15px; margin: 0 0 6px; }
 .search-list { list-style: none; margin: 0; padding: 0; }

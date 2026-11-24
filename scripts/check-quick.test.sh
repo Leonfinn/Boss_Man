@@ -709,4 +709,61 @@ run 1 "real clash" env REBASE_RC=1 REBASE_OUT="refused: real code conflicts too:
 grep -q "^FAIL  merge with origin/main is clean" "$t/out" || fail "real clash: merge step not FAIL: $(cat "$t/out")"
 grep -q "refused: real code conflicts too" "$t/out" || fail "real clash: refusal reason not shown: $(cat "$t/out")"
 
+# BOS-2484: the report-only squeeze. A fresh repo with a stub scripts/squeeze-test.sh that logs its file and answers by name.
+repo="$t/sq"; mkdir -p "$repo/scripts"
+cp "$here/check-quick.sh" "$here/check-all.sh" "$here/check-slot.sh" "$here/check-guards.sh" "$here/install-packages.sh" "$here/test-shell.sh" "$here/squeeze-skip.txt" "$repo/scripts/"
+cp "$t/repo/scripts/check-shell.sh" "$repo/scripts/"
+cat >"$repo/scripts/squeeze-test.sh" <<'S'
+#!/usr/bin/env bash
+echo "squeeze $1" >>"$LOG"
+case "$1" in
+  *fails*) echo "run 1/2: FAIL (exit 1, 3 s)"; echo "AssertionError: too slow"; exit 1 ;;
+  *hangs*) echo "run 1/2: no answer (over 200 s)"; exit 3 ;;
+  *errors*) echo "run 1/2: ERROR, every test was skipped"; exit 2 ;;
+esac
+exit 0
+S
+chmod +x "$repo/scripts/squeeze-test.sh"
+g init -q -b main; echo a >"$repo/README"; g add -A; g commit -q -m init
+g update-ref refs/remotes/origin/main HEAD
+g checkout -q -b feature
+# No test file changed: a note saying so, and no squeeze run.
+commit apps/server/src/a.ts
+run 0 "squeeze: no test file" env
+grep -q "^check-quick: squeeze (report only): no new or changed test file to run" "$t/out" || fail "squeeze none: $(cat "$t/out")"
+notlogged "squeeze " "squeeze none"
+# Passing files; the runner's tests and the skip list's file are left out; a failing file is a report line, the run still exits 0.
+skipped_file="$(sed -e 's/[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' "$here/squeeze-skip.txt" | head -n 1)"
+[ -n "$skipped_file" ] || fail "squeeze-skip.txt lists no file"
+commit apps/server/test/ok.test.ts apps/server/test/fails.test.ts apps/runner/test/r.test.ts "$skipped_file"
+run 0 "squeeze: report only" env
+logged "squeeze apps/server/test/ok.test.ts" "squeeze"
+logged "squeeze apps/server/test/fails.test.ts" "squeeze"
+notlogged "squeeze apps/runner/test/r.test.ts" "squeeze runner"
+notlogged "squeeze $skipped_file" "squeeze skip list"
+grep -q "^SQUEEZE  pass: apps/server/test/ok.test.ts" "$t/out" || fail "squeeze pass line: $(cat "$t/out")"
+grep -q "^SQUEEZE  FAILED on a slow, busy CPU (report only, does not fail this check): apps/server/test/fails.test.ts" "$t/out" || fail "squeeze fail line: $(cat "$t/out")"
+grep -q "AssertionError: too slow" "$t/out" || fail "squeeze fail output not shown"
+grep -q "^check-quick: all steps passed" "$t/out" || fail "squeeze fail changed the verdict"
+grep -q "^check-quick: squeeze (report only): 2 of 2 test files run on a slow CPU, 1 failed, 0 no answer, 0 could not run, 0 left out" "$t/out" || fail "squeeze note: $(cat "$t/out")"
+# No answer and a run that could not start are named as such, not as findings; more than 3 files: 3 run and the rest are counted.
+commit apps/web/src/hangs.test.ts apps/web/src/errors.test.ts apps/launcher/test/l.test.ts
+run 0 "squeeze: cap" env
+[ "$(grep -c '^squeeze ' "$LOG")" -eq 3 ] || fail "squeeze cap: $(cat "$LOG")"
+grep -q "^SQUEEZE  [0-9]* more changed test file(s) were not squeezed (at most 3 a check)" "$t/out" || fail "squeeze left-out line: $(cat "$t/out")"
+grep -q "left out$" "$t/out" || fail "squeeze left-out count: $(cat "$t/out")"
+# A failed step means no squeeze; CHECK_QUICK_SQUEEZE=0 switches it off.
+run 1 "squeeze: failed step" env FAIL_ON=typecheck
+notlogged "squeeze " "squeeze after a failed step"
+run 0 "squeeze: off" env CHECK_QUICK_SQUEEZE=0
+notlogged "squeeze " "squeeze off"
+! grep -q "squeeze (report only)" "$t/out" || fail "squeeze note shown while off"
+# A hang and an error are reported without failing (own run: only those two files).
+g reset -q --hard origin/main
+commit apps/web/src/hangs.test.ts apps/web/src/errors.test.ts
+run 0 "squeeze: no answer and error" env
+grep -q "^SQUEEZE  no answer (stopped before it finished; neither pass nor fail): apps/web/src/hangs.test.ts" "$t/out" || fail "squeeze no-answer line: $(cat "$t/out")"
+grep -q "^SQUEEZE  could not run (exit 2; not a finding): apps/web/src/errors.test.ts" "$t/out" || fail "squeeze error line: $(cat "$t/out")"
+grep -q "0 failed, 1 no answer, 1 could not run" "$t/out" || fail "squeeze counts: $(cat "$t/out")"
+
 echo "check-quick.test.sh: ok"
