@@ -477,6 +477,8 @@ export function mergeQueueService(
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
     /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
     places?: (companyId: string) => Promise<Map<string, { place: number | null; why: string | null; seatPlace?: number | null; lane?: string | null }>>;
+    /** BOS-2508: each ticket the merge train holds waiting for a seat, with its place among them (1 = seated next), job or not. */
+    seatPlaces?: (companyId: string) => Promise<Map<string, number>>;
     /** BOS-1486: whether this company's runner is connected right now (a waiting merge can't start without one). */
     runnerConnected?: (companyId: string) => Promise<boolean>;
     /** BOS-1486: a runner update is holding the line (a wrap-up hold is not one). */
@@ -744,6 +746,9 @@ export function mergeQueueService(
       const runnerUp = deps.runnerConnected ? await deps.runnerConnected(companyId).catch(() => null) : null;
       const runnerUpdateOn = deps.runnerUpdateOn ? await deps.runnerUpdateOn().catch(() => false) : false;
       const detail = deps.queueDetail && queue?.mode === "server" ? await deps.queueDetail(companyId).catch(() => null) : null;
+      // BOS-2508: tickets the merge train itself holds waiting for a seat (1 = seated next). Such a merge has no check job yet,
+      // so the check queue knows nothing of it; without this it fell through to the company-wide "ahead" count.
+      const trainSeats = deps.seatPlaces && queue?.mode === "server" ? await deps.seatPlaces(companyId).catch(() => new Map<string, number>()) : new Map<string, number>();
 
       const waiting: WaitingRow[] = [];
       // BOS-1517: the status line's own parts, set as each row's reason is worked out (a hold's label is its step).
@@ -934,7 +939,7 @@ export function mergeQueueService(
           });
           continue;
         }
-        if (detail?.seatWait?.includes(r.id)) {
+        if (detail?.seatWait?.includes(r.id) || trainSeats.has(r.id)) {
           blockerOf.set(r.id, "Every merge-train seat is taken.");
           waiting.push({ ...base, state: "waiting_for_seat", label: `waiting for a train seat${why}`, stuck: overAnHour, next: "It takes a seat as soon as one frees; its check then starts by itself.", actor: "system", decisionId: null });
           continue;
@@ -947,8 +952,11 @@ export function mergeQueueService(
         if (detail && detail.busy.length >= detail.slots) {
           const names = detail.busy.map((b, i) => `slot ${i + 1}: ${b.ref ?? b.title} (${b.kind})`).join("; ");
           blockerOf.set(r.id, `Every slot is busy: ${names}.`);
-          stepOf.set(r.id, `waiting for a check slot (${queue?.waiting ?? 0} ahead)${why}`);
-          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue?.waiting ?? 0} ahead). Every slot is busy: ${names}${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+          // BOS-2508: `queue.waiting` counts every queued check in the company, quick checks too, so it is worded as that unless
+          // the ticket has its own place (replaced below by "(N ahead)").
+          const shared = `${queue?.waiting ?? 0} ${queue?.waiting === 1 ? "check" : "checks"} waiting in the shared line`;
+          stepOf.set(r.id, `waiting for a check slot (${shared})${why}`);
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${shared}). Every slot is busy: ${names}${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
           continue;
         }
         if (!detail) {
@@ -968,14 +976,17 @@ export function mergeQueueService(
           // BOS-1405: the label counts this merge's own place, not the whole queue's length (place 1 is next up).
           if (w.state === "waiting_for_check_capacity") {
             const ahead = Math.max(0, p.place - 1);
-            w.label = w.label.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`);
+            const own = ahead === 0 ? "(next up)" : `(${ahead} ahead)`;
+            const shared = /\(\d+ (?:ahead|checks? waiting in the shared line)\)/;
+            w.label = w.label.replace(shared, own);
             const s = stepOf.get(w.ticketId);
-            if (s) stepOf.set(w.ticketId, s.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`));
+            if (s) stepOf.set(w.ticketId, s.replace(shared, own));
           }
         }
         // BOS-1803: a train-seat wait says how many wait ahead of it, and a background-lane merge says so and for how long,
         // in the label the ticket's status line shows too, so "merging since …" with nothing running isn't read as lost.
-        if (p?.seatPlace && w.state === "waiting_for_seat" && !w.heldAlone) w.label = w.label.replace(/^waiting for a train seat/, `waiting for a train seat (${p.seatPlace === 1 ? "next up" : `${p.seatPlace - 1} ahead`})`);
+        const seatPlace = p?.seatPlace ?? trainSeats.get(w.ticketId);
+        if (seatPlace && w.state === "waiting_for_seat" && !w.heldAlone) w.label = w.label.replace(/^waiting for a train seat/, `waiting for a train seat (${seatPlace === 1 ? "next up" : `${seatPlace - 1} ahead`})`);
         if (p?.lane) {
           w.lane = p.lane;
           w.label = `${w.label}; ${p.lane}`;
