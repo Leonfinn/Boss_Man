@@ -4,6 +4,7 @@
 import { and, eq, gte, inArray, ne, or, sql, desc } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { resultWhere } from "./runs.js";
 import { agents, companies, costEvents, runs, ticketReviews, ticketTransitions, tickets } from "../db/schema.js";
 
 const DAY = 86_400_000;
@@ -14,6 +15,9 @@ export type AgentRecordTicket = { id: string; ref: string | null; title: string;
 export type AgentRecord = {
   days: number;
   finished: number;
+  /** Runs started in the window, and how many of them failed (outcome starts with "error", the Runs page rule). */
+  runs: number;
+  failedRuns: number;
   /** Finished tickets that had a review and no changes requested. */
   passedFirstTime: number;
   sendBacks: number;
@@ -66,10 +70,17 @@ export function agentRecordService(db: Db, deps: { now?: () => Date } = {}) {
         const s = startAt.get(r.id);
         return s === undefined ? [] : [Math.max(0, finishedAt(r).getTime() - s)];
       });
+      // Runs started in the window; failed uses the Runs page rule.
+      const [runCount] = await db
+        .select({ runs: sql<number>`count(*)::int`, failed: sql<number>`(count(*) filter (where ${resultWhere("failed")}))::int` })
+        .from(runs)
+        .where(and(eq(runs.agentId, agentId), gte(runs.startedAt, since)));
       const total = rows.reduce((a, r) => a + (costOf.get(r.id) ?? 0), 0);
       return {
         days: RECORD_DAYS,
         finished: rows.length,
+        runs: runCount?.runs ?? 0,
+        failedRuns: runCount?.failed ?? 0,
         passedFirstTime: rows.filter((r) => reviewed.has(r.id) && !sendBacks.has(r.id)).length,
         sendBacks: [...sendBacks.values()].reduce((a, b) => a + b, 0),
         medianMergeMs: median(cycles),
