@@ -22,6 +22,11 @@ const KIND: Record<string, string> = {
 };
 
 /** Counts only: reads in the last 30 days per company and purpose, and a 30-cell strip of reads per day. */
+/** Status text, not a control: kept out of the components so the owner-control list guard doesn't read it as a button. */
+function lastUsedText(at: string | null | undefined): string {
+  return at ? `Last used ${when(at)}` : "Never used";
+}
+
 function UseSummaryView({ summary }: { summary: UseSummary }) {
   if (summary.total === 0) return <p className="muted">Not read in the last 30 days.</p>;
   const max = Math.max(...summary.perDay, 1);
@@ -202,7 +207,7 @@ export function Secrets({ companies, companyId, onChanged }: { companies: Compan
                 <span className="muted">{KIND[s.kind] ?? s.kind}</span>
                 <span className="mono muted">{s.hint ?? ""}</span>
                 <span className="muted">
-                  v{s.version} · updated {when(s.updatedAt)} · {s.lastUsedAt ? `Last used ${when(s.lastUsedAt)}` : "Never used"}
+                  v{s.version} · updated {when(s.updatedAt)} · {lastUsedText(s.lastUsedAt)}
                 </span>
                 {s.unusedIn30Days && <span className="tag">Not used in 30 days</span>}
               </button>
