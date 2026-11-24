@@ -144,8 +144,14 @@ export async function recreateLauncher(d: SwapDeps, r: HelperRelease): Promise<"
   await docker.remove(next);
   await docker.createServer(next, launcherSpec(d.cfg, r), "launcher");
   if (old) await docker.stop(name, 30).catch(() => undefined);
-  await docker.start(next).catch(() => undefined);
+  let startError = "";
+  await docker.start(next).catch((e) => {
+    startError = String((e as Error)?.message ?? e).slice(0, 300);
+  });
   if (!(await waitHealthy(d, next, h.launcherReadySeconds))) {
+    // Say why before the evidence is removed: the start error and the end of the new launcher's own log (no secrets in either).
+    const tail = (await docker.logs(next, 8).catch(() => "")).replace(/\s+/g, " ").slice(-400);
+    console.error(`launcher ${next} did not become healthy. start error: ${startError || "none"}; log: ${tail || "empty"}`);
     await docker.remove(next).catch(() => undefined);
     if (old) await docker.start(name).catch(() => undefined);
     return "failed";

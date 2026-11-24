@@ -115,6 +115,8 @@ ok "the server answers /api/health"
 [ -z "${INSTALL_SECONDS_FILE:-}" ] || echo "$SECONDS" > "$INSTALL_SECONDS_FILE"
 
 launcher_log="$(docker logs launcher 2>&1)"
+# The first server can answer while the launcher is missing (the updater makes the launcher first, and logs why it could not): show that.
+docker inspect launcher >/dev/null 2>&1 || { echo "--- the launcher does not exist; updater log:"; docker logs --tail 15 updater 2>&1 | cut -c1-400; }
 echo "$launcher_log" | grep -q 'dropped to uid 1000' && ok "the launcher dropped to uid 1000 with the socket's group" || bad "launcher privileges: $launcher_log"
 echo "$launcher_log" | grep -q '"msg":"data folder"' && ok "the launcher found its data volume on the host" || bad "launcher data folder"
 echo "$launcher_log" | grep -q 'launcher listening' && ok "the launcher is up and can reach Docker" || bad "launcher not listening"
