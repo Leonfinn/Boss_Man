@@ -281,7 +281,8 @@ function MoveToFront({ companyId, row, onMoved }: { companyId: string; row: Wait
   );
 }
 
-export function Waiting({ rows, companyId, onMoved, serverHost }: { rows: WaitingRow[]; companyId?: string; onMoved?: () => void; serverHost?: string | null }) {
+/** `firstNumber` (BOS-2508): the running rows above are unnumbered, so the first waiting merge is (running shown + 1) and the last number equals the tab's count. */
+export function Waiting({ rows, companyId, onMoved, serverHost, firstNumber = 1 }: { rows: WaitingRow[]; companyId?: string; onMoved?: () => void; serverHost?: string | null; firstNumber?: number }) {
   const firstFailed = rows.findIndex((r) => r.actor !== "owner" && r.state === "check_failed_retrying");
   const firstStuck = rows.findIndex((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck);
   return (
@@ -298,7 +299,7 @@ export function Waiting({ rows, companyId, onMoved, serverHost }: { rows: Waitin
               <article key={r.ticketId} id={i === firstFailed ? "mq-first-failed" : i === firstStuck ? "mq-first-stuck" : undefined} tabIndex={i === firstFailed || i === firstStuck ? -1 : undefined} className={`card mq-item${edge}`} data-stuck={r.stuck ? "true" : undefined} data-state-word={s.word}>
                 <div className="mq-head">
                   <span className="mq-title">
-                    <span className="mq-pos">{i + 1}</span>
+                    <span className="mq-pos">{firstNumber + i}</span>
                     <TicketLink id={r.ticketId} ref={r.ref} title={r.title} />
                   </span>
                   <span className="mq-wait">waiting {waited(r.minutes)}</span>
@@ -619,7 +620,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
                 <p key={t.projectId} className="mq-held-fix" role="status" data-landing-turn="true">{landingTurnText(t)}</p>
               ))}
               <Running rows={data.running} slots={data.slots} paused={pausedLine} serverHost={data.serverHost} slotSplit={data.slotSplit} />
-              <Waiting serverHost={data.serverHost} rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
+              <Waiting serverHost={data.serverHost} firstNumber={data.running.length + 1} rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />
             </>
           ) : null}

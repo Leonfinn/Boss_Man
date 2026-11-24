@@ -134,7 +134,7 @@ import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
 import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
-import { retierWaiting } from "./services/merge-train.js";
+import { retierWaiting, trainFacts } from "./services/merge-train.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
@@ -1229,6 +1229,12 @@ export async function buildApp(opts: AppOptions) {
     },
     // BOS-1803: seat waiters (no check-queue place yet) come along too, for their train-seat place and lane.
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && (r.position || r.heldBySeat)).map((r) => [r.ticketId, { place: r.position, why: r.why, seatPlace: r.seatPlace, lane: r.lane }])),
+    // BOS-2508: the train's own list of tickets waiting for a seat (a member that is not seated has no check job yet).
+    seatPlaces: async (companyId) => {
+      const out = new Map<string, number>();
+      for (const p of await db.select({ id: projects.id }).from(projects).where(eq(projects.companyId, companyId))) (trainFacts(p.id)?.waiting ?? []).forEach((id, i) => out.set(id, i + 1));
+      return out;
+    },
     // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
     runnerConnected: async (companyId) => {
       const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
