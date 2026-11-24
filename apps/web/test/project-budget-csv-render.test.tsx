@@ -88,6 +88,10 @@ describe.skipIf(!can)("Project spend: Costliest tasks Download CSV (BOS-2543, re
           ]);
           expect(rows).toHaveLength(12);
           expect(rows[11]).toBe("");
+          // The first task's dollar figures match what the page shows for it (BOS-2543: same figure on screen).
+          const first = await funds.locator("ol li").first().innerText();
+          expect(first).toContain(`$${rows[1]!.split(",")[3]} `);
+          expect(first).toContain(`+ about $${rows[1]!.split(",")[4]} on subscriptions`);
         }
       } finally {
         await page.close();
