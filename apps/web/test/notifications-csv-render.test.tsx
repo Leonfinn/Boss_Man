@@ -18,15 +18,20 @@ const notice = (id: string, over: Record<string, unknown> = {}) => ({
   title: `Notice ${id}`, body: null, link: "#/decisions", pushedAt: null, pushError: null, readAt: null,
   createdAt: new Date().toISOString(), ...over,
 });
+const LONG = "A very long notice title that goes on and on without any break so the header has to cope ".repeat(4);
+// 60 notices, the first with a long title, so the page is tall and the header is under pressure.
 const items = [
-  notice("one", { requested: "page", level: "flag", demotedBy: "quiet hours", pushError: "phone unreachable", body: "Two, lines" }),
+  notice("one", { title: LONG, requested: "page", level: "flag", demotedBy: "quiet hours", pushError: "phone unreachable", body: "Two, lines" }),
   notice("two", { level: "ask", requested: "ask", pushedAt: new Date().toISOString() }),
+  ...Array.from({ length: 58 }, (_, i) => notice(`n${i}`)),
 ];
-const api = { ...API, "/api/notifications": { items, unread: 2 } };
+const api = { ...API, "/api/notifications": { items, unread: 60 } };
 
+// The owner's two devices and a phone width.
 const SIZES = [
-  { name: "desktop", width: 1280, height: 900, touch: false },
-  { name: "phone", width: 390, height: 844, touch: true },
+  { name: "1667", width: 1667, height: 724, touch: true },
+  { name: "1550", width: 1550, height: 900, touch: false },
+  { name: "390", width: 390, height: 844, touch: true },
 ];
 
 describe.skipIf(!browser || !server)("BOS-2520 Notifications Download CSV in a real browser", () => {
@@ -39,14 +44,20 @@ describe.skipIf(!browser || !server)("BOS-2520 Notifications Download CSV in a r
         await page.getByRole("button", { name: "Download CSV", exact: true }).waitFor({ timeout: 15_000 });
         const o = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
         expect(o.sw, JSON.stringify(o)).toBeLessThanOrEqual(o.cw);
+        // The button sits beside "Mark all read" and the two do not overlap.
+        const box = (name: string) => page.getByRole("button", { name, exact: true }).boundingBox();
+        const [a, b] = [await box("Download CSV"), await box("Mark all read")];
+        expect(a && b).toBeTruthy();
+        const apart = a!.x + a!.width <= b!.x + 0.5 || b!.x + b!.width <= a!.x + 0.5 || a!.y + a!.height <= b!.y + 0.5 || b!.y + b!.height <= a!.y + 0.5;
+        expect(apart, JSON.stringify({ a, b })).toBe(true);
         const dir = process.env.BOSSMAN_SCRATCH;
         if (dir) await page.screenshot({ path: `${dir}/notifications-csv-${s.name}.png` });
         const [file] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Download CSV", exact: true }).click()]);
         expect(file.suggestedFilename()).toMatch(/^notifications-\d{4}-\d{2}-\d{2}\.csv$/);
         const text = readFileSync(await file.path(), "utf8");
         const lines = text.trim().split("\r\n");
-        expect(lines).toHaveLength(3);
-        expect(text).toContain("Notice one");
+        expect(lines).toHaveLength(61);
+        expect(text).toContain("A very long notice title");
         expect(text).toContain("phone unreachable");
         expect(text).toContain("#/decisions");
       } finally {

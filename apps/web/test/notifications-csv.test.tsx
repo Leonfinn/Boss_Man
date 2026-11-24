@@ -43,7 +43,36 @@ describe("noticesToCsv", () => {
   });
 });
 
+describe("noticesToCsv seeded rows", () => {
+  it("4 notices (lowered, push error, read, no company) give a header and 4 rows; hostile titles are quoted or guarded", () => {
+    const csv = noticesToCsv([
+      mk("a", { requested: "page", level: "flag", demotedBy: "quiet hours" }),
+      mk("b", { level: "page", requested: "page", pushError: "refused" }),
+      mk("c", { readAt: "2026-11-21T00:00:00.000Z" }),
+      mk("d", { companyId: null, company: null, title: "=SUM(A1), \"x\"\nline two" }),
+    ]);
+    expect(csv.split("\r\n").length).toBeGreaterThanOrEqual(6);
+    expect(csv).toContain("\"'=SUM(A1), \"\"x\"\"\nline two\"");
+    expect(csv).toContain(",,Note,,,'=SUM".replace("'=SUM", "\"'=SUM"));
+    expect(csv.startsWith("Time,Company,Type,")).toBe(true);
+  });
+});
+
 describe("Notifications Download CSV", () => {
+  it("with the Unread filter on, the file holds only the unread notices returned", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (String(url).includes("status=unread")) return json({ items: [mk("u")], unread: 1 });
+      throw new Error(`no stub for ${url}`);
+    }));
+    render(<Notifications feed={{ items: [mk("u"), mk("r", { readAt: "2026-11-21T00:00:00.000Z" })], unread: 1, counts: { level: {}, company: {} } }} onChanged={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Unread/ }));
+    await waitFor(() => expect(screen.queryByText("Title r")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    const text = await blobs[0]!.text();
+    expect(text.trim().split("\r\n")).toHaveLength(2);
+    expect(text).toContain("Title u");
+  });
+
   it("saves the rows shown under the filter, including an older page, and marks nothing read", async () => {
     const first = Array.from({ length: 50 }, (_, i) => mk(`f${i}`, { createdAt: new Date(Date.UTC(2026, 10, 20, 10, 0, 100 - i)).toISOString() }));
     const older = [mk("o1", { createdAt: new Date(Date.UTC(2026, 10, 10)).toISOString() })];
