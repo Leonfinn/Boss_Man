@@ -18,6 +18,7 @@ import type { mainCiService } from "../services/main-ci.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
 import { dataHealthService } from "../services/data-health.js";
 import { checkMachineStats } from "../services/check-machine-stats.js";
+import { checkLineStats } from "../services/check-line-stats.js";
 import { runnerImageCommit } from "../services/runner-image.js";
 import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
@@ -276,6 +277,11 @@ export function settingsLimitsRoutes(
   owner.get("/api/data-health", async () => dataHealth.read());
   // BOS-2373: each machine's last 7 days of checks (read-only; its own block).
   owner.get("/api/settings/check-workers/stats", async (req) => checkMachineStats(db, new Date(), z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
+  // BOS-2436: the check line over the same 7 days, all machines together; tz is the browser's zone for days and hours.
+  owner.get("/api/settings/check-workers/line", async (req) => {
+    const q = z.object({ companyId: Uuid.optional(), tz: z.string().max(64).optional() }).parse(req.query);
+    return checkLineStats(db, { companyId: q.companyId, timeZone: q.tz });
+  });
   // BOS-313: check the merged result before pushing it (off by default while it rolls out).
   owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
   owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
