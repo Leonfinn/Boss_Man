@@ -168,6 +168,7 @@ reads:
 ## #/runs
 sections: 
   - Finished
+  - Longest tool calls
   - Permissions in this run
   - Running now
   - Runs
