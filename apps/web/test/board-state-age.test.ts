@@ -30,6 +30,6 @@ describe("oldestAge", () => {
 describe("board CSV", () => {
   it("has a Days in state column", () => {
     const rows = boardToCsv([{ t: { id: "x", title: "T", systemState: "backlog" } as never, column: "Backlog", assignee: "", ref: "" }]).split("\r\n");
-    expect(rows[0]!.endsWith(",Days in state,Build")).toBe(true);
+    expect(rows[0]!.endsWith(",Days in state,Build,Waiting on this")).toBe(true);
   });
 });
