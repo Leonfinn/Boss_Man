@@ -146,7 +146,7 @@ function WhoUsedIt({ s }: { s: FundingStatus }) {
         {r.engagement ? <span className="muted"> (engagement work, charged here)</span> : null}
       </span>
       <span className="mono nowrap">
-        {compact(r.tokens)} tokens · {usd(r.costMicros)} · {pct(r.share)}
+        {[w.totalTokens > 0 ? `${compact(r.tokens)} tokens` : null, w.totalMicros > 0 ? usd(r.costMicros) : null, pct(r.share)].filter(Boolean).join(" · ")}
       </span>
     </li>
   );

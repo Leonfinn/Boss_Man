@@ -52,6 +52,8 @@ describe("Who used it fold on a funding card", () => {
     expect(screen.getByText("Zippy")).toBeTruthy();
     expect(screen.getByText("Everyone else (2)")).toBeTruthy();
     expect(screen.getByText(/engagement work/)).toBeTruthy();
+    // A plan-only source shows tokens and share but no money figure.
+    expect(screen.getByText("800 tokens · 80%")).toBeTruthy();
     cleanup();
     stub([], { days: 7, totalTokens: 0, totalMicros: 0, agents: [], projects: [] });
     render(<FundingCards />);
