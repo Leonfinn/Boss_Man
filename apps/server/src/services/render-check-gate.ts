@@ -35,7 +35,7 @@ export type ShotFacts = { name: string; caption: string | null; byAgent: boolean
 
 /** Each file's changed lines (+ and -, without the marker), by its new path (and old path for a rename). */
 export function changedLinesByFile(diff: string): Map<string, string[]> {
-  const out = new Map<string, string[]>();
+  const out = new Map<string, string[]>(); // not state: a local of this function, rebuilt on every call
   let current: string[] | null = null;
   for (const line of diff.split("\n")) {
     const head = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
