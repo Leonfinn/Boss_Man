@@ -151,7 +151,7 @@ export const OWNER_CONTROLS = {
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Creating", "Back to the list", "Unlink",
     "Link to …", "Done: mark processed", "Back to unprocessed", "Archive", "Delete", "Copy", "New link", "Remove",
     "Feedback portal", "Search", "Anonymous …", "Save times",
-    "Download CSV", "Preparing",
+    "Download CSV", "Preparing", "Show older", "Show newer",
   ],
   "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote", "Copy link", "Copied"],
   Agents: [
@@ -324,7 +324,7 @@ export const OWNER_FIELDS = {
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
-    "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
+    "Came in by", "Order", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
     "Visitors must click a link we email them before a post, comment or vote counts", "Link works for (hours)",
     "Remember a confirmed browser for (days)", "Open this portal at the public address itself",
   ],
