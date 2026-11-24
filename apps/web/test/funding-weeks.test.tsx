@@ -98,6 +98,6 @@ describe("Last 8 weeks fold on a funding card", () => {
     const lines = (await blob!.text()).trim().split("\r\n");
     expect(lines[0]).toBe("week_start,plan_use_percent,resets,spend_usd,holds,held_minutes");
     expect(lines).toHaveLength(9);
-    expect(lines[1] < lines[8]).toBe(true);
+    expect(lines[1]! < lines[8]!).toBe(true);
   });
 });
