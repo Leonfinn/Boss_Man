@@ -413,6 +413,34 @@ function StalledTag({ f }: { f: Feature }) {
   ) : null;
 }
 
+/** What a feature still needs before it counts as set up (BOS-2521): a size, a place on the roadmap, and a portal
+ * decision (on the portal, or deliberately kept off it). A feature with none of these is set up. */
+export type SetupGap = "size" | "roadmap" | "portal";
+export const SETUP_GAP_LABEL: Record<SetupGap, string> = { size: "No size", roadmap: "Not on the roadmap", portal: "Portal not decided" };
+
+export function setupGaps(f: Pick<Feature, "effort" | "objectiveId" | "milestoneId" | "portalVisible" | "keepOffPortal">): SetupGap[] {
+  const gaps: SetupGap[] = [];
+  if (f.effort == null) gaps.push("size");
+  if (!f.objectiveId && !f.milestoneId) gaps.push("roadmap");
+  if (!f.portalVisible && !f.keepOffPortal) gaps.push("portal");
+  return gaps;
+}
+
+/** The small tags on a row naming what the feature still needs (BOS-2521); nothing once it is set up. */
+function SetupTags({ f }: { f: Feature }) {
+  const gaps = setupGaps(f);
+  if (!gaps.length) return null;
+  return (
+    <span className="feature-setup" style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, marginLeft: 6 }}>
+      {gaps.map((g) => (
+        <span key={g} className="tag amber">
+          {SETUP_GAP_LABEL[g]}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 /** A blocked task is said on its own line, with a mark so it isn't colour alone (BOS-1257). */
 function BlockedLine({ n }: { n: number }) {
   return n ? <span className="feature-blocked">⚠ {n} blocked</span> : null;
@@ -479,6 +507,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
           <a href={`#/features/${f.companyId}/${f.id}`} data-shortcut-open>{f.title}</a>
         </span>
         <VisitorsWillSee f={f} />
+        <SetupTags f={f} />
       </td>
       <td style={{ whiteSpace: "nowrap" }}>
         <PortalTick f={f} onPatch={onPatch} />
@@ -552,6 +581,7 @@ function FeatureCard({ f, drivers, sub, hasSubfeatures, open, onToggle, onPatch 
           <VisitorsWillSee f={f} />
           <StatusSelect f={f} onPatch={onPatch} />
           <StalledTag f={f} />
+          <SetupTags f={f} />
           <small className="muted" title={lastMovedTitle(f.lastMovedAt)}>Last moved: {lastMovedLabel(f.lastMovedAt)}</small>
         </div>
         <div className="fcard-priority" title="Value × 3 ÷ effort">
@@ -651,6 +681,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
   const [stalledOnly, setStalledOnly] = useState(false);
+  const [unfinishedOnly, setUnfinishedOnly] = useState(false);
   const [query, setQuery] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -668,7 +699,16 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   // "Last moved" puts the longest-quiet first and the features with no tasks last.
   const order = (a: Feature, b: Feature) =>
     sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : sort === "moved" ? compareLastMoved(a, b) : b.createdAt.localeCompare(a.createdAt);
-  const listed = (d?.features ?? []).filter((f) => (all || ACTIVE.includes(f.status)) && (!stalledOnly || isStalled(f)));
+  // "Unfinished setup" (BOS-2521) counts features missing a size, a roadmap place or a portal decision; it narrows the list
+  // with search and "Stalled only", and features with no parent stay under their parent as search does.
+  const needsSetup = (f: Feature) => setupGaps(f).length > 0;
+  const unfiltered = (d?.features ?? []).filter((f) => all || ACTIVE.includes(f.status));
+  const needsSetupCount = unfiltered.filter(needsSetup).length;
+  const listed = unfiltered.filter(
+    (f) =>
+      (!stalledOnly || isStalled(f)) &&
+      (!unfinishedOnly || needsSetup(f) || (f.parentId != null && unfiltered.some((p) => p.id === f.parentId && needsSetup(p)))),
+  );
   // Search (BOS-2256): a feature matches on title or description; its subfeatures stay under it, and a matching subfeature brings its parent.
   const needle = query.trim().toLowerCase();
   const hit = (f: Feature) => `${f.title}\n${f.description ?? ""}`.toLowerCase().includes(needle);
@@ -737,6 +777,11 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <input type="checkbox" checked={stalledOnly} onChange={(e) => setStalledOnly(e.target.checked)} />
                 Stalled only
               </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }} title="Features with no size, no place on the roadmap, or no portal decision">
+                <input type="checkbox" checked={unfinishedOnly} onChange={(e) => setUnfinishedOnly(e.target.checked)} />
+                Unfinished setup
+                {d && <span className="muted" data-testid="needs-setup-count">{needsSetupCount} feature{needsSetupCount === 1 ? " needs" : "s need"} setup</span>}
+              </label>
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
                 Show released and declined
@@ -784,6 +829,10 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
               <button type="button" className="btn small" onClick={() => setQuery("")}>
                 Clear
               </button>
+            </p>
+          ) : d && !shown.length && (unfinishedOnly || stalledOnly) && !needle ? (
+            <p className="muted" data-testid="setup-empty">
+              {unfinishedOnly ? "Every feature is set up" : "No stalled features"}
             </p>
           ) : d && !shown.length ? (
             <p className="muted">No features yet. Add one above, or create one while linking feedback in the inbox.</p>
