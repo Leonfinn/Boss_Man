@@ -115,7 +115,7 @@ export const OWNER_CONTROLS = {
   // "Download CSV" saves the active projects' figures in the chosen sort (BOS-2502).
   Projects: ["Open …", "Unarchive", "Saving", "Re-detect", "Check now", "Edit settings", "Hide settings", "Download CSV"],
   // "Copy link" in the header says "Copied" for a moment after a copy (BOS-2233).
-  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing"],
+  Run: ["Send after this turn", "Interrupt and send", "Stop run", "Copy link", "Copied", "Download", "Preparing", "Previous", "Next"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   // The Engagements list: the paged list's own buttons come from "Any screen"; its "Show" filter is a field (OWNER_FIELDS).
   Engagements: ["Download CSV"],
@@ -297,7 +297,7 @@ export const OWNER_FIELDS = {
     // Under a message's "Copy link" when copying fails here (BOS-2456).
     "Couldn't copy here. Copy the link by hand",
   ],
-  Run: ["Page address"],
+  Run: ["Page address", "Show"],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
   Config: [
     "Reviews for this project", "Name", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
