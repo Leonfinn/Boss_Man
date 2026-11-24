@@ -138,8 +138,8 @@ const cards = (n: number) => `${n} card${n === 1 ? "" : "s"}`;
 /** BOS-1052, BOS-2428: whether the model is really answering, over the window the owner picked (remembered in the browser). */
 function SecondOpinionStatsView({ stats }: { stats: SecondOpinionStats | undefined }) {
   const [range, setRange] = useState<SecondOpinionRange>(readRange);
-  if (!stats) return null;
-  const w = stats[range];
+  const w = stats?.[range];
+  if (!stats || !w) return null;
   const label = RANGE_LABELS[range];
   const pick = (
     <select aria-label="Time range" value={range} onChange={(e) => {
@@ -272,7 +272,7 @@ export function SecondOpinionSetting({ company }: { company: Company }) {
           </button>
         </div>
         {msg && <p role="status">{msg}</p>}
-        {(cur.data?.enabled || (stats.data && stats.data.last30d.answered + stats.data.last30d.fellBack > 0)) && <SecondOpinionStatsView stats={stats.data ?? undefined} />}
+        {(cur.data?.enabled || (stats.data?.last30d && stats.data.last30d.answered + stats.data.last30d.fellBack > 0)) && <SecondOpinionStatsView stats={stats.data ?? undefined} />}
       </form>
     </Section>
   );
