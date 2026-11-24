@@ -337,9 +337,7 @@ p { margin: 0; }
 .lane-head { display: flex; flex-direction: column; gap: 2px; padding: 0 2px 0 6px; }
 .lane-title { display: flex; align-items: center; gap: 6px; min-height: 36px; }
 .lane h2 { font-size: 14px; font-weight: 600; }
-.lane-title .mono { font-size: 12px; color: var(--muted); white-space: nowrap; flex: none; }
-.lane-title h2 { min-width: 0; overflow-wrap: anywhere; }
-.lane-title .count-badge { color: var(--side); }
+.lane-title .mono { font-size: 12px; color: var(--muted); white-space: nowrap; flex: none; }.lane-title .count-badge { color: var(--side); }
 .lane-empty { margin: 0; font-size: 13px; color: var(--muted); }
 .lane-hint { font-size: 12px; color: var(--muted); }
 /* BOS-1909: lanes that move by themselves (Being checked, Merged watching) read as parked: a dashed edge, flat cards. */
