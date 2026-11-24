@@ -6,9 +6,9 @@ import { RecordRuns } from "../src/pages/Agents";
 afterEach(cleanup);
 
 it("shows runs, failed runs and the share, with 'failed' linking to the Runs page's failed filter", () => {
-  render(<RecordRuns runs={8} failedRuns={3} />);
-  expect(screen.getByTestId("record-runs").textContent).toBe("8 runs · 3 failed (38%)");
-  expect(screen.getByRole("link", { name: "3 failed" }).getAttribute("href")).toBe("#/runs?result=failed");
+  render(<RecordRuns runs={5} failedRuns={2} />);
+  expect(screen.getByTestId("record-runs").textContent).toBe("5 runs · 2 failed (40%)");
+  expect(screen.getByRole("link", { name: "2 failed" }).getAttribute("href")).toBe("#/runs?result=failed");
 });
 
 it("shows plain '0 failed' with no link when nothing failed, and copes with no runs", () => {

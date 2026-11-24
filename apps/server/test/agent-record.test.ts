@@ -54,14 +54,14 @@ it("counts a finished ticket per agent over 30 days: first-time passes, send-bac
   const mergedAt = new Date(t0.getTime() - 30 * 60_000);
   await db.update(tickets).set({ mergedAt }).where(eq(tickets.id, clean!.id));
 
-  // Runs: Dev has the 3 above; add a failed one, an old failed one (outside the window) and an interrupted one (not "failed").
+  // Runs: Dev has the 3 above; add two failed ones and an old failed one (outside the window).
   await db.insert(runs).values({ companyId: co.company.id, agentId: dev.id, outcome: "error: boom", endedAt: new Date() });
-  await db.insert(runs).values({ companyId: co.company.id, agentId: dev.id, outcome: "interrupted", endedAt: new Date() });
+  await db.insert(runs).values({ companyId: co.company.id, agentId: dev.id, outcome: "error: again", endedAt: new Date() });
   await db.insert(runs).values({ companyId: co.company.id, agentId: dev.id, outcome: "error: old", startedAt: new Date(t0.getTime() - 40 * 24 * HOUR), endedAt: new Date(t0.getTime() - 40 * 24 * HOUR) });
 
   const rec = await agentRecordService(db, { now: () => t0 }).record(dev.id);
   expect(rec.runs).toBe(5);
-  expect(rec.failedRuns).toBe(1);
+  expect(rec.failedRuns).toBe(2);
   expect(rec.finished).toBe(2);
   expect(rec.passedFirstTime).toBe(1);
   expect(rec.sendBacks).toBe(1);
