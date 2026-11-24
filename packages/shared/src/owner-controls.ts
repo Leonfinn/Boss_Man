@@ -96,6 +96,8 @@ export const OWNER_CONTROLS = {
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // Past the newest 500 messages, the conversation's older pages (BOS-2168).
     "Load older messages", "Loading older messages",
+    // "Copy link" under each message, "Link copied" for a moment after a copy (BOS-2456).
+    "Link copied",
     // The Scrum Master's log of this ticket.
     "Undo", "Undoing", "Scrum Master", "Show all …",
     // The header's "Copy link", "Copied" for a moment after a copy (BOS-2233).
@@ -290,6 +292,8 @@ export const OWNER_FIELDS = {
     "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
     // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2233).
     "Page address",
+    // Under a message's "Copy link" when copying fails here (BOS-2456).
+    "Couldn't copy here. Copy the link by hand",
   ],
   Run: ["Page address"],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.

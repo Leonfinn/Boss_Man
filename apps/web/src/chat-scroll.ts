@@ -16,3 +16,7 @@ export function newSince(ids: string[], anchorId: string | null): number {
 /** The address of one message: the same route a search result opens (`#/chat/<company>/<agent>/<message>`). */
 export const messageLink = (loc: { origin: string; pathname: string }, companyId: string, agentId: string, messageId: string) =>
   `${loc.origin}${loc.pathname}#/chat/${companyId}/${agentId}/${messageId}`;
+
+/** The address of one message in a ticket's conversation: the ticket route plus `?m=<messageId>` (BOS-2456). */
+export const ticketMessageLink = (loc: { origin: string; pathname: string }, ticketId: string, messageId: string) =>
+  `${loc.origin}${loc.pathname}#/tickets/${ticketId}?m=${encodeURIComponent(messageId)}`;

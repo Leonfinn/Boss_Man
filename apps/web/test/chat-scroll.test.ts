@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { distanceFromBottom, isFarUp, messageLink, newSince } from "../src/chat-scroll";
+import { distanceFromBottom, isFarUp, messageLink, newSince, ticketMessageLink } from "../src/chat-scroll";
 
 describe("chat-scroll (BOS-2440)", () => {
   it("measures the distance from the bottom, never below 0", () => {
@@ -19,5 +19,11 @@ describe("chat-scroll (BOS-2440)", () => {
   });
   it("builds the message route the search results use", () => {
     expect(messageLink({ origin: "https://boss.example.com", pathname: "/" }, "c1", "a1", "m9")).toBe("https://boss.example.com/#/chat/c1/a1/m9");
+  });
+});
+
+describe("ticket message link (BOS-2456)", () => {
+  it("is the ticket route plus the message id", () => {
+    expect(ticketMessageLink({ origin: "https://boss.example.com", pathname: "/" }, "t1", "m9")).toBe("https://boss.example.com/#/tickets/t1?m=m9");
   });
 });
