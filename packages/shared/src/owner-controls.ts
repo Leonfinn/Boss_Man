@@ -65,7 +65,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark this day read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark this day read", "Mark all read", "Download CSV", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing", "Previous", "Next", "Search older messages", "Searching", "Remember this", "Add to standing rules", "Undo", "Cancel", "Copy link", "Link copied", "Jump to newest", "Clear"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -126,7 +126,7 @@ export const OWNER_CONTROLS = {
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   // BOS-2473: Merge history's CSV of the rows shown.
   "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front", "Download CSV"],
-  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change"],
+  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change", "Download CSV"],
   Plan: [
     "Refresh",
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
@@ -167,7 +167,7 @@ export const OWNER_CONTROLS = {
   ],
   Skills: [
     "Add", "Adding", "Search", "Added", "Add to …", "Edit", "Check for updates", "Delete", "Save", "Cancel", "Remove pack",
-    "Add a skill", "Discard draft",
+    "Add a skill", "Discard draft", "Download CSV",
   ],
   "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …", "Download CSV"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
@@ -179,7 +179,7 @@ export const OWNER_CONTROLS = {
     "Run the setup wizard", "Clear",
   ],
   "Server and runner": [
-    "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
+    "Reconnect runner", "Start runner", "Restart", "Stop", "Download CSV", "Copy token", "Issue a new runner token", "Register a runner",
     "Review and deploy", "Check for updates now", "Build and update runners", "Deploy to staging", "Cancel queued runner update", "Save", "Save add-ons", "Cancel the update", "Update runners (finish runs first)",
     // The update wait (BOS-420): the same button reads by phase.
     "Stop making room", "Lift the hold now",

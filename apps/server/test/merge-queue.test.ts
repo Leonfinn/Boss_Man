@@ -409,6 +409,20 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(view.running[0]!.minutes).toBeGreaterThanOrEqual(15);
     });
 
+    // BOS-2479: on 24 Nov 17:22 the update banner named merges "being pushed" that the Merges tab didn't list. A push under way
+    // holds no slot but is what the update waits for, so it is in Running now; a landing waiting for a train seat is not.
+    it("lists a push to main under way in Running now although it holds no slot; a landing not pushing stays out", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const pushedAt = new Date(Date.now() - 20_000).toISOString();
+      const landing = { ticketId: id, startedAt: new Date(Date.now() - 10 * 60_000).toISOString(), startedBy: "the merge gate", phase: "merging" as const };
+      const view = await svc(c, { runningMerges: () => [{ ...landing, pushingSince: pushedAt }], runningChecks: async () => [] }).get(c.company.id);
+      expect(view.running.map((r) => r.ticketId)).toEqual([id]);
+      expect(view.running[0]!.statusLine).toMatchObject({ step: "pushing to main", since: pushedAt });
+      const seat = await svc(c, { runningMerges: () => [landing], runningChecks: async () => [] }).get(c.company.id);
+      expect(seat.running).toEqual([]);
+    });
+
     // BOS-1942: where a running merge check runs comes from its check job, and the server's host name rides with the view.
     it("carries where each running merge check runs, and the server's host name", async () => {
       const c = (ctx = await setup());
@@ -470,7 +484,8 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(row.statusLine!.next).toMatch(/check then starts by itself/);
       // A merge not named in seatWait still waits for a slot, and its line names what holds the slots.
       const other = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 3 }), queueDetail: async () => ({ ...(await seat()), seatWait: [] }) });
-      expect(other.statusLine!.step).toMatch(/^waiting for a check slot \(3 ahead\)$/);
+      // BOS-2508: with no place of its own, the company-wide count is worded as what it counts, never as "ahead".
+      expect(other.statusLine!.step).toBe("waiting for a check slot (3 checks waiting in the shared line)");
       expect(other.statusLine!.blocker).toMatch(/Every slot is busy: slot 1: APP-1/);
     });
 
@@ -490,6 +505,36 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       const busy = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 5 }), queueDetail: detail(2), places: async () => new Map([[id, { place: 4, why: null, lane }]]) });
       expect(busy.statusLine!.step).toBe(`waiting for a check slot (3 ahead); ${lane}`);
       expect(busy.place).toBe(4);
+    });
+
+    // BOS-2508: two merges the train holds for a seat (no check job) and one with a queued job each say their own place; the
+    // company-wide count of queued checks (10) is never shown as any of their places.
+    it("gives each seat waiter and each queued merge its own 'ahead' text, never the company-wide count", async () => {
+      const c = (ctx = await setup());
+      await serverMode(c);
+      const ids: string[] = [];
+      for (let i = 1; i <= 3; i++) {
+        const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: `Merge ${i}` })).json() as { id: string };
+        await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+        await approve(c, t.id);
+        ids.push(t.id);
+      }
+      const [queued, seat1, seat2] = ids as [string, string, string];
+      const row = async (over: Partial<Parameters<typeof mergeQueueService>[1]>) => {
+        const data = await svc(c, { queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 10 }), queueDetail: detail(2), ...over }).get(c.company.id);
+        return Object.fromEntries(data.waiting.map((w) => [w.ticketId, w.label.replace(/\. Every slot is busy.*$/, "")]));
+      };
+      const labels = await row({
+        seatPlaces: async () => new Map([[seat1, 1], [seat2, 2]]),
+        places: async () => new Map([[queued, { place: 3, why: null }]]),
+      });
+      expect(labels[seat1]).toBe("waiting for a train seat (next up)");
+      expect(labels[seat2]).toBe("waiting for a train seat (1 ahead)");
+      expect(labels[queued]).toBe("waiting for a check slot (2 ahead)");
+      for (const l of Object.values(labels)) expect(l).not.toMatch(/10 ahead/);
+      // A merge with no place at all says what the number counts.
+      const bare = await row({});
+      for (const id of ids) expect(bare[id]).toBe("waiting for a check slot (10 checks waiting in the shared line)");
     });
 
     // BOS-1515 (B1): a merge the train holds to land on main alone says who it clashed with, the files, and what happens next.

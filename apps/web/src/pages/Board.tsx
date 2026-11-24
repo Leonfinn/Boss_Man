@@ -697,7 +697,7 @@ function TicketCard({ waiters, t, mine, merging, who, name, prefix, tiers, numbe
             Size {t.size}
           </span>
         )}
-        {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
+        {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.hasPlan ? "Plan waiting" : "Planning"}</span>}
         {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : t.blockedBy.length}</span>}
         {waiters && waiters.length > 0 && (
           <span className="tag amber" tabIndex={0} title={waiters.map((w) => (w.number ? ticketRef(prefix, w.number) : w.title)).join(", ")}>
@@ -887,14 +887,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [query, setQuery] = useState("");
   const [allDone, setAllDone] = useState(false);
   // BOS-2166: the server sends the newest done tickets only; every done ticket is asked for while "Show all done" is on or the search has words.
-  const wantAllDone = allDone || query.trim() !== "";
-  const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board${wantAllDone ? "?done=all" : ""}`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
+  const searching = query.trim() !== "";
+  const wantAllDone = allDone || searching;
+  // BOS-2497: cards come without descriptions; the search box matches them too, so they are asked for (text=1) only while it has words.
+  const boardQuery = [wantAllDone ? "done=all" : "", searching ? "text=1" : ""].filter(Boolean).join("&");
+  const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board${boardQuery ? `?${boardQuery}` : ""}`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
   const reloadBoard = board.reload;
   const firstAsk = useRef(true);
   useEffect(() => {
     if (firstAsk.current) { firstAsk.current = false; return; }
     reloadBoard();
-  }, [wantAllDone, reloadBoard]);
+  }, [boardQuery, reloadBoard]);
   // BOS-1546: the merge queue's own status line for each approved ticket (place in line, check running since, the ticket it waits for). Asked only when the board has such a ticket.
   const inMergeLine = (board.data?.columns ?? []).some((c) => c.tickets.some((t) => t.reviewStage === "merging" || t.reviewStage === "held"));
   const mergeLines = usePoll(

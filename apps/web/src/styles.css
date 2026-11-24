@@ -1150,6 +1150,12 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .dash-line-link { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; color: var(--ink); text-decoration: none; min-height: 44px; }
 .dash-line-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .dash-sentence { font-size: 13px; color: var(--muted); }
+.dash-refresh { font-size: 12px; color: var(--muted); }
+/* BOS-2538: each "Right now" line names its own poll interval. Wide, the heading cuts the small note short as the
+   panel narrows (no second line above the lines); a phone shows the heading's own short line instead. */
+.dash-head-wide { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 100%; }
+.dash-panel-head small { min-width: 0; }
+.dash-head-narrow { display: none; }
 .dash-pill { display: none; }
 p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; }
 .dash-needs-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "tag title btn" ". small btn"; gap: 2px 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
@@ -1173,6 +1179,9 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
   .dash-line-link { padding: 6px 10px; min-height: 48px; align-items: center; }
   .dash-state, .dash-sentence { display: none; }
   .dash-pill { display: inline; font-weight: 600; font-size: 13px; }
+  .dash-refresh { display: none; }
+  .dash-head-wide { display: none; }
+  .dash-head-narrow { display: inline; }
   .dash-needs-item { grid-template-columns: minmax(0, 1fr); grid-template-areas: "tag" "title" "small" "btn"; gap: 4px; justify-items: start; }
   .dash-needs-btn { min-height: 44px; }
 }

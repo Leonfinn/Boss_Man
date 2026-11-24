@@ -6,7 +6,7 @@ export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 /** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
 export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[]; since?: string; phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951 */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: the owner's wrap-up: since when, and which update it is for. */ wrapAsked?: boolean; wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" }) & { last?: LastUpdate };
 
 /** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
 export function checkSentence(c: RunnerCheckView): string {
@@ -33,6 +33,30 @@ export function waitingFor(m: { runs: number; companies: number; checks?: number
   if (m.unknownWait) return "waiting on something Boss Man cannot name (no agent run, check or merge is going)";
   return "swapping the runners now";
 }
+/** BOS-2479: a check on a separate check worker, which a runner update lets run and never waits for. */
+export type WorkerCheckView = { ticket: string | null; kind: string; scope: string };
+
+/**
+ * BOS-2479: what the banner adds after "waiting for …": the checks on a check worker it does not wait for, named by ticket
+ * and counted by kind ("2 quick checks on a check worker keep running and are not waited for (BOS-2456, BOS-2468)."), and
+ * the latest time the update goes ahead. On 24 Nov the owner saw two quick checks running and read them as the wait.
+ * Both fields are absent from an older server, which then gets nothing extra.
+ */
+export function updateWaitExtras(m: { workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null }): string {
+  const list = m.workerChecksList ?? [];
+  const counts = new Map<string, number>(); // not state: local to this call
+  for (const c of list) {
+    const word = c.kind === "merge" ? "merge check" : c.scope === "full" ? "full check" : c.scope === "quick" ? "quick check" : "check";
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const kinds = [...counts].map(([word, k]) => plural(k, word, `${word}s`)).join(" and ");
+  const names = list.map((c) => c.ticket).filter((t): t is string => !!t);
+  const one = list.length === 1;
+  const worker = list.length ? `${kinds} on a check worker ${one ? "keeps" : "keep"} running and ${one ? "is" : "are"} not waited for${names.length ? ` (${names.join(", ")})` : ""}.` : "";
+  const goAhead = m.goAheadAt ? `Goes ahead by ${atTime(m.goAheadAt)} at the latest.` : "";
+  return [worker, goAhead].filter(Boolean).join(" ");
+}
+
 /**
  * BOS-1877: when a drain started and when it should end, in plain words, from the server's forecast. All fields are
  * absent from an older server, which then gets no timing line. `overdue` says so plainly instead of promising a time.
@@ -276,7 +300,7 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
         tone: "amber",
         tag: "Waiting for checks",
         say: `The ${what} is ${waitingFor(maint)}.`,
-        more: `Nothing new starts until ${k === 1 ? "it is" : "they are"} done. Waiting is safe: ${k === 1 ? "it carries" : "they carry"} on and the swap follows by itself. Checks on a separate check worker are not waited for.`,
+        more: `Nothing new starts until ${k === 1 ? "it is" : "they are"} done. Waiting is safe: ${k === 1 ? "it carries" : "they carry"} on and the swap follows by itself. ${maint.workerChecksList?.length ? "" : "Checks on a separate check worker are not waited for. "}${updateWaitExtras(maint)}`.trim(),
         next: `Or stop ${k === 1 ? "it" : "them"} now: ${k === 1 ? "it starts" : "they start"} again from the beginning after the swap, so the time already spent is lost.`,
         primary: { id: "update-now", label: `Stop the ${k === 1 ? "check" : "checks"} and update now`, blue: false },
         normal: [{ id: "cancel-update", label: `Cancel the ${what}` }],
@@ -419,7 +443,8 @@ export function runnerProgress(live: LiveRow[] | null | undefined, maint: Mainte
   const runners = (live ?? []).filter((l) => l.registered);
   const stamps = runners.map((l) => l.imageVersion).filter((v): v is string => !!v);
   const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
-  const done = runners.filter((l) => l.connected && !l.swap && l.imageVersion === newest).length;
+  // Same test as LiveState's "Connected" (a leftover swap mark must not hide a runner that is already up on the new image, BOS-2525).
+  const done = runners.filter((l) => l.connected && l.imageVersion === newest).length;
   // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
   const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup" && maint.kind !== "building";
   return { inProgress: held, done, total: runners.length, newest };

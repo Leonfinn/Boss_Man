@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, historyWaitingOn, wrapUpBannerText, plainReason, runnerProgress, updateStatus, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, historyWaitingOn, wrapUpBannerText, plainReason, runnerProgress, updateStatus, updateWaitExtras, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
@@ -79,6 +79,22 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(waitingFor({ runs: 0, companies: 0, merges: 1, mergesList: [{ ticket: "BOS-7" }] })).toBe("waiting for 1 merge being pushed to main (BOS-7)");
     expect(waitingFor({ runs: 1, companies: 1, merges: 2 })).toBe("waiting for 1 run in 1 company to finish, and for 2 merges being pushed to main");
     expect(waitingFor({ runs: 0, companies: 0, unknownWait: true })).toMatch(/cannot name/);
+  });
+
+  // BOS-2479 (24 Nov 10:24): the banner said only "1 merge being pushed" while the owner saw two quick checks running.
+  it("2. Names every wait with counts and tickets, the worker checks it doesn't wait for, and the latest go-ahead (BOS-2479)", () => {
+    const quick = (ticket: string) => ({ ticket, kind: "pre_review", scope: "quick", startedAt: iso(-5), runningForMinutes: 5, usuallyMinutes: null });
+    const m = { runs: 0, companies: 0, checks: 2, checksList: [quick("BOS-2456"), quick("BOS-2468")], merges: 1, mergesList: [{ ticket: "BOS-2408" }] };
+    const text = waitingFor(m);
+    expect(text).toContain("2 checks to finish before swapping the runners: BOS-2456 quick check");
+    expect(text).toContain("BOS-2468 quick check");
+    expect(text).toContain("1 merge being pushed to main (BOS-2408)");
+    const extras = updateWaitExtras({ workerChecksList: [{ ticket: "BOS-2470", kind: "pre_review", scope: "quick" }, { ticket: "BOS-2471", kind: "pre_review", scope: "quick" }], goAheadAt: "2026-11-24T11:05:00.000Z" });
+    expect(extras).toMatch(/^2 quick checks on a check worker keep running and are not waited for \(BOS-2470, BOS-2471\)\. Goes ahead by .+ at the latest\.$/);
+    expect(updateWaitExtras({ workerChecksList: [{ ticket: null, kind: "merge", scope: "full" }] })).toBe("1 merge check on a check worker keeps running and is not waited for.");
+    // An older server sends neither field: nothing extra. No counted push: never "being pushed".
+    expect(updateWaitExtras({})).toBe("");
+    expect(waitingFor({ runs: 0, companies: 0, checks: 2, checksList: [quick("BOS-2456"), quick("BOS-2468")], merges: 0, mergesList: [] })).not.toContain("being pushed");
   });
 
   it("2. Waiting for agents, wrap-up asked, before the deadline: no main button", () => {
@@ -303,5 +319,26 @@ describe("runner swap in progress: every part of the page agrees (BOS-1558)", ()
     expect(historyTag(hist, p).tag).toBe("Done");
     expect(updateStatus(view, m, null, NOW).tag).not.toBe("Updating");
     expect(renderToStaticMarkup(createElement(LiveState, { r: live[1]!, progress: p }))).not.toContain("old image");
+  });
+
+  // BOS-2525: the badge count and the "Now running" list use one test, even with a leftover swap mark.
+  it("badge count matches the list: 0 of 3, 2 of 3 and 3 of 3", () => {
+    const m = maintUpdate({ runs: 1 });
+    const NEW = "202611241722";
+    const OLD = "202611241201";
+    const tagFor = (live: LiveRow[]) => historyTag(hist, runnerProgress(live, m)).tag;
+    const connectedCount = (live: LiveRow[]) => live.filter((l) => renderToStaticMarkup(createElement(LiveState, { r: l, progress: runnerProgress(live, m) })).includes(">Connected<")).length;
+
+    const two = [row("a", NEW, { swap: { id: "s" } }), row("b", NEW, { swap: { id: "s" } }), row("c", OLD)];
+    expect(tagFor(two)).toBe("Swapping (2 of 3 companies done)");
+    expect(connectedCount(two)).toBe(2);
+
+    const none = [row("a", OLD), row("b", OLD), row("c", NEW, { connected: false })];
+    expect(tagFor(none)).toBe("Swapping (0 of 3 companies done)");
+
+    // Held but every runner already connected on the new image: the hold has not lifted yet, so "3 of 3" still reads "Swapping".
+    const all = [row("a", NEW), row("b", NEW), row("c", NEW)];
+    expect(tagFor(all)).toBe("Swapping (3 of 3 companies done)");
+    expect(connectedCount(all)).toBe(3);
   });
 });

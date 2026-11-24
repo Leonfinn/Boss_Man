@@ -32,7 +32,7 @@ import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListen
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
-import { serverWaitChecks, updateWaitCountsRun } from "./services/runner-busy.js";
+import { runnerBusy, runnerChecks, serverWaitChecks, updateWaitCountsRun, workerChecks } from "./services/runner-busy.js";
 import { activeWaits, runnerHoldWait } from "./services/update-waits.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
@@ -134,7 +134,7 @@ import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
 import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
-import { retierWaiting } from "./services/merge-train.js";
+import { retierWaiting, trainFacts } from "./services/merge-train.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
@@ -587,6 +587,7 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1645: `review` is built further down; this only runs during a drain pass.
     landingMerges: () => review.landingMergesByCompany(),
     landingMergeIds: () => review.landingMergeIds(),
+    landingEndsAt: async () => (await review.landingWaitFacts()).endsAt,
     // BOS-2058: the owner's wrap-up pressed while a server update waits for a quiet machine belongs to it and lifts with it.
     serverUpdateWaiting: async () => (await deployWait.get())?.phase === "waiting", // `deployWait` is built further down; this only runs on a pass
     tick: () => scheduler.tick(),
@@ -1229,6 +1230,12 @@ export async function buildApp(opts: AppOptions) {
     },
     // BOS-1803: seat waiters (no check-queue place yet) come along too, for their train-seat place and lane.
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && (r.position || r.heldBySeat)).map((r) => [r.ticketId, { place: r.position, why: r.why, seatPlace: r.seatPlace, lane: r.lane }])),
+    // BOS-2508: the train's own list of tickets waiting for a seat (a member that is not seated has no check job yet).
+    seatPlaces: async (companyId) => {
+      const out = new Map<string, number>();
+      for (const p of await db.select({ id: projects.id }).from(projects).where(eq(projects.companyId, companyId))) (trainFacts(p.id)?.waiting ?? []).forEach((id, i) => out.set(id, i + 1));
+      return out;
+    },
     // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
     runnerConnected: async (companyId) => {
       const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
@@ -1277,8 +1284,14 @@ export async function buildApp(opts: AppOptions) {
   });
   // BOS-2058: every update wait that is on, for the owner's screens and the CEO's server_status (one list, update-waits.ts).
   const currentUpdateWaits = async () => {
-    const landing = await review.landingWaitFacts().catch(() => ({ since: null, ids: [] as string[] }));
-    return activeWaits(db, { landingSince: landing.since, landingNames: landing.ids.map((id) => id.slice(0, 8)) });
+    const landing = await review.landingWaitFacts().catch(() => ({ since: null, ids: [] as string[], names: [] as string[], endsAt: null }));
+    // BOS-2479: what the drain still waits on, from the same reads as the drain (runner checks only), and the worker's
+    // checks it lets run and does not wait for. A failed read leaves the line as it was (no counts), never a wrong count.
+    const at = new Date();
+    const drain = await Promise.all([runnerBusy(db, true, at), runnerChecks(db, at), workerChecks(db)])
+      .then(([busy, onRunner, onWorker]) => ({ runs: busy.runsTotal, runnerChecks: onRunner, workerChecks: onWorker }))
+      .catch(() => undefined);
+    return activeWaits(db, { landingSince: landing.since, landingNames: landing.names, ...(drain ? { drain } : {}) });
   };
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
   // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
@@ -2184,7 +2197,7 @@ export async function buildApp(opts: AppOptions) {
     // The Spend page's read (BOS-2194): routes/spend-report.ts.
     spendReportRoutes(owner, db, { now: opts.now });
 
-    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all" }));
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all", withText: (req.query as { text?: string }).text === "1" }));
 
     owner.post("/api/projects/:id/tickets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

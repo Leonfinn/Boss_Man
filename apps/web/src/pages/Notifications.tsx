@@ -7,6 +7,7 @@ import { when } from "./Runs";
 import { MoreText } from "./Decisions";
 import { READ_IDS_MAX, groupByDay } from "../notice-days";
 import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
+import { buildCsv, download } from "../csv";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
   note: { label: "Note", tone: "", help: "The feed only" },
@@ -14,6 +15,33 @@ const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> 
   page: { label: "Page", tone: "red", help: "Also the phone: something urgent" },
   ask: { label: "Ask", tone: "amber", help: "Needs an answer" },
 };
+
+/** The full app address for a notice's link: links are in-app ("#/…"), so put the page's own address in front. */
+function fullLink(link: string): string {
+  if (/^https?:\/\//i.test(link)) return link;
+  const base = `${window.location.origin}${window.location.pathname}`;
+  return link.startsWith("#") ? base + link : base + (link.startsWith("/") ? "#" : "#/") + link;
+}
+
+/** (BOS-2520) The notices shown as CSV: every loaded row under the current filters, with nothing marked read. */
+export function noticesToCsv(rows: Notice[]): string {
+  return buildCsv(
+    ["Time", "Company", "Type", "Asked-for type (when lowered)", "Lowered by", "Title", "Text", "Read at", "Pushed to phone at", "Push error", "Link"],
+    rows.map((n) => [
+      n.createdAt,
+      n.company ?? "",
+      LEVEL[n.level].label,
+      n.requested !== n.level ? LEVEL[n.requested].label : "",
+      n.demotedBy ?? "",
+      n.title,
+      n.body ?? "",
+      n.readAt ?? "",
+      n.pushedAt ?? "",
+      n.pushError ?? "",
+      fullLink(n.link),
+    ]),
+  );
+}
 
 function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
   // When the question became the title, show only what follows its first line (if anything) as the body.
@@ -252,17 +280,28 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
           <h1>Notifications</h1>
           <p className="sub">Everything Boss Man and the agents have told you, newest first, with where to look.</p>
         </div>
-        {active
-          ? unreadShown.length > 0 && (
-              <button className="btn" type="button" onClick={() => read({ ids: unreadShown.map((n) => n.id) })}>
-                Mark these read
-              </button>
-            )
-          : (feed?.unread ?? 0) > 0 && (
-              <button className="btn" type="button" onClick={() => read({ all: true })}>
-                Mark all read
-              </button>
-            )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            className="btn"
+            type="button"
+            disabled={items.length === 0}
+            title="Downloads the notices shown: this filter and search, including older pages already loaded"
+            onClick={() => download(`notifications-${new Date().toISOString().slice(0, 10)}.csv`, noticesToCsv(items))}
+          >
+            Download CSV
+          </button>
+          {active
+            ? unreadShown.length > 0 && (
+                <button className="btn" type="button" onClick={() => read({ ids: unreadShown.map((n) => n.id) })}>
+                  Mark these read
+                </button>
+              )
+            : (feed?.unread ?? 0) > 0 && (
+                <button className="btn" type="button" onClick={() => read({ all: true })}>
+                  Mark all read
+                </button>
+              )}
+        </div>
       </header>
       {/* (BOS-1506) This button used to sit in the side menu; it shows here until the owner turns notifications on. */}
       {browserPermission === "default" && onEnableBrowser && (
