@@ -2184,7 +2184,7 @@ export async function buildApp(opts: AppOptions) {
     // The Spend page's read (BOS-2194): routes/spend-report.ts.
     spendReportRoutes(owner, db, { now: opts.now });
 
-    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all" }));
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id, { doneAll: (req.query as { done?: string }).done === "all", withText: (req.query as { text?: string }).text === "1" }));
 
     owner.post("/api/projects/:id/tickets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

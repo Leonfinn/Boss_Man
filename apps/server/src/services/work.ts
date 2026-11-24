@@ -297,7 +297,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return columnsOf(projectId);
     },
 
-    async board(projectId: string, opts: { doneAll?: boolean } = {}) {
+    async board(projectId: string, opts: { doneAll?: boolean; withText?: boolean } = {}) {
       const p = await project(projectId);
       const cols = await columnsOf(projectId);
       const boardRows = (where: SQL | undefined) =>
@@ -483,8 +483,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // A reviewer's hold (BOS-808): passed, but kept from merging on purpose. Its own stage, apart from waiting for a reviewer or merging.
         const hold = t.systemState === "review" ? (holds.get(t.id) ?? null) : null;
         const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : beingChecked.has(t.id) ? ("checking" as const) : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
+        // BOS-2497: a card leaves out the ticket's long text (about 1 MB a refresh on a busy board, every 10 s). The page needs the
+        // plan only as yes/no, and the description only for its search box, which asks for it with withText.
+        const { body, plan, ceoPlan, stateNote, ownerSetup, ownerSetupOverride, ownerSetupWhy, ownerSetupIfSkipped, acceptanceCriteria, diffFiles, liveEvidence, monitorNote, ...short } = t;
         return {
-        ...t,
+        ...short,
+        ...(opts.withText ? { body } : {}),
+        hasPlan: !!plan,
         waitingOnOwner,
         reviewStage,
         checkLine: reviewStage === "checking" ? (checkLines.get(t.id) ?? "waiting for its check") : null,

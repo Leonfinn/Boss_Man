@@ -277,7 +277,7 @@ export type Ticket = {
   /** The feature it delivers and the task it is a sub-task of, by title, on a board card. */
   featureId?: string | null;
   featureTitle?: string | null;
-  /** The description; board cards carry it for the search box. */
+  /** The description; board cards carry it only when the search box asks (`?text=1`, BOS-2497). */
   body?: string | null;
   parentTitle?: string | null;
   lastActivityAt?: string;
@@ -339,7 +339,9 @@ export type UnticketedRun = { id: string; agent: string | null; ticketId: string
 /** `workingAgents` is the number of agents with a run going, the Dashboard's figure. */
 /** A run going now on a ticket in another project of the company. */
 export type OtherProjectRun = { id: string; agent: string | null; purpose: string | null; startedAt: string; ticketId: string; ticketNumber: number | null; ticketTitle: string; projectId: string; projectName: string };
-export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; otherProjects?: OtherProjectRun[]; /** All done tickets in the project; the board sends only the newest unless asked for all. */ doneTotal?: number; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
+/** BOS-2497: a board card leaves out the ticket's long text. The plan comes only as yes/no; the description only with `?text=1` (the search box asks for it). */
+export type BoardTicket = Omit<Ticket, "plan"> & { hasPlan: boolean };
+export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; otherProjects?: OtherProjectRun[]; /** All done tickets in the project; the board sends only the newest unless asked for all. */ doneTotal?: number; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: BoardTicket[] }> };
 
 export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null; quotaHoldAt?: number; quotaOverage?: "pause" | "urgent" | "all"; quotaDisabledWindows?: string[]; secretId?: string | null; fallbackRank?: number | null };
 export type FundingStatus = {
