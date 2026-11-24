@@ -3,10 +3,10 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
-import { permissionDecisions } from "../src/db/schema.js";
+import { companies, decisions, permissionDecisions } from "../src/db/schema.js";
 import { permissionLogDays, prunePermissionDecisions } from "../src/services/housekeeping.js";
 import { createPermissionLog } from "../src/services/permission-log.js";
-import { permissionsForRun, permissionStore, PERMISSION_TITLE_MAX, ruleUsage } from "../src/services/permission-store.js";
+import { permissionsForRun, permissionStore, PERMISSION_TITLE_MAX, mostAskedCards, ruleUsage } from "../src/services/permission-store.js";
 
 const DAY = 86_400_000;
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -101,6 +101,44 @@ describe("permission store", () => {
     });
     const all = await ruleUsage(db, null, now);
     expect(all["Docker restarts"]!.week).toEqual({ allow: 2, ceo: 1, owner: 0, deny: 0 });
+    await close();
+  });
+
+  // BOS-2418: grouped by kind and exact title, owner/CEO cards only, 30 days, with how each was answered.
+  it("lists the most-asked cards with the split and how they were answered", async () => {
+    const { db, close } = await openPglite();
+    const now = new Date("2026-11-23T12:00:00Z");
+    const [co] = await db.insert(companies).values({ name: "Example Co" }).returning();
+    const [other] = await db.insert(companies).values({ name: "Other Co" }).returning();
+    const card = async (companyId: string, status: "open" | "answered", answer: string | null) =>
+      (await db.insert(decisions).values({ companyId, kind: "permission", question: "q", recommendedOption: "Allow once", status, answer }).returning())[0]!.id;
+    const row = (companyId: string, title: string | null, kind: string, ageDays: number, tier: string, decisionId?: string) =>
+      ({ ...ids(), companyId, title, kind, at: new Date(now.getTime() - ageDays * DAY), rule: "r", position: 1, outcome: tier, tier, decisionId: decisionId ?? null });
+    await db.insert(permissionDecisions).values([
+      row(co!.id, "docker restart web", "shell", 1, "owner", await card(co!.id, "answered", "Allow once")),
+      row(co!.id, "docker restart web", "shell", 2, "owner", await card(co!.id, "answered", "Deny")),
+      row(co!.id, "docker restart web", "shell", 3, "owner", await card(co!.id, "open", null)),
+      row(co!.id, "docker restart web", "shell", 4, "ceo"),
+      row(co!.id, "docker restart web", "mcp", 4, "owner"), // same title, another kind: its own group
+      row(co!.id, "docker restart web", "shell", 40, "owner"), // outside 30 days
+      row(co!.id, "ls", "shell", 1, "allow"), // never reached anyone
+      row(co!.id, "rm x", "shell", 1, "deny"),
+      row(other!.id, "docker restart web", "shell", 1, "owner"), // another company
+    ]);
+    const one = await mostAskedCards(db, co!.id, now);
+    expect(one.map((c) => [c.kind, c.title])).toEqual([["shell", "docker restart web"], ["mcp", "docker restart web"]]);
+    expect(one[0]).toMatchObject({ asked: 4, toOwner: 3, toCeo: 1, allowed: 1, refused: 1, open: 1, lastAt: new Date(now.getTime() - DAY).toISOString() });
+    expect((await mostAskedCards(db, null, now))[0]!.asked).toBe(5);
+    expect(await mostAskedCards(db, randomUUID(), now)).toEqual([]);
+    await close();
+  });
+
+  it("keeps only the top 10 most-asked cards", async () => {
+    const { db, close } = await openPglite();
+    const now = new Date("2026-11-23T12:00:00Z");
+    const who = ids();
+    await db.insert(permissionDecisions).values(Array.from({ length: 12 }, (_, i) => ({ ...who, runId: randomUUID(), title: `t${i}`, kind: "shell", at: now, rule: "r", position: 1, outcome: "owner", tier: "owner" })));
+    expect(await mostAskedCards(db, who.companyId, now)).toHaveLength(10);
     await close();
   });
 

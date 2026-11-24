@@ -31,7 +31,8 @@ describe("decision rules", () => {
     let ok = false;
     vi.stubGlobal("fetch", vi.fn(async () => (ok ? new Response(JSON.stringify({ company: [], global: [], defaults: [] }), { status: 200 }) : new Response(JSON.stringify({ error: "Boom" }), { status: 500 }))));
     render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
-    const retry = await screen.findByRole("button", { name: /retry/i });
+    // Every request fails here, so the most-asked fold has its own Retry above the rules' one (the last).
+    const retry = (await screen.findAllByRole("button", { name: /retry/i })).at(-1)!;
     expect(screen.queryByText("None yet.")).toBeNull();
     expect(screen.queryByText("Add a rule")).toBeNull();
     ok = true;
@@ -277,5 +278,37 @@ describe("decision rules", () => {
     expect(await screen.findByRole("button", { name: /retry/i })).toBeTruthy();
     expect(screen.getByText("Busy rule")).toBeTruthy();
     expect(screen.queryByText("Not used in 30 days")).toBeNull();
+  });
+
+  // BOS-2418: the "Most-asked cards" fold and "Make a rule".
+  const emptyList = { company: [], global: [], defaults: [] };
+  const serve = (asked: () => Response) => vi.stubGlobal("fetch", vi.fn(async (url: string) => (url.includes("/most-asked") ? asked() : new Response(JSON.stringify(url.includes("/usage") ? { rules: {} } : emptyList), { status: 200 }))));
+
+  it("lists the most-asked cards and Make a rule fills the form without saving", async () => {
+    const card = { kind: "execute", title: "docker exec web (a.b)", asked: 5, toOwner: 4, toCeo: 1, allowed: 2, refused: 1, open: 1, lastAt: new Date().toISOString() };
+    serve(() => new Response(JSON.stringify({ cards: [card] }), { status: 200 }));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    expect(await screen.findByText("Most-asked cards (last 30 days)")).toBeTruthy();
+    expect(screen.getByText("docker exec web (a.b)")).toBeTruthy();
+    expect(screen.getByText("2 allowed, 1 refused, 1 still open")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Make a rule" }));
+    await waitFor(() => expect((screen.getByLabelText("Tool title matches (regex)") as HTMLInputElement).value).toBe("^docker exec web \\(a\\.b\\)$"));
+    expect((screen.getByLabelText("execute") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("New rule") as HTMLInputElement).value).toBe("");
+    const f = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(f.filter(([, init]) => (init as { method?: string } | undefined)?.method === "POST")).toHaveLength(0);
+  });
+
+  it("says no cards reached the owner when there are none", async () => {
+    serve(() => new Response(JSON.stringify({ cards: [] }), { status: 200 }));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    expect(await screen.findByText("No cards reached you in the last 30 days.")).toBeTruthy();
+  });
+
+  it("shows Retry when the most-asked cards fail to load", async () => {
+    serve(() => new Response(JSON.stringify({ error: "Boom" }), { status: 500 }));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    expect(await screen.findByText(/most-asked cards/i, { selector: "p, p *" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy();
   });
 });
