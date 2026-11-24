@@ -76,7 +76,7 @@ describe("instructions from the template", () => {
       vi.stubGlobal(
         "fetch",
         vi.fn(async (url: string) => {
-          const body = url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")], ceo: { ...tpl("ceo", "CEO"), role: undefined } } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/history") ? [] : url.includes("/agents") ? [agent] : [];
+          const body = url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")], ceo: { ...tpl("ceo", "CEO"), role: undefined } } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/history") ? [] : url.includes("/record") ? { days: 30, finished: 0, passedFirstTime: 0, sendBacks: 0, medianMergeMs: null, costPerFinishedMicros: null, recent: [] } : url.includes("/agents") ? [agent] : [];
           return new Response(JSON.stringify(body), { status: 200 });
         }),
       );
@@ -97,7 +97,7 @@ describe("reviews line (BOS-198)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        const body = url.includes("review-policy") ? policy : url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")] } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/history") ? [] : url.includes("/agents") ? [ada] : [];
+        const body = url.includes("review-policy") ? policy : url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")] } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/history") ? [] : url.includes("/record") ? { days: 30, finished: 0, passedFirstTime: 0, sendBacks: 0, medianMergeMs: null, costPerFinishedMicros: null, recent: [] } : url.includes("/agents") ? [ada] : [];
         return new Response(JSON.stringify(body), { status: 200 });
       }),
     );

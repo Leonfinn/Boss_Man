@@ -2,10 +2,10 @@
 // read timeout, a reset connection, the model API overloaded or answering 5xx) is resumed by itself, the
 // same way an interrupted run is, at most twice an hour per ticket. Past that, and for any other error,
 // the CEO gets one card naming the error. Usage-limit and sign-in errors keep their own path (limit-requeue
-// and the account card), and so do owner-chat and deploy runs.
+// and the account card), and so do owner-chat runs. A deploy's run is never resumed (BOS-2362): one CEO card names the target.
 import { and, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { activity, runs } from "../db/schema.js";
+import { activity, deployTargets, deploys, runs } from "../db/schema.js";
 import { record } from "./activity.js";
 import { accountOutage } from "./loop-guards.js";
 import type { AlertInput } from "./alert-ladder.js";
@@ -57,6 +57,22 @@ export function runErrorRetry(db: Db, deps: Deps) {
           dedupeKey: key,
           ...(run.ticketId ? { clearWhen: [{ kind: "ticketDone" as const, ticketId: run.ticketId }] } : {}),
         });
+      // BOS-2362: a deploy's run is never restarted by itself (steps may have half-run; only a new approval restarts it,
+      // BOS-480). Whatever the error, the CEO gets one card naming the target. A deploy that already reported success is left alone.
+      const [dep] = await db
+        .select({ id: deploys.id, status: deploys.status, target: deployTargets.name })
+        .from(deploys)
+        .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
+        .where(eq(deploys.runId, runId))
+        .limit(1);
+      if (dep) {
+        if (dep.status === "succeeded") return "skipped";
+        await card(
+          `The deploy to ${dep.target} ended on an error and was not restarted, because a deploy step may have half run and only a new approval restarts it: ${error}`,
+          `run-error:${runId}`,
+        );
+        return "card";
+      }
       if (kind === "other") {
         await card(`A run ended on an error and Boss Man does not know it as a passing one, so it did not restart it: ${error}`, `run-error:${runId}`);
         return "card";

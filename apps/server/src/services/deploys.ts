@@ -6,7 +6,7 @@
 // A target may name a deploy tag (DR-033, rules.liveTag): after a deploy to it reports success,
 // the runner's daemon moves that tag on the project's remote to the commit the deploy was asked
 // for, with the merge token. No agent ever names the tag, the refspec or the commit pushed.
-import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { DEPLOY_REF, deployTagNameProblem, findCredential, riskOf, stagingFirst, ticketRef, type ResolveResult, type RUNNER_FEATURES, type RunnerCommand, type TagResult } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, decisions, deploys, deployTargets, projects, runners as runnersTable, tickets } from "../db/schema.js";
@@ -732,7 +732,7 @@ export function deploysService(
      * (BOS-2318) it is one page, newest first: `limit` rows (default 20, at most 100) older than the deploy `before`,
      * optionally for one target. Each row also names who asked and the linked ticket's reference.
      */
-    async list(companyId?: string, page?: { targetId?: string; limit?: number; before?: string }) {
+    async list(companyId?: string, page?: { targetId?: string; limit?: number; before?: string; status?: "succeeded" | "failed" }) {
       const q = db
         .select({
           deploy: deploys,
@@ -748,11 +748,39 @@ export function deploysService(
         .leftJoin(tickets, eq(tickets.id, deploys.ticketId));
       const rows = page
         ? await q
-            .where(and(companyId ? eq(deploys.companyId, companyId) : undefined, page.targetId ? eq(deploys.targetId, page.targetId) : undefined, page.before ? olderThan(deploys, deploys, page.before) : undefined))
+            .where(
+              and(
+                companyId ? eq(deploys.companyId, companyId) : undefined,
+                page.targetId ? eq(deploys.targetId, page.targetId) : undefined,
+                page.status === "succeeded" ? eq(deploys.status, "succeeded") : page.status === "failed" ? inArray(deploys.status, ["failed", "rejected"]) : undefined,
+                page.before ? olderThan(deploys, deploys, page.before) : undefined,
+              ),
+            )
             .orderBy(desc(deploys.createdAt), desc(deploys.id))
             .limit(Math.min(100, Math.max(1, Math.floor(page.limit ?? 20))))
         : await q.where(companyId ? eq(deploys.companyId, companyId) : undefined).orderBy(asc(deploys.createdAt));
       return rows.map(({ ticketNumber, ticketPrefix, ...r }) => ({ ...r, ticketRef: ticketRef(ticketPrefix, ticketNumber) }));
+    },
+
+    /** One target's last 30 days (from `now`): deploys by outcome, median request-to-finish of the succeeded ones, the last success. */
+    async summary(targetId: string, now = new Date()) {
+      const since = new Date(now.getTime() - 30 * 86_400_000);
+      const rows = await db
+        .select({ status: deploys.status, createdAt: deploys.createdAt, finishedAt: deploys.finishedAt })
+        .from(deploys)
+        .where(and(eq(deploys.targetId, targetId), gte(deploys.createdAt, since)));
+      const ok = rows.filter((r) => r.status === "succeeded");
+      const secs = ok.filter((r) => r.finishedAt).map((r) => (r.finishedAt!.getTime() - r.createdAt.getTime()) / 1000).sort((a, b) => a - b);
+      const mid = secs.length >> 1;
+      const lastAt = ok.reduce<Date | null>((m, r) => { const t = r.finishedAt ?? r.createdAt; return !m || t > m ? t : m; }, null);
+      return {
+        days: 30,
+        total: rows.length,
+        succeeded: ok.length,
+        failedOrRejected: rows.filter((r) => r.status === "failed" || r.status === "rejected").length,
+        medianSeconds: secs.length ? (secs.length % 2 ? secs[mid]! : (secs[mid - 1]! + secs[mid]!) / 2) : null,
+        lastSuccessAt: lastAt ? lastAt.toISOString() : null,
+      };
     },
   };
 }

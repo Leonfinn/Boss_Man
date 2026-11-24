@@ -894,7 +894,7 @@ export function CheckQueueSetting({ companyId }: { companyId?: string } = {}) {
         <input type="checkbox" data-testid="merge-train" checked={v.train} onChange={(e) => setEdit({ ...v, train: e.target.checked })} />
         <span>
           <strong>Merge approved work in the order it was approved.</strong> <code className="mono">merge train</code>{" "}
-          <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. Needs the server queue. Turning it off takes effect for the next merge.</span>
+          <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. With "Wait for GitHub CI" on, each one also runs on GitHub, and a GitHub pass on a ticket further back lets the tickets ahead of it land too. Needs the server queue. Turning it off takes effect for the next merge.</span>
         </span>
       </label>
       {v.train && (d.runnersTooOldForTrain ?? []).length > 0 && (

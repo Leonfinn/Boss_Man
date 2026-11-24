@@ -36,6 +36,7 @@
 //   refreshed      BOS-1820: with GitHub CI gating, main moved while its check waited for a slot in a way a pass couldn't
 //                  be carried across, so the queued job took the new merge (and a new GitHub run) before it started
 //                  (why/files: why no carry; refreshes: how many times this attempt)
+//   ci_covered     BOS-2360: merge train with CI gating: it lands on the GitHub pass of a ticket behind it (by, commit)
 //   landing_turn   BOS-1762: its landing turn was taken | queued | ended | expired (rebuilds, capMin)
 //   left           it left review without merging (to: the state it moved to)
 //   takeover       a server took charge (by: the cause, see TakeoverCause; commit: the live commit). One row per
@@ -93,7 +94,12 @@ export type MergeLineEvent =
   /** BOS-1871: the landing began waiting for GitHub CI on its merge copy (`commit`). */
   | { event: "ci_wait_started"; commit: string }
   /** BOS-1871: that wait ended: `outcome` is how (passed, failed, timeout, stopped, error, …), `waitedMs` how long it took. */
-  | { event: "ci_wait_ended"; commit: string; outcome: string; waitedMs: number };
+  | { event: "ci_wait_ended"; commit: string; outcome: string; waitedMs: number }
+  /**
+   * BOS-2360: merge train with GitHub CI gating: this member lands on the GitHub pass of `by` (a ticket behind it, stacked on
+   * it), on that ticket's commit `commit`, not on a run of its own. `failed`: its own run had failed (a one-off failure).
+   */
+  | { event: "ci_covered"; by: string; commit: string; failed?: boolean };
 
 /**
  * Why a server took charge of the merge line (BOS-1399). A restart and a crash look the same from inside, so
@@ -204,6 +210,7 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
       : "Merge line: the landing turn ended",
   ci_wait_started: (e) => `Merge line: waiting for GitHub CI on the merge copy ${e.commit.slice(0, 12)}`,
   ci_wait_ended: (e) => `Merge line: GitHub CI wait ended (${e.outcome}) after ${Math.round(e.waitedMs / 60_000)} min`,
+  ci_covered: (e) => `Merge line: GitHub CI passed on ${e.commit.slice(0, 12)}, a ticket behind it in the merge train that holds this change${e.failed ? " (its own run had failed once)" : ""}`,
 };
 
 const summaryOf = (e: MergeLineEvent) => (SUMMARY[e.event] as (x: MergeLineEvent) => string)(e);

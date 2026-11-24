@@ -14,6 +14,8 @@ const base = { id: "a1", name: "Bramble", companyId: "c1", role: "worker", agent
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
 const change = { id: "ch1", field: "name", before: "Old", after: "Bramble", createdAt: "2026-11-20T10:00:00Z", undoneAt: null, byAgentId: null };
 
+const emptyRecord = { days: 30, finished: 0, passedFirstTime: 0, sendBacks: 0, medianMergeMs: null, costPerFinishedMicros: null, recent: [] };
+
 function stub(handler: (url: string, init?: RequestInit) => Response | Promise<Response>, agents: unknown) {
   vi.stubGlobal(
     "fetch",
@@ -22,6 +24,7 @@ function stub(handler: (url: string, init?: RequestInit) => Response | Promise<R
       if (special) return special;
       if (url.includes("agent-templates")) return json({ templates: [] });
       if (url.includes("/models")) return json({ runner: {}, api: [] });
+      if (url.includes("/record")) return json(emptyRecord);
       if (url.includes("/history")) return json([{ c: change, by: null }]);
       if (url.includes("/notes")) return json({ items: [], limits: { count: 20, title: 80, text: 500, why: 300 } });
       if (url.includes("/agents")) return agents instanceof Response ? agents.clone() : json(agents);
@@ -86,6 +89,34 @@ describe("Undo, picture and Refresh guards (BOS-2103)", () => {
     fireEvent.click(btn);
     expect(await screen.findByText(/Couldn't refresh the model lists/)).toBeTruthy();
     await waitFor(() => expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false));
+  });
+});
+
+describe("Record fold (BOS-2389)", () => {
+  const rec = { days: 30, finished: 3, passedFirstTime: 2, sendBacks: 1, medianMergeMs: 4 * 3_600_000, costPerFinishedMicros: 1_500_000, recent: [{ id: "t-1", ref: "BOS-9", title: "Fix the thing", size: 3, finishedAt: "2026-11-20T10:00:00Z", sendBacks: 1, costMicros: 2_000_000 }] };
+
+  it("shows the figures and a linked ticket table", async () => {
+    stub((url) => (url.includes("/record") ? json(rec) : (undefined as never)), [{ ...base, id: "a-rec" }]);
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Bramble" }));
+    await screen.findByText("Record (last 30 days)");
+    expect(await screen.findByText(/3 finished · 2 passed review first time · 1 send-backs · median 4\.0h to merge · \$1\.50 per finished ticket/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "BOS-9" }).getAttribute("href")).toBe("#/tickets/t-1");
+    expect(screen.getByText("Fix the thing")).toBeTruthy();
+  });
+
+  it("says nothing was finished for an idle agent", async () => {
+    stub(() => undefined as never, [{ ...base, id: "a-idle" }]);
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Bramble" }));
+    expect(await screen.findByText("Nothing finished in the last 30 days")).toBeTruthy();
+  });
+
+  it("shows a load error with Retry", async () => {
+    stub((url) => (url.includes("/record") ? json({ error: "Record down" }, 500) : (undefined as never)), [{ ...base, id: "a-recfail" }]);
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Bramble" }));
+    expect(await screen.findByText(/Couldn't load the record: Record down/)).toBeTruthy();
   });
 });
 

@@ -248,6 +248,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         runLimits: deps.runLimits ? await deps.runLimits(companyId).catch(() => null) : null,
         mergeFailures: deps.mergeFailures ? await deps.mergeFailures(companyId).catch(() => null) : null,
         mergeTrain: deps.mergeTrain ? await deps.mergeTrain(companyId).catch(() => null) : null,
+        // BOS-2360: the owner's merge train switch (Settings → Checks), so "is the train on?" is read, not inferred from the records.
+        mergeTrainOn: await checkQueue(db).train().catch(() => null),
         landingTurns: deps.landingTurns ? await deps.landingTurns(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
         // BOS-2058: every update wait that is on (what it waits on, since when, when it ends): the owner's screens read the same list.

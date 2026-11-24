@@ -425,7 +425,18 @@ export type RunRow = {
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };
 
-export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null };
+export type EngagementSummary = {
+  openByState: Record<string, number>;
+  waitingOnRequester: number;
+  waitingOnProvider: number;
+  waitingOnOther: number;
+  spend30dPlanUseUsd: number;
+  spend30dPayAsYouGoUsd: number;
+  medianDaysToFinish: number | null;
+  finishedCount: number;
+};
+/** `summary` rides on the first row of the owner's first page only (BOS-2427). */
+export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null; stateSince?: string; summary?: EngagementSummary | null };
 export type EngagementView = EngagementRow & {
   scope: string;
   deliverables: string | null;
@@ -602,10 +613,10 @@ export type Feature = {
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
 export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; portalUrl: string | null; confirmByEmail: boolean; confirmLinkHours: number; rememberAddressDays: number; portalAtBareAddress?: boolean; emailReady: boolean; drivers: Driver[]; areas: FeatureArea[] };
-export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number };
+export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number; features: Array<{ id: string; title: string; status: FeatureStatus }> };
 export type Insight = { id: string; noteId: string; featureId: string; importance: Importance; highlight: string | null; createdBy: string; createdAt: string };
 export type NoteDetail = {
-  note: Omit<NoteSummary, "customer" | "insightCount"> & { customerId: string | null; processedAt: string | null };
+  note: Omit<NoteSummary, "customer" | "insightCount" | "features"> & { customerId: string | null; processedAt: string | null };
   customer: { id: string; name: string; email: string | null; segment: string | null } | null;
   insights: Array<Insight & { feature: { id: string; title: string; status: FeatureStatus } }>;
   suggestions: Array<{ id: string; title: string; status: FeatureStatus; score: number; shared: string[] }>;

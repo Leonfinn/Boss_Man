@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, decisions, runners } from "../src/db/schema.js";
@@ -15,6 +15,7 @@ const JUDGE_ALLOWS = 'rm -rf shots && git status --porcelain && echo "done" # to
 // The rules judge denies this (prints environment values).
 const JUDGE_DENIES = "rm -rf dist && env";
 
+type Win = { answered: number; denied: number; fellBack: number; reasons: Array<{ reason: string; count: number }>; perDay: Array<{ day: string; cards: number }> };
 type Call = { url: string; init: RequestInit };
 type Reply = (call: Call) => Promise<Response>;
 
@@ -272,7 +273,8 @@ describe("model second opinion (BOS-338)", () => {
     await ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { permissionJudge: "advise" });
     await ctx.turnOn();
     const empty = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json();
-    expect(empty).toEqual({ answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [] });
+    const zero = { answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [], bothVerdicts: 0, agreed: 0, agreement: null };
+    expect(empty).toMatchObject({ answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [], last24h: { ...zero, perDay: [] }, last7d: zero, last30d: zero });
     const failed = await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
     expect(judgeOf(failed)?.second).toMatchObject({ state: "failed", reason: expect.stringContaining("Groq") });
     await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
@@ -281,9 +283,28 @@ describe("model second opinion (BOS-338)", () => {
     // A card from two days ago doesn't count.
     const old = await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
     await ctx.db.update(decisions).set({ createdAt: new Date(Date.now() - 48 * 3600_000) }).where(eq(decisions.id, old.id));
-    const s = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json() as { answered: number; denied: number; fellBack: number; reasons: Array<{ reason: string; count: number }> };
-    expect(s).toMatchObject({ answered: 1, denied: 1, fellBack: 2 });
+    // A card from ten days ago counts in the 30-day window only; one from 40 days ago in none.
+    const mid = await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
+    await ctx.db.update(decisions).set({ createdAt: new Date(Date.now() - 10 * 24 * 3600_000) }).where(eq(decisions.id, mid.id));
+    const ancient = await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
+    await ctx.db.update(decisions).set({ createdAt: new Date(Date.now() - 40 * 24 * 3600_000) }).where(eq(decisions.id, ancient.id));
+    const all = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json() as { last24h: Win; last7d: Win; last30d: Win };
+    const s = all.last24h;
+    // The old top-level fields still carry the same 24 h values.
+    expect(all).toMatchObject({ answered: 1, denied: 1, fellBack: 2 });
+    expect(s).toMatchObject({ answered: 1, denied: 1, fellBack: 2, bothVerdicts: 1, agreed: 0, agreement: 0 });
     expect(s.reasons).toEqual([{ reason: expect.stringContaining("too busy"), count: 2 }]);
+    // 7 days: the 48 h old card joins; 30 days: the 10 day old one too; the 40 day old one never.
+    expect(all.last7d).toMatchObject({ answered: 2, denied: 2, fellBack: 2 });
+    expect(all.last30d).toMatchObject({ answered: 3, denied: 3, fellBack: 2, bothVerdicts: 3, agreed: 0, agreement: 0 });
+    expect(all.last7d.perDay).toHaveLength(7);
+    expect(all.last30d.perDay).toHaveLength(30);
+    expect(all.last30d.perDay.reduce((a, d) => a + d.cards, 0)).toBe(5);
+    expect(all.last7d.perDay.reduce((a, d) => a + d.cards, 0)).toBe(4);
+    // A card that kept no rules-judge verdict is left out of the agreement rate, never guessed.
+    await ctx.db.update(decisions).set({ context: sql`${decisions.context} #- '{judge,verdict}'` }).where(eq(decisions.id, mid.id));
+    const noVerdict = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json() as { last30d: Win };
+    expect(noVerdict.last30d).toMatchObject({ answered: 3, bothVerdicts: 2 });
   });
 
   it("settings: needs an address and model to switch on; Test reports a working model", async () => {

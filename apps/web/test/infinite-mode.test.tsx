@@ -44,7 +44,7 @@ describe("model picker infinite group (BOS-279)", () => {
     };
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => json(url.includes("agent-templates") ? { templates: [] } : url.includes("/models") ? models : url.includes("funding-sources") ? [{ id: "fs1", name: "Synthetic Big", kind: "subscription", provider: "synthetic" }] : url.includes("/history") ? [] : url.includes("/agents") ? [agent] : [])),
+      vi.fn(async (url: string) => json(url.includes("agent-templates") ? { templates: [] } : url.includes("/models") ? models : url.includes("funding-sources") ? [{ id: "fs1", name: "Synthetic Big", kind: "subscription", provider: "synthetic" }] : url.includes("/history") ? [] : url.includes("/record") ? { days: 30, finished: 0, passedFirstTime: 0, sendBacks: 0, medianMergeMs: null, costPerFinishedMicros: null, recent: [] } : url.includes("/agents") ? [agent] : [])),
     );
     render(<Agents company={company} onChanged={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Backend" }));

@@ -26,6 +26,7 @@ reads:
   - /api/agent-templates
   - /api/agents/:id/history
   - /api/agents/:id/notes
+  - /api/agents/:id/record
   - /api/companies/:id/agents
   - /api/companies/:id/models
   - /api/companies/:id/review-policy
@@ -155,6 +156,7 @@ sections:
   - Projects (…)
 reads: 
   - /api/companies/:id/projects
+  - /api/companies/:id/projects-summary
   - /api/companies/:id/review-policy
 
 ## #/roadmap
@@ -287,6 +289,7 @@ reads:
   - /api/companies/:id/second-opinion
   - /api/companies/:id/second-opinion/stats
   - /api/policy-rules
+  - /api/policy-rules/most-asked
   - /api/policy-rules/usage
   - /api/secrets
 
@@ -360,6 +363,7 @@ reads:
   - /api/companies/:id/penpot
   - /api/companies/:id/projects
   - /api/deploys
+  - /api/deploys/summary
 
 ## #/settings/<company>/transfer
 sections: 
@@ -420,6 +424,7 @@ reads:
   - /api/companies/:id/skills/:id
   - /api/companies/:id/skills/:id/history
   - /api/companies/:id/skills/elsewhere
+  - /api/companies/:id/skills/updates
 
 ## #/spend
 sections: 
@@ -459,6 +464,7 @@ reads:
   - /api/tickets/:id/related
   - /api/tickets/:id/reviews
   - /api/tickets/:id/runs
+  - /api/tickets/:id/state-history
 
 ## #/wiki
 sections: 
