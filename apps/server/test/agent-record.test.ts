@@ -144,4 +144,22 @@ it("lists every non-retired agent's record without the recent list (BOS-2504)", 
   expect(mine).toMatchObject({ name: "Dev", finished: 0, runs: 2, failedRuns: 1, medianMergeMs: null, costPerFinishedMicros: null });
   expect(mine).not.toHaveProperty("recent");
   expect(body.agents.some((a) => a.agentId === gone.id)).toBe(false);
+  // Two more agents with different records: each row has the same numbers as that agent's own /record.
+  const project = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/projects`, headers, payload: { name: "App" } })).json() as { id: string };
+  const b = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/agents`, headers, payload: { name: "Bee" } })).json() as { id: string };
+  const c = (await built.app.inject({ method: "POST", url: `/api/companies/${co.company.id}/agents`, headers, payload: { name: "Cee" } })).json() as { id: string };
+  for (const [agent, n] of [[b.id, 2], [c.id, 3]] as const) {
+    for (let i = 0; i < n; i++) {
+      const [t] = await db.insert(tickets).values({ companyId: co.company.id, projectId: project.id, title: `${agent}-${i}`, systemState: "done", assigneeAgentId: agent, stateChangedAt: new Date(Date.now() - (i + 1) * HOUR) }).returning();
+      if (agent === c.id && i === 0) await db.insert(ticketReviews).values({ ticketId: t!.id, reviewer: "Rod", verdict: "changes_requested" });
+      await db.insert(runs).values({ companyId: co.company.id, agentId: agent, ticketId: t!.id, outcome: i === 1 ? "error: x" : "end_turn", endedAt: new Date() });
+    }
+  }
+  const again = (await built.app.inject({ method: "GET", url: `/api/companies/${co.company.id}/agent-records`, headers })).json() as { agents: Array<Record<string, unknown> & { agentId: string }> };
+  for (const id of [dev.id, b.id, c.id]) {
+    const { recent: _recent, ...single } = (await built.app.inject({ method: "GET", url: `/api/agents/${id}/record`, headers })).json() as Record<string, unknown>;
+    const { agentId: _a, name: _n, ...row } = again.agents.find((a) => a.agentId === id)!;
+    expect(row).toEqual(single);
+  }
+  expect(again.agents.find((a) => a.agentId === c.id)).toMatchObject({ finished: 3, sendBacks: 1, runs: 3, failedRuns: 1 });
 });
