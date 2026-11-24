@@ -112,6 +112,28 @@ describe("Right now", () => {
     const lines = healthLines({ health: { ...ok, runner: { registered: false, connected: false, lastSeenAt: null } }, merges: view(), stuck: null, running: 0, companyId: "c1" });
     expect(lines[0]!.state).toBe("No runner set up");
   });
+
+  // BOS-2538: Merges is read from the merge-queue poll every 20 s while the other three come from the dashboard poll
+  // every 10 s, so each line states its own interval and the heading states none.
+  it("names each line's own poll interval: 20 s for Merges, 10 s for the rest", () => {
+    const lines = healthLines({ health: ok, merges: view(), stuck: null, running: 0, companyId: "c1" });
+    expect(lines.map((l) => l.refresh)).toEqual(["Updates every 10 s.", "Updates every 20 s.", "Updates every 10 s.", "Updates every 10 s."]);
+  });
+
+  it("shows each interval under its own line and keeps the single heading interval out", () => {
+    const lines = healthLines({ health: ok, merges: view(), stuck: null, running: 0, companyId: "c1" });
+    const { container } = render(<RightNow lines={lines} paused={false} companyId="c1" />);
+    const rows = [...container.querySelectorAll(".dash-line")];
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => r.querySelector(".dash-refresh")?.textContent)).toEqual(["Updates every 10 s.", "Updates every 20 s.", "Updates every 10 s.", "Updates every 10 s."]);
+    expect(screen.getByRole("heading", { name: /Right now/ }).textContent).not.toMatch(/every 10 s/);
+  });
+
+  it("states each interval while the first read is still loading", () => {
+    const { container } = render(<RightNow lines={null} paused={false} companyId="c1" />);
+    expect(container.querySelectorAll(".dash-refresh")).toHaveLength(4);
+    expect(screen.getAllByText("Updates every 20 s.")).toHaveLength(1);
+  });
 });
 
 describe("Stuck-merges banner", () => {
