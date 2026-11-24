@@ -606,6 +606,50 @@ function folderOpen(over: OpenFolders, key: string, currentFolder: string): bool
 
 const RECENT_KEY = "wiki-recent-open";
 
+const DAY_MS = 86_400_000;
+export const STALE_DAYS = 30;
+const STALE_SHOWN = 20;
+
+/** Pages last changed more than 30 days before `now`, oldest first, each with whole days since the change. */
+export function stalePages<T extends { updatedAt: string }>(pages: T[], now: number): { page: T; days: number }[] {
+  return pages
+    .map((page) => ({ page, at: Date.parse(page.updatedAt) }))
+    .filter((x) => Number.isFinite(x.at) && now - x.at > STALE_DAYS * DAY_MS)
+    .sort((a, b) => a.at - b.at)
+    .map((x) => ({ page: x.page, days: Math.floor((now - x.at) / DAY_MS) }));
+}
+
+/** "Not changed in 30 days (N)": the stalest pages first, 20 shown and the rest behind "Show all". */
+function StalePages({ pages, companyId, current, onPick }: { pages: PageRow[]; companyId: string; current: string | undefined; onPick: () => void }) {
+  const [all, setAll] = useState(false);
+  const stale = stalePages(pages, Date.now());
+  const shown = all ? stale : stale.slice(0, STALE_SHOWN);
+  return (
+    <details className="wiki-recent wiki-stale">
+      <summary>Not changed in {STALE_DAYS} days ({stale.length})</summary>
+      {stale.length === 0 && <p className="muted">No page is older than {STALE_DAYS} days.</p>}
+      <ul>
+        {shown.map(({ page: p, days }) => (
+          <li key={p.id}>
+            <a href={`#/wiki/${companyId}/${p.slug}`} aria-current={p.slug === current ? "page" : undefined} onClick={onPick} title={p.title}>
+              <span className="t">{p.title}</span>
+              <small>
+                {p.folder ? `${p.folder} · ` : ""}
+                {days} days ago by {p.updatedBy ?? "you"}
+              </small>
+            </a>
+          </li>
+        ))}
+      </ul>
+      {stale.length > STALE_SHOWN && (
+        <button type="button" className="chip" onClick={() => setAll(!all)}>
+          {all ? "Show fewer" : `Show all ${stale.length}`}
+        </button>
+      )}
+    </details>
+  );
+}
+
 /** The 10 pages changed last, newest first, above the folders. Collapsible; the choice is kept in this browser. */
 function RecentlyChanged({ pages, companyId, current, onPick }: { pages: PageRow[]; companyId: string; current: string | undefined; onPick: () => void }) {
   const [open, setOpen] = useState(() => {
@@ -860,6 +904,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
             {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "Only the company brief so far."}</p>}
             <SemanticSettings companyId={company.id} />
             {!q.trim() && <RecentlyChanged pages={pages} companyId={company.id} current={creating === null ? pageSlug : undefined} onPick={() => (setCreating(null), closeDrawer())} />}
+            {!q.trim() && pages.length > 0 && <StalePages pages={pages} companyId={company.id} current={creating === null ? pageSlug : undefined} onPick={() => (setCreating(null), closeDrawer())} />}
             <TreeList
               folder={tree(pages)}
               companyId={company.id}

@@ -135,7 +135,7 @@ export const OWNER_CONTROLS = {
     "Clear filters", "Download CSV", "Unassigned",
   ],
   Wiki: [
-    "Show older versions", "Compare", "Close compare", "Show", "Restore this version",
+    "Show older versions", "Compare", "Close compare", "Show", "Show all …", "Show fewer", "Restore this version",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
     "Deleted pages", "Restore", "Restoring", "Download",
