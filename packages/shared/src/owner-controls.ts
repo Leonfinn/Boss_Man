@@ -101,6 +101,8 @@ export const OWNER_CONTROLS = {
     "Copy link", "Copied",
     // The header's "Download": the ticket as Markdown, "Preparing" while it fetches the conversation (BOS-2314).
     "Download", "Preparing",
+    // Find in this conversation (BOS-2422): the header's "Find", and the labels BOS-2411 added to Chat.
+    "Find", "Previous", "Next", "Search older messages", "Searching",
   ],
   // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,

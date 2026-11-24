@@ -2,12 +2,13 @@
 // one feed, oldest first, like a chat. A run that's going shows what the agent is doing as it
 // happens; finished runs fold their steps away. The box at the bottom talks to the agent: into
 // its live run (after the current turn, or interrupting it), or as a new run.
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { systemAuthor, ticketRef } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { useDraft } from "../drafts";
-import { linked } from "../pages/Chat";
+import { linked, visibleParts } from "../pages/Chat";
+import { countHits, findQuery, findSpots, spotIndex, splitHits, stepSpot, type FindSpot, type Segment } from "../chat-find";
 import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
 import { outcomeTag, when } from "../pages/Runs";
@@ -220,6 +221,127 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
     else window.scrollBy(0, shift);
   }, [kept]);
 
+  // Find in this conversation (BOS-2422), over the helper chat uses (chat-find.ts). `at` is "the nth match in
+  // message X", so older pages added above move nothing. A message's matches run through its summary, then its
+  // Details, in the order they are drawn.
+  const split = (m: Message) => (m.author === "agent" ? splitDetails(m.text) : { summary: m.text, details: null });
+  const partsOf = (m: Message) => {
+    const { summary, details } = split(m);
+    return { id: m.id, parts: [...visibleParts(summary), ...(details ? visibleParts(details) : [])] };
+  };
+  const [findOpen, setFindOpen] = useState(false);
+  const [findText, setFindText] = useState("");
+  const [query, setQuery] = useState("");
+  const [at, setAt] = useState<FindSpot | null>(null);
+  const [findNote, setFindNote] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const searchRun = useRef(0);
+  const findBox = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!findQuery(findText)) {
+      setQuery("");
+      return;
+    }
+    const t = setTimeout(() => setQuery(findText), 250);
+    return () => clearTimeout(t);
+  }, [findText]);
+  useEffect(() => {
+    setAt(null);
+    setFindNote(null);
+  }, [query]);
+  const closeFind = () => {
+    searchRun.current++;
+    setSearching(false);
+    setFindOpen(false);
+    setFindText("");
+    setQuery("");
+    setAt(null);
+    setFindNote(null);
+  };
+  useEffect(closeFind, [ticketId]);
+  useEffect(() => {
+    if (findOpen) findBox.current?.focus();
+  }, [findOpen]);
+  const spots = query ? findSpots(messages.map(partsOf), query) : [];
+  const here = spotIndex(spots, at);
+  const curSpot = here >= 0 ? spots[here]! : null;
+  const curKey = curSpot ? `${curSpot.id}:${curSpot.n}` : "";
+  useEffect(() => {
+    if (spots.length && here < 0) setAt(spots[0]!);
+  }, [spots.length, here, query]);
+  useEffect(() => {
+    if (curKey) feedBox.current?.querySelector(".find-hit.current")?.scrollIntoView({ block: "center" });
+  }, [curKey, query]);
+  const step = (dir: 1 | -1) => setAt(stepSpot(spots, curSpot, dir));
+  const onFindKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeFind();
+    } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      step(e.shiftKey ? -1 : 1);
+    }
+  };
+  // Ctrl+F or Cmd+F with focus in the conversation opens the box instead of the browser's own find.
+  const onSectionKey = (e: KeyboardEvent<HTMLElement>) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      setFindOpen(true);
+      findBox.current?.focus();
+    }
+  };
+  // Loads older pages until one has a match or the start is reached.
+  const searchOlder = async () => {
+    const first = messages[0];
+    if (!first || searching || !query) return;
+    const run = ++searchRun.current;
+    const id = ticketId;
+    setSearching(true);
+    setFindNote(null);
+    try {
+      let top = first;
+      let more = hasOlder;
+      let page: Message[] = [];
+      let loaded: Message[] = [];
+      let hits = 0;
+      while (more && !hits) {
+        const res = await api<Conversation>(`/api/tickets/${id}/messages?before=${encodeURIComponent(top.id)}`);
+        if (searchRun.current !== run || shownTicket.current !== id) return;
+        page = res.items;
+        loaded = [...loaded, ...page];
+        more = (res.hasMore ?? false) && page.length > 0;
+        top = page[0] ?? top;
+        hits = page.reduce((sum, m) => sum + countHits(partsOf(m).parts, query), 0);
+        setOlderMore(more);
+      }
+      const newest = convo.data?.items ?? [];
+      setKept((prev) => new Map([...loaded.map((m) => [m.id, m] as const), ...prev, ...newest.map((m) => [m.id, m] as const)]));
+      if (hits) {
+        setAt(findSpots(page.map(partsOf), query).at(-1) ?? null);
+        setFindNote(`${hits} more found`);
+      } else {
+        setFindNote("No more matches; start of the conversation");
+      }
+    } catch (err) {
+      if (searchRun.current === run) setFindNote((err as Error).message);
+    } finally {
+      if (searchRun.current === run) setSearching(false);
+    }
+  };
+  // Matches in a message are numbered in the order they are drawn, the same order findSpots counted them.
+  const markIn = (m: Message, seq: { n: number }) => (words: string): ReactNode =>
+    !query
+      ? words
+      : splitHits(words, query).map((s: Segment, k) =>
+          s.hit ? (
+            <mark key={k} className={`find-hit${curSpot?.id === m.id && curSpot.n === seq.n++ ? " current" : ""}`}>
+              {s.text}
+            </mark>
+          ) : (
+            <Fragment key={k}>{s.text}</Fragment>
+          ),
+        );
+
   const feed = [
     ...messages.map((m) => ({ at: m.createdAt, key: `m${m.id}`, m, r: null as RunRow | null, mark: null })),
     ...(runs.data ?? []).map((r) => ({ at: r.startedAt, key: `r${r.id}`, m: null as Message | null, r, mark: null })),
@@ -301,8 +423,48 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           : "Write a note. Assign the task to have an agent pick it up.";
 
   return (
-    <section className="card activity" aria-labelledby="activity-h">
-      <h2 id="activity-h">Activity</h2>
+    <section className="card activity" aria-labelledby="activity-h" onKeyDown={onSectionKey}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <h2 id="activity-h">Activity</h2>
+        <button type="button" className="btn" aria-expanded={findOpen} onClick={() => (findOpen ? closeFind() : setFindOpen(true))} title="Find in this conversation (Ctrl+F)">
+          Find
+        </button>
+      </div>
+      {findOpen && (
+        <div className="chat-find" role="search">
+          <input ref={findBox} type="search" aria-label="Find in this conversation" placeholder="Find in this conversation" value={findText} onChange={(e) => setFindText(e.target.value)} onKeyDown={onFindKey} />
+          {query && (
+            <span className="muted" role="status">
+              {spots.length ? `${here + 1} of ${spots.length}` : "No matches"}
+            </span>
+          )}
+          {query && (
+            <>
+              <button type="button" className="btn" onClick={() => step(-1)} disabled={spots.length < 2} title="Previous match">
+                Previous
+              </button>
+              <button type="button" className="btn" onClick={() => step(1)} disabled={spots.length < 2} title="Next match">
+                Next
+              </button>
+            </>
+          )}
+          {query && hasOlder && (
+            <button type="button" className="btn" onClick={() => void searchOlder()} disabled={searching}>
+              {searching ? "Searching…" : "Search older messages"}
+            </button>
+          )}
+          {searching && (
+            <p className="muted" role="status">
+              Searching older messages…
+            </p>
+          )}
+          {!searching && findNote && (
+            <p className="muted" role="status">
+              {findNote}
+            </p>
+          )}
+        </div>
+      )}
       <div className="activity-feed" role="log" aria-live="polite" ref={feedBox}>
         {hasOlder && messages.length > 0 && (
           <div style={{ textAlign: "center" }}>
@@ -341,14 +503,17 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           ) : (
             <div key={key} data-key={key} className={`chat-msg ${m!.author === "agent" ? "assistant" : m!.author}`}>
               {(() => {
-                const { summary, details } = m!.author === "agent" ? splitDetails(m!.text) : { summary: m!.text, details: null };
+                const { summary, details } = split(m!);
+                const mark = markIn(m!, { n: 0 });
+                // Details open when the current match is in them.
+                const inDetails = !!query && !!details && curSpot?.id === m!.id && curSpot.n >= countHits(visibleParts(summary), query);
                 return (
                   <>
-                    <p>{linked(summary, companyId, refCtx)}</p>
+                    <p>{linked(summary, companyId, refCtx, mark)}</p>
                     {details && (
-                      <details>
+                      <details open={inDetails || undefined}>
                         <summary>Details</summary>
-                        <p>{linked(details, companyId, refCtx)}</p>
+                        <p>{linked(details, companyId, refCtx, mark)}</p>
                       </details>
                     )}
                   </>
