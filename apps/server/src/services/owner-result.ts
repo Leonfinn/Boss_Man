@@ -9,9 +9,11 @@
 //   2. answering it puts a line and a flag in the owner's chat and feed at once ("your answer is with X; a result follows"),
 //      and wakes the raiser with a note that says how to report back (BOS-2291: only the raiser, not every assignee);
 //   3. the raiser's status-only reply on the card's ticket is accepted (`ticket_reply` with notAnAsk on that ticket), and the
-//      reply is posted into the owner's chat too, so the result arrives even if no run starts;
+//      reply is posted into the owner's chat too, so the result arrives even if no run starts; an interim "still working"
+//      reply does not count, and a line the raiser posts in the owner's chat counts too (Rex's review of BOS-2555);
 //   4. if nothing has reached the owner 30 minutes after the answer, the CEO is woken to post the result, and the owner gets
-//      a line and a flag saying who is on it. The sweep reads the card's own row, so a restart loses nothing.
+//      a line and a flag saying who is on it. The sweep reads the card's own row, so a restart loses nothing. A card with no
+//      ticket of its own is matched on the raiser alone, and its wake carries no empty ticket id (Rex's review of BOS-2555).
 import { and, desc, eq, gt, inArray, isNotNull, lte } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -76,9 +78,9 @@ export function reportBackNote(input: { ownerVoice: string; question: string; ti
     `${input.ownerVoice} answered your card with the information it asked for: "${short(input.question, 200)}". What they sent is posted on this ticket's conversation.`,
     `Now report back to them. They don't read ticket pages, so two things reach them:`,
     `- Post the result on this ticket as a short status-only reply: ticket_reply with notAnAsk set to true (it asks nothing of them, so the server lets it through; an ask is still held). Say in plain words what happened and what comes next: a step they press, or "nothing to do". It is posted into their chat for them.`,
-    `- Also say one line in the owner chat (the CEO's chat): the same two things in a sentence or two, naming this ticket (${input.ref ?? input.ticketId}).`,
+    `- Also say one line in the owner chat (the CEO's chat): the same two things in a sentence or two, naming this ticket (${input.ref ?? input.ticketId}). A line there counts too, so a result said only in the chat still reaches them.`,
     `Never put a question back to them in either; if something else is needed from them, raise a new card for that.`,
-    `If this needs work before an answer can be given, say so in the same line ("checking now, back shortly"); if you cannot report at all, the CEO is asked 30 minutes after their answer and will tell them for you.`,
+    `Only the real result counts. An interim note ("checking now, back shortly") does not: say that if you must, but keep the deadline, and post the result itself when you have it. If you cannot report at all, the CEO is asked 30 minutes after their answer and will tell them for you.`,
   ].join("\n");
 }
 
@@ -93,11 +95,13 @@ export function resultWaitingFlag(raiser: string, ceo: string, question: string,
 }
 
 /** What the CEO reads when it is woken to post the result. */
-export function ceoResultNote(input: { ownerVoice: string; raiser: string; question: string; answer: string; ticketId: string; ref: string | null; received: boolean }): string {
+export function ceoResultNote(input: { ownerVoice: string; raiser: string; question: string; answer: string; ticketId: string | null; ref: string | null; received: boolean }): string {
   return [
     `${input.ownerVoice} answered "${short(input.question, 200)}"${input.ref ? ` (${input.ref})` : ""} with the information the card asked for. ${INFO_ASK_MINUTES} minutes later nothing has reached them: ${input.raiser} didn't post a result, and the owner hasn't heard what their answer showed.`,
-    `Their answer: ${short(input.answer, 300)}${input.received ? " (what they sent is on the ticket's conversation; read it there, pictures and files included)" : ""}`,
-    `Post the result for the owner now: read what they sent on ticket #/tickets/${input.ticketId}, work out what it showed, and tell them in plain words in the owner chat: what happened, and the next step (what to press, or nothing to do). You may also reply on the ticket with notAnAsk. If it needs real work, open a ticket and say so in the same line.`,
+    `Their answer: ${short(input.answer, 300)}${input.received && input.ticketId ? " (what they sent is on the ticket's conversation; read it there, pictures and files included)" : ""}`,
+    input.ticketId
+      ? `Post the result for the owner now: read what they sent on ticket #/tickets/${input.ticketId}, work out what it showed, and tell them in plain words in the owner chat: what happened, and the next step (what to press, or nothing to do). You may also reply on the ticket with notAnAsk. If it needs real work, open a ticket and say so in the same line.`
+      : `Post the result for the owner now: this card wasn't about a ticket, so ask ${input.raiser} what it showed (a card open on its answer), then tell the owner in plain words in their chat: what happened, and the next step (what to press, or nothing to do). If it needs real work, open a ticket and say so in the same line.`,
   ].join("\n");
 }
 
@@ -171,26 +175,32 @@ export async function startedInfoAnswer(
   }
 }
 
-/** Whether the raiser has reported the result: a later line in the owner's chat for this card, or a chat reply naming the ticket. */
-export async function reportedSince(db: Db, d: Decision, since: Date): Promise<boolean> {
-  const [line] = await db
-    .select({ id: ownerChatMessages.id })
-    .from(ownerChatMessages)
-    .where(and(eq(ownerChatMessages.companyId, d.companyId), eq(ownerChatMessages.infoAskCardId, d.id), gt(ownerChatMessages.createdAt, since)))
-    .limit(1);
-  if (line) return true;
-  const ticketId = (await aboutTickets(db, d))[0] ?? null;
-  const ref = await refOf(db, d.companyId, ticketId);
+/**
+ * A reply that only says work is still going: the deadline stays, and nobody treats it as the result (Rex's review of BOS-2555).
+ * A real result can contain these words, so a line is checked for a next step before it is taken as interim.
+ */
+const INTERIM = /\b(?:still (?:looking|checking|investigating|digging|working)|checking (?:now|it|this|into)|back shortly|will (?:report|update|follow up|get back|come back)|more (?:soon|shortly)|stand ?by|give me (?:a|some) (?:moment|minute|hour)|nothing to report yet|not yet)\b/i;
+
+/** Whether a reply is only an interim "still working" note, which never counts as the result. */
+export function isInterimReply(text: string): boolean {
+  return INTERIM.test(text);
+}
+
+/**
+ * Whether the raiser has said the result in the owner's chat, for this card, since the answer (Rex's review of BOS-2555: the
+ * note tells the raiser to say a line there, so that line has to clear the deadline too). A line in the raiser's own thread is
+ * the owner reading it, which is the whole point, so any non-interim reply from the raiser since the answer counts; an interim
+ * "still working" line does not.
+ */
+export async function reportedInChat(db: Db, d: Decision, since: Date, raiserAgentId: string | null): Promise<boolean> {
+  if (!raiserAgentId) return false;
   const replies = await db
     .select({ text: ownerChatMessages.text })
     .from(ownerChatMessages)
-    .where(and(eq(ownerChatMessages.companyId, d.companyId), eq(ownerChatMessages.role, "assistant"), gt(ownerChatMessages.createdAt, since)))
+    .where(and(eq(ownerChatMessages.companyId, d.companyId), eq(ownerChatMessages.agentId, raiserAgentId), eq(ownerChatMessages.role, "assistant"), gt(ownerChatMessages.createdAt, since)))
     .orderBy(desc(ownerChatMessages.createdAt))
     .limit(20);
-  if (ref && replies.some((r) => new RegExp(`(^|[^A-Za-z0-9-])${ref.replace(/[-]/g, "\\-")}(?![0-9])`, "i").test(r.text))) return true;
-  // A reply that repeats the card's ask is taken as the report: the raiser answering in its own words.
-  const words = short(d.question, 60);
-  return words.length >= 24 && replies.some((r) => r.text.includes(words));
+  return replies.some((r) => r.text && !isInterimReply(r.text));
 }
 
 type SweepDeps = {
@@ -213,9 +223,14 @@ export async function reportDueInfoAnswers(db: Db, now: Date, deps: SweepDeps): 
     .limit(20);
   let woken = 0;
   for (const d of due) {
+    // A result already posted in the owner's chat (the raiser was told to say one line there) means nobody needs waking.
+    if (await reportedInChat(db, d, d.answeredAt ?? d.infoAskDueAt!, d.raisedByAgentId)) {
+      await db.update(decisions).set({ infoAskDueAt: null }).where(and(eq(decisions.id, d.id), eq(decisions.infoAskDueAt, d.infoAskDueAt!)));
+      continue;
+    }
     const [claimed] = await db
       .update(decisions)
-      .set({ infoAskDueAt: null })
+      .set({ infoAskDueAt: null, infoAskNaggedAt: now })
       .where(and(eq(decisions.id, d.id), eq(decisions.infoAskDueAt, d.infoAskDueAt!)))
       .returning({ id: decisions.id });
     if (!claimed) continue;
@@ -224,7 +239,7 @@ export async function reportDueInfoAnswers(db: Db, now: Date, deps: SweepDeps): 
     } catch (err) {
       deps.log?.(`reporting the result of card ${d.id} failed: ${(err as Error).message}`);
       // Put the deadline back, an hour out, so a broken wake doesn't spin on every pass.
-      await db.update(decisions).set({ infoAskDueAt: new Date(now.getTime() + 60 * 60_000) }).where(eq(decisions.id, d.id));
+      await db.update(decisions).set({ infoAskDueAt: new Date(now.getTime() + 60 * 60_000), infoAskNaggedAt: null }).where(eq(decisions.id, d.id));
     }
   }
   return { woken };
@@ -232,7 +247,12 @@ export async function reportDueInfoAnswers(db: Db, now: Date, deps: SweepDeps): 
 
 async function escalateToCeo(db: Db, d: Decision, now: Date, deps: SweepDeps): Promise<boolean> {
   const ceo = await ceoOf(db, d.companyId);
-  if (!ceo) return false;
+  if (!ceo) {
+    // No CEO to hand it to: keep the deadline, a day out, and log it, rather than losing the result silently (Rex's review).
+    deps.log?.(`card ${d.id} asked the owner for information and no result came, but this company has no CEO to post it.`);
+    await db.update(decisions).set({ infoAskDueAt: new Date(now.getTime() + 24 * 60 * 60_000), infoAskNaggedAt: null }).where(eq(decisions.id, d.id));
+    return false;
+  }
   const [raiser] = d.raisedByAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, d.raisedByAgentId)) : [];
   const name = raiser?.name ?? "the team";
   const ticketId = (await aboutTickets(db, d))[0] ?? null;
@@ -245,15 +265,17 @@ async function escalateToCeo(db: Db, d: Decision, now: Date, deps: SweepDeps): P
   }
   const flag = resultWaitingFlag(name, ceo.name, d.question, ticketId);
   await deps.notify({ companyId: d.companyId, agentId: null, level: "flag", ...flag });
-  // The CEO is woken on the ticket, so its run opens with the conversation (what the owner sent) in front of it.
-  await deps.wake({ agentId: ceo.id, reason: INFO_RESULT_REASON, ticketId, priority: 4, note: ceoResultNote({ ownerVoice: "The owner", raiser: name, question: d.question, answer: d.answer ?? "", ticketId: ticketId ?? "", ref, received: true }) });
+  // The CEO is woken on the ticket, so its run opens with the conversation (what the owner sent) in front of it. A card with
+  // no ticket of its own wakes on the raiser alone, and the note says where to read the answer instead of a dead ticket link.
+  await deps.wake({ agentId: ceo.id, reason: INFO_RESULT_REASON, ticketId, priority: 4, note: ceoResultNote({ ownerVoice: "The owner", raiser: name, question: d.question, answer: d.answer ?? "", ticketId, ref, received: true }) });
   return true;
 }
 
 /**
  * BOS-2555: the result of an information card, in the owner's chat (a line from the facts) and their feed. The first line for
  * the card is the raiser's, in their own thread; later lines go to the CEO chat, where the owner was already told it was with
- * someone. Never throws: the ticket reply itself is already saved.
+ * someone. An interim "still working" reply is not the result and leaves the deadline running. Never throws: the ticket reply
+ * itself is already saved.
  */
 export async function noteResultReported(db: Db, input: { companyId: string; ticketId: string; agentId: string; text: string }, deps: { notify: (n: NotifyInput) => Promise<unknown>; log?: (m: string) => void }): Promise<boolean> {
   try {
@@ -264,7 +286,10 @@ export async function noteResultReported(db: Db, input: { companyId: string; tic
       .orderBy(desc(decisions.answeredAt))
       .limit(10);
     const about = await Promise.all(cards.map(async (c) => ({ card: c, tickets: await aboutTickets(db, c) })));
-    const card = about.find((x) => x.tickets.includes(input.ticketId));
+    // An interim "still working" reply is not the result: it stays on the ticket, and the deadline runs on (Rex's review).
+    if (isInterimReply(input.text)) return false;
+    // A card with no ticket of its own can't be matched by ticket: the raiser is the only link, so its newest such card counts.
+    const card = about.find((x) => x.tickets.includes(input.ticketId)) ?? about.find((x) => x.tickets.length === 0);
     if (!card) return false;
     // Cleared first, conditional on the deadline: a second reply, or the 30-minute sweep, never posts a second result.
     const [claimed] = await db

@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, ownerChatMessages, runs, tickets, wakes } from "../src/db/schema.js";
+import { agents, decisions, notifications, ownerChatMessages, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { infoAskOf, INFO_ASK_MINUTES, noteResultReported } from "../src/services/owner-result.js";
 import { notificationsService } from "../src/services/notifications.js";
@@ -62,6 +62,10 @@ describe("which cards ask the owner for information", () => {
     expect(infoAskOf({ ...base, question: "Which do you prefer: blue or green?" })).toBeNull();
     expect(infoAskOf({ ...base, question: "Please send me a screenshot", context: { type: "question", ownerMustDo: true, steps: ["Open the app"] } })).toBeNull();
     expect(infoAskOf({ ...base, kind: "permission", question: "Please paste the log" })).toBeNull();
+  });
+  it("a plain question about what the product does is not a request for information", () => {
+    expect(infoAskOf({ ...base, question: "What do you show on the dashboard?" })).toBeNull();
+    expect(infoAskOf({ ...base, question: "What should the settings page say?" })).toBeNull();
   });
 });
 
@@ -142,6 +146,61 @@ describe("BOS-2555: an information answer reaches the owner", () => {
     expect(INFO_ASK_MINUTES).toBe(30);
     await c.sweeps.run();
     expect((await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id))).some((w) => w.reason === "a result for the owner" && w.ticketId === t2.id)).toBe(false);
+  });
+
+  it("a result said only in the owner's chat clears the deadline, so nobody is woken", async () => {
+    const c = await setup();
+    const t = await c.ticket("Find the deploy failure");
+    const d = await c.card(t, "Please paste the deploy log from the failed update.");
+    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
+    // The raiser says the result in the owner's chat instead of on the ticket (the note allows either).
+    await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.dev.id, role: "assistant", text: `Your answer showed a stale runner image. The result: it was rebuilt and the update went through, nothing to do. (ticket ${t.title})` });
+    await c.db.update(decisions).set({ infoAskDueAt: new Date(Date.now() - 60_000) }).where(eq(decisions.id, d.id));
+    await c.sweeps.run();
+    expect((await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id))).some((w) => w.reason === "a result for the owner")).toBe(false);
+    expect(await c.dueCount(d.id)).toBeNull();
+  });
+
+  it("an interim 'checking now' reply clears nothing: the deadline stays, and the CEO is still woken", async () => {
+    const c = await setup();
+    const t = await c.ticket("Find the deploy failure");
+    const d = await c.card(t, "Please paste the deploy log from the failed update.");
+    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
+    const posted = await noteResultReported(c.db, { companyId: c.company.id, ticketId: t.id, agentId: c.dev.id, text: "Thanks, checking now, back shortly." }, { notify: c.notify });
+    expect(posted).toBe(false);
+    expect(await c.dueCount(d.id)).not.toBeNull();
+    expect((await c.chatLines()).some((l) => l.text.includes("Dougal checked what you sent"))).toBe(false);
+    await c.db.update(decisions).set({ infoAskDueAt: new Date(Date.now() - 60_000) }).where(eq(decisions.id, d.id));
+    await c.sweeps.run();
+    expect((await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id))).some((w) => w.reason === "a result for the owner")).toBe(true);
+  });
+
+  it("a card with no ticket of its own still wakes the CEO, with no dead ticket link, and a reply on a ticket fills it", async () => {
+    const c = await setup();
+    // A card raised about no ticket at all (context has no ticketId).
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Please paste the error you see on the login page.", options: ["Sent it"], recommendedOption: "Sent it", raisedByAgentId: c.dev.id, tier: "owner", context: { type: "question" } })
+      .returning();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Sent it" });
+    await c.db.update(decisions).set({ infoAskDueAt: new Date(Date.now() - 60_000) }).where(eq(decisions.id, d!.id));
+    await c.sweeps.run();
+    const wake = (await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id))).find((w) => w.reason === "a result for the owner");
+    expect(wake).toBeTruthy();
+    expect(wake!.ticketId ?? null).toBeNull();
+    expect(wake!.note ?? "").not.toContain("#/tickets/undefined");
+    expect(wake!.note ?? "").toContain("Post the result");
+  });
+
+  it("with no CEO, the deadline is kept rather than the result lost silently", async () => {
+    const c = await setup();
+    const t = await c.ticket("Find the deploy failure");
+    const d = await c.card(t, "Please paste the deploy log from the failed update.");
+    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Sent it" });
+    await c.db.update(agents).set({ role: "manager" }).where(eq(agents.id, c.ceo.id));
+    await c.db.update(decisions).set({ infoAskDueAt: new Date(Date.now() - 60_000) }).where(eq(decisions.id, d.id));
+    await c.sweeps.run();
+    expect(await c.dueCount(d.id)).not.toBeNull();
   });
 });
 
