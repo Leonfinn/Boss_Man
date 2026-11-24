@@ -24,7 +24,15 @@ export type SecondOpinionResult = { verdict: "allow" | "deny"; reason: string } 
 export type SecondOpinionCard = { question: string; command: string | null; ownTicket?: string | null };
 
 /** How the model did on the last 24 h of cards (BOS-1052), from each card's own judge.second record. */
-export type SecondOpinionStats = { answered: number; allowed: number; denied: number; fellBack: number; pending: number; reasons: Array<{ reason: string; count: number }> };
+export type SecondOpinionWindow = {
+  answered: number; allowed: number; denied: number; fellBack: number; pending: number; reasons: Array<{ reason: string; count: number }>;
+  /** Answered cards whose rules-judge verdict was also stored, and how many of those matched the model. agreement is null when none (shown as "not recorded"). */
+  bothVerdicts: number; agreed: number; agreement: number | null;
+  /** Cards per UTC day, oldest first; empty for the 24 h window. */
+  perDay: Array<{ day: string; cards: number }>;
+};
+export type SecondOpinionStatsAll = SecondOpinionWindow & { last24h: SecondOpinionWindow; last7d: SecondOpinionWindow; last30d: SecondOpinionWindow };
+export type SecondOpinionStats = SecondOpinionWindow;
 
 const key = (companyId: string) => `second-opinion:${companyId}`;
 
@@ -220,29 +228,55 @@ export function secondOpinionService(
      * The last 24 h of cards the model was asked about (BOS-1052): answered (allow/deny) vs fell back to the rules judge,
      * with the commonest reasons. Read from each card's judge.second, so it counts what really happened on cards.
      */
-    async stats(companyId: string): Promise<SecondOpinionStats> {
-      const since = new Date(now().getTime() - 24 * 3600_000);
+    async stats(companyId: string): Promise<SecondOpinionStatsAll> {
       const state = sql<string>`${decisions.context} #>> '{judge,second,state}'`;
       const reason = sql<string | null>`${decisions.context} #>> '{judge,second,reason}'`;
-      const rows = await db
-        .select({ state, reason, n: sql<number>`count(*)::int` })
-        .from(decisions)
-        .where(and(eq(decisions.companyId, companyId), eq(decisions.kind, "permission"), gte(decisions.createdAt, since), sql`${decisions.context} #> '{judge,second}' IS NOT NULL`))
-        .groupBy(state, reason);
-      const out: SecondOpinionStats = { answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [] };
-      for (const r of rows) {
-        const n = Number(r.n);
-        if (r.state === "allow") out.allowed += n;
-        else if (r.state === "deny") out.denied += n;
-        else if (r.state === "pending") out.pending += n;
-        else if (r.state === "failed") {
-          out.fellBack += n;
-          out.reasons.push({ reason: r.reason ?? "no reason recorded", count: n });
+      const verdict = sql<string | null>`${decisions.context} #>> '{judge,verdict}'`;
+      const day = sql<string>`to_char(${decisions.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
+      const window = async (hours: number, withDays: boolean): Promise<SecondOpinionWindow> => {
+        const since = new Date(now().getTime() - hours * 3600_000);
+        const rows = await db
+          .select({ state, reason, verdict, day, n: sql<number>`count(*)::int` })
+          .from(decisions)
+          .where(and(eq(decisions.companyId, companyId), eq(decisions.kind, "permission"), gte(decisions.createdAt, since), sql`${decisions.context} #> '{judge,second}' IS NOT NULL`))
+          .groupBy(state, reason, verdict, day);
+        const out: SecondOpinionWindow = { answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [], bothVerdicts: 0, agreed: 0, agreement: null, perDay: [] };
+        const reasons = new Map<string, number>();
+        const days = new Map<string, number>();
+        for (const r of rows) {
+          const n = Number(r.n);
+          if (r.state === "allow") out.allowed += n;
+          else if (r.state === "deny") out.denied += n;
+          else if (r.state === "pending") out.pending += n;
+          else if (r.state === "failed") {
+            out.fellBack += n;
+            const k = r.reason ?? "no reason recorded";
+            reasons.set(k, (reasons.get(k) ?? 0) + n);
+          }
+          if ((r.state === "allow" || r.state === "deny") && (r.verdict === "allow" || r.verdict === "deny")) {
+            out.bothVerdicts += n;
+            if (r.state === r.verdict) out.agreed += n;
+          }
+          if (r.state !== "pending") days.set(r.day, (days.get(r.day) ?? 0) + n);
         }
-      }
-      out.answered = out.allowed + out.denied;
-      out.reasons = out.reasons.sort((a, b) => b.count - a.count).slice(0, 3);
-      return out;
+        out.answered = out.allowed + out.denied;
+        // null means "not recorded": no card in the window kept both verdicts, so no rate is guessed.
+        out.agreement = out.bothVerdicts > 0 ? out.agreed / out.bothVerdicts : null;
+        out.reasons = [...reasons].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count).slice(0, 5);
+        if (withDays) {
+          // Every day of the window, oldest first, so empty days show as gaps in the strip.
+          const nDays = Math.round(hours / 24);
+          const end = now().getTime();
+          for (let i = nDays - 1; i >= 0; i--) {
+            const d = new Date(end - i * 86_400_000).toISOString().slice(0, 10);
+            out.perDay.push({ day: d, cards: days.get(d) ?? 0 });
+          }
+        }
+        return out;
+      };
+      const last24h = await window(24, false);
+      // The 24 h fields also stay at the top level, as before, so any older reader keeps working.
+      return { ...last24h, last24h, last7d: await window(24 * 7, true), last30d: await window(24 * 30, true) };
     },
 
     /** The Test button: a harmless sample card, with the settings given (saved or not). */

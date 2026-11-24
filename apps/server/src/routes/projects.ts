@@ -14,7 +14,8 @@ import type { launcherService } from "../services/launcher.js";
 import { record } from "../services/activity.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
 import { summarizeCostChecks } from "../services/cost-check.js";
-import { monthStartUtc, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
+import { monthStartUtc, projectMonthlyTrend, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
+import { validZone } from "../services/spend-report.js";
 import type { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { runnersService } from "../services/runners.js";
 import type { secretsService } from "../services/secrets.js";
@@ -127,6 +128,46 @@ export function projectRoutes(
     return db.select().from(projects).where(eq(projects.companyId, id)).orderBy(projects.name);
   });
 
+  // One summary per project for the Projects list in settings (BOS-2421): open work, points left, finished in 30 days, this month's spend
+  // (the same projectSpendMicros the budget page uses), and the last merge. One request for the whole company.
+  owner.get("/api/companies/:id/projects-summary", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    const t = deps.now ? deps.now() : new Date();
+    const monthStart = monthStartUtc(t);
+    const since = new Date(t.getTime() - 30 * 86_400_000);
+    const open = sql`${tickets.systemState} <> 'done'`;
+    const rows = await db
+      .select({
+        projectId: projects.id,
+        monthlyCap: projects.monthlyCapMicros,
+        open: sql<string>`count(${tickets.id}) filter (where ${open})`,
+        inReview: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'review')`,
+        points: sql<string>`coalesce(sum(${tickets.size}) filter (where ${open}), 0)`,
+        unsized: sql<string>`count(${tickets.id}) filter (where ${open} and ${tickets.size} is null)`,
+        finished: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled' and ${tickets.stateChangedAt} >= ${since})`,
+        lastMergeAt: sql<Date | null>`max(${tickets.mergedAt})`,
+      })
+      .from(projects)
+      .leftJoin(tickets, eq(tickets.projectId, projects.id))
+      .where(eq(projects.companyId, id))
+      .groupBy(projects.id, projects.monthlyCapMicros);
+    const out = [];
+    for (const r of rows) {
+      out.push({
+        projectId: r.projectId,
+        open: Number(r.open),
+        inReview: Number(r.inReview),
+        pointsLeft: Number(r.points),
+        unsized: Number(r.unsized),
+        finishedLast30Days: Number(r.finished),
+        monthMicros: await projectSpendMicros(db, r.projectId, monthStart),
+        monthlyCapMicros: r.monthlyCap,
+        lastMergeAt: r.lastMergeAt ? new Date(r.lastMergeAt).toISOString() : null,
+      });
+    }
+    return { projects: out };
+  });
+
   owner.post("/api/companies/:id/projects", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);
@@ -228,7 +269,10 @@ export function projectRoutes(
     const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
     // The cost sanity check (BOS-1866): runs on this project's tasks whose recorded cost disagrees with their tokens at list price, and runs not checked.
     const costCheck = await summarizeCostChecks(db, sql`${runsTable.ticketId} in (select ${tickets.id} from ${tickets} where ${tickets.projectId} = ${id})` as ReturnType<typeof and>);
-    return { costCheck, tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
+    // Month by month for the last 6 months, in the owner's time zone (the browser sends ?tz=, as the Spend page does; BOS-2369).
+    const tz = (req.query as { tz?: string }).tz;
+    const months = await projectMonthlyTrend(db, id, { timeZone: validZone(typeof tz === "string" ? tz : undefined), now: t });
+    return { months, costCheck, tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
   });
 
   // The setup wizard (R56): where the owner is in it, and what's still to do for a company.

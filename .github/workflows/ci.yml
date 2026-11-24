@@ -61,13 +61,12 @@ jobs:
             printf 'check=true\nimages=false\nhoststeps=true\nweb=true\n' >>"$GITHUB_OUTPUT"; exit 0
           fi
           # A gate push (bossman-ci/**) or a pull request's branch push (bossman/**): the gate waits on these runs, so
-          # check, web and host-steps always run (BOS-1070). Images only when the change touches their paths: for the
-          # gate's merge commit that is its diff against the first parent (main); for a branch, against where it left main.
+          # check, web and host-steps always run (BOS-1070). Images only when the change touches their paths: the diff
+          # against where the commit left main. For the gate's merge commit that is its first parent (main), except on the
+          # merge train (BOS-2360), where the commit is stacked on the merge commits of the tickets ahead: its first parent
+          # is then the ticket ahead, and a diff against it would miss their image changes, which this run also covers.
           case "$GITHUB_EVENT_NAME:$GITHUB_REF" in push:refs/heads/bossman-ci/* | push:refs/heads/bossman/*)
-            case "$GITHUB_REF" in
-              refs/heads/bossman-ci/*) base="$(git rev-parse --verify -q "$GITHUB_SHA^1")" || base= ;;
-              *) base="$(git merge-base origin/main "$GITHUB_SHA")" || base= ;;
-            esac
+            base="$(git merge-base origin/main "$GITHUB_SHA")" || base=
             # No base to diff against (should not happen with fetch-depth 0): build the images rather than skip them.
             images=true
             if [ -n "$base" ]; then
@@ -402,7 +401,7 @@ jobs:
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break; sleep 1; done
           reg=localhost:5000/ci
           images='[]'
-          for pair in server:boss-man-server:ci launcher:boss-man-launcher:current netguard:boss-man-netguard:current runner:boss-man-runner:ci; do
+          for pair in server:boss-man-server:ci launcher:boss-man-launcher:current netguard:boss-man-netguard:current runner:boss-man-runner:ci updater:boss-man-updater:ci; do
             short="${pair%%:*}"; local_tag="${pair#*:}"
             docker tag "$local_tag" "$reg/boss-man-$short:ci"
             docker push -q "$reg/boss-man-$short:ci" >/dev/null

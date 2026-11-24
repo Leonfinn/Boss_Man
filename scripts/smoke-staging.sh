@@ -11,6 +11,7 @@
 # Sign-in checks use an optional smoke account: SMOKE_CREDENTIALS names a root-only file with two lines,
 # smoke_username=<name> and smoke_password=<password>. The values are only ever sent to staging's own address and
 # never printed. Without the file those checks are "skipped: not set up", never a failure.
+# With no company on staging, the check makes a staging-only company and project (BOS-2405); SMOKE_RUNNER_WAIT (seconds, default 120) is how long it waits for that company's runner to connect.
 # Other environment: SMOKE_TIMEOUT (seconds per request, default 10), SMOKE_WAIT (seconds to wait for the address, default 60),
 # SMOKE_PRODUCTION_PROJECT (compose project whose containers must not change, default boss-man).
 set -uo pipefail
@@ -46,6 +47,9 @@ BIND="$(env_get BOSSMAN_BIND)"; PORT="$(env_get BOSSMAN_HOST_PORT)"
 case ${BIND:-} in "" | 0.0.0.0) BIND=127.0.0.1 ;; esac
 [[ ${PORT:-} =~ ^[0-9]{2,5}$ ]] || { report address fail "BOSSMAN_HOST_PORT is not set in the staging .env."; exit 1; }
 BASE="http://$BIND:$PORT"
+SMOKE_COMPANY="Staging smoke check company" SMOKE_PROJECT="Staging smoke check project"
+RUNNER_WAIT="${SMOKE_RUNNER_WAIT:-120}"
+[[ $RUNNER_WAIT =~ ^[0-9]{1,4}$ ]] || { echo "ERROR: SMOKE_RUNNER_WAIT must be a whole number." >&2; exit 2; }
 JAR="$(mktemp)"; trap 'rm -f "$JAR"' EXIT
 api() { curl -sS --max-time "$TIMEOUT" -b "$JAR" -c "$JAR" -H 'Content-Type: application/json' "$@"; }
 
@@ -110,8 +114,33 @@ else
     companies="$(api "$BASE/api/companies" 2>/dev/null)"
     pid="$(grep -oE '"projects":\[\{"id":"[0-9a-f-]{36}"' <<<"$companies" | head -n 1 | grep -oE '[0-9a-f-]{36}')"
     cid="$(grep -oE '"projects":\[\{"id":"[0-9a-f-]{36}","companyId":"[0-9a-f-]{36}"' <<<"$companies" | head -n 1 | grep -oE '[0-9a-f-]{36}"$' | tr -d '"')"
+    # Staging has no company (a new host, or its data was reset): make a staging-only company and project, once.
+    # No repo link, no secrets, no integrations. An earlier run's company is found by its name and reused, never duplicated.
+    made_company="" setup_fail="" relaunch=""
     if [[ -z $pid ]]; then
-      report ticket skipped "no staging company with a project yet"
+      if [[ -z $cid ]]; then
+        # The company list puts a company's own id before its name, so this finds the smoke company even without a project.
+        cid="$(grep -oE "\"id\":\"[0-9a-f-]{36}\"[^{}]*\"name\":\"$SMOKE_COMPANY\"" <<<"$companies" | head -n 1 | grep -oE '^"id":"[0-9a-f-]{36}"' | grep -oE '[0-9a-f-]{36}')"
+        if [[ -z $cid ]]; then
+          if [[ $companies == *"\"name\":\"$SMOKE_COMPANY\""* ]]; then setup_fail="a company named \"$SMOKE_COMPANY\" exists but its id could not be read"
+          else
+            mc="$(printf '{"name":"%s","mission":"Made by the staging smoke check. Safe to delete."}' "$SMOKE_COMPANY" | api --data-binary @- "$BASE/api/companies" 2>/dev/null)"
+            cid="$(grep -oE '"company":\{"id":"[0-9a-f-]{36}"' <<<"$mc" | grep -oE '[0-9a-f-]{36}')"
+            if [[ $cid =~ ^[0-9a-f-]{36}$ ]]; then made_company=1; else cid=""; setup_fail="creating the staging company failed: ${mc:0:120}"; fi
+          fi
+        else relaunch=1
+        fi
+      else relaunch=1
+      fi
+      if [[ -z $setup_fail ]]; then
+        mp="$(printf '{"name":"%s"}' "$SMOKE_PROJECT" | api --data-binary @- "$BASE/api/companies/$cid/projects" 2>/dev/null)"
+        pid="$(field id <<<"$mp")"
+        [[ $pid =~ ^[0-9a-f-]{36}$ ]] || { pid=""; setup_fail="creating the staging project failed: ${mp:0:120}"; }
+      fi
+    else relaunch=1
+    fi
+    if [[ -z $pid ]]; then
+      report ticket fail "$setup_fail"
     else
       made="$(printf '{"title":"Smoke check %s"}' "${COMMIT:0:8}" | api --data-binary @- "$BASE/api/projects/$pid/tickets" 2>/dev/null)"
       tid="$(field id <<<"$made")"
@@ -121,11 +150,23 @@ else
       else report ticket fail "the ticket was not created"; fi
     fi
     if [[ $cid =~ ^[0-9a-f-]{36}$ ]]; then
-      rr="$(api "$BASE/api/companies/$cid/runner" 2>/dev/null)"
+      # A new company's runner is started by staging's launcher and takes a little while to connect: wait for it.
+      # A company that exists but has no runner (the launcher failed before) is asked to start one, once.
+      rr="" rend=$((SECONDS + RUNNER_WAIT)) asked="" launch_err=""
+      while :; do
+        rr="$(api "$BASE/api/companies/$cid/runner" 2>/dev/null)"
+        [[ $(field connected <<<"$rr") == true ]] && break
+        if [[ -z $asked && -n $relaunch && $(field registered <<<"$rr") != true ]]; then
+          asked=1; lr="$(api -X POST "$BASE/api/companies/$cid/runner/launch" 2>/dev/null)"
+          [[ $lr != *'"error"'* ]] || launch_err=" (starting it failed: ${lr:0:100})"
+        fi
+        ((SECONDS < rend)) || break; sleep 2
+      done
       img="$(field imageVersion <<<"$rr")"
-      if [[ $(field connected <<<"$rr") == true ]]; then report runner pass "runner connected${img:+, image $img}"; else report runner fail "the staging runner is not connected"; fi
+      if [[ $(field connected <<<"$rr") == true ]]; then report runner pass "runner connected${img:+, image $img}${made_company:+ (staging company made by this check)}"
+      else report runner fail "the staging runner is not connected after ${RUNNER_WAIT}s$launch_err"; fi
     else
-      report runner skipped "no staging company yet"
+      report runner fail "no staging company to check: ${setup_fail:-it could not be made}"
     fi
   else
     hint=""

@@ -15,7 +15,7 @@ import type { Db } from "../db/client.js";
 import { linkedSlugs, liveWikiPage } from "./wiki.js";
 import { checkJobsByCompany, updateWaitCountsRun } from "./runner-busy.js";
 import { pickAccount } from "./claude-accounts.js";
-import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, reviewRequests, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingQuotaHolds, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, reviewRequests, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -477,6 +477,8 @@ export function schedulerService(
           })
           .catch((err) => deps.log?.(`quota hold notification failed: ${(err as Error).message}`));
         await db.update(fundingSources).set({ quotaHeldNotified: true }).where(eq(fundingSources.id, source.id));
+        // For the "Last 8 weeks" fold on the Funding page: when this hold began.
+        await db.insert(fundingQuotaHolds).values({ fundingSourceId: source.id, window: first.window, startedAt: t });
       }
       if (!held && source.quotaHeldNotified) {
         await deps
@@ -489,6 +491,7 @@ export function schedulerService(
           })
           .catch((err) => deps.log?.(`quota release notification failed: ${(err as Error).message}`));
         await db.update(fundingSources).set({ quotaHeldNotified: false }).where(eq(fundingSources.id, source.id));
+        await db.update(fundingQuotaHolds).set({ endedAt: t }).where(and(eq(fundingQuotaHolds.fundingSourceId, source.id), isNull(fundingQuotaHolds.endedAt)));
       }
       if (overage && !source.quotaOverageNotified) {
         await deps

@@ -47,6 +47,23 @@ Check before committing: pnpm --filter @boss-man/site build (it stops on a headi
 - The website install guide now leads with the ready-made Docker image install, keeping build-from-source as a second option.
 - A new website guide explains moving a company from Paperclip, and the Paperclip guide now marks the export step confirmed on TrueNAS, adds an scp copy step, and runs the issues export from a throwaway Postgres container.
 - Each release now runs an install test on a clean machine, and the install guide shows the date of the latest test, whether it passed and how long the install took.
+- The Merge queue page shows which ticket holds the landing turn, what it is waiting for, and roughly when it and the tickets behind it will land.
+- On the Board, clicking "N looks stuck" shows only those cards, with "Show all" to go back.
+- Settings has a "Find a setting" box that narrows the menu by name, hint, help text and "On this page" entries.
+- On the Dashboard, "N failed in 14 days" opens the Runs page already filtered to failed runs.
+- Ctrl+K search now also finds agents and skills, each in its own group.
+- The public roadmap portal's Released tab is now "What's new", with month headings and dates, and visitors can follow new releases in a feed reader.
+- On the Roadmap, each milestone shows points done and left and an expected finish date at the last 4 weeks' pace, marked when that is after the target date.
+- The Runs page has a "Waiting to start" list: which agents are queued, for which ticket, why, and how long they have waited.
+- Settings → Tools → Deploy targets has "Deploy this version again" on a past successful deploy, a way back after a bad deploy. It still needs your approval.
+- The Spend report has a "Costliest tickets" table for the chosen period, each linking to its ticket.
+- A wiki page has a "Links" section: the pages it links to, with missing pages marked, and the pages that link to it.
+- The Notifications page has a search box that finds notices by words in their title or text.
+- Keyboard shortcuts on the Runs and Features pages: j and k move between rows, Enter opens one, and "?" lists the keys.
+- The Skills page shows each skill's history: when it changed, who changed it, and a fold showing what changed.
+- A run's page shows its model, tokens and cost in one line, and says "not reported" for any figure the harness did not give.
+- The Workflow report has a "Week by week" table for the last 8 weeks.
+- The card asking for a second GitHub account token now asks for a classic token (repo and workflow), because a collaborator cannot make a fine-grained one for the repo.
 
 ## 22 November 2026
 

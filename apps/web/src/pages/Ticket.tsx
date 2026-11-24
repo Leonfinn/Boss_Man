@@ -13,6 +13,8 @@ import { BranchOverlaps } from "../components/BranchOverlaps";
 import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
 import { TicketRecord } from "../components/TicketRecord";
+import { TicketChecks } from "../components/TicketChecks";
+import { TicketStateHistory } from "../components/TicketStateHistory";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { criterionText, criteriaText, goLiveWaitWords, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
@@ -857,6 +859,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         <div className="ticket-main">
           <TicketOpenCards ticketId={t.id} />
           <TicketRecord ticketId={t.id} />
+          <TicketChecks ticketId={t.id} />
+          <TicketStateHistory ticketId={t.id} />
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>

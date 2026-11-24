@@ -214,10 +214,15 @@ export function serverAdminRoutes(
     const { companyId } = z.object({ companyId: Uuid }).parse(req.body);
     return deploysSvc.redeploy(companyId, id).then((r) => reply.code(201).send(r)).catch(deployErrors(reply));
   });
+  // The last 30 days of one target's deploys: counts, median time to finish, last success.
+  owner.get("/api/deploys/summary", async (req) => {
+    const { targetId } = z.object({ targetId: Uuid }).parse(req.query);
+    return deploysSvc.summary(targetId);
+  });
   owner.get("/api/deploys", async (req) => {
-    const q = z.object({ companyId: Uuid.optional(), targetId: Uuid.optional(), limit: z.coerce.number().int().min(1).optional(), before: Uuid.optional() }).parse(req.query);
+    const q = z.object({ companyId: Uuid.optional(), targetId: Uuid.optional(), limit: z.coerce.number().int().min(1).optional(), before: Uuid.optional(), status: z.enum(["succeeded", "failed"]).optional() }).parse(req.query);
     // No paging parameters: the whole list, as before. Any of them: one newest-first page.
-    const paged = q.targetId !== undefined || q.limit !== undefined || q.before !== undefined;
-    return deploysSvc.list(q.companyId, paged ? { targetId: q.targetId, limit: q.limit, before: q.before } : undefined);
+    const paged = q.targetId !== undefined || q.limit !== undefined || q.before !== undefined || q.status !== undefined;
+    return deploysSvc.list(q.companyId, paged ? { targetId: q.targetId, limit: q.limit, before: q.before, status: q.status } : undefined);
   });
 }

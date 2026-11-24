@@ -75,6 +75,7 @@ import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { limitRequeue } from "./services/limit-requeue.js";
+import { runErrorRetry } from "./services/run-error-retry.js";
 import { record } from "./services/activity.js";
 import { branchOverlapView } from "./services/branch-overlaps.js";
 import { chooseFence, chooseGuard, closeFenceCard, closeFenceUnavailableCard, featureStates } from "./services/fence-default.js";
@@ -857,6 +858,8 @@ export async function buildApp(opts: AppOptions) {
           }
         })
         .then(() => limitRequeues.releaseReady())
+        // A passing error resumes the run by itself, twice an hour per ticket at most; any other error is a CEO card now (BOS-2357).
+        .then(() => (event.interrupted || !event.error ? null : runErrorRetries.afterRun(event.runId)))
         // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
         .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
@@ -1029,6 +1032,7 @@ export async function buildApp(opts: AppOptions) {
   // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
   // funding source, or the one the run used when it says so.
   const limitRequeues = limitRequeue(db, { now: opts.now ?? (() => new Date()) });
+  const runErrorRetries = runErrorRetry(db, { now: opts.now ?? (() => new Date()), resume: (runId) => recovery.onInterrupted(runId), alert: (input) => alerts.raise(input) });
   const loops = loopGuards(db, {
     limits: opts.loopLimits,
     now: opts.now,
@@ -2717,9 +2721,9 @@ export async function buildApp(opts: AppOptions) {
     // (BOS-2187) Past answers, newest first, 50 at a time: pass the last page's `next` as `cursor`.
     owner.get("/api/decisions/answered", async (req) => {
       const q = z
-        .object({ cursor: z.string().max(100).optional(), q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional(), companyId: z.string().uuid().optional(), id: z.string().uuid().optional() })
+        .object({ cursor: z.string().max(100).optional(), q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).optional(), companyId: z.string().uuid().optional(), id: z.string().uuid().optional(), by: z.enum(["owner", "ceo", "auto", "withdrawn"]).optional(), kind: z.string().max(60).optional(), weeks: z.coerce.number().int().min(1).max(8).optional() })
         .parse(req.query ?? {});
-      return decisionsSvc.answeredList({ ...(q.cursor ? { cursor: q.cursor } : {}), ...(q.q ? { q: q.q } : {}), ...(q.limit ? { limit: q.limit } : {}), ...(q.companyId ? { companyId: q.companyId } : {}), ...(q.id ? { id: q.id } : {}) });
+      return decisionsSvc.answeredList({ ...(q.by ? { by: q.by } : {}), ...(q.kind ? { kind: q.kind } : {}), ...(q.weeks ? { weeks: q.weeks } : {}), ...(q.cursor ? { cursor: q.cursor } : {}), ...(q.q ? { q: q.q } : {}), ...(q.limit ? { limit: q.limit } : {}), ...(q.companyId ? { companyId: q.companyId } : {}), ...(q.id ? { id: q.id } : {}) });
     });
 
     // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).

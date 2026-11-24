@@ -202,7 +202,8 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
       `<updated>${(entries[0]?.releasedAt ?? new Date(0)).toISOString()}</updated>`,
       `<link rel="self" type="application/atom+xml" href="${xmlEscape(`${base}/api/portal/feed.atom`)}"/>`,
       `<link rel="alternate" type="text/html" href="${xmlEscape(home)}"/>`,
-      ...entries.map((e) => `<entry><title>${xmlEscape(e.title)}</title><id>urn:uuid:${e.id}</id><updated>${e.releasedAt.toISOString()}</updated><link rel="alternate" type="text/html" href="${xmlEscape(home)}"/><summary>${xmlEscape(e.summary)}</summary></entry>`),
+      // BOS-2391: each entry's id and link are that feature's own link (the page opens on its card).
+      ...entries.map((e) => `<entry><title>${xmlEscape(e.title)}</title><id>${xmlEscape(`${home}#feature-${e.id}`)}</id><updated>${e.releasedAt.toISOString()}</updated><link rel="alternate" type="text/html" href="${xmlEscape(`${home}#feature-${e.id}`)}"/><summary>${xmlEscape(e.summary)}</summary></entry>`),
       `</feed>`,
     ].join("\n");
     return reply.type("application/atom+xml; charset=utf-8").send(xml);

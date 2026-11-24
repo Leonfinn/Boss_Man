@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, costEvents, fundingSources, projects, runs, tickets } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, costEvents, fundingSources, projects, runners as runnersT, runs, ticketTransitions, tickets } from "../src/db/schema.js";
 import { eq } from "drizzle-orm";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -59,5 +59,70 @@ describe("ticket record (BOS-2175)", () => {
     await ctx.db.update(projects).set({ ticketCostCapMicros: 3_000_000 }).where(eq(projects.id, ctx.project.id));
     expect((await ctx.req("GET", `/api/tickets/${ctx.ticketId}/record`)).json().capMicros).toBe(3_000_000);
     expect((await ctx.req("GET", `/api/tickets/${crypto.randomUUID()}/record`)).statusCode).toBe(404);
+  });
+});
+
+describe("ticket checks list (BOS-2371)", () => {
+  it("is empty for a ticket with no checks, and 404 for an unknown ticket", async () => {
+    expect((await ctx.req("GET", `/api/tickets/${ctx.ticketId}/checks`)).json()).toEqual({ checks: [] });
+    expect((await ctx.req("GET", `/api/tickets/${crypto.randomUUID()}/checks`)).statusCode).toBe(404);
+  });
+
+  it("lists every check newest first with what, machine and the first failing line", async () => {
+    const co = ctx.co.company.id;
+    const [worker] = await ctx.db.insert(checkWorkers).values({ name: "Big box", tokenHash: "h1" }).returning();
+    const [runner] = await ctx.db.insert(runnersT).values({ companyId: co, tokenHash: "h2" }).returning();
+    const base = { companyId: co, projectId: ctx.project.id, ticketId: ctx.ticketId, commit: "c", tree: "t" };
+    const at = (minsAgo: number) => new Date(Date.UTC(2026, 10, 20, 12, 0) - minsAgo * 60_000);
+    await ctx.db.insert(checkJobs).values({ ...base, kind: "pre_review", scope: "quick", state: "failed", runnerId: runner!.id, queuedAt: at(30), startedAt: at(29), endedAt: at(25), logTail: "ok one\n FAIL  test/foo.test.ts > adds up\nmore" });
+    await ctx.db.insert(checkJobs).values({ ...base, kind: "merge", state: "stuck", workerId: worker!.id, queuedAt: at(20), startedAt: at(19), endedAt: at(10), reason: "no output for 15 minutes" });
+    await ctx.db.insert(checkJobs).values({ ...base, kind: "pre_review", scope: "full", state: "passed", workerId: worker!.id, queuedAt: at(9), startedAt: at(8), endedAt: at(2), logTail: "error: noise in a passing log" });
+    await ctx.db.insert(checkJobs).values({ ...base, kind: "merge", state: "running", runnerId: runner!.id, queuedAt: at(1.5), startedAt: at(1) });
+    await ctx.db.insert(checkJobs).values({ ...base, kind: "pre_review", scope: "quick", state: "queued", queuedAt: at(1) });
+    // Another ticket's check must not show.
+    const [other] = await ctx.db.insert(tickets).values({ companyId: co, projectId: ctx.project.id, title: "Other" }).returning();
+    await ctx.db.insert(checkJobs).values({ ...base, ticketId: other!.id, kind: "merge", state: "failed" });
+
+    const { checks } = (await ctx.req("GET", `/api/tickets/${ctx.ticketId}/checks`)).json() as { checks: Array<Record<string, unknown>> };
+    expect(checks.map((c) => [c.what, c.state, c.machine])).toEqual([
+      ["quick", "queued", null],
+      ["merge", "running", "company runner"],
+      ["full", "passed", "Big box"],
+      ["merge", "stuck", "Big box"],
+      ["quick", "failed", "company runner"],
+    ]);
+    expect(checks[0]!.startedAt).toBeNull();
+    expect(checks[1]).toMatchObject({ startedAt: at(1).toISOString(), endedAt: null, firstLine: null }); // running: the page counts to now
+    expect(checks[2]!.firstLine).toBeNull(); // a passed check has no failing line, whatever its log says
+    expect(checks[3]!.firstLine).toBe("no output for 15 minutes"); // no log: the recorded reason
+    expect(checks[4]!.firstLine).toContain("test/foo.test.ts");
+    expect(checks[4]).toMatchObject({ startedAt: at(29).toISOString(), endedAt: at(25).toISOString() });
+  });
+
+  it("stops at the newest 50", async () => {
+    const base = { companyId: ctx.co.company.id, projectId: ctx.project.id, ticketId: ctx.ticketId, kind: "pre_review", commit: "c", tree: "t", state: "passed" };
+    await ctx.db.insert(checkJobs).values(Array.from({ length: 51 }, (_, i) => ({ ...base, queuedAt: new Date(Date.UTC(2026, 10, 20, 12, i)) })));
+    const { checks } = (await ctx.req("GET", `/api/tickets/${ctx.ticketId}/checks`)).json() as { checks: Array<{ queuedAt: string }> };
+    expect(checks).toHaveLength(50);
+    expect(checks[0]!.queuedAt).toBe(new Date(Date.UTC(2026, 10, 20, 12, 50)).toISOString());
+    expect(checks.at(-1)!.queuedAt).toBe(new Date(Date.UTC(2026, 10, 20, 12, 1)).toISOString());
+  });
+});
+
+describe("ticket state history (BOS-2419)", () => {
+  it("lists the ticket's transitions oldest first, flags a history that starts mid-way, and 404s an unknown ticket", async () => {
+    const co = ctx.co.company.id;
+    const rows = async () => (await ctx.req("GET", `/api/tickets/${ctx.ticketId}/state-history`)).json() as { complete: boolean; transitions: Array<{ from: string | null; to: string }> };
+    await ctx.db.delete(ticketTransitions).where(eq(ticketTransitions.ticketId, ctx.ticketId));
+    expect(await rows()).toMatchObject({ complete: false, transitions: [] });
+    const base = { companyId: co, ticketId: ctx.ticketId };
+    await ctx.db.insert(ticketTransitions).values({ ...base, fromState: "review", toState: "in_progress", at: new Date(2000) });
+    await ctx.db.insert(ticketTransitions).values({ ...base, fromState: "backlog", toState: "review", at: new Date(1000) });
+    const mid = await rows();
+    expect(mid.complete).toBe(false);
+    expect(mid.transitions.map((t) => t.to)).toEqual(["review", "in_progress"]);
+    await ctx.db.insert(ticketTransitions).values({ ...base, fromState: null, toState: "backlog", at: new Date(500) });
+    expect((await rows()).complete).toBe(true);
+    expect((await ctx.req("GET", `/api/tickets/${crypto.randomUUID()}/state-history`)).statusCode).toBe(404);
   });
 });

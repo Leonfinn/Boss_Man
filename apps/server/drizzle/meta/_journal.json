@@ -1223,8 +1223,22 @@
     {
       "idx": 193,
       "version": "7",
-      "when": 1795469438498,
-      "tag": "0193_update_holds",
+      "when": 1795467093073,
+      "tag": "0193_funding_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 194,
+      "version": "7",
+      "when": 1795480896145,
+      "tag": "0194_server_size_readings",
+      "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1795503543088,
+      "tag": "0195_update_holds",
       "breakpoints": true
     }
   ]

@@ -11,6 +11,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
 import { PERMISSION_REPORT_MAX_HOURS, permissionReport } from "../services/permission-report.js";
+import { mostAskedCards, ruleUsage } from "../services/permission-store.js";
 import { RuleError, type policyRulesService } from "../services/policy-rules.js";
 import { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { schedulerService } from "../services/scheduler.js";
@@ -117,6 +118,10 @@ export function policyRoutes(
     if (err instanceof RuleError) return reply.code(err.status).send({ error: "rejected", message: err.message });
     throw err;
   };
+  // How often each rule matched in the last 7 and 30 days (BOS-2372). Read-only.
+  owner.get("/api/policy-rules/usage", async (req) => ({ rules: await ruleUsage(db, z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null) }));
+  // The 10 kinds of request that reached the owner or the CEO most in the last 30 days (BOS-2418). Read-only.
+  owner.get("/api/policy-rules/most-asked", async (req) => ({ cards: await mostAskedCards(db, z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null) }));
   owner.get("/api/policy-rules", async (req) => rules.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null));
   // Every change leaves a "settings" activity line (BOS-1963). A rule for every company (companyId null)
   // has no single company, so the same line is recorded against each company.

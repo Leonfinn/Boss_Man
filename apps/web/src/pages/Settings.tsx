@@ -13,7 +13,7 @@ import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settin
 import { Watchdog } from "./settings/Watchdog";
 import { CeoApprovals, CompanyPause, GoalCheck,StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
+import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy, ServerHealth } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
 import { Account } from "./settings/Account";
@@ -359,13 +359,14 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
       <>
         <SelfDeploy go={go} />
         <StopAllWork />
+        <ServerHealth />
       </>
     ),
     limits: (
       <>
         <RunLimits updatesHref={companyId ? `#/${settingsPath(companyId, "updates")}` : undefined} />
         <WipLimits company={company ?? undefined} onChanged={onChanged} />
-        <CheckQueueSetting />
+        <CheckQueueSetting companyId={companyId ?? undefined} />
       </>
     ),
     runner: company ? (

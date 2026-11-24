@@ -1,5 +1,6 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
+import { useEffect, useState } from "react";
 import { setCompanyPause } from "./settings/Team";
 import { api, type Company, type Decision, type DecisionTally, type RunRow } from "../api";
 import { NoCompany } from "../components/NoCompany";
@@ -121,6 +122,48 @@ function SuccessChart({ days }: { days: Day[] }) {
         <span>{label(String(rates.at(-1)?.day ?? ""))}</span>
       </div>
     </figure>
+  );
+}
+
+type WeekView = { week: "this" | "last"; merged: Array<{ title: string; feature: string | null; id?: string }>; spentMicros: number; beforeMicros: number; released: string[]; waiting: number; oldestWaitingMs: number | null; text: string };
+const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+
+/** One fold of the weekly summary (BOS-2390): loads its week when first opened; the same facts the Monday email carries. */
+export function WeekFold({ companyId, week, title }: { companyId: string; week: "this" | "last"; title: string }) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<WeekView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => {
+    setError(null);
+    api<WeekView>(`/api/companies/${companyId}/weekly-summary/view?week=${week}`).then(setView, (e: Error) => setError(e.message));
+  };
+  useEffect(() => {
+    if (open && !view) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  const hours = view?.oldestWaitingMs != null ? Math.max(1, Math.round(view.oldestWaitingMs / 3_600_000)) : 0;
+  return (
+    <details className="card fold" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>{title}</summary>
+      <div style={{ padding: "0 18px 14px" }}>
+        {error ? <LoadError what="this summary" message={error} onRetry={load} /> : !view ? <p className="muted">{open ? "Loading…" : ""}</p> : (
+          <>
+            <p>Merged: {view.merged.length === 0 ? "nothing" : `${view.merged.length} ticket${view.merged.length === 1 ? "" : "s"}`}</p>
+            {view.merged.length > 0 && (
+              <ul>
+                {view.merged.slice(0, 10).map((m, i) => (
+                  <li key={m.id ?? i}>{m.id ? <a href={`#/tickets/${m.id}`}>{m.title}</a> : m.title}{m.feature ? <span className="muted"> · {m.feature}</span> : null}</li>
+                ))}
+                {view.merged.length > 10 && <li className="muted">and {view.merged.length - 10} more</li>}
+              </ul>
+            )}
+            <p>Spent: {usd(view.spentMicros)} <span className="muted">(the week before: {usd(view.beforeMicros)})</span></p>
+            {view.released.length > 0 && <p>Features released: {view.released.join(", ")}</p>}
+            <p>{view.waiting ? `Waiting for you now: ${view.waiting} card${view.waiting === 1 ? "" : "s"}, oldest ${hours} hour${hours === 1 ? "" : "s"}` : "Nothing is waiting for you."}</p>
+          </>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -291,6 +334,14 @@ export function Dashboard({ company, decisions = null, tally = null, onChanged }
           <p className="muted">What happened recently is in <a href="#/notifications">Notifications</a>.</p>
         </section>
       </div>
+
+      <section aria-labelledby="dash-weekly">
+        <h2 id="dash-weekly" className="section-label">
+          Weekly summary
+        </h2>
+        <WeekFold companyId={company.id} week="this" title="This week so far" />
+        <WeekFold companyId={company.id} week="last" title="Last week" />
+      </section>
     </>
   );
 }

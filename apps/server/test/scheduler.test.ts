@@ -5,7 +5,7 @@ import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { appCache, sharedDatabase } from "./helpers/shared-server.js";
-import { activity, decisions, fundingSources, notifications, nudges, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, fundingQuotaHolds, fundingSources, notifications, nudges, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -438,10 +438,13 @@ describe("scheduler", () => {
     await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.99) });
     await ctx.tick();
     expect((await ctx.db.select().from(notifications)).filter((n) => /Routine work paused/.test(n.title))).toHaveLength(1);
+    // The funding page's history records the hold as open.
+    expect((await ctx.db.select().from(fundingQuotaHolds)).map((h) => [h.window, h.endedAt])).toEqual([["seven_day", null]]);
     await new Promise((r) => setTimeout(r, 5));
     await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.2) });
     await ctx.tick();
     expect((await ctx.db.select().from(notifications)).filter((n) => /running again/.test(n.title))).toHaveLength(1);
+    expect((await ctx.db.select().from(fundingQuotaHolds))[0]!.endedAt).not.toBeNull();
   });
 
   it("says once that extra-usage credits are being used", async () => {
@@ -1079,6 +1082,49 @@ describe("scheduler", () => {
     expect(ctx.commands).toHaveLength(1);
     const launched = (await ctx.db.select().from(wakes)).filter((w) => w.status === "launched");
     expect(launched).toHaveLength(1);
+  });
+
+  it("Start now launches a held wake at once when a slot is free, logging the owner's reason (BOS-2328)", async () => {
+    ctx = await setup({ company: 1 });
+    const w = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    await ctx.db.update(wakes).set({ status: "deferred", statusReason: "quiet hours", notBefore: new Date(Date.now() + 3_600_000) }).where(eq(wakes.id, w.id));
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(0); // held until its time
+    const res = await ctx.req("POST", `/api/companies/${ctx.company.id}/wakes/${w.id}/start-now`, { reason: "needed now" });
+    expect(res.json()).toMatchObject({ ok: true, started: true });
+    expect(ctx.commands).toHaveLength(1);
+    const rows = await ctx.db.select().from(activity).where(eq(activity.kind, "wake_start_now"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.summary).toContain("needed now");
+  });
+
+  it("Start now never goes over the company limit: the wake stays waiting and the route says so (BOS-2328)", async () => {
+    ctx = await setup({ company: 1 });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(1); // the one slot is full
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const w = await ctx.scheduler.wake({ agentId: worker.id, reason: "x" });
+    const res = await ctx.req("POST", `/api/companies/${ctx.company.id}/wakes/${w.id}/start-now`, {});
+    expect(res.json()).toMatchObject({ ok: true, started: false });
+    expect(res.json().waitingReason).toBeTruthy();
+    expect(ctx.commands).toHaveLength(1);
+  });
+
+  it("Cancel removes only that wake; start-now and cancel refuse another company's wake (BOS-2328)", async () => {
+    ctx = await setup({ company: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const a = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    const b = await ctx.scheduler.wake({ agentId: worker.id, reason: "y" });
+    const other = "00000000-0000-4000-8000-000000000009";
+    expect((await ctx.req("POST", `/api/companies/${other}/wakes/${a.id}/cancel`, {})).statusCode).toBe(404);
+    expect((await ctx.req("POST", `/api/companies/${other}/wakes/${a.id}/start-now`, {})).statusCode).toBe(404);
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.id, a.id))).toHaveLength(1);
+    expect((await ctx.req("POST", `/api/companies/${ctx.company.id}/wakes/${a.id}/cancel`, { reason: "no longer wanted" })).statusCode).toBe(200);
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.id, a.id))).toHaveLength(0);
+    expect(await ctx.db.select().from(wakes).where(eq(wakes.id, b.id))).toHaveLength(1);
+    const rows = await ctx.db.select().from(activity).where(eq(activity.kind, "wake_cancelled"));
+    expect(rows[0]!.summary).toContain("no longer wanted");
   });
 
   it("never holds an owner chat behind the instance or company limit, but one chat per agent at a time", async () => {

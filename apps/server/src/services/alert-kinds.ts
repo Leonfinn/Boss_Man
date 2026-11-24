@@ -246,8 +246,14 @@ export const ALERT_KINDS = {
   },
   // idle-slots-alert.ts (BOS-1881): free run slots outnumbered the startable Ready tickets, with an agent idle, for 30
   // minutes. Stops at the CEO, never the owner; one card per company, closes by itself (idleSlotsGone).
+  // BOS-2358 replaced the rule: no non-chat work run for 15 minutes while a Ready or In-progress ticket of an unpaused
+  // agent waits; the card lists why each isn't running. Still the CEO's card.
   idle_slots: {
     topRung: "ceo",
+  },
+  // The same alert 30 minutes after the CEO's card, if still true: an info notice on the owner's queue (BOS-2358).
+  idle_slots_owner: {
+    topRung: "owner",
   },
   // landing-turn-eta.ts (BOS-2359): a landing turn held for more than twice the usual GitHub wait. Stops at the CEO,
   // never the owner; one card per ticket's turn, closes by itself (landingTurnEnded) when that ticket's turn ends.

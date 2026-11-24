@@ -281,6 +281,8 @@ export type Ticket = {
   body?: string | null;
   parentTitle?: string | null;
   lastActivityAt?: string;
+  /** BOS-2400: when the ticket last changed state (the board sends the whole ticket row). */
+  stateChangedAt?: string;
   /** In review with an owner sign-off decision still open (the "Your review" lane). */
   waitingOnOwner?: boolean;
   waitingDecisionId?: string | null;
@@ -364,6 +366,14 @@ export type FundingStatus = {
   daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
   /** The last 7 days per company, biggest first. */
   byCompany?: Array<{ companyId: string; name: string; runs: number; tokens: number; costMicros: number }>;
+  /** The last 8 weeks, newest first: plan use at each reset, spend and the times work was held for this source's quota. */
+  weeks?: Array<{
+    start: string;
+    end: string;
+    plans: Array<{ window: string; resets: number; peak: number; limit: number | null }>;
+    spendMicros: number;
+    holds: Array<{ window: string; startedAt: string; endedAt: string | null; ms: number }>;
+  }>;
   totalSpentMicros: number;
   coverage: string;
 };
@@ -415,12 +425,25 @@ export type RunRow = {
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };
 
-export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null };
+export type EngagementSummary = {
+  openByState: Record<string, number>;
+  waitingOnRequester: number;
+  waitingOnProvider: number;
+  waitingOnOther: number;
+  spend30dPlanUseUsd: number;
+  spend30dPayAsYouGoUsd: number;
+  medianDaysToFinish: number | null;
+  finishedCount: number;
+};
+/** `summary` rides on the first row of the owner's first page only (BOS-2427). */
+export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null; stateSince?: string; summary?: EngagementSummary | null };
 export type EngagementView = EngagementRow & {
   scope: string;
   deliverables: string | null;
   acceptanceCriteria: string[];
   spentUsd: number;
+  /** The provider's tickets doing the work; absent in the requester's view. */
+  tickets?: Array<{ id: string; ref: string | null; title: string; state: string; assignee: string | null; spentUsd: number }>;
   counterTerms: unknown;
   delivery: { summary?: string; refs?: string[] } | null;
   thread: Array<{ from: string; fromCompanyId: string; kind: string; body: string; at: string }>;
@@ -473,7 +496,8 @@ export type NotifySettings = {
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
 export type Horizon = "now" | "next" | "later";
-export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; active: number; status: MilestoneStatus; horizon: Horizon; pinned: Horizon | null; forecast: MilestoneForecast };
+export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; active: number; status: MilestoneStatus; horizon: Horizon; pinned: Horizon | null; forecast: MilestoneForecast; /** 8 weekly points, oldest first (BOS-2397). */ burnup?: BurnupPoint[] };
+export type BurnupPoint = { weekEnd: string; done: number; total: number };
 export type MilestoneForecast = { pointsDone: number; pointsLeft: number; unsized: number; pace: number; expectedFinish: string | null; daysLate: number };
 export type RoadmapObjective = {
   id: string;
@@ -589,10 +613,10 @@ export type Feature = {
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
 export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; portalUrl: string | null; confirmByEmail: boolean; confirmLinkHours: number; rememberAddressDays: number; portalAtBareAddress?: boolean; emailReady: boolean; drivers: Driver[]; areas: FeatureArea[] };
-export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number };
+export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number; features: Array<{ id: string; title: string; status: FeatureStatus }> };
 export type Insight = { id: string; noteId: string; featureId: string; importance: Importance; highlight: string | null; createdBy: string; createdAt: string };
 export type NoteDetail = {
-  note: Omit<NoteSummary, "customer" | "insightCount"> & { customerId: string | null; processedAt: string | null };
+  note: Omit<NoteSummary, "customer" | "insightCount" | "features"> & { customerId: string | null; processedAt: string | null };
   customer: { id: string; name: string; email: string | null; segment: string | null } | null;
   insights: Array<Insight & { feature: { id: string; title: string; status: FeatureStatus } }>;
   suggestions: Array<{ id: string; title: string; status: FeatureStatus; score: number; shared: string[] }>;

@@ -106,7 +106,7 @@ To turn it off, remove the `STAGING_DIR` line; nothing else changes. Roll stagin
 | `address` | `/api/health` answers |
 | `version` | the commit it reports is the commit deployed |
 | `board` | the web page loads |
-| `signin`, `ticket`, `runner` | sign in as the smoke account, create a ticket and close it, and see the staging runner connected (with its image) |
+| `signin`, `ticket`, `runner` | sign in as the smoke account, create a ticket and close it, and see the staging runner connected (with its image). If staging has no company with a project (a new host, or its data reset), the check first makes "Staging smoke check company" with "Staging smoke check project" (no repository link, no secrets, no integrations), staging's launcher starts its runner, and the check waits up to `SMOKE_RUNNER_WAIT` seconds (default 120) for it to connect. A later run reuses them, and a reset staging gets them again on the next deploy. If the company or project can't be made, `ticket` and `runner` fail with the reason; they are only skipped when sign-in itself is not set up. If staging already has a company with a project (for example one you made), that one is used and nothing is added. Needs the launcher on (`BOSSMAN_LAUNCHER=1`, as in the setup above); without it the runner check fails with "not connected". |
 | `agent_run` | always `skipped`: a real run costs model tokens, so check it by hand |
 | `production` | production's containers are the same ones that ran before the deploy |
 

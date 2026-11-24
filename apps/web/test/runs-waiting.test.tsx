@@ -45,6 +45,51 @@ describe("Runs page: Waiting to start (BOS-2320)", () => {
     expect(screen.queryByText("No agents are waiting to start.")).toBeNull();
   });
 
+  const wake = { id: "w1", agentId: "a1", agent: "Ada", ticketId: null, ticket: null, ticketRef: null, reason: "chat", status: "queued", statusReason: null, notBefore: null, createdAt: ago(3) };
+
+  it("Cancel asks for a reason, posts it, and the row goes", async () => {
+    let gone = false;
+    const posts: Array<{ url: string; body: string }> = [];
+    vi.stubGlobal("prompt", vi.fn(() => "not needed"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push({ url, body: String(init.body) });
+          gone = true;
+          return json({ ok: true });
+        }
+        return url === "/api/companies/co-1/wakes/waiting" ? json(gone ? [] : [wake]) : json([]);
+      }),
+    );
+    render(<Runs companies={companies} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.getByText("No agents are waiting to start.")).toBeTruthy());
+    expect(posts).toEqual([{ url: "/api/companies/co-1/wakes/w1/cancel", body: JSON.stringify({ reason: "not needed" }) }]);
+  });
+
+  it("Cancel does nothing when the owner dismisses the confirm", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => null));
+    const f = vi.fn(async (url: string, _init?: RequestInit) => (url === "/api/companies/co-1/wakes/waiting" ? json([wake]) : json([])));
+    vi.stubGlobal("fetch", f);
+    render(<Runs companies={companies} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(f.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === "POST")).toBe(false);
+  });
+
+  it("Start now on a wake that cannot start says it is waiting for a slot, not that it started", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => ""));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) =>
+        init?.method === "POST" ? json({ ok: true, started: false, waitingReason: "all run slots are busy" }) : url === "/api/companies/co-1/wakes/waiting" ? json([wake]) : json([]),
+      ),
+    );
+    render(<Runs companies={companies} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start now" }));
+    expect(await screen.findByText(/Not started yet: all run slots are busy/)).toBeTruthy();
+  });
+
   it("says so when nobody is waiting", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json([])));
     render(<Runs companies={companies} />);

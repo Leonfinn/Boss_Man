@@ -4,10 +4,10 @@
 // The requester sees the status and the thread, never the provider's tickets.
 import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { olderThan, pageLimit, type Page } from "./list-page.js";
-import { findCredential, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
+import { findCredential, ticketRef, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { closeCardBySystem } from "./card-validity.js";
-import { agents, companies, costEvents, decisions, engagementMessages, engagements, projects, ticketDependencies } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, engagementMessages, engagements, projects, runs, ticketDependencies, tickets } from "../db/schema.js";
 
 export class EngagementError extends Error {
   constructor(
@@ -37,6 +37,15 @@ type Engagement = typeof engagements.$inferSelect;
 type WakeHook = (input: { agentId: string; reason: string; note: string; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
 
 const OPEN: Engagement["status"][] = ["requested", "countered", "accepted", "in_progress", "delivered"];
+
+/** Whose move it is in each open state (BOS-2427); a state not listed counts as "other". */
+const WAITING_ON: Partial<Record<Engagement["status"], "requester" | "provider">> = {
+  requested: "provider",
+  accepted: "provider",
+  in_progress: "provider",
+  countered: "requester",
+  delivered: "requester",
+};
 
 /** Who may take each action, and from which statuses. */
 const RULES: Record<EngagementAction["action"], { side: "requester" | "provider" | "either"; from: Engagement["status"][] }> = {
@@ -69,6 +78,26 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
     const [e] = await db.select().from(engagements).where(eq(engagements.id, id));
     if (!e) throw new EngagementError(404, "No such engagement.");
     return e;
+  }
+
+  /** The provider's tickets doing this engagement's work, oldest first, each with what its runs have cost so far. */
+  async function workTickets(e: Engagement) {
+    const rows = await db
+      .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, assignee: agents.name })
+      .from(tickets)
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(eq(tickets.engagementId, e.id), eq(tickets.companyId, e.providerCompanyId)))
+      .orderBy(asc(tickets.number), asc(tickets.id));
+    if (rows.length === 0) return [];
+    const [prefix] = await db.select({ p: companies.ticketPrefix }).from(companies).where(eq(companies.id, e.providerCompanyId));
+    const spend = await db
+      .select({ ticketId: runs.ticketId, micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+      .from(costEvents)
+      .innerJoin(runs, eq(runs.id, costEvents.runId))
+      .where(inArray(runs.ticketId, rows.map((r) => r.id)))
+      .groupBy(runs.ticketId);
+    const spent = new Map(spend.map((s) => [s.ticketId, Number(s.micros) / 1e6]));
+    return rows.map((r) => ({ id: r.id, ref: ticketRef(prefix?.p, r.number), title: r.title, state: r.state, assignee: r.assignee ?? null, spentUsd: spent.get(r.id) ?? 0 }));
   }
 
   async function companyName(id: string) {
@@ -134,6 +163,51 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
     }
     await post(e, e.providerCompanyId, "awaiting_approval", "Agreed; waiting for the owner to approve.");
     return { engagement: e, note: "Agreed. The owner approves before work starts; you'll be woken when they do." };
+  }
+
+  /** The strip above the owner's list (BOS-2427), over every engagement whatever the list's filters. */
+  async function summarize() {
+    const day = 86_400_000;
+    const open = await db.select({ status: engagements.status, n: sql<string>`count(*)` }).from(engagements).where(inArray(engagements.status, OPEN)).groupBy(engagements.status);
+    const byState: Record<string, number> = {};
+    for (const o of open) byState[o.status] = Number(o.n);
+    let waitingOnRequester = 0;
+    let waitingOnProvider = 0;
+    let other = 0;
+    for (const [s, n] of Object.entries(byState)) {
+      const side = WAITING_ON[s as Engagement["status"]];
+      if (side === "requester") waitingOnRequester += n;
+      else if (side === "provider") waitingOnProvider += n;
+      else other += n;
+    }
+    const spend = await db
+      .select({ basis: costEvents.basis, micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+      .from(costEvents)
+      .where(and(isNotNull(costEvents.engagementId), isNotNull(costEvents.chargedCompanyId), sql`${costEvents.occurredAt} >= ${new Date(now().getTime() - 30 * day)}`))
+      .groupBy(costEvents.basis);
+    const micros = (b: string) => Number(spend.find((s) => s.basis === b)?.micros ?? 0) / 1e6;
+    // Request to sign-off, for the engagements signed off in the last 90 days.
+    const finished = await db
+      .select({ days: sql<string>`extract(epoch from (max(${engagementMessages.createdAt}) - min(${engagements.createdAt}))) / 86400` })
+      .from(engagementMessages)
+      .innerJoin(engagements, eq(engagements.id, engagementMessages.engagementId))
+      .where(and(eq(engagements.status, "signed_off"), eq(engagementMessages.kind, "signed_off")))
+      .groupBy(engagementMessages.engagementId)
+      .having(sql`max(${engagementMessages.createdAt}) >= ${new Date(now().getTime() - 90 * day)}`);
+    const days = finished.map((f) => Number(f.days)).sort((a, b) => a - b);
+    const mid = Math.floor(days.length / 2);
+    const medianDaysToFinish = days.length === 0 ? null : days.length % 2 ? days[mid]! : (days[mid - 1]! + days[mid]!) / 2;
+    return {
+      openByState: byState,
+      waitingOnRequester,
+      waitingOnProvider,
+      /** Open ones whose state sits on neither side; the strip says so when this is above 0. */
+      waitingOnOther: other,
+      spend30dPlanUseUsd: micros("list_estimate"),
+      spend30dPayAsYouGoUsd: micros("billed"),
+      medianDaysToFinish,
+      finishedCount: days.length,
+    };
   }
 
   return {
@@ -296,8 +370,12 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
       const theirs = companyId ? (companyId === e.requesterCompanyId ? e.providerCompanyId : e.requesterCompanyId) : null;
       const theirName = theirs ? await companyName(theirs) : null;
       const mark = (text: string, authorCompanyId: string) => (theirs && authorCompanyId === theirs ? untrusted(theirName!, text) : text);
+      // The provider's own tickets (BOS-2368): shown to the provider and the owner's all-companies view, never to the requester.
+      const showWork = !companyId || companyId === e.providerCompanyId;
+      const work = showWork ? await workTickets(e) : [];
       return {
         ...(theirs ? { notice: UNTRUSTED_NOTE } : {}),
+        ...(showWork ? { tickets: work } : {}),
         id: e.id,
         title: mark(e.title, e.requesterCompanyId),
         status: e.status,
@@ -345,7 +423,30 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
         .limit(pageLimit(page.limit));
       const ids = [...new Set(rows.flatMap((r) => [r.requesterCompanyId, r.providerCompanyId]))];
       const names = new Map(ids.length ? (await db.select({ id: companies.id, name: companies.name }).from(companies).where(inArray(companies.id, ids))).map((c) => [c.id, c.name]) : []);
-      return rows.map((r) => ({ id: r.id, title: r.title, status: r.status, requester: names.get(r.requesterCompanyId), provider: names.get(r.providerCompanyId), budgetCapUsd: r.budgetCapMicros != null ? r.budgetCapMicros / 1e6 : null }));
+      // When each row's state began (BOS-2427): the newest step in its thread (a plain message changes no state).
+      const since = new Map<string, Date>();
+      if (rows.length) {
+        const steps = await db
+          .select({ engagementId: engagementMessages.engagementId, at: sql<Date>`max(${engagementMessages.createdAt})` })
+          .from(engagementMessages)
+          .where(and(inArray(engagementMessages.engagementId, rows.map((r) => r.id)), sql`${engagementMessages.kind} <> 'message'`))
+          .groupBy(engagementMessages.engagementId);
+        for (const s of steps) since.set(s.engagementId, new Date(s.at));
+      }
+      const out = rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        requester: names.get(r.requesterCompanyId),
+        provider: names.get(r.providerCompanyId),
+        budgetCapUsd: r.budgetCapMicros != null ? r.budgetCapMicros / 1e6 : null,
+        stateSince: (since.get(r.id) ?? r.createdAt).toISOString(),
+      }));
+      // The owner's first page (all companies, newest) carries the summary strip on its first row, so the route stays an array
+      // and an agent's company-scoped list never sees it.
+      if (companyId || page.before || out.length === 0) return out;
+      const summary = await summarize();
+      return out.map((r, i) => ({ ...r, summary: i === 0 ? summary : undefined }));
     },
   };
 }

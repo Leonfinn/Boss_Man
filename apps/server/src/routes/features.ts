@@ -156,8 +156,8 @@ export function featureRoutes(
   owner.get("/api/feedback/unprocessed", async () => feedback.unprocessedCount());
   owner.get("/api/companies/:id/feedback", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const q = z.object({ state: z.enum(["unprocessed", "processed", "archived"]).optional(), q: z.string().max(200).optional(), before: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
-    return feedback.notes(id, q);
+    const q = z.object({ state: z.enum(["unprocessed", "processed", "archived"]).optional(), q: z.string().max(200).optional(), before: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(200).optional(), delivered: z.enum(["true", "false"]).optional() }).parse(req.query);
+    return feedback.notes(id, { ...q, delivered: q.delivered === "true" });
   });
   owner.post("/api/companies/:id/feedback", async (req, reply) => {
     const { id } = IdParam.parse(req.params);

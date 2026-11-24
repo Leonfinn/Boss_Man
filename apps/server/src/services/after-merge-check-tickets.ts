@@ -3,10 +3,12 @@
 // "not reported" for two days, until the CEO noticed. The result goes on the parent's state note as a numbered line
 // (checkTicketLine), which readVerdicts and so the done gate read like an owner's card answer, and the parent's
 // assignee is woken. Closing the parent stays a person's step (out of scope on the ticket).
-import { and, eq, sql } from "drizzle-orm";
+// BOS-2417: a merged parent whose only unreported criteria are tied to open check tickets may close at go-live (the
+// tie is not a reason to sit Blocked for a week); its watch moves to the check tickets, and the result still lands here.
+import { and, eq, isNotNull, ne, sql } from "drizzle-orm";
 import { checkTicketLine, criterionText, isAfterMerge, readCriteria, readVerdicts, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, companies, tickets } from "../db/schema.js";
+import { activity, agents, companies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 
 /** The wake reason; "waiting" class in wake-classes.ts, so it is never dropped. */
@@ -36,6 +38,52 @@ export function checkTicketDoneRefusal(criteriaRaw: unknown, note: string | null
     ? `Not reported: ${missing.map((m) => `"${m}"`).join(", ")}.`
     : "This ticket has no criteria of its own, so there is nothing to read a result from: add them with update_ticket.";
   return `This ticket is the check for criterion ${checksCriterion} of another ticket. Boss Man copies its result there only from a numbered pass or fail for each of this ticket's own criteria, and closing it now would record nothing. ${what} Write the summary in this form, in criteria order: "${form}" (use "N fail: <why>" for a fail). A bare "Pass: …" is not read. To close it with no result, use outcome cancelled.`;
+}
+
+/** BOS-2417: a parent's check tickets still open, with the parent criterion each settles (1-based) and its watch. */
+export type OpenCheck = { id: string; number: number | null; criterion: number; assigneeAgentId: string | null; watchingFor: string | null; watchTrigger: string | null };
+
+/**
+ * BOS-2417: the open check tickets that let a merged parent close with their criteria still unreported. Empty when the
+ * parent hasn't merged: a tie only lets live work close, never work still in review.
+ */
+export async function closableChecks(db: Db, parentId: string): Promise<OpenCheck[]> {
+  const [p] = await db.select({ mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, parentId));
+  if (!p?.mergeCommit) return [];
+  const rows = await db
+    .select({ id: tickets.id, number: tickets.number, criterion: tickets.checksCriterion, assigneeAgentId: tickets.assigneeAgentId, watchingFor: tickets.watchingFor, watchTrigger: tickets.watchTrigger })
+    .from(tickets)
+    .where(and(eq(tickets.checksTicketId, parentId), ne(tickets.systemState, "done"), isNotNull(tickets.checksCriterion)));
+  return rows.map((r) => ({ ...r, criterion: r.criterion! }));
+}
+
+/** BOS-2417: 0-based indexes of the after-merge criteria an open check ticket settles. */
+export function tiedCriteria(criteriaRaw: unknown, open: readonly OpenCheck[]): Set<number> {
+  const criteria = readCriteria(criteriaRaw);
+  return new Set(open.map((o) => o.criterion - 1).filter((i) => criteria[i] && isAfterMerge(criteria[i]!)));
+}
+
+/** BOS-2417: the done gate's "not reported" list, leaving out the criteria tied to an open check ticket. */
+export function unreportedUntied(criteriaRaw: unknown, note: string | null | undefined, tied: ReadonlySet<number>): string[] {
+  const criteria = readCriteria(criteriaRaw);
+  return readVerdicts(criteria, note)
+    .filter((r, i) => isAfterMerge(criteria[i]!) && r.verdict === null && !tied.has(i))
+    .map((r) => r.criterion);
+}
+
+/**
+ * BOS-2417: the closing parent's watch goes to its open check tickets, so an event (gate_ci_failed...) wakes whoever
+ * still does the check instead of the finished ticket's assignee. A check ticket that already watches keeps its own.
+ * The parent's trigger is cleared (it is done, so it would wake nobody anyway); its watchingFor stays as history.
+ * Returns the check tickets that took the watch.
+ */
+export async function moveWatchToChecks(db: Db, parentId: string, open: readonly OpenCheck[]): Promise<OpenCheck[]> {
+  const [p] = await db.select({ watchingFor: tickets.watchingFor, watchUntil: tickets.watchUntil, watchTrigger: tickets.watchTrigger }).from(tickets).where(eq(tickets.id, parentId));
+  if (!p?.watchingFor && !p?.watchTrigger) return [];
+  const took = open.filter((o) => !o.watchingFor && !o.watchTrigger);
+  for (const o of took) await db.update(tickets).set({ watchingFor: p.watchingFor, watchUntil: p.watchUntil, watchTrigger: p.watchTrigger }).where(eq(tickets.id, o.id));
+  if (took.length) await db.update(tickets).set({ watchTrigger: null }).where(eq(tickets.id, parentId));
+  return took;
 }
 
 /** The note can hold 4000 characters: the old note gives way from the front, so the new line is never cut. */
@@ -96,5 +144,19 @@ export async function reportCheckTicket(db: Db, ticketId: string, now: Date = ne
     note = `${named}, the check for criterion ${n} of this ticket ("${criterionText(criterion)}"), is done and reported ${verdict}. Boss Man wrote "${n} ${verdict}" on this ticket's state note, naming ${ref}. ${status}`;
   }
   await record(db, { companyId: parent.companyId, ticketId: parent.id, kind: "after_merge_check", summary, detail: { key, checkTicketId: check.id, criterion: n, verdict }, at: now });
+  // BOS-2417: a parent closed at go-live with this check left open. A pass only needs recording, so nobody is woken
+  // for a run with nothing to do; anything else (a fail, no result, a changed criterion) wakes the CEO, since the
+  // parent's assignee has moved on and Boss Man can't open the failed check's follow-up on a ticket already closed.
+  if (parent.systemState === "done") {
+    if (verdict === "pass" && criterion && isAfterMerge(criterion)) return null;
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.role, "ceo")));
+    if (!ceo) return null;
+    const parentRef = ticketRef(c.prefix, parent.number) ?? parent.id.slice(0, 8);
+    const what =
+      verdict === "fail" && criterion && isAfterMerge(criterion)
+        ? `reported fail on criterion ${n} ("${criterionText(criterion)}"). Boss Man wrote "${n} fail" on ${parentRef}'s state note. Open the follow-up for the failed check (create_ticket, naming ${parentRef}) and assign it.`
+        : `closed without a result Boss Man could record for criterion ${n}: ${summary} Decide whether the check still needs doing, and if so open a ticket for it.`;
+    return { agentId: ceo.id, ticketId: parent.id, note: `${named}, the check left open when ${parentRef} "${parent.title}" was closed at go-live, ${what}` };
+  }
   return parent.assigneeAgentId ? { agentId: parent.assigneeAgentId, ticketId: parent.id, note } : null;
 }
