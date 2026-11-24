@@ -343,6 +343,7 @@ type DeployTargetRow = {
   isProduction: boolean;
   rules: { requiresApproval?: boolean; liveTag?: { projectId: string; name: string } | null };
   lastDeploy: { id: string; ref: string; commit: string | null; at: string | null; tagName: string | null; tagResult: string | null } | null;
+  latestAttempt?: { status: string; outcome: string | null; at: string } | null;
 };
 
 const ENDPOINT_HINT = { ssh: "deploy@host or ssh://deploy@host:22", docker: "tcp://socket-proxy:2375", git: "https://git.example.com/you/app.git" } as const;
@@ -595,6 +596,12 @@ export function DeployTargets({ company }: { company: Company }) {
                       </>
                     ) : (
                       <span className="muted">none yet</span>
+                    )}
+                    {t.latestAttempt && (
+                      <div className={t.latestAttempt.status === "failed" || t.latestAttempt.status === "rejected" ? "error" : t.latestAttempt.status === "pending_approval" ? "warning" : "muted"} style={{ fontSize: 13 }}>
+                        Latest: {DEPLOY_STATUS_TEXT[t.latestAttempt.status] ?? t.latestAttempt.status}
+                        {t.latestAttempt.status !== "pending_approval" && t.latestAttempt.status !== "running" && t.latestAttempt.status !== "approved" && <> {when(t.latestAttempt.at)}</>}
+                      </div>
                     )}
                     <DeployHistory companyId={company.id} targetId={t.id} name={t.name} latestSuccessId={t.lastDeploy?.id ?? null} />
                   </td>
