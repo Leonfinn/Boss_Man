@@ -102,7 +102,7 @@ import { secretScanService } from "./services/secret-scan.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkIdleService, IDLE_CHECK_SLOT_REASON, idleView } from "./services/check-idle.js";
 import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
-import { landingTurnAlertSweep, usualCiWait } from "./services/landing-turn-eta.js";
+import { landingTurnAlertSweep, usualCiWait, usualMergeCheck } from "./services/landing-turn-eta.js";
 import { softHold } from "./services/deploy-wait-hold.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
@@ -1242,6 +1242,8 @@ export async function buildApp(opts: AppOptions) {
     // BOS-2359: the landing turns and the usual GitHub wait, for the holder's line and the estimates.
     landingTurns: (companyId) => review.landingTurnStatus(companyId),
     usualCiWait: (companyId) => usualCiWait(db, companyId, (opts.now ?? (() => new Date()))()),
+    // BOS-2505: the banner's "last one expected by" uses the usual check time with the same GitHub wait.
+    usualMergeCheck: (companyId) => usualMergeCheck(db, companyId, (opts.now ?? (() => new Date()))()),
     // BOS-1594: the stuck/over-capacity verdict's two live facts: an empty train seat (the restart seed wait excluded), and a check worker.
     emptySeatSince: async (companyId) => {
       const since = (await mergeTrainStatus(db, companyId).catch(() => [])).filter((p) => !p.seeding && p.emptySeatSince).map((p) => new Date(p.emptySeatSince!).getTime());
