@@ -6,7 +6,7 @@
 #      is on the runner's network) fails before, during and after. A control from a container with no guard shows the address is reachable.
 #   3. A move whose guard image fails its check writes no release-current, leaves the launcher and the runner as they were, and the old
 #      guard keeps guarding (same container, still running, egress still closed).
-# Called by scripts/install-images.test.sh (real half) when INSTALL_HELPER_MOVE=1, after its stack is up and a runner "smoke" runs.
+# Called by scripts/install-images.test.sh (real half) when its registry is local (INSTALL_HELPER_MOVE=0 opts out, =1 forces), after its stack is up and a runner "smoke" runs.
 #   scripts/helper-move-live.sh <compose project> <images.env>
 # It builds four small images on top of the stack's own launcher and guard images (a label, or a guard that exits 1) and pushes them to the
 # registry named in images.env, which must accept pushes (CI's throwaway local registry). It touches only the stack's own containers.
@@ -18,7 +18,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 P="${1:?compose project name}"
 ENVF="${2:?images.env path}"
 fail=0
-ok() { echo "ok   $1"; }
+oks=0
+ok() { oks=$((oks + 1)); echo "ok   $1"; }
 bad() { echo "FAIL $1"; fail=1; }
 val() { grep "^$1=" "$ENVF" | tail -n1 | cut -d= -f2-; }
 
@@ -30,7 +31,8 @@ RUNNER=boss-man-runner-smoke
 GUARD=boss-man-netguard-smoke
 T="$(mktemp -d)"
 TAGS=""
-cleanup() { touch "$T/stop"; for t in $TAGS; do docker rmi "$t" >/dev/null 2>&1; done; rm -rf "$T"; }
+noticed=0
+cleanup() { [ "$noticed" = 1 ] || echo "::error title=BOS-2528 helper move::FAIL, stopped early after $oks ok lines (see the FAIL line in the job log)"; touch "$T/stop"; for t in $TAGS; do docker rmi "$t" >/dev/null 2>&1; done; rm -rf "$T"; }
 trap cleanup EXIT
 
 curl -fsS "http://${REG%%/*}/v2/" >/dev/null 2>&1 || { bad "the registry ${REG%%/*} does not answer, so the test images cannot be pushed"; exit 1; }
@@ -115,6 +117,7 @@ jq -e '.[] | select(.slug=="smoke") | select(.state=="running")' <<<"$list" >/de
 [ "$(jq -r '.[] | select(.slug=="smoke") | .guard' <<<"$list")" = on ] && ok "after: the new launcher reports the guard on" || bad "after: guard state is not on: $list"
 jq -e --arg g "@$GOOD" '.releaseCurrent.netguard | endswith($g)' <<<"$m1" >/dev/null && ok "release-current now names the good guard" || bad "release-current after move 1: $(jq -c .releaseCurrent <<<"$m1")"
 n_open="$(grep -c OPEN "$T/probe1.log")"; n_closed="$(grep -c CLOSED "$T/probe1.log")"; n_err="$(grep -c ERROR "$T/probe1.log")"
+c1="$n_closed"; o1="$n_open"
 echo "during move 1: $n_closed closed, $n_open open, $n_err errors"
 [ "$n_open" = 0 ] && [ "$n_closed" -ge 3 ] && ok "during move 1 egress stayed closed ($n_closed attempts, none opened)" || bad "during move 1: $n_closed closed, $n_open open, $n_err errors"
 [ "$(probe)" = CLOSED ] && ok "after move 1: the runner still cannot open db:5432" || bad "after move 1: egress is not closed"
@@ -140,4 +143,13 @@ n_open="$(grep -c OPEN "$T/probe2.log")"; n_closed="$(grep -c CLOSED "$T/probe2.
 echo "during move 2: $n_closed closed, $n_open open, $n_err errors"
 [ "$n_open" = 0 ] && [ "$n_closed" -ge 3 ] && ok "during move 2 egress stayed closed ($n_closed attempts, none opened)" || bad "during move 2: $n_closed closed, $n_open open, $n_err errors"
 [ "$(probe)" = CLOSED ] && ok "after move 2: the runner still cannot open db:5432" || bad "after move 2: egress is not closed"
+# One public line for the GitHub run: annotations can be read without a login, raw job logs cannot (BOS-2528). Figures only, no secrets.
+same_runner=no; [ "$r0" = "$r1" ] && [ "$r1" = "$r2" ] && same_runner=yes
+summary="runner id unchanged across both moves: $same_runner; move 1 (good guard) result $(jq -r .result <<<"$m1" 2>/dev/null): $c1 closed, $o1 open probes; move 2 (failing guard) result $(jq -r .result <<<"$m2" 2>/dev/null): $n_closed closed, $n_open open probes; release-current unchanged by move 2: $([ "$(jq -c .releaseCurrent <<<"$m2" 2>/dev/null)" = "$rel1" ] && echo yes || echo no)"
+noticed=1
+if [ "$fail" = 0 ]; then
+  echo "::notice title=BOS-2528 helper move::PASS, $oks ok lines, none failed: $summary"
+else
+  echo "::error title=BOS-2528 helper move::FAIL after $oks ok lines (see the FAIL lines in the job log): $summary"
+fi
 exit "$fail"
