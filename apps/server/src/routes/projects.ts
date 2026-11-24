@@ -144,9 +144,11 @@ export function projectRoutes(
         open: sql<string>`count(${tickets.id}) filter (where ${open})`,
         inReview: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'review')`,
         // BOS-2463: really blocked, leaving out merged work only waiting for a live check (the Dashboard's split).
+        // BOS-2532 (G2): points and unsized count the same set, so a task saved with a size of 0 is unsized here too, not
+        // "no points and not unsized" (the forecast reads it the same way, via effectiveSize in planning.ts).
         blocked: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'blocked' and not ${liveCheckWaitSql})`,
-        points: sql<string>`coalesce(sum(${tickets.size}) filter (where ${open}), 0)`,
-        unsized: sql<string>`count(${tickets.id}) filter (where ${open} and ${tickets.size} is null)`,
+        points: sql<string>`coalesce(sum(greatest(${tickets.size}, 1)) filter (where ${open} and ${tickets.size} > 0), 0)`,
+        unsized: sql<string>`count(${tickets.id}) filter (where ${open} and (${tickets.size} is null or ${tickets.size} <= 0))`,
         finished: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled' and ${tickets.stateChangedAt} >= ${since})`,
         lastMergeAt: sql<Date | null>`max(${tickets.mergedAt})`,
       })

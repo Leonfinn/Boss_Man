@@ -222,6 +222,15 @@ describe("milestone forecast (points and pace)", () => {
     expect(forecastMilestone(rows, 20 / 4, "2026-12-30", "2026-11-23")).toMatchObject({ pointsDone: 8, pointsLeft: 10, unsized: 1, expectedFinish: "2026-12-07" });
   });
 
+  // BOS-2532 (G2): on 24 Nov the owner's "N of M points done" left a sized task's points out of M. A task whose size
+  // reads 0 is not on the point scale (the size is refused now), so it counts as unsized, never as "sized, worth nothing".
+  it("BOS-2532: a task whose size reads 0 counts as unsized, so M is the whole of what is sized", () => {
+    const rows = [{ size: 3, done: true }, { size: 0, done: false }, { size: 5, done: false }];
+    expect(forecastMilestone(rows, 20, null, "2026-11-23")).toMatchObject({ pointsDone: 3, pointsLeft: 5, unsized: 1 });
+    // 3 of 8 points done, and the list under it shows two sized tasks: the two numbers now agree.
+    expect(rows.filter((r) => (r.size ?? 0) >= 1).length).toBe(2);
+  });
+
   it("has no finish date without pace, and none is late without a target", () => {
     expect(forecastMilestone([{ size: 3, done: false }], 0, "2026-12-01", "2026-11-23")).toMatchObject({ pointsLeft: 3, expectedFinish: null, daysLate: 0 });
     expect(forecastMilestone([{ size: 7, done: false }], 7, null, "2026-11-23")).toMatchObject({ expectedFinish: "2026-11-30", daysLate: 0 });
