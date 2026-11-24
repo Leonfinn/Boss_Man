@@ -8,7 +8,8 @@ import { buildApp } from "../src/app.js";
 import { issueRunToken } from "../src/mcp.js";
 import { openPglite } from "../src/db/client.js";
 import { agentNotes, decisions, ownerAnswerEmbeddings, ownerChatMessages, paAnswers, ticketMessages } from "../src/db/schema.js";
-import { describeOwnerAnswer, embedMissingOwnerAnswers, isRepeat, ownWords, ownerAnswerSearch, searchOwnerAnswers } from "../src/services/owner-answers.js";
+import { askCheckNotes, describeOwnerAnswer, embedMissingOwnerAnswers, isRepeat, ownWords, ownerAnswerSearch, searchOwnerAnswers } from "../src/services/owner-answers.js";
+import type { OwnerAnswerHit, OwnerAskCheck } from "../src/services/owner-answers.js";
 
 // A fake embedder: words that mean the same thing share a concept, so their vectors point the same way.
 const DIMS = 768;
@@ -543,5 +544,78 @@ describe("ownWords: the owner's own words after a quoted agent line (BOS-1856)",
   it("leaves a quote that is not at the start alone, and takes the text after the quote's lines", () => {
     expect(ownWords("First line.\n> A quote later in the message")).toBe("First line.\n> A quote later in the message");
     expect(ownWords("> quoted\nnot an answer")).toBe("not an answer");
+  });
+});
+
+describe("askCheckNotes: the warnings added to a card that went through (BOS-2392)", () => {
+  const hit = (over: Partial<OwnerAnswerHit> = {}): OwnerAnswerHit => ({
+    kind: "card",
+    sourceId: "11111111-2222-4333-8444-555555555555",
+    question: "Make the GitHub repo public now?",
+    answer: "Yes",
+    ownerNote: null,
+    ticketId: null,
+    ticketRef: null,
+    at: new Date("2026-11-14T10:00:00Z"),
+    score: 0.75,
+    ownerWords: 0.75,
+    sameQuestion: 1,
+    meaning: null,
+    method: "words",
+    ...over,
+  });
+  const check = (over: Partial<OwnerAskCheck> = {}): OwnerAskCheck => ({ refusal: null, related: [], meaning: "off", ...over });
+
+  it("adds nothing when the ask has no related answer, no done step and meaning search did help", () => {
+    expect(askCheckNotes(check())).toBe("");
+    expect(askCheckNotes(check({ meaning: "used" }))).toBe("");
+    expect(askCheckNotes(check({ doneSteps: [] }))).toBe("");
+  });
+
+  it("lists a close earlier answer with the same line the search shows", () => {
+    const h = hit();
+    const out = askCheckNotes(check({ related: [h] }));
+    expect(out).toBe(
+      `Possibly related earlier owner answers (not the same question, so this went through; withdraw it if one of these settles it):\n${describeOwnerAnswer(h)}`,
+    );
+    expect(out).toContain("2026-11-14 10:00 UTC");
+    expect(out).toContain('Owner: "Yes".');
+  });
+
+  it("warns about a step the owner already did, naming the card, ticket, date, ask and answer", () => {
+    const out = askCheckNotes(
+      check({
+        doneSteps: [hit({ sourceId: "abcdef12-2222-4333-8444-555555555555", ticketRef: "APP-7", question: "Turn the worker off?", answer: "Done: worker is off" })],
+      }),
+    );
+    expect(out).toContain(
+      "The owner already did these steps on an earlier card. Check the live state first (the thing itself, not the answer); this went through, but if the step is done, withdraw it. If it must be redone, say why:",
+    );
+    expect(out).toContain(
+      `- the owner did this on card abcdef12 on APP-7 at 2026-11-14 10:00 UTC (asked: "Turn the worker off?"; they answered: "Done: worker is off")`,
+    );
+  });
+
+  it("clips a long ask and answer in a done-step line", () => {
+    const out = askCheckNotes(check({ doneSteps: [hit({ question: "q".repeat(200), answer: "a".repeat(200) })] }));
+    expect(out).toContain(`asked: "${"q".repeat(159)}…"`);
+    expect(out).toContain(`they answered: "${"a".repeat(119)}…"`);
+  });
+
+  it("says when meaning search couldn't help, clipping a long reason", () => {
+    expect(askCheckNotes(check({ meaning: { unavailable: "the embeddings provider answered 500" } }))).toBe(
+      "Meaning search was unavailable (the embeddings provider answered 500), so only word search checked whether the owner already answered this.",
+    );
+    const long = askCheckNotes(check({ meaning: { unavailable: "x".repeat(200) } }));
+    expect(long).toBe(`Meaning search was unavailable (${"x".repeat(159)}…), so only word search checked whether the owner already answered this.`);
+  });
+
+  it("puts related answers first, then done steps, then the meaning warning, with a blank line between", () => {
+    const out = askCheckNotes(check({ related: [hit()], doneSteps: [hit()], meaning: { unavailable: "the provider timed out" } }));
+    const parts = out.split("\n\n");
+    expect(parts).toHaveLength(3);
+    expect(parts[0]).toMatch(/^Possibly related earlier owner answers/);
+    expect(parts[1]).toMatch(/^The owner already did these steps/);
+    expect(parts[2]).toMatch(/^Meaning search was unavailable/);
   });
 });
