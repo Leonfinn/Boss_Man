@@ -291,7 +291,7 @@ export const OWNER_FIELDS = {
     // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2233).
     "Page address",
   ],
-  Run: ["Page address"],
+  Run: ["Page address", "Show"],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
   Config: [
     "Reviews for this project", "Name", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
