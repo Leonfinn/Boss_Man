@@ -143,7 +143,13 @@ type RetroHistoryRow = {
 
 /** Past retros (BOS-2429): the last 8, newest first; a failure kind in 3 or more of them keeps coming up. */
 function PastRetros({ history }: { history: RetroHistoryRow[] }) {
-  if (!history.length) return null;
+  if (!history.length)
+    return (
+      <details>
+        <summary>Past retros</summary>
+        <p className="muted" style={{ fontSize: 14 }}>No retros yet.</p>
+      </details>
+    );
   const seen = new Map<string, number>();
   for (const h of history) for (const f of h.findings) seen.set(f.failure, (seen.get(f.failure) ?? 0) + 1);
   return (
@@ -161,7 +167,7 @@ function PastRetros({ history }: { history: RetroHistoryRow[] }) {
                   </span>
                 ))
               : "No findings saved."}{" "}
-            Changes: {h.changes.applied} applied, {h.changes.skipped} skipped, {h.changes.waiting} waiting; of {h.changes.checked} checked, {h.changes.met} met their target.
+            Changes: {h.changes.applied} applied, {h.changes.skipped} skipped, {h.changes.waiting} waiting; of {h.changes.checked} checked, {h.changes.met} met their target and {h.changes.checked - h.changes.met} missed.
           </li>
         ))}
       </ul>
