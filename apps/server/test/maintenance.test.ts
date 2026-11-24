@@ -319,8 +319,8 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.scheduler.tick();
     expect(c.commands.filter((x) => x.type === "run.start" && x.boardToolsOnly)).toHaveLength(1);
     await c.req("POST", "/api/maintenance/start", {});
-    // The chat run is live but it isn't work: the banner counts nothing and chat is not "open".
-    expect(await c.maint()).toMatchObject({ on: true, runs: 0, chatOpen: false });
+    // The chat run is live but it isn't work: the banner counts nothing. Chat stays open: no runner is being recreated yet (BOS-2404).
+    expect(await c.maint()).toMatchObject({ on: true, runs: 0, chatOpen: true });
     // With no work run to wait for, the runner swaps even though the chat run is still live.
     await c.maintenance.step();
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
