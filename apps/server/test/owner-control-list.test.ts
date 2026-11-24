@@ -139,6 +139,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // The "Other places to send alerts" card on the Notifications page (BOS-2199).
   "components/AlertDestinations.tsx": "Notifications",
   "pages/Plan.tsx": "Plan",
+  // The Search page (BOS-2378); its first field is the Open tickets only tick box (BOS-2477).
+  "pages/Search.tsx": "Search",
   "pages/Portal.tsx": "Feedback portal",
   "pages/Roadmap.tsx": "Roadmap",
   // The old Rules page is now the Permission rules card on Settings → Permissions (BOS-1019).

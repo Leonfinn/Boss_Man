@@ -1871,6 +1871,8 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 .search-results li { display: flex; flex-direction: column; gap: 2px; padding: 8px 16px; cursor: pointer; min-height: 44px; justify-content: center; }
 .search-results li.active { background: var(--accent-soft); }
 .search-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A ticket hit's state (BOS-2477), first on the title line so a long title's "…" never hides it. */
+.search-title .search-state { margin-right: 6px; font-weight: 500; vertical-align: 1px; }
 /* Keyboard shortcuts list (BOS-2321): reuses the search box's back and panel. */
 .shortcuts-title { flex: 1; margin: 0; font-size: 16px; }
 .shortcuts-list { margin: 0; padding: 8px 16px; overflow-y: auto; }
@@ -1886,7 +1888,8 @@ details.pushes[open] > summary { margin-bottom: 8px; }
 /* The box's "See all N results" link and the Search page (BOS-2378). */
 .search-all { margin: 0; padding: 10px 16px; border-top: 1px solid var(--line); }
 .search-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 16px; }
-.search-filters input { flex: 1 1 260px; min-width: 0; }
+.search-filters input[type="search"] { flex: 1 1 260px; min-width: 0; }
+.search-open { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; }
 .search-group { margin: 0 0 20px; }
 .search-group h2 { font-size: 15px; margin: 0 0 6px; }
 .search-list { list-style: none; margin: 0; padding: 0; }
