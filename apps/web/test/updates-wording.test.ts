@@ -150,6 +150,10 @@ describe("historyWhat", () => {
   });
   it("a server row with no changes is just Server", () => {
     expect(historyWhat(row({ changes: 0 }))).toBe("Server");
+    // BOS-2549: the real count, and what is cut from the list; a replaced row names its successor.
+    expect(historyWhat(row({ changes: 38, shown: 20 }))).toBe("Server, 38 changes (showing 20 of 38)");
+    expect(historyWhat(row({ changes: 3, shown: 3 }))).toBe("Server, 3 changes");
+    expect(historyWhat(row({ changes: 4, result: "replaced", replacedBy: "a63be888" }))).toBe("Server, 4 changes: replaced by a newer update (a63be888)");
   });
 });
 
