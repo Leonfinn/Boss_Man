@@ -258,6 +258,7 @@ export const OWNER_FIELDS = {
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
     "Your one-line reason, or the corrected lesson (needed for Edit)",
+    "Who answered", "Kind",
   ],
   // The "Remember this" box under the owner's own message (BOS-2184).
   Chat: ["Add this to the standing rules every agent reads"],
