@@ -29,7 +29,7 @@ describe("recent searches (BOS-2433)", () => {
   it("lists them in an empty box, runs one on Enter or a click, and Clear empties the list", async () => {
     rememberSearch("osprey");
     rememberSearch("dark mode");
-    const fetchMock = vi.fn(async () => json({ q: "dark mode", tickets: [], wiki: [], chats: [] }));
+    const fetchMock = vi.fn(async (_url: string) => json({ q: "dark mode", tickets: [], wiki: [], chats: [] }));
     vi.stubGlobal("fetch", fetchMock);
     render(<SearchPalette companyId="c1" go={() => {}} />);
     ctrlK();
