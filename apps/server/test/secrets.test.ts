@@ -1,4 +1,5 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { summariseUse } from "../src/services/secrets.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decryptSecret, encryptSecret } from "../src/crypto.js";
 import { and, eq } from "drizzle-orm";
@@ -116,6 +117,44 @@ describe("secrets store", () => {
     expect(dup.statusCode).toBe(409);
     const badName = await t.app.inject({ method: "POST", url: `/api/secrets/${key}/grants`, headers: { cookie }, payload: { companyId: homelab, envName: "deploy-key" } });
     expect(badName.statusCode).toBe(400);
+  });
+});
+
+describe("30-day use summary", () => {
+  it("counts per company, purpose and day, and tags a secret with no recent read", () => {
+    const now = new Date("2026-11-24T12:00:00Z");
+    const day = (n: number) => new Date(now.getTime() - n * 86_400_000);
+    const s = summariseUse(
+      [
+        { at: day(0), company: "A", purpose: "run" },
+        { at: day(0), company: "A", purpose: "deploy" },
+        { at: day(29), company: "B", purpose: "merge" },
+        { at: day(1), company: null, purpose: "github_watch" },
+        { at: day(30), company: "A", purpose: "run" },
+      ],
+      now,
+    );
+    expect(s.total).toBe(5);
+    expect(s.byPurpose).toEqual({ run: 2, deploy: 1, merge: 1, other: 1 });
+    expect(s.byCompany[0]).toEqual({ company: "A", reads: 3 });
+    expect(s.perDay[29]).toBe(2);
+    expect(s.perDay[28]).toBe(1);
+    expect(s.perDay[0]).toBe(1);
+    expect(s.perDay.reduce((a, b) => a + b, 0)).toBe(4);
+  });
+
+  it("list() gives last used and the unused tag, one query for all secrets", async () => {
+    const { secret } = await t.secrets.create({ name: "Idle", kind: "generic", value: "v-idle-value" });
+    const [row] = (await t.secrets.list()).filter((r) => r.id === secret.id);
+    expect(row!.lastUsedAt).toBeNull();
+    expect(row!.unusedIn30Days).toBe(true);
+    expect(JSON.stringify(row)).not.toContain("v-idle-value");
+    await t.db.insert(secretAccessLog).values({ secretId: secret.id, companyId: randomUUID(), purpose: "run", at: new Date(Date.now() - 40 * 86_400_000) });
+    expect((await t.secrets.list()).find((r) => r.id === secret.id)!.unusedIn30Days).toBe(true);
+    await t.db.insert(secretAccessLog).values({ secretId: secret.id, companyId: randomUUID(), purpose: "run" });
+    const after = (await t.secrets.list()).find((r) => r.id === secret.id)!;
+    expect(after.unusedIn30Days).toBe(false);
+    expect(after.lastUsedAt).toBeInstanceOf(Date);
   });
 });
 

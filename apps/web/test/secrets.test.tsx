@@ -117,8 +117,10 @@ describe("secrets page", () => {
     failGrants = false;
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText(/Not granted to any company/)).toBeTruthy();
-    releaseLog(json([]));
+    releaseLog(json({ entries: [], summary: { total: 0, byCompany: [], byPurpose: { run: 0, deploy: 0, merge: 0, other: 0 }, perDay: new Array(30).fill(0) } }));
     expect(await screen.findByText(/No run has been given it yet/)).toBeTruthy();
+    expect(screen.getByText(/Not read in the last 30 days/)).toBeTruthy();
+    expect(screen.getByText(/Never used/)).toBeTruthy();
   });
 
   it("names the deploy target a secret is limited to, and falls back when it is unknown", async () => {

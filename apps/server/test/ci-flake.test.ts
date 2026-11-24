@@ -44,6 +44,9 @@ describe("namedTestFiles", () => {
     expect(repoRelative("/srv/actions/_work/site/site/apps/x.test.ts")).toBe("apps/x.test.ts");
     expect(repoRelative("/github/workspace/apps/x.test.ts")).toBe("apps/x.test.ts");
     expect(repoRelative("/etc/x.test.ts")).toBe("/etc/x.test.ts");
+    // BOS-2448: a repo mounted at /work in a `docker run -w /work` step (run 45323213260's check-worker-image job).
+    expect(repoRelative("/work/apps/launcher/test/docker.test.ts")).toBe("apps/launcher/test/docker.test.ts");
+    expect(repoRelative("/workspace/apps/x.test.ts")).toBe("/workspace/apps/x.test.ts");
     expect(namedTestFiles([{ job: "check", paths: ["/home/runner/work/site/site/apps/x.test.ts"] }]).files).toEqual(["apps/x.test.ts"]);
   });
 

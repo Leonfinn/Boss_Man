@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import * as schema from "./schema.js";
+import { recordLimitHit } from "./limit-counts.js";
 
 export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
 
@@ -40,9 +41,11 @@ export function makeLimitWatcher(limits: DbPoolLimits, log: (msg: string) => voi
     let kind: string | undefined;
     if (e?.code === "57014" && /statement timeout/i.test(message)) {
       kind = "statement";
+      recordLimitHit("statement");
       if (!seen.has(kind)) log(`[db] a query was cancelled after ${limits.statementTimeoutMs} ms (statement timeout, BOSSMAN_DB_STATEMENT_TIMEOUT_MS). Further ones are not logged.`);
     } else if (/timeout exceeded when trying to connect/i.test(message)) {
       kind = "connect";
+      recordLimitHit("connect");
       if (!seen.has(kind)) log(`[db] no database connection free within ${limits.connectTimeoutMs} ms (pool of ${limits.max}, BOSSMAN_DB_POOL_MAX / BOSSMAN_DB_CONNECT_TIMEOUT_MS). Further ones are not logged.`);
     }
     if (kind) seen.add(kind);

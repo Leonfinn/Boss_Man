@@ -132,6 +132,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   // Funding, Rules and Secrets are pages of their own, shown as tabs of Settings.
   "pages/Funding.tsx": "Funding",
   "pages/MergeQueue.tsx": "Merge queue",
+  "pages/MergeHistory.tsx": "Merge queue",
   "pages/Notifications.tsx": "Notifications",
   // The notification settings moved here from the feed page (BOS-2327); Settings → Notifications is the same screen in the list.
   "pages/settings/Notifications.tsx": "Notifications",
@@ -192,6 +193,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Runs.tsx>EndAllRuns": "Runs",
   // Settings' pages (Settings.tsx SETTINGS_GROUPS): each panel the Settings page shows, by the page that shows it (BOS-1019).
   "pages/Settings.tsx>StopAllWork": "Server and runner",
+  "pages/Settings.tsx>ServerHealth": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",
   "pages/Settings.tsx>SelfDeploy": "Server and runner",
   "pages/Settings.tsx>ThisHost": "Server and runner",

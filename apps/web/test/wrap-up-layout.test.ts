@@ -69,6 +69,7 @@ function answer(p: string, mode: string): unknown {
   if (p === "/api/private-details") return { total: 0, counts: {} };
   if (p === "/api/devices") return [];
   if (p === "/api/netguard-allow") return { report: null };
+  if (p === "/api/data-health") return { disk: null, database: { bytes: null, dayAgoBytes: null, weekAgoBytes: null, growthPercent7d: null }, limits: { statementTimeouts: 0, poolFull: 0 }, slowQueries: [], warnings: [] };
   return {};
 }
 

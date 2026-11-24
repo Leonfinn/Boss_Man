@@ -103,6 +103,101 @@ export function MachineRecord({ stats }: { stats: MachineStatsView | undefined }
   );
 }
 
+/** BOS-2436: the check line over 7 days, all machines together, from GET /api/settings/check-workers/line. */
+export type CheckLineView = {
+  days: { date: string; quick: number; full: number; merge: number }[];
+  kinds: { kind: "quick" | "full" | "merge"; total: number; cancelled: number; medianWaitSeconds: number | null; longestWaitSeconds: number | null; medianRunSeconds: number | null }[];
+  busiestHours: { hour: number; checks: number }[];
+  waitingNow: number;
+  oldestWaitSeconds: number | null;
+  timeZone: string;
+};
+
+const KIND_NAMES = { quick: "Quick", full: "Full", merge: "Merge" } as const;
+const hourText = (h: number) => `${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00`;
+const dayText = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+
+/** The "Check line, last 7 days" fold: how many checks came in, how long they waited for a machine, and when it is busiest. */
+export function CheckLine({ line }: { line: CheckLineView }) {
+  const ran = line.kinds.reduce((t, k) => t + k.total, 0);
+  const cancelled = line.kinds.reduce((t, k) => t + k.cancelled, 0);
+  const waiting =
+    line.waitingNow === 0 ? "Nothing waiting now." : `Waiting now: ${line.waitingNow} check${line.waitingNow === 1 ? "" : "s"}, the oldest for ${lengthText(line.oldestWaitSeconds ?? 0)}.`;
+  return (
+    <details className="card" style={{ padding: 8 }} data-testid="check-line">
+      <summary>
+        <strong>Check line, last 7 days</strong>
+      </summary>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, fontSize: 14 }}>
+        <p style={{ margin: 0 }} data-testid="check-line-now">
+          {waiting}
+        </p>
+        {ran === 0 && cancelled === 0 ? (
+          <p className="muted" style={{ margin: 0 }} data-testid="check-line-empty">
+            No checks in the last 7 days
+          </p>
+        ) : (
+          <>
+            <table data-testid="check-line-kinds">
+              <thead>
+                <tr>
+                  <th>Kind</th>
+                  <th>Checks</th>
+                  <th>Median wait to start</th>
+                  <th>Longest wait</th>
+                  <th>Median run time</th>
+                  <th>Cancelled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {line.kinds.map((k) => (
+                  <tr key={k.kind}>
+                    <td>{KIND_NAMES[k.kind]}</td>
+                    <td>{k.total}</td>
+                    <td>{lengthText(k.medianWaitSeconds)}</td>
+                    <td>{lengthText(k.longestWaitSeconds)}</td>
+                    <td>{lengthText(k.medianRunSeconds)}</td>
+                    <td>{k.cancelled}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <table data-testid="check-line-days">
+              <thead>
+                <tr>
+                  <th>Day</th>
+                  <th>Quick</th>
+                  <th>Full</th>
+                  <th>Merge</th>
+                </tr>
+              </thead>
+              <tbody>
+                {line.days.map((d) => (
+                  <tr key={d.date}>
+                    <td>{dayText(d.date)}</td>
+                    <td>{d.quick}</td>
+                    <td>{d.full}</td>
+                    <td>{d.merge}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {line.busiestHours.length > 0 && (
+              <p style={{ margin: 0 }} data-testid="check-line-hours">
+                {`Busiest hours (checks queued, ${line.timeZone} time): `}
+                {line.busiestHours.map((h) => `${hourText(h.hour)} (${h.checks})`).join(" · ")}
+              </p>
+            )}
+            <p className="muted" style={{ margin: 0 }}>
+              Wait is from a check joining the line to a machine starting it. Checks still waiting count above, not in the medians; cancelled checks are counted apart.
+            </p>
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
+
 type Draft = { name: string; companyIds: string[]; slots: string; threads: string; memoryGb: string; policy: SlotPolicy };
 const blank: Draft = { name: "", companyIds: [], slots: "1", threads: "", memoryGb: "", policy: DEFAULT_POLICY };
 
@@ -190,6 +285,12 @@ export function CheckWorkers({ workers, maxSlots, reload, companyId }: { workers
   const list = companies.data ?? [];
   const statsPoll = usePoll((signal) => api<MachineStatsView[]>(`/api/settings/check-workers/stats${companyId ? `?companyId=${companyId}` : ""}`, { signal }), 60_000, `check-worker-stats-${companyId ?? ""}`);
   const statsOf = (machine: string) => (Array.isArray(statsPoll.data) ? statsPoll.data.find((s) => s.machine === machine) : undefined);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const linePoll = usePoll(
+    (signal) => api<CheckLineView>(`/api/settings/check-workers/line?tz=${encodeURIComponent(zone)}${companyId ? `&companyId=${companyId}` : ""}`, { signal }),
+    60_000,
+    `check-line-${companyId ?? ""}`,
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-workers">
@@ -197,6 +298,8 @@ export function CheckWorkers({ workers, maxSlots, reload, companyId }: { workers
       <p className="muted" style={{ fontSize: 14 }}>
         Other machines that take checks when the runner's slots are full. A check worker runs checks only: merge checks (the full test run before a ticket lands) and quick checks (before review). It gets no secrets and runs no agents, and code only ever goes onto main from your main Boss Man server, never from a worker. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
       </p>
+      {linePoll.data && Array.isArray(linePoll.data.kinds) && <CheckLine line={linePoll.data} />}
+      {linePoll.error && linePoll.data === null && <LoadError what="the check line's last 7 days" message={linePoll.error.message} onRetry={linePoll.reload} />}
       <div className="card" style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }} data-testid="check-runner-record">
         <strong>Company runner</strong>
         <MachineRecord stats={statsOf("runner")} />

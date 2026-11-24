@@ -1226,6 +1226,13 @@
       "when": 1795467093073,
       "tag": "0193_funding_history",
       "breakpoints": true
+    },
+    {
+      "idx": 194,
+      "version": "7",
+      "when": 1795480896145,
+      "tag": "0194_server_size_readings",
+      "breakpoints": true
     }
   ]
 }
