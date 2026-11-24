@@ -11,7 +11,7 @@ import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { lazyPage, PageSuspense } from "./lazy-page";
 import { settingsRedirect } from "./pages/settings-redirect";
-import { atTime, drainTiming, waitingFor, wrapUpBannerText, type RunnerCheckView } from "./pages/settings/updates";
+import { atTime, drainTiming, updateWaitExtras, waitingFor, wrapUpBannerText, type RunnerCheckView, type WorkerCheckView } from "./pages/settings/updates";
 import { inLineOf, MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { SearchPalette } from "./components/SearchPalette";
 import { Shortcuts } from "./components/Shortcuts";
@@ -110,7 +110,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-2404: the owner's chat answers; false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen: boolean; chatBackBy?: string | null; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951: merges being pushed to main (named by ticket), and a wait on nothing Boss Man can name. */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2056: when the owner's wrap-up was asked and which update it is for. */ wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup" | "building"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-2404: the owner's chat answers; false only while a runner is being swapped, until chatBackBy at the latest. */ chatOpen: boolean; chatBackBy?: string | null; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean; /** BOS-1877: the drain's phase, forecast and whether it ran past it. */ phase?: "waiting" | "swapping"; expectedFinishAt?: string | null; overdue?: boolean; /** BOS-1951: merges being pushed to main (named by ticket), and a wait on nothing Boss Man can name. */ merges?: number; mergesList?: { ticket: string | null }[]; unknownWait?: boolean; /** BOS-2479: checks on a check worker (not waited for) and the latest go-ahead. */ workerChecksList?: WorkerCheckView[]; goAheadAt?: string | null; /** BOS-2056: when the owner's wrap-up was asked and which update it is for. */ wrapSince?: string; wrapForUpdate?: "server" | "runner" | "none" };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -143,9 +143,12 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
       </p>
     );
   const timing = drainTiming(m);
+  // BOS-2479: the worker checks it doesn't wait for, and the latest time it goes ahead.
+  const extras = updateWaitExtras(m);
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. {timing ? `${timing} ` : ""}Nothing new starts until it is done.{" "}
+      Update pending: {waiting}. {timing ? `${timing} ` : ""}
+      {extras ? `${extras} ` : ""}Nothing new starts until it is done.{" "}
       {m.overdue && m.phase === "waiting" ? (
         <>
           {m.unknownWait ? "It is running late: Boss Man cannot say what it is waiting for. " : "It is past the time given: "}

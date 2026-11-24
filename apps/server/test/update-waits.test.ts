@@ -6,28 +6,44 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import type { Db } from "../src/db/client.js";
 import { checkJobs, checkWorkers, companies, projects, runs, settings, tickets } from "../src/db/schema.js";
-import { runnerBusy, runsByCompany, serverWaitChecks } from "../src/services/runner-busy.js";
-import { activeWaits, blocksClass, describeWait, drainEndsAt, LANDING_END_MS, landingsThatCount, ruleProblems, runnerHoldWait, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
+import { runnerBusy, runsByCompany, serverWaitChecks, workerChecks } from "../src/services/runner-busy.js";
+import { activeWaits, blocksClass, describeWait, drainDetail, drainEndsAt, LANDING_END_MS, landingsThatCount, namedChecksText, ruleProblems, runnerHoldWait, serverQuietCounts, WAIT_RULES, type WaitKind, type WaitRule } from "../src/services/update-waits.js";
 import { duringUpdate, PASSES_UPDATE_HOLD, WAKE_CLASS } from "../src/services/wake-classes.js";
 
-// 20 Nov 11:44: a merge whose check had passed and which was only waiting for GitHub CI on its merge copy (phase "merging",
-// beat kept fresh by the CI poll) held the runner swap until its CI wait ended. Before the fix every such landing counted.
-describe("which landings a runner swap waits on (BOS-2058, the 11:44 hold)", () => {
+// BOS-2479 (replacing BOS-2058's exception list): a landing counts only while its push call is going, for at most
+// LANDING_END_MS from that call's start. A landing waiting for GitHub CI (20 Nov 11:44), a train seat (24 Nov 10:11) or
+// anything else before the push has no push start, so it never counts.
+describe("which landings a runner swap waits on (BOS-2479: only a push under way)", () => {
   const now = Date.parse("2026-01-01T12:00:00Z");
-  const started = new Map([
-    ["ci", now - 6 * 60_000],
+  const pushStarts = new Map([
     ["pushing", now - 6 * 60_000],
     ["old", now - LANDING_END_MS - 1],
-    ["unknown", Number.NaN],
   ]);
-  const facts = { ciWaiting: (id: string) => id === "ci", startedMs: (id: string) => started.get(id)!, now };
+  const facts = { pushingSince: (id: string) => pushStarts.get(id), now };
 
-  it("drops a landing waiting for GitHub CI and one past its own end; keeps a push and a landing of unknown start", () => {
-    expect(landingsThatCount(["ci", "pushing", "old", "unknown"], facts)).toEqual(["pushing", "unknown"]);
+  it("keeps a push under way; drops a landing that isn't pushing and a push past its own end", () => {
+    expect(landingsThatCount(["ci-wait", "train-seat", "pushing", "old"], facts)).toEqual(["pushing"]);
   });
 
-  it("counts the same landing again once its CI wait is over and it pushes", () => {
-    expect(landingsThatCount(["ci"], { ...facts, ciWaiting: () => false })).toEqual(["ci"]);
+  it("counts the same landing once its push starts", () => {
+    expect(landingsThatCount(["train-seat"], facts)).toEqual([]);
+    expect(landingsThatCount(["train-seat"], { ...facts, pushingSince: () => now })).toEqual(["train-seat"]);
+  });
+});
+
+// BOS-2479: on 24 Nov the drain line always read "running agents and checks to finish", with no counts, while two quick
+// checks ran on a check worker that the drain never waits for; the CEO read them as what held the update.
+describe("the drain line says what it still waits on, and what it does not (BOS-2479)", () => {
+  const quick = (ticket: string) => ({ ticket, kind: "pre_review", scope: "quick" });
+  it("names its runs and runner checks with counts and tickets", () => {
+    expect(drainDetail({ runs: 3, runnerChecks: [quick("BOS-2456"), quick("BOS-2468"), { ticket: "BOS-2408", kind: "merge", scope: "full" }], workerChecks: [] }, false)).toBe("3 agent runs; 2 quick checks: BOS-2456, BOS-2468; 1 merge check: BOS-2408");
+  });
+  it("says plainly when nothing of its own is left, and names worker checks as not waited for", () => {
+    expect(drainDetail({ runs: 0, runnerChecks: [], workerChecks: [quick("BOS-2456"), quick("BOS-2468")] }, true)).toBe(
+      "nothing left of its own; it now waits only for the waits below. Not waited for: 2 quick checks: BOS-2456, BOS-2468 on a check worker",
+    );
+    expect(drainDetail({ runs: 0, runnerChecks: [], workerChecks: [] }, false)).toBe("nothing left; the swap happens on the next pass");
+    expect(namedChecksText([{ ticket: null, kind: "pre_review", scope: "full" }])).toBe("1 full check: no ticket");
   });
 });
 
@@ -95,6 +111,17 @@ describe("what a waiting server update counts (serverWaitChecks)", () => {
     await job("passed", { kind: "merge", scope: "full" });
     expect(await serverWaitChecks(db)).toBe(3);
   });
+
+  // BOS-2479: the runner drain's "not waited for" list is exactly the running checks on a worker.
+  it("workerChecks lists running checks on a check worker only, by ticket reference", async () => {
+    const { job } = await seed();
+    await job("running", { kind: "pre_review", scope: "quick", worker: true });
+    await job("running", { kind: "pre_review", scope: "quick", worker: false });
+    await job("queued", { kind: "pre_review", scope: "quick", worker: true });
+    const rows = await workerChecks(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "pre_review", scope: "quick", ticket: "T-1" });
+  });
 });
 
 describe("activeWaits: one list for every screen", () => {
@@ -129,6 +156,18 @@ describe("activeWaits: one list for every screen", () => {
     expect(drainEndsAt({ since, deadline: since, swapWhenDone: true, swapWhenDoneAt: "2026-11-20T10:31:00.000Z" }).toISOString()).toBe("2026-11-20T11:31:00.000Z");
     // An unreadable deadline never makes it end sooner or never.
     expect(drainEndsAt({ since, deadline: "not a date" }).toISOString()).toBe("2026-11-20T11:00:00.000Z");
+  });
+
+  it("BOS-2479: the drain row carries its counts and the landing row names tickets by reference", async () => {
+    await db.insert(settings).values({ key: "maintenance", value: { kind: "update", since: "2026-11-24T10:05:00.000Z", deadline: "2026-11-24T10:35:00.000Z" } });
+    const quick = (ticket: string) => ({ ticket, kind: "pre_review", scope: "quick" });
+    const waits = await activeWaits(db, { landingSince: "2026-11-24T10:20:00.000Z", landingNames: ["BOS-2408"], drain: { runs: 0, runnerChecks: [quick("BOS-2456"), quick("BOS-2468")], workerChecks: [quick("BOS-2470")] } });
+    expect(waits.map((w) => w.waitingOn)).toEqual([
+      "running agents and checks to finish (2 quick checks: BOS-2456, BOS-2468. Not waited for: 1 quick check: BOS-2470 on a check worker)",
+      "a merge that is being pushed to main (BOS-2408)",
+    ]);
+    // Without a landing, an empty drain says the swap is next; with the owner's force, no counts (it waits for none).
+    expect((await activeWaits(db, { drain: { runs: 0, runnerChecks: [], workerChecks: [] } }))[0]!.waitingOn).toContain("nothing left; the swap happens on the next pass");
   });
 
   it("lists nothing when no update waits", async () => {

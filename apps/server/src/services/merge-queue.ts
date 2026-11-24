@@ -462,7 +462,7 @@ export function mergeQueueService(
   db: Db,
   deps: {
     /** This process's running merges, from the review service's own markers. */
-    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] }; turn?: TurnWait }>;
+    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] }; turn?: TurnWait; pushingSince?: string }>;
     /** The check slot limit: how many merge checks run at once. */
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
@@ -661,7 +661,9 @@ export function mergeQueueService(
       for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
       for (const l of live) if (!slotOf.has(l.ticketId) && l.ci) ciWait.set(l.ticketId, l.ci);
       for (const l of live) if (!slotOf.has(l.ticketId) && l.turn) turnWait.set(l.ticketId, l.turn);
-      live = live.filter((l) => slotOf.has(l.ticketId));
+      // BOS-2479: a push to main under way holds no slot (its check is over) but is what a runner update waits for, so it
+      // stays in Running now: whenever the update banner says a merge is being pushed, this tab shows it.
+      live = live.filter((l) => slotOf.has(l.ticketId) || !!l.pushingSince);
       // BOS-1757: a running merge job is what holds a slot, so it is listed even when no landing marker owns it (the ticket
       // was sent back, or the server restarted). The Checks panel counts the same rows, so the two screens can't disagree.
       const marked = new Set(live.map((l) => l.ticketId));
@@ -708,10 +710,12 @@ export function mergeQueueService(
         const phase = l.phase ?? "checking";
         const slot = slotOf.get(l.ticketId) ?? (i % Math.max(1, limit)) + 1;
         const over = elapsed > RUNNING_LIMIT_MS;
+        // BOS-2479: a push with no slot of its own says so, with when the push began (the banner's "being pushed").
+        const pushOnly = !!l.pushingSince && !slotOf.has(l.ticketId);
         return {
           statusLine: {
-            step: `slot ${slot}: ${PHASE_TEXT[phase]}`,
-            since: started.toISOString(),
+            step: pushOnly ? "pushing to main" : `slot ${slot}: ${PHASE_TEXT[phase]}`,
+            since: pushOnly ? l.pushingSince! : started.toISOString(),
             next: phase === "merging" ? "It is done once the merge is in." : "It merges by itself if the check passes.",
             blocker: over ? "The check has run for over an hour." : null,
           },
