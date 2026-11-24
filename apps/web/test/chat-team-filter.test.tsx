@@ -37,6 +37,44 @@ const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200
 const company = { id: "c1", name: "App Co", agents: [] } as unknown as Company;
 const thread = (id: string, name: string, role: string, last: unknown) => ({ id, name, role, duty: null, state: "idle", last });
 
+describe("Chat team list filter, 5 agents and an open conversation", () => {
+  it("narrows by name or role, shows the 2 unread, and leaves the open conversation alone", async () => {
+    const reply = { role: "assistant", text: "Hi", createdAt: "2026-11-21T10:00:00Z" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/chat/threads")) {
+          return json([
+            thread("a1", "Radagast", "ceo", null),
+            thread("a2", "Bungle", "worker", reply),
+            thread("a3", "Zippy", "worker", null),
+            thread("a4", "Yaffle", "worker", reply),
+            thread("a5", "Kit", "worker", null),
+          ]);
+        }
+        if (url.includes("/chat?")) return json({ agentId: "a1", state: "idle", items: [{ id: "m1", role: "assistant", text: "Open conversation text", createdAt: "2026-11-21T09:00:00Z" }] });
+        return json([]);
+      }),
+    );
+    render(<ChatPage companies={[company]} companyId="c1" agentId="a1" go={() => {}} onChanged={() => {}} />);
+    const nav = () => within(screen.getByRole("navigation", { name: "Team" }));
+    const box = await screen.findByRole("searchbox", { name: "Find a teammate" });
+    await screen.findByText("Open conversation text");
+    expect(nav().getAllByRole("link")).toHaveLength(5);
+    fireEvent.change(box, { target: { value: "zip" } });
+    expect(nav().getAllByRole("link").map((a) => a.textContent)).toEqual([expect.stringContaining("Zippy")]);
+    fireEvent.change(box, { target: { value: "ceo" } });
+    expect(nav().getAllByRole("link")).toHaveLength(1);
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("switch", { name: "Unread only" }));
+    expect(nav().getAllByRole("link")).toHaveLength(2);
+    fireEvent.change(box, { target: { value: "nobody" } });
+    expect(screen.getByText(/No one matches/)).toBeTruthy();
+    expect(screen.getByText("Open conversation text")).toBeTruthy();
+    expect(nav().queryAllByRole("link")).toHaveLength(0);
+  });
+});
+
 describe("Chat team list filter", () => {
   it("filters, says No one matches with Clear, and Unread only shows the dot rows", async () => {
     vi.stubGlobal(
