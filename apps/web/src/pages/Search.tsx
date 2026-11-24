@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { LoadError } from "../components/LoadError";
-import { GROUPS, SEARCH_MIN, searchAddress, TIMED, when, type SearchHit, type SearchKind, type SearchResults, type SearchSince } from "../components/SearchPalette";
+import { GROUPS, rememberSearch, SEARCH_MIN, searchAddress, TIMED, when, type SearchHit, type SearchKind, type SearchResults, type SearchSince } from "../components/SearchPalette";
 import { hashQuery } from "../hooks";
 
 /** Hits per "Show more". */
@@ -111,7 +111,7 @@ export function SearchPage({ companyId, go }: { companyId: string | undefined; g
       <header className="page-head">
         <div>
           <h1>Search</h1>
-          <p className="sub">Every ticket, wiki page, chat message, feature, decision, run, agent and skill that matches your words.</p>
+          <p className="sub">Every ticket, wiki page, chat message, feature, decision, run, agent, skill and feedback note that matches your words.</p>
         </div>
       </header>
       <form
@@ -119,6 +119,7 @@ export function SearchPage({ companyId, go }: { companyId: string | undefined; g
         role="search"
         onSubmit={(e) => {
           e.preventDefault();
+          rememberSearch(draft);
           to({ q: draft.trim() });
         }}
       >

@@ -180,6 +180,7 @@ reads:
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
+  - /api/runs/recent
 
 ## #/scrum-master
 sections: 
@@ -253,6 +254,7 @@ reads:
   - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
+  - /api/settings/check-workers/line
   - /api/settings/check-workers/stats
   - /api/settings/merge-carry
   - /api/settings/wait-for-ci
@@ -271,6 +273,7 @@ reads:
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
   - /api/notifications/pushes
+  - /api/notifications/week
   - /api/setup
 
 ## #/settings/<company>/permissions
@@ -493,6 +496,7 @@ sections:
   - Sizes
   - Week by week
   - What this shows
+  - Where tickets wait
   - Workflow report
 reads: 
   - /api/companies/:id/retros/latest

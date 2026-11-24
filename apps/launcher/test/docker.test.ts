@@ -3,7 +3,7 @@ import http from "node:http";
 import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { dockerClient } from "../src/docker.js";
 
 let cleanup: Array<() => void> = [];
@@ -181,7 +181,7 @@ describe("docker events (BOS-335)", () => {
 });
 
 /** A Docker socket whose container reports running for `runningFor` polls, then stops with `exitCode`. */
-function waitingSocket(opts: { runningFor: number; exitCode: number }) {
+function waitingSocket(opts: { runningFor: number; exitCode: number; onPoll?: () => void }) {
   const dir = mkdtempSync(path.join(tmpdir(), "bm-dock-wait-"));
   const sock = path.join(dir, "d.sock");
   const seen: string[] = [];
@@ -195,6 +195,7 @@ function waitingSocket(opts: { runningFor: number; exitCode: number }) {
     // A `POST /wait` would block here (the bug): fail the test's expectation by answering it.
     if (req.method === "POST") return send(200, { StatusCode: opts.exitCode });
     polls++;
+    opts.onPoll?.();
     const running = polls <= opts.runningFor;
     return send(200, { Id: "c1", State: { Running: running, ExitCode: running ? 0 : opts.exitCode } });
   });
@@ -222,10 +223,16 @@ describe("docker wait for the Claude pack installer (BOS-972)", () => {
   });
 
   it("gives up at the caller's own deadline and reports not-stopped", async () => {
-    const f = waitingSocket({ runningFor: 1_000_000, exitCode: 0 });
+    // A fake clock that moves 10 ms per poll of the socket (BOS-2449): with the wall clock, a slow GitHub machine
+    // spent the whole 30 ms budget on the first poll and the poll count was 1. This way the count depends only on
+    // wait()'s deadline sums: a 30 ms budget ends after exactly 3 polls (t = 10, 20, 30). It still catches wait()
+    // giving up early (fewer polls), ignoring its deadline (the test never ends) or overshooting it (more polls).
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    cleanup.push(() => vi.restoreAllMocks());
+    const f = waitingSocket({ runningFor: 1_000_000, exitCode: 0, onPoll: () => (now += 10) });
     const res = await dockerClient(f.sock, { pollMs: 2, maxMs: 5000 }).wait("c1", 30);
     expect(res).toEqual({ stopped: false, exitCode: null });
-    // It waited the whole budget (roughly), never a tight loop.
-    expect(f.polls()).toBeGreaterThan(1);
+    expect(f.polls()).toBe(3);
   });
 });

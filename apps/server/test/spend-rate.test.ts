@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, costEvents, fundingSources, projects, runs, tickets } from "../src/db/schema.js";
 import { kindCeiling } from "../src/services/alert-kinds.js";
-import { spendRateSweep } from "../src/services/spend-rate.js";
+import { spendRateKey, spendRateSweep } from "../src/services/spend-rate.js";
 
 let db: Awaited<ReturnType<typeof openPglite>>["db"];
 let close: () => Promise<void>;
@@ -116,5 +116,22 @@ describe("spend rate alert", () => {
     fail = false;
     expect((await s.run()).raised).toBe(1);
     expect(kindCeiling("spend_rate", "owner")).toBeDefined();
+  });
+});
+
+describe("spendRateKey", () => {
+  it("pins the key format and keeps one key per company per UTC day", () => {
+    expect(spendRateKey("co-1", "2026-11-21")).toBe("spend-rate:co-1:2026-11-21");
+    expect(spendRateKey("co-1", "2026-11-21")).toBe(spendRateKey("co-1", "2026-11-21"));
+    expect(spendRateKey("co-1", "2026-11-21")).not.toBe(spendRateKey("co-1", "2026-11-22"));
+    expect(spendRateKey("co-1", "2026-11-21")).not.toBe(spendRateKey("co-2", "2026-11-21"));
+  });
+
+  it("is the dedupe key of the alert raised for that day", async () => {
+    await history(10, 7);
+    await spend(50, daysAgo(0));
+    const raised: Array<Record<string, unknown>> = [];
+    expect((await sweep(NOW, raised).run()).raised).toBe(1);
+    expect(raised[0]!.dedupeKey).toBe(spendRateKey(companyId, "2026-11-21"));
   });
 });

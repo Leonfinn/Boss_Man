@@ -20,7 +20,7 @@ const wf = { path: "apps/runner/Dockerfile", added: 1, removed: 0 };
 const wfEdit = { path: ".github/workflows/ci.yml", added: 1, removed: 0 };
 const diff = (files: WorkspaceDiff["files"], head = "headcommit1"): WorkspaceDiff => ({ baseCommit: "b", head, tree: `tree-${head}`, commits: [{ sha: head, subject: "x" }], files, diff: "", truncated: false });
 
-async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "failed"; head?: string; context?: boolean; mainWorkflows?: boolean; quick?: "passed" | "none" }) {
+async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "failed"; head?: string; context?: boolean; mainWorkflows?: boolean; quick?: "passed" | "none"; paths?: string[]; texts?: Record<string, string> }) {
   const { db } = await shared;
   await db.delete(checkJobs);
   await db.delete(settings);
@@ -40,7 +40,11 @@ async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "fai
     if (sha === "mainhead1") return { state: "none" as const, waiting: [], failed: [] };
     return opts.ci === "failed" ? { state: "failed" as const, waiting: [], failed: [{ name: "check-worker-image", url: "https://example.com/run/1" }] } : { state: "passed" as const, waiting: [], failed: [] };
   });
-  const hosts = { ciStatus, failures: vi.fn(async (_c: unknown, _t: string, runs: Array<{ name: string }>) => runs.map((run) => ({ run, lines: ["docker build failed"], billing: false }))) };
+  const hosts = {
+    ciStatus,
+    failures: vi.fn(async (_c: unknown, _t: string, runs: Array<{ name: string }>) => runs.map((run) => ({ run, lines: ["docker build failed"], billing: false, paths: opts.paths ?? null }))),
+    fileText: vi.fn(async (_c: unknown, _t: string, path: string) => opts.texts?.[path] ?? null),
+  };
   const d = diff(opts.files, opts.head);
   const preflight = ciPreflightService(db, {
     hosts: hosts as never,
@@ -179,6 +183,49 @@ describe("GitHub CI before review (BOS-1664)", () => {
     // Before the run ends on a new head the move to review is held.
     const s2 = await setup({ files: [wfEdit], mainWorkflows: true });
     expect(await s2.svc.reviewRefusal(s2.co, s2.ticket)).toMatch(/request_check/);
+  });
+
+  describe("BOS-2438: tests that read the workflows are set aside when the branch edits them", () => {
+    const reader = "apps/server/test/ci-workflow-x.test.ts";
+    const other = "apps/server/test/other.test.ts";
+    const texts = { [reader]: `readFileSync(join(root, ".github/workflows/ci.yml"))`, [other]: `expect(1).toBe(2)` };
+
+    it("a failure only in a test that reads the workflows counts as passed, and the ticket says which test was set aside", async () => {
+      const s = await setup({ files: [wfEdit], ci: "failed", mainWorkflows: true, paths: [reader], texts });
+      await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+      await settled(s);
+      expect(s.wakes[0]!.note).toMatch(/passed/);
+      expect(s.wakes[0]!.note).toMatch(/Set aside, not counted against your branch: apps\/server\/test\/ci-workflow-x\.test\.ts/);
+      expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+    });
+
+    it("another failing test still counts, and the set-aside one is named", async () => {
+      const s = await setup({ files: [wfEdit], ci: "failed", mainWorkflows: true, paths: [reader, other], texts });
+      await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+      await settled(s);
+      expect(s.wakes[0]!.note).toMatch(/FAILED/);
+      expect(s.wakes[0]!.note).toMatch(/Set aside/);
+      expect(await s.svc.reviewRefusal(s.co, s.ticket)).toMatch(/did not pass/);
+    });
+
+    it("a failure with no named test, or a test that can't be read, counts", async () => {
+      const a = await setup({ files: [wfEdit], ci: "failed", mainWorkflows: true });
+      await a.svc.request({ companyId: a.co, agentId: a.agent, ticketId: a.ticket });
+      await settled(a);
+      expect(a.wakes[0]!.note).toMatch(/FAILED/);
+      const b = await setup({ files: [wfEdit], ci: "failed", mainWorkflows: true, paths: [reader] });
+      await b.svc.request({ companyId: b.co, agentId: b.agent, ticketId: b.ticket });
+      await settled(b);
+      expect(b.wakes[0]!.note).toMatch(/FAILED/);
+    });
+
+    it("a branch that doesn't edit workflows gets no set-aside", async () => {
+      const s = await setup({ files: [wf], ci: "failed", paths: [reader], texts });
+      await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+      await settled(s);
+      expect(s.wakes[0]!.note).toMatch(/FAILED/);
+      expect(s.wakes[0]!.note).not.toMatch(/Set aside/);
+    });
   });
 
   it("BOS-2300: a workflow edit waiting for its quick check is not pushed if the runner later lacks the feature, then runs once it has it", async () => {
