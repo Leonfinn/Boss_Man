@@ -31,7 +31,7 @@ export type SecondOpinionWindow = {
   /** Cards per UTC day, oldest first; empty for the 24 h window. */
   perDay: Array<{ day: string; cards: number }>;
 };
-export type SecondOpinionStatsAll = { last24h: SecondOpinionWindow; last7d: SecondOpinionWindow; last30d: SecondOpinionWindow };
+export type SecondOpinionStatsAll = SecondOpinionWindow & { last24h: SecondOpinionWindow; last7d: SecondOpinionWindow; last30d: SecondOpinionWindow };
 export type SecondOpinionStats = SecondOpinionWindow;
 
 const key = (companyId: string) => `second-opinion:${companyId}`;
@@ -274,7 +274,9 @@ export function secondOpinionService(
         }
         return out;
       };
-      return { last24h: await window(24, false), last7d: await window(24 * 7, true), last30d: await window(24 * 30, true) };
+      const last24h = await window(24, false);
+      // The 24 h fields also stay at the top level, as before, so any older reader keeps working.
+      return { ...last24h, last24h, last7d: await window(24 * 7, true), last30d: await window(24 * 30, true) };
     },
 
     /** The Test button: a harmless sample card, with the settings given (saved or not). */

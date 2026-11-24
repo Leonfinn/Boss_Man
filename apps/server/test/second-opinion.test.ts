@@ -274,7 +274,7 @@ describe("model second opinion (BOS-338)", () => {
     await ctx.turnOn();
     const empty = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json();
     const zero = { answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [], bothVerdicts: 0, agreed: 0, agreement: null };
-    expect(empty).toMatchObject({ last24h: { ...zero, perDay: [] }, last7d: zero, last30d: zero });
+    expect(empty).toMatchObject({ answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [], last24h: { ...zero, perDay: [] }, last7d: zero, last30d: zero });
     const failed = await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
     expect(judgeOf(failed)?.second).toMatchObject({ state: "failed", reason: expect.stringContaining("Groq") });
     await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
@@ -290,6 +290,8 @@ describe("model second opinion (BOS-338)", () => {
     await ctx.db.update(decisions).set({ createdAt: new Date(Date.now() - 40 * 24 * 3600_000) }).where(eq(decisions.id, ancient.id));
     const all = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json() as { last24h: Win; last7d: Win; last30d: Win };
     const s = all.last24h;
+    // The old top-level fields still carry the same 24 h values.
+    expect(all).toMatchObject({ answered: 1, denied: 1, fellBack: 2 });
     expect(s).toMatchObject({ answered: 1, denied: 1, fellBack: 2, bothVerdicts: 1, agreed: 0, agreement: 0 });
     expect(s.reasons).toEqual([{ reason: expect.stringContaining("too busy"), count: 2 }]);
     // 7 days: the 48 h old card joins; 30 days: the 10 day old one too; the 40 day old one never.
