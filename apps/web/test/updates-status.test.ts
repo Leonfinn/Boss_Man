@@ -46,6 +46,25 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(noOffer.next).toBe("Nothing to retry: the next change will be offered when it merges.");
   });
 
+  it("1. BOS-2556: a newer update waiting after a failure takes the banner; no Try again", () => {
+    const failed = st({ result: "failed", message: "build could not reach the registry" });
+    const w: DeployWaitView = { on: true, phase: "waiting", origin: "approve", commit: "bbbbbbbb22", deadline: iso(60), quiet: { ready: false, runs: 1, checks: 0, freeMb: null, needMb: null, why: ["1 agent is running"] } };
+    const s = updateStatus(offered({ status: failed }), null, w, NOW);
+    expect(s.tag).toBe("Approved, waiting");
+    expect(s.alert).toBeUndefined();
+    expect(s.primary).toBeNull();
+    expect(s.more).toContain("1 agent is running");
+    const queued = updateStatus(offered({ status: failed, pending: true }), null, null, NOW);
+    expect(queued.tag).toBe("Updating");
+    expect(queued.primary).toBeNull();
+  });
+
+  it("1. BOS-2556: a failure with nothing newer pending is unchanged", () => {
+    const s = updateStatus(offered({ status: st({ result: "failed", message: "x" }) }), null, null, NOW);
+    expect(s.tag).toBe("Update failed");
+    expect(s.primary).toMatchObject({ id: "try-again" });
+  });
+
   it("1. a rejection only because a newer update replaced it is history, not a failure", () => {
     const s = updateStatus(base({ status: st({ result: "rejected", message: "Rejected: abc is not on main any more (main is at def)" }) }), null, null, NOW);
     expect(s.tag).toBe("Up to date");

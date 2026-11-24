@@ -1853,16 +1853,45 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'self_deploy'`, olderThan))
         .orderBy(desc(when), desc(decisions.id))
         .limit(Math.max(1, Math.min(limit, 20)));
+      // BOS-2549: a card's result is written only when the host reports its own request id, so a card replaced by a newer
+      // approval (or whose deploy was reported under another id) keeps `result` null for ever. Settle those here:
+      // the commit the server runs now went in ("deployed"); any other one with a newer server card after it was replaced.
+      const liveCommit = (await available())?.deployed ?? null;
+      const serverCards = await db
+        .select({ id: decisions.id, context: decisions.context, when })
+        .from(decisions)
+        .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'self_deploy'`, sql`${decisions.context}->>'target' = 'server'`))
+        .orderBy(desc(when), desc(decisions.id))
+        .limit(200);
+      const stamp = (w: unknown) => new Date(w as string | Date).getTime();
       return rows.map((r) => {
         const c = r.context as SelfDeployContext;
+        const at = (r.answeredAt ?? r.createdAt).toISOString();
+        let result: string | null = c.result?.result ?? null;
+        let replacedBy: string | null = null;
+        if (!result && c.target === "server") {
+          const newer = serverCards.filter((o) => o.id !== r.id && stamp(o.when) >= stamp(at) && (stamp(o.when) > stamp(at) || o.id > r.id));
+          if (liveCommit && c.commit === liveCommit) result = "deployed";
+          else if (newer.length) {
+            result = "replaced";
+            const next = (newer.at(-1)!.context as SelfDeployContext).commit;
+            replacedBy = next ? next.slice(0, 8) : null;
+          }
+        }
+        // The real number of changes: tickets named on the card plus those it only counted (`update.more`), not the capped commit list.
+        const named = c.update ? c.update.changes.length : 0;
+        const changes = c.update ? named + c.update.more : (c.changes?.length ?? 0);
+        const shown = c.update ? named : (c.changes?.length ?? 0);
         return {
           id: r.id,
           target: c.target,
           commit: c.commit,
-          changes: c.changes?.length ?? 0,
-          result: c.result?.result ?? null,
+          changes,
+          shown,
+          result,
+          replacedBy,
           message: c.result?.message ?? null,
-          at: c.result?.at ?? (r.answeredAt ?? r.createdAt).toISOString(),
+          at: c.result?.at ?? at,
         };
       });
     },

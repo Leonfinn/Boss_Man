@@ -97,6 +97,23 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(none).toEqual([]);
   });
 
+  it("Recent updates settles old server rows with no result and counts the real changes (BOS-2549)", async () => {
+    const c = (ctx = await setup());
+    await c.available({});
+    const [co] = await c.db.select().from(companies);
+    const named = Array.from({ length: 20 }, (_, i) => ({ ticketId: `t${i}`, ref: `BOS-${i}`, title: `T${i}` }));
+    const add = async (day: number, commit: string, update?: object) =>
+      (await c.db.insert(decisions).values({ companyId: co!.id, kind: "question", tier: "owner", question: `u${day}`, options: ["Done"], recommendedOption: "Done", status: "answered", answeredAt: new Date(Date.UTC(2026, 9, day)), context: { type: "self_deploy", target: "server", commit, changes: ["a", "b"], ...(update ? { update } : {}) } as never }).returning())[0]!.id;
+    const replaced = await add(1, "c".repeat(40));
+    const live = await add(2, A, { changes: named, more: 18, total: 90 });
+    const newest = await add(3, "d".repeat(40));
+    const rows = (await c.req("GET", "/api/self-deploy/history?limit=10")).json() as { id: string; result: string | null; changes: number; shown: number; replacedBy: string | null }[];
+    const by = (id: string) => rows.find((r) => r.id === id)!;
+    expect(by(newest).result).toBeNull(); // the newest unfinished one may still wait
+    expect(by(live)).toMatchObject({ result: "deployed", changes: 38, shown: 20 });
+    expect(by(replaced)).toMatchObject({ result: "replaced", replacedBy: A.slice(0, 8), changes: 2, shown: 2 });
+  });
+
   it("refuses to save add-ons when self-deploy is not set up (BOS-1583)", async () => {
     const c = (ctx = await setup({ deployer: false }));
     expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toMatchObject({ enabled: false });
