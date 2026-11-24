@@ -81,6 +81,25 @@ describe("server health", () => {
     expect(h.history[12]).toEqual({ day: "2026-11-22", bytes: 1001 });
   });
 
+  it("returns 3 readings as 3 and an empty history without error", async () => {
+    const { svc, db } = await setup();
+    for (const [i, day] of ["2026-11-20", "2026-11-21", "2026-11-22"].entries()) {
+      await db.insert(serverSizeReadings).values({ day, dbBytes: 100 + i, recordedAt: new Date() });
+    }
+    const h = await svc.read(); // today's reading makes 4
+    expect(h.history.map((r) => r.day)).toEqual(["2026-11-20", "2026-11-21", "2026-11-22", "2026-11-23"]);
+    expect(h.database.dayAgoBytes).toBe(102);
+    expect(h.database.weekAgoBytes).toBeNull();
+  });
+
+  it("returns an empty history when the size can't be read and nothing is stored", async () => {
+    const none = await setup();
+    const stubbed = new Proxy(none.db, { get: (t, p, r) => (p === "execute" ? async () => { throw new Error("no size"); } : Reflect.get(t, p, r)) });
+    const h = await dataHealthService(stubbed, { statfs: disk(50) }).read();
+    expect(h.history).toEqual([]);
+    expect(h.database.bytes).toBeNull();
+  });
+
   it("warns below 10% or 5 GB free, once a day per company", async () => {
     const low = await setup({ freeGb: 9 }); // 9% of 100 GB
     expect(await low.svc.checkWarnings()).toBe(1);
