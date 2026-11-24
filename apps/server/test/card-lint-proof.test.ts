@@ -290,7 +290,7 @@ describe("R11: host commands need proof", () => {
 // as private (backups live there). The old `cp` kept the source's open mode and was held; `install -m 0750` is not.
 describe("R6: the hand-apply card's host-deployer.sh copy", () => {
   const HOSTS = [{ name: "nas01", login: "owner", ownership: [{ path: "/srv/bm/src", owner: "root", group: "root", mode: "755", role: "backups" as const }, { path: "/srv/bm/deployer", owner: "root", group: "root", mode: "755" }] }];
-  const lint = (cmd: string) => lintOwnerSteps([step("Copy the deployer script.", sh(cmd, { host: "nas01", as: "root" }))], { hosts: HOSTS, serverHost: "nas01" }).refuse;
+  const lint = (cmd: string) => lintOwnerSteps([step("Copy the deployer script.", sh(cmd, { host: "nas01", as: "root" }))], { hosts: HOSTS, serverHost: "nas01" }).refuse.filter((f) => f.rule === "R6"); // R11 (proof) is a separate rule, not under test here
   const SRC = "/srv/bm/src/scripts/host-deployer.sh";
   const DEST = "/srv/bm/deployer/host-deployer.sh";
 
