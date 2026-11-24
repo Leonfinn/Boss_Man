@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import type { Company } from "../src/api";
-import { SEARCH_DEBOUNCE_MS, SearchPalette, type SearchResults } from "../src/components/SearchPalette";
+import { SEARCH_DEBOUNCE_MS, SEARCH_LABEL, SearchPalette, type SearchResults } from "../src/components/SearchPalette";
 import { ChatPage } from "../src/pages/Chat";
 
 Element.prototype.scrollIntoView = () => {};
@@ -61,7 +61,7 @@ describe("search box (BOS-2192)", () => {
       if (!screen.queryByRole("dialog", { name: "Search" })) ctrlK();
       expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
     });
-    const box = screen.getByRole("combobox", { name: "Search tickets, wiki, chats, features, decisions and runs" });
+    const box = screen.getByRole("combobox", { name: SEARCH_LABEL });
     expect(document.activeElement).toBe(box);
     fireEvent.keyDown(box, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
@@ -77,7 +77,7 @@ describe("search box (BOS-2192)", () => {
     expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
 
     // No keyboard: the sidebar's button.
-    fireEvent.click(screen.getByRole("button", { name: "Search tickets, wiki, chats, features, decisions and runs" }));
+    fireEvent.click(screen.getByRole("button", { name: SEARCH_LABEL }));
     await screen.findByRole("dialog", { name: "Search" });
   });
 

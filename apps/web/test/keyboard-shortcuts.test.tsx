@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 import type { Company } from "../src/api";
-import { SearchPalette } from "../src/components/SearchPalette";
+import { SEARCH_LABEL, SearchPalette } from "../src/components/SearchPalette";
 import { G_WINDOW_MS, JUMPS, Shortcuts } from "../src/components/Shortcuts";
 
 afterEach(() => {
@@ -137,7 +137,7 @@ describe("keyboard shortcuts (BOS-2321)", () => {
   it("with the Ctrl+K search box open, '?' types into its box and does not open the list", async () => {
     render(<><SearchPalette companyId="c1" go={() => {}} /><Shortcuts go={() => {}} hasProjects /></>);
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
-    const box = await screen.findByRole("combobox", { name: "Search tickets, wiki, chats, features, decisions and runs" });
+    const box = await screen.findByRole("combobox", { name: SEARCH_LABEL });
     expect(document.activeElement).toBe(box);
     // The key reaches the box (nothing calls preventDefault), so the browser types it.
     expect(fireEvent.keyDown(box, { key: "?", shiftKey: true })).toBe(true);

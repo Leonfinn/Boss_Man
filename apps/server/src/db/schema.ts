@@ -962,6 +962,8 @@ export const deploys = pgTable("deploys", {
   tagAt: timestamp("tag_at", { withTimezone: true }),
   /** "pending", "moved", "unchanged", or "skipped: <why>" / "failed: <git's text>". Null: the target has no tag, or the deploy hasn't finished. */
   tagResult: text("tag_result"),
+  /** BOS-2329: set when the owner asked to ship an earlier successful deploy's commit again; points at that deploy. Null for every ordinary deploy. */
+  redeployOf: uuid("redeploy_of").references((): AnyPgColumn => deploys.id, { onDelete: "set null" }),
   createdAt: createdAt(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 });

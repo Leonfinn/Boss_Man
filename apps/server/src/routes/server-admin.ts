@@ -206,6 +206,12 @@ export function serverAdminRoutes(
     if (r.result === "has_history") return reply.code(409).send({ error: "has_history", field: "has_history", message: `This target has ${r.count} past deploy${r.count === 1 ? "" : "s"}, and removing it would erase ${r.count === 1 ? "it" : "them"} and the target's secret grants.` });
     return reply.code(404).send({ error: "not_found" });
   });
+  // BOS-2329: ship an earlier successful deploy's commit again; approval and the tag step apply as for any deploy.
+  owner.post("/api/deploys/:id/redeploy", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const { companyId } = z.object({ companyId: Uuid }).parse(req.body);
+    return deploysSvc.redeploy(companyId, id).then((r) => reply.code(201).send(r)).catch(deployErrors(reply));
+  });
   owner.get("/api/deploys", async (req) => {
     const q = z.object({ companyId: Uuid.optional(), targetId: Uuid.optional(), limit: z.coerce.number().int().min(1).optional(), before: Uuid.optional() }).parse(req.query);
     // No paging parameters: the whole list, as before. Any of them: one newest-first page.

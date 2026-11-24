@@ -213,7 +213,47 @@ export function Engagement({ id }: { id: string }) {
           </p>
         </section>
 
-        <section aria-labelledby="thread-h" style={{ flex: "2 1 420px", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ flex: "2 1 420px", minWidth: 0, display: "flex", flexDirection: "column", gap: 20 }}>
+        {e.tickets && e.tickets.length > 0 && (
+          <section aria-labelledby="work-h" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <h2 id="work-h" style={{ fontSize: 16, fontWeight: 600 }}>
+              Work
+            </h2>
+            <p className="muted" style={{ fontSize: 13 }}>
+              {e.tickets.filter((t) => t.state === "done").length} of {e.tickets.length} done
+            </p>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Ticket</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Assignee</th>
+                    <th scope="col" style={{ textAlign: "right" }}>Spent</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {e.tickets.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <a href={`#/tickets/${t.id}`}>
+                          {t.ref ? <span className="mono">{t.ref} </span> : null}
+                          {t.title}
+                        </a>
+                      </td>
+                      <td>{t.state.replace(/_/g, " ")}</td>
+                      <td>{t.assignee ?? "Unassigned"}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        ${t.spentUsd.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+        <section aria-labelledby="thread-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <h2 id="thread-h" style={{ fontSize: 16, fontWeight: 600 }}>
             Thread
           </h2>
@@ -233,6 +273,7 @@ export function Engagement({ id }: { id: string }) {
             </article>
           ))}
         </section>
+        </div>
       </div>
     </>
   );

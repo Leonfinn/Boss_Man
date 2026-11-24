@@ -23,6 +23,13 @@ export function weeklySummaryRoutes(owner: FastifyInstance, deps: { weekly: Retu
       throw err;
     }
   });
+  // The summary on the Dashboard (BOS-2390): the email's facts and text, readable without email set up.
+  owner.get("/api/companies/:id/weekly-summary/view", async (req, reply) => {
+    const id = Id.parse(req.params).id;
+    const week = z.object({ week: z.enum(["this", "last"]).default("this") }).parse(req.query).week;
+    if (!(await deps.weekly.companyExists(id))) return reply.code(404).send(notFound);
+    return deps.weekly.view(id, week);
+  });
   // "Send one now" (BOS-2241): the same email as Monday's, at once; lastSentAt is untouched.
   owner.post("/api/companies/:id/weekly-summary/send-now", async (req, reply) => {
     const id = Id.parse(req.params).id;

@@ -53,8 +53,9 @@ describe("the Runs page (BOS-1887)", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<Runs companies={companies} />);
     const alerts = await screen.findAllByRole("alert");
-    expect(alerts.length).toBe(2);
-    expect(screen.getAllByRole("button", { name: "Retry" }).length).toBe(2);
+    // Running, Waiting to start (BOS-2320) and past runs each show their own error.
+    expect(alerts.length).toBe(3);
+    expect(screen.getAllByRole("button", { name: "Retry" }).length).toBe(3);
     expect(screen.queryByText("No agents are running.")).toBeNull();
     expect(screen.queryByText("No runs have finished yet.")).toBeNull();
     const before = fetchMock.mock.calls.length;

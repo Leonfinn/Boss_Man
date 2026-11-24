@@ -1,5 +1,5 @@
 {
-  "id": "f5f8db69-bc2a-41c1-a42b-e7b5086ea838",
+  "id": "5fc797d3-5d5c-4460-a724-b4dc4b1bbd88",
   "prevId": "1d526ede-8b23-4053-8211-e2b2e9040c78",
   "version": "7",
   "dialect": "postgresql",
@@ -3004,6 +3004,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "redeploy_of": {
+          "name": "redeploy_of",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3078,6 +3084,19 @@
           "tableTo": "runs",
           "columnsFrom": [
             "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "deploys_redeploy_of_deploys_id_fk": {
+          "name": "deploys_redeploy_of_deploys_id_fk",
+          "tableFrom": "deploys",
+          "tableTo": "deploys",
+          "columnsFrom": [
+            "redeploy_of"
           ],
           "columnsTo": [
             "id"
@@ -9301,38 +9320,6 @@
           ]
         }
       },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.server_size_readings": {
-      "name": "server_size_readings",
-      "schema": "",
-      "columns": {
-        "day": {
-          "name": "day",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "db_bytes": {
-          "name": "db_bytes",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "recorded_at": {
-          "name": "recorded_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

@@ -56,6 +56,63 @@ describe("Spend page", () => {
     expect(within(screen.getByRole("table")).getByText("Docs")).toBeTruthy();
   });
 
+  it("By model: a table with plan use and pay-as-you-go, and a CSV with a model column (BOS-2401)", async () => {
+    const m = { runs: 2, inputTokens: 1500, outputTokens: 20, cacheReadTokens: 3, cacheWriteTokens: 4 };
+    respond = (url) => {
+      const base = answer(Number(new URL(url, "http://x").searchParams.get("days")));
+      const day = base.days.at(-1)!;
+      const modelDays = [
+        { date: day, model: "opus", micros: 3_000_000, planMicros: 2_000_000, payMicros: 1_000_000, ...m },
+        { date: day, model: "Unknown model", micros: 1_000_000, planMicros: 0, payMicros: 1_000_000, ...m },
+      ];
+      return { status: 200, body: { ...base, models: modelDays.map((d) => ({ ...d, date: "" })), modelDays } };
+    };
+    const { container } = render(<SpendReport company={company} />);
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: "By model" }));
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("opus")).toBeTruthy();
+    expect(within(table).getByText("Unknown model")).toBeTruthy();
+    expect(within(table).getByText("75%")).toBeTruthy();
+    expect(within(table).getAllByText("1,500").length).toBe(2);
+    expect(container.querySelectorAll(".dbar .seg.blue").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "7 days" }));
+    await waitFor(() => expect(container.querySelectorAll(".dbar")).toHaveLength(7));
+    expect(within(screen.getByRole("table")).getByText("opus")).toBeTruthy();
+    let blob: Blob | undefined;
+    URL.createObjectURL = vi.fn((b: Blob) => ((blob = b), "blob:x"));
+    URL.revokeObjectURL = vi.fn();
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    const lines = (await blob!.text()).trim().split("\r\n");
+    expect(lines[0]).toBe("date,model,runs,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,plan_usd,pay_as_you_go_usd,cost_usd");
+    expect(lines[1]).toContain(",opus,2,1500,20,3,4,2.0000,1.0000,3.0000");
+    fireEvent.click(screen.getByRole("button", { name: "By agent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    expect((await blob!.text()).split("\r\n")[0]).toBe("date,agent,feature,project,tickets,cost_usd");
+  });
+
+  it("shows the costliest tickets as links with their share, and follows the period (BOS-2370)", async () => {
+    respond = (url) => {
+      const n = Number(new URL(url, "http://x").searchParams.get("days"));
+      const top = [
+        { ticketId: "t1", ref: "BOS-7", title: "Fix the thing", state: "in_progress", feature: "Search", micros: 3_000_000, runs: 4 },
+        { ticketId: null, ref: null, title: "Not on a ticket", state: null, feature: null, micros: 1_000_000, runs: 0 },
+      ];
+      return { status: 200, body: { ...answer(n), topTickets: n === 7 ? top.slice(0, 1) : top } };
+    };
+    render(<SpendReport company={company} />);
+    const heading = await screen.findByRole("heading", { name: "Costliest tickets" });
+    const table = within(heading.parentElement!).getByRole("table");
+    const link = within(table).getByRole("link", { name: "Fix the thing" });
+    expect(link.getAttribute("href")).toBe("#/tickets/t1");
+    expect(within(table).getByText("75%")).toBeTruthy();
+    expect(within(table).getByText("Not on a ticket").closest("a")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "7 days" }));
+    await waitFor(() => expect(screen.queryByText("Not on a ticket")).toBeNull());
+    expect(screen.getByRole("link", { name: "Fix the thing" })).toBeTruthy();
+  });
+
   it("downloads a CSV whose rows add up to the table's total", async () => {
     let blob: Blob | undefined;
     URL.createObjectURL = vi.fn((b: Blob) => ((blob = b), "blob:x"));

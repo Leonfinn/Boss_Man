@@ -38,6 +38,7 @@ const Dashboard = lazyPage(() => import("./pages/Dashboard"), "Dashboard");
 const SpendReport = lazyPage(() => import("./pages/SpendReport"), "SpendReport");
 const Skills = lazyPage(() => import("./pages/Skills"), "Skills");
 const Agents = lazyPage(() => import("./pages/Agents"), "Agents");
+const SearchPage = lazyPage(() => import("./pages/Search"), "SearchPage");
 const Features = lazyPage(() => import("./pages/Features"), "Features");
 const Wiki = lazyPage(() => import("./pages/Wiki"), "Wiki");
 const Feedback = lazyPage(() => import("./pages/Feedback"), "Feedback");
@@ -416,9 +417,9 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "agents" ? (
-          <Agents company={current} onChanged={companies.reload} />
+          <Agents company={current} agentId={route[1]} onChanged={companies.reload} />
         ) : page === "skills" ? (
-          <Skills company={current} />
+          <Skills company={current} skillId={route[1]} />
         ) : page === "features" ? (
           <Features companies={list} companyId={companyId} featureId={route[2]} go={go} />
         ) : page === "feedback" ? (
@@ -429,6 +430,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Plan companies={list} companyId={companyId} go={go} />
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
+        ) : page === "search" ? (
+          <SearchPage companyId={companyId} go={go} />
         ) : page === "merge-queue" ? (
           <MergeQueue companies={list} companyId={companyId} />
         ) : page === "tickets" && route[1] ? (

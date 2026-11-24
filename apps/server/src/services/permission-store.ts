@@ -46,6 +46,45 @@ export function permissionStore(db: Db): PermissionStore {
   };
 }
 
+export type RuleUseCounts = { allow: number; ceo: number; owner: number; deny: number };
+export type RuleUsage = { week: RuleUseCounts; month: RuleUseCounts; lastAt: string };
+
+/**
+ * How often each rule decided in the last 7 and 30 days (BOS-2372), by the rule text stored on the decision,
+ * split by where the request went (allowed, the CEO, the owner, refused), with the last time it matched.
+ * One company, or every company when companyId is null. Read-only. A rule renamed since keeps its old counts under the old name.
+ */
+export async function ruleUsage(db: Db, companyId: string | null, now: Date = new Date()): Promise<Record<string, RuleUsage>> {
+  const monthStart = new Date(now.getTime() - 30 * 86_400_000);
+  const weekStart = new Date(now.getTime() - 7 * 86_400_000);
+  const count = (tier: string, from: Date) => sql<number>`count(*) filter (where ${permissionDecisions.tier} = ${tier} and ${permissionDecisions.at} >= ${from.toISOString()}::timestamptz)::int`;
+  const rows = await db
+    .select({
+      rule: permissionDecisions.rule,
+      wAllow: count("allow", weekStart),
+      wCeo: count("ceo", weekStart),
+      wOwner: count("owner", weekStart),
+      wDeny: count("deny", weekStart),
+      mAllow: count("allow", monthStart),
+      mCeo: count("ceo", monthStart),
+      mOwner: count("owner", monthStart),
+      mDeny: count("deny", monthStart),
+      lastAt: sql<string>`max(${permissionDecisions.at})`,
+    })
+    .from(permissionDecisions)
+    .where(and(sql`${permissionDecisions.at} >= ${monthStart.toISOString()}::timestamptz`, companyId ? eq(permissionDecisions.companyId, companyId) : undefined))
+    .groupBy(permissionDecisions.rule);
+  const out: Record<string, RuleUsage> = {};
+  for (const r of rows) {
+    out[r.rule] = {
+      week: { allow: r.wAllow, ceo: r.wCeo, owner: r.wOwner, deny: r.wDeny },
+      month: { allow: r.mAllow, ceo: r.mCeo, owner: r.mOwner, deny: r.mDeny },
+      lastAt: new Date(r.lastAt).toISOString(),
+    };
+  }
+  return out;
+}
+
 /** One run's decisions, oldest first, capped; `truncated` says the run had more. */
 export async function permissionsForRun(db: Db, runId: string) {
   const rows = await db

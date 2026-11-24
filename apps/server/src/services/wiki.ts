@@ -569,7 +569,8 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     },
 
     /**
-     * Pages this text links to (that exist) and pages whose body links to slug.
+     * Pages this text links to (that exist), [[slug]] targets with no live page (missingLinks, BOS-2366)
+     * and pages whose body links to slug.
      * shortcut: linked-from is a LIKE scan of this company's pages; add a wiki_links table
      * (written on save) when a company has thousands of pages or backlinks feel slow.
      */
@@ -582,7 +583,8 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         .from(wikiPages)
         .where(and(eq(wikiPages.companyId, companyId), liveWikiPage, or(like(wikiPages.body, `%[[${esc}]]%`), like(wikiPages.body, `%[[${esc}#%`))))
         .orderBy(asc(wikiPages.slug));
-      return { links: wanted.filter((l) => out.some((o) => o.slug === l)), linkedFrom: from.map((r) => r.slug).filter((l) => l !== slug) };
+      const live = new Set(out.map((o) => o.slug));
+      return { links: wanted.filter((l) => live.has(l)), missingLinks: wanted.filter((l) => !live.has(l)), linkedFrom: from.map((r) => r.slug).filter((l) => l !== slug) };
     },
 
     /** One page with its history and the tickets it was produced for. */

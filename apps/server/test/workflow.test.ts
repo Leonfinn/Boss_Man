@@ -276,3 +276,30 @@ describe("sizes (docs/19 part 6)", () => {
     expect(path(unsized).p50Ms).toBe(D);
   });
 });
+
+describe("week by week trend", () => {
+  it("gives 8 whole weeks oldest first plus the part-week, matching the main figures", async () => {
+    const c = await setup();
+    const dee = await c.agent("Dee", "developer");
+    const base = { assigneeAgentId: dee.id };
+    // NOW is Wednesday 28 Oct; this week began Monday 26 Oct 00:00 UTC.
+    const a = await c.ticket([["backlog", 10 * D], ["in_progress", 9 * D], ["done", 8 * D]], base); // Mon 19 Oct 12:00 ... week of 19 Oct
+    const b = await c.ticket([["backlog", 10 * D], ["in_progress", 9 * D], ["done", 7 * D]], base); // week of 19 Oct
+    await c.ticket([["backlog", 5 * D], ["in_progress", 2 * D], ["done", H]], base); // this week
+    await c.db.insert(ticketReviews).values([
+      { ticketId: a.id, reviewer: "Rae", verdict: "changes_requested" },
+      { ticketId: a.id, reviewer: "Rae", verdict: "approved" },
+      { ticketId: b.id, reviewer: "Rae", verdict: "approved" },
+    ]);
+    const { trend, overall } = await c.svc.scorecard(c.company.id, 7);
+    expect(trend).toHaveLength(9);
+    expect(trend.map((w) => w.weekStart.slice(0, 10))).toEqual(["2026-08-31", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05", "2026-10-12", "2026-10-19", "2026-10-26"]);
+    expect(trend.map((w) => w.partial)).toEqual([false, false, false, false, false, false, false, false, true]);
+    expect(trend[7]).toMatchObject({ partial: false, done: 2, firstPassRate: 0.5, meanRework: 0.5, medianCycleMs: 1.5 * D });
+    expect(trend[8]).toMatchObject({ done: 1, firstPassRate: null, costPerDoneMicros: 0 });
+    expect(trend[0]).toMatchObject({ done: 0, firstPassRate: null, medianCycleMs: null, costPerDoneMicros: null });
+    // The same span in the main figures agrees.
+    // The 7-day main figures cover 21 Oct to now: the part-week's ticket, plus b (done 21 Oct 12:00).
+    expect(overall.done).toBe(2);
+  });
+});

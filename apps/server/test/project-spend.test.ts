@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { companies, costEvents, fundingSources, projects, runs, tickets } from "../src/db/schema.js";
-import { monthStartUtc, projectSpendMicros } from "../src/services/project-spend.js";
+import { monthStartUtc, projectMonthlyTrend, projectSpendMicros } from "../src/services/project-spend.js";
 
 let ctx: Awaited<ReturnType<typeof openPglite>> | undefined;
 beforeEach(async () => {
@@ -71,5 +71,45 @@ describe("projectSpendMicros", () => {
   it("gives 0 when the project has no costs", async () => {
     const s = await setup();
     expect(await projectSpendMicros(db(), s.project.id)).toBe(0);
+  });
+});
+
+describe("projectMonthlyTrend (BOS-2369)", () => {
+  it("gives six months oldest first, split into pay-as-you-go and plan, in the given zone, for this project only", async () => {
+    const s = await setup();
+    const now = new Date("2026-11-15T12:00:00Z");
+    const r1 = await s.run(s.ticket.id);
+    const r2 = await s.run(s.ticket.id);
+    const ro = await s.run(s.otherTicket.id);
+    await s.cost(r1, s.api.id, 2_000_000, { occurredAt: new Date("2026-11-10T10:00:00Z") });
+    await s.cost(r1, s.sub.id, 500_000, { occurredAt: new Date("2026-11-10T10:00:00Z") });
+    await s.cost(r2, s.api.id, 1_000_000, { occurredAt: new Date("2026-06-20T10:00:00Z") });
+    await s.cost(ro, s.api.id, 9_000_000, { occurredAt: new Date("2026-11-10T10:00:00Z") });
+    // Charged back to this project from another project's run.
+    await s.cost(ro, s.api.id, 300_000, { occurredAt: new Date("2026-10-05T10:00:00Z"), chargedProjectId: s.project.id });
+    // Before the window: left out.
+    await s.cost(r1, s.api.id, 7_000_000, { occurredAt: new Date("2026-05-01T10:00:00Z") });
+    // 00:30 on 1 Nov in Berlin is still 31 Oct in New York.
+    await s.cost(r1, s.api.id, 40_000, { occurredAt: new Date("2026-10-31T23:30:00Z") });
+    const utc = await projectMonthlyTrend(db(), s.project.id, { timeZone: "UTC", now });
+    expect(utc.map((m) => m.month)).toEqual(["2026-06", "2026-07", "2026-08", "2026-09", "2026-10", "2026-11"]);
+    expect(utc[0]).toMatchObject({ paygMicros: 1_000_000, planMicros: 0 });
+    expect(utc[4]).toMatchObject({ paygMicros: 300_000 + 40_000 });
+    expect(utc[5]).toMatchObject({ paygMicros: 2_000_000, planMicros: 500_000 });
+    const ny = await projectMonthlyTrend(db(), s.project.id, { timeZone: "America/New_York", now });
+    expect(ny[4]!.paygMicros).toBe(340_000);
+    const berlin = await projectMonthlyTrend(db(), s.project.id, { timeZone: "Europe/Berlin", now });
+    expect(berlin[4]!.paygMicros).toBe(300_000);
+    expect(berlin[5]!.paygMicros).toBe(2_040_000);
+    // Runs are counted by start month, this project's only.
+    await db().insert(runs).values([
+      { companyId: s.company.id, ticketId: s.ticket.id, startedAt: new Date("2026-09-03T10:00:00Z") },
+      { companyId: s.company.id, ticketId: s.ticket.id, startedAt: new Date("2026-09-04T10:00:00Z") },
+      { companyId: s.company.id, ticketId: s.otherTicket.id, startedAt: new Date("2026-09-04T10:00:00Z") },
+    ]);
+    const again = await projectMonthlyTrend(db(), s.project.id, { timeZone: "UTC", now });
+    // The two runs made by setup started at the real clock, so they count in whichever month that is; compare only the dated month.
+    expect(again[3]!.runs).toBe(2);
+    expect(again.slice(0, 3).map((m) => m.runs)).toEqual([0, 0, 0]);
   });
 });
