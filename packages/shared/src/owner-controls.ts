@@ -287,7 +287,7 @@ export const OWNER_FIELDS = {
     "Filter", "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "Why it matters (opens the card)", "If you skip it", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
-    "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
+    "Priority 1", "Recurring", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
     // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2233).
     "Page address",
   ],
