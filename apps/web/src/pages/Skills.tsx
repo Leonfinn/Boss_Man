@@ -758,10 +758,10 @@ export function Skills({ company, skillId }: { company: Company | undefined; ski
                 <span className="skills-attention-count" id="skills-attention-count">
                   {`${needing} ${needing === 1 ? "needs" : "need"} attention`}
                 </span>
-                <button type="button" role="switch" aria-checked={attentionOnly} aria-labelledby="skills-attention-count" className={`switch${attentionOnly ? " on" : ""}`} onClick={() => setAttentionOnly(!attentionOnly)}>
+                <button type="button" role="switch" aria-checked={attentionOnly} aria-label="Needs attention only" className={`switch${attentionOnly ? " on" : ""}`} onClick={() => setAttentionOnly(!attentionOnly)}>
                   <span className="switch-knob" aria-hidden="true" />
                 </button>
-                <span className="muted">Needs attention only</span>
+                <span className="muted" aria-hidden="true">Needs attention only</span>
               </div>
             </>
           )}
