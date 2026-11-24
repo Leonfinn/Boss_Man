@@ -6,6 +6,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { ticketDependencies, tickets } from "../src/db/schema.js";
 import { BOARD_DONE_LIMIT } from "../src/services/work.js";
+import { registerBoardBuilds } from "../src/services/board-build.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -51,6 +52,34 @@ describe("board done limit (BOS-2166)", () => {
     const everything = await ctx.board("?done=all");
     expect(ctx.all(everything).filter((c) => c.title.startsWith("Done "))).toHaveLength(total);
     expect(everything.doneTotal).toBe(total);
+  });
+
+  // BOS-2495: thousands of done tickets must not grow what a board load sends (the Kanban tab polls it every 10 s).
+  it("sends the same cards and the same size with 3,000 done tickets as with 50", async () => {
+    ctx = await setup();
+    const open = await ctx.make("Still open");
+    const { companyId, projectId } = (await ctx.db.select({ companyId: tickets.companyId, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, open.id)))[0]!;
+    const doneRows = (from: number, n: number, year: number) =>
+      Array.from({ length: n }, (_, i) => ({ companyId, projectId, title: `Done ${from + i}`, body: "A long description. ".repeat(50), systemState: "done" as const, outcome: "completed", lastActivityAt: new Date(Date.UTC(year, 0, 1, 0, 0, i)) }));
+    await ctx.db.insert(tickets).values(doneRows(0, BOARD_DONE_LIMIT, 2026));
+    const before = await ctx.req("GET", `/api/projects/${ctx.project.id}/board`);
+    for (let i = 0; i < 6; i++) await ctx.db.insert(tickets).values(doneRows(BOARD_DONE_LIMIT + i * 500, 500, 2020));
+    const after = await ctx.req("GET", `/api/projects/${ctx.project.id}/board`);
+    const b = after.json() as BoardBody;
+    expect(b.doneTotal).toBe(BOARD_DONE_LIMIT + 3000);
+    expect(ctx.all(b).map((c) => c.id).sort()).toEqual(ctx.all(before.json() as BoardBody).map((c) => c.id).sort());
+    // Only the done count's digits differ.
+    expect(Math.abs(after.payload.length - before.payload.length)).toBeLessThan(10);
+  });
+
+  // BOS-2495: the board answered only after every Review card's git host lookup; a hung host held "Loading tasks" until its timeouts.
+  it("answers while the git host never does", async () => {
+    ctx = await setup();
+    const t = await ctx.make("In review");
+    await ctx.db.update(tickets).set({ systemState: "review", branch: "bossman/in-review" }).where(eq(tickets.id, t.id));
+    registerBoardBuilds(ctx.db, () => new Promise(() => {}));
+    const b = await ctx.board();
+    expect(ctx.all(b).some((c) => c.id === t.id)).toBe(true);
   });
 
   it("still names a parent and a blocker that are old done tickets left out of the list", async () => {
