@@ -28,21 +28,31 @@ const today = "2026-10-16";
 // unscheduled, the 14-day at-risk boundary, the Now/Next/Later day boundaries and a pinned
 // horizon) are not repeated here. "late" is repeated on purpose so this file alone proves it.
 
-describe("milestoneStatus", () => {
+describe("milestoneStatus (BOS-2558: one rule, every row of the design's table)", () => {
+  const ok = { blocked: 0, daysLate: 0, noEstimate: false };
+
   it("marks a milestone late when its date has already passed", () => {
-    expect(milestoneStatus({ total: 5, done: 2, blocked: 0 }, "2026-10-10", today)).toBe("late");
+    expect(milestoneStatus({ total: 5, done: 2, ...ok }, "2026-10-10", today)).toBe("late");
   });
 
   it("tracks a half-done milestone that is not blocked, even when it is due very soon", () => {
-    expect(milestoneStatus({ total: 4, done: 2, blocked: 0 }, "2026-10-20", today)).toBe("on_track");
+    expect(milestoneStatus({ total: 4, done: 2, ...ok }, "2026-10-20", today)).toBe("on_track");
   });
 
-  it("tracks a milestone due just past the two-week window with nothing done", () => {
-    expect(milestoneStatus({ total: 4, done: 0, blocked: 0 }, "2026-10-31", today)).toBe("on_track");
+  it("is at risk when its own pace finishes it after its date", () => {
+    expect(milestoneStatus({ total: 4, done: 1, ...ok, daysLate: 5 }, "2026-10-16", today)).toBe("at_risk");
   });
 
-  it("flags a milestone due today as at risk when under half its tickets are done", () => {
-    expect(milestoneStatus({ total: 4, done: 1, blocked: 0 }, "2026-10-16", today)).toBe("at_risk");
+  it("is at risk with no estimate only when due within 28 days", () => {
+    expect(milestoneStatus({ total: 4, done: 0, ...ok, noEstimate: true }, "2026-11-13", today)).toBe("at_risk");
+    expect(milestoneStatus({ total: 4, done: 0, ...ok, noEstimate: true }, "2026-11-14", today)).toBe("on_track");
+  });
+
+  it("puts done before no date, a past date before a blocked ticket, and no tickets before no date", () => {
+    expect(milestoneStatus({ total: 2, done: 2, ...ok }, null, today)).toBe("done");
+    expect(milestoneStatus({ total: 2, done: 1, ...ok, blocked: 1 }, "2026-10-01", today)).toBe("late");
+    expect(milestoneStatus({ total: 0, done: 0, ...ok }, null, today)).toBe("no_work");
+    expect(milestoneStatus({ total: 2, done: 1, ...ok }, null, today)).toBe("no_date");
   });
 });
 

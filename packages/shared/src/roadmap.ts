@@ -10,23 +10,32 @@ export type Horizon = (typeof HORIZONS)[number];
 /** Days ahead that a target date puts a milestone in Now, and in Next. */
 export const NOW_DAYS = 30;
 export const NEXT_DAYS = 90;
-export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
+export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "no_date";
 
-/** Days before its target date that a milestone can be flagged as at risk. */
-export const AT_RISK_DAYS = 14;
+/** With no estimate (nothing finished in the last 4 weeks), a milestone due within this many days is at risk. */
+export const NO_ESTIMATE_RISK_DAYS = 28;
+
+/** What the status is worked out from. The counts cover the milestone's direct tickets and its features' tickets, cancelled left out. */
+export type MilestoneStatusInput = MilestoneCounts & {
+  /** Whole days the expected finish (at the milestone's own pace) falls after its date; 0 when on time. */
+  daysLate: number;
+  /** True when there is work left but no pace to estimate a finish from. */
+  noEstimate: boolean;
+};
 
 /**
- * No work until it has tickets. Done when every ticket is done. Late when the target date has passed first. At risk when
- * it's due within two weeks and has blocked tickets or less than half its tickets done.
+ * The one status rule (BOS-2558), first match wins: Done when every ticket is done; No tickets when it has none; No date
+ * when it has no date; Late when the date has passed with work left; At risk when it finishes after its date at its own
+ * pace, a ticket is blocked, or there is no estimate and it's due within 28 days; otherwise On track.
  * `today` and `targetDate` are calendar dates, YYYY-MM-DD.
  */
-export function milestoneStatus(counts: MilestoneCounts, targetDate: string | null, today: string): MilestoneStatus {
-  if (counts.total > 0 && counts.done === counts.total) return "done";
-  if (!counts.total) return "no_work";
-  if (!targetDate) return "unscheduled";
+export function milestoneStatus(m: MilestoneStatusInput, targetDate: string | null, today: string): MilestoneStatus {
+  if (m.total > 0 && m.done === m.total) return "done";
+  if (!m.total) return "no_work";
+  if (!targetDate) return "no_date";
   if (targetDate < today) return "late";
   const days = (Date.parse(`${targetDate}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000;
-  if (days <= AT_RISK_DAYS && (counts.blocked > 0 || counts.done / counts.total < 0.5)) return "at_risk";
+  if (m.daysLate > 0 || m.blocked > 0 || (m.noEstimate && days <= NO_ESTIMATE_RISK_DAYS)) return "at_risk";
   return "on_track";
 }
 

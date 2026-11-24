@@ -1,178 +1,15 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NoCompany } from "../components/NoCompany";
-import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type BurnupPoint, type MilestoneStatus, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
+import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
+import { MilestoneRows, STATUS, rangeOf, type DateRange } from "./RoadmapRows";
 import { usePoll } from "../hooks";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { STATUS_TONE } from "./Features";
-import { dayOf, short } from "../short-date";
+import { short } from "../short-date";
 import { buildCsv, download } from "../csv";
 
-export const STATUS: Record<MilestoneStatus, { label: string; tone: string; colour: string }> = {
-  done: { label: "Done", tone: "green", colour: "var(--green-ink)" },
-  late: { label: "Late", tone: "red", colour: "var(--red-ink)" },
-  at_risk: { label: "At risk", tone: "amber", colour: "var(--amber)" },
-  on_track: { label: "On track", tone: "blue", colour: "var(--accent)" },
-  no_work: { label: "No tasks", tone: "", colour: "#8b95a3" },
-  unscheduled: { label: "No date", tone: "", colour: "#8b95a3" },
-};
-
-const DAY = 86_400_000;
-
-/** The date range every timeline on the page shares, so objectives line up. */
-function windowOf(companies: RoadmapCompany[], now: string): { start: number; end: number } {
-  const dates = companies.flatMap((c) => c.objectives.flatMap((o) => o.milestones.flatMap((m) => (m.targetDate ? [dayOf(m.targetDate)] : []))));
-  const t = dayOf(now);
-  const start = Math.min(t - 14 * DAY, ...dates) - 7 * DAY;
-  const end = Math.max(t + 60 * DAY, ...dates) + 14 * DAY;
-  return { start, end };
-}
-
-/** Month starts inside the window, for the axis. */
-function months(win: { start: number; end: number }) {
-  const out: Array<{ at: number; label: string }> = [];
-  const d = new Date(win.start);
-  let m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1));
-  while (m.getTime() < win.end) {
-    out.push({ at: m.getTime(), label: m.toLocaleDateString(undefined, { month: "short", year: m.getUTCMonth() === 0 ? "numeric" : undefined, timeZone: "UTC" }) });
-    m = new Date(Date.UTC(m.getUTCFullYear(), m.getUTCMonth() + 1, 1));
-  }
-  return out;
-}
-
-const LABEL_PX = 150;
-
-/** Puts each dated milestone in the first lane where its label doesn't overlap the previous one. */
-function lanes(ms: RoadmapMilestone[], x: (m: RoadmapMilestone) => number, width: number) {
-  const ends: number[] = [];
-  const lane = new Map<string, number>();
-  for (const m of [...ms].sort((a, b) => x(a) - x(b))) {
-    const px = (x(m) / 100) * width;
-    let i = ends.findIndex((e) => e <= px);
-    if (i === -1) i = ends.length;
-    ends[i] = px + LABEL_PX;
-    lane.set(m.id, i);
-  }
-  return { lane, count: Math.max(1, ends.length) };
-}
-
-/** "21 of 34 points done · 13 left · at this pace about 2 Dec" and what is worth a warning. */
-export function forecastLines(f: RoadmapMilestone["forecast"]): { text: string; late: boolean; note: string | null } {
-  const total = f.pointsDone + f.pointsLeft;
-  const base = `${f.pointsDone} of ${total} points done · ${f.pointsLeft} left`;
-  const note = f.unsized ? `${f.unsized} ticket${f.unsized === 1 ? " has" : "s have"} no size` : null;
-  if (f.pointsLeft === 0) return { text: `${base}`, late: false, note };
-  if (!f.expectedFinish) return { text: `${base} · No finished work in the last 4 weeks to estimate from.`, late: false, note };
-  const when = short(f.expectedFinish);
-  return f.daysLate > 0
-    ? { text: `${base} · at this pace about ${when}, ${f.daysLate} day${f.daysLate === 1 ? "" : "s"} after the target`, late: true, note }
-    : { text: `${base} · at this pace about ${when}`, late: false, note };
-}
-
-/** "Pace: 12 points a week (last 4 weeks)": the weekly pace the forecast uses. */
-export function paceLine(pace: number): string {
-  if (!(pace > 0)) return "Pace: no finished work in the last 4 weeks";
-  return `Pace: ${Number.isInteger(pace) ? pace : pace.toFixed(1)} points a week (last 4 weeks)`;
-}
-
-/** The sentence a screen reader gets for a burn-up: how done and total moved over the 8 weeks. */
-export function burnupLabel(b: BurnupPoint[]): string {
-  const first = b[0]!;
-  const last = b.at(-1)!;
-  const move = (a: number, z: number) => (a === z ? `stayed at ${z}` : `${z > a ? "rose" : "fell"} from ${a} to ${z}`);
-  return `Done ${move(first.done, last.done)} points; total ${move(first.total, last.total)} points, over the last 8 weeks`;
-}
-
-/** Two lines, done (solid) and total (dashed), one point a week. Same colours as the rest of the app, no chart library. */
-function Burnup({ b }: { b: BurnupPoint[] }) {
-  const W = 160;
-  const H = 40;
-  const max = Math.max(1, ...b.map((p) => p.total));
-  const pts = (key: "done" | "total") => b.map((p, i) => `${((i / (b.length - 1)) * (W - 4) + 2).toFixed(1)},${(H - 3 - (p[key] / max) * (H - 6)).toFixed(1)}`).join(" ");
-  const label = burnupLabel(b);
-  return (
-    <svg className="rm-burnup" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} style={{ display: "block", marginTop: 4 }}>
-      <title>{label}</title>
-      <polyline points={pts("total")} fill="none" stroke="var(--muted)" strokeWidth="2" strokeDasharray="4 3" />
-      <polyline points={pts("done")} fill="none" stroke="var(--accent-ink)" strokeWidth="2" />
-    </svg>
-  );
-}
-
-function Forecasts({ ms }: { ms: RoadmapMilestone[] }) {
-  const open = ms.filter((m) => m.status !== "done" && m.forecast.pointsDone + m.forecast.pointsLeft + m.forecast.unsized > 0);
-  if (!open.length) return null;
-  return (
-    <>
-      {/* Every milestone of an objective belongs to one company, so they share its pace. */}
-      <p className="rm-pace muted" style={{ margin: "8px 0 0", fontSize: 13 }}>
-        {paceLine(open[0]!.forecast.pace)}
-      </p>
-      <ul className="rm-forecasts" style={{ listStyle: "none", margin: "8px 0 0", padding: 0, fontSize: 13 }}>
-        {open.map((m) => {
-          const l = forecastLines(m.forecast);
-          return (
-            <li key={m.id}>
-              <b>{m.title}</b>: <span style={l.late ? { color: "var(--amber)" } : undefined}>{l.text}</span>
-              {l.note && <span className="muted"> · {l.note}</span>}
-              {m.burnup && m.burnup.length > 1 && <Burnup b={m.burnup} />}
-            </li>
-          );
-        })}
-      </ul>
-    </>
-  );
-}
-
-function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; win: { start: number; end: number }; now: string; selected: string | null; onSelect: (id: string) => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(800);
-  useEffect(() => {
-    if (!ref.current) return;
-    const ro = new ResizeObserver(([e]) => setWidth(e!.contentRect.width));
-    ro.observe(ref.current);
-    return () => ro.disconnect();
-  }, []);
-  const x = (m: RoadmapMilestone) => ((dayOf(m.targetDate!) - win.start) / (win.end - win.start)) * 100;
-  const dated = o.milestones.filter((m) => m.targetDate);
-  const { lane, count } = lanes(dated, x, width);
-  const todayX = ((dayOf(now) - win.start) / (win.end - win.start)) * 100;
-  return (
-    <>
-    <div ref={ref} className="rm-track" style={{ height: 34 + count * 46 }}>
-      {months(win).map((mo) => (
-        <span key={mo.at} className="rm-month" style={{ left: `${((mo.at - win.start) / (win.end - win.start)) * 100}%` }}>
-          {mo.label}
-        </span>
-      ))}
-      <span className="rm-today" style={{ left: `${todayX}%` }} aria-hidden="true" />
-      {dated.map((m) => {
-        const left = x(m);
-        const flip = (left / 100) * width + LABEL_PX > width;
-        return (
-          <button
-            key={m.id}
-            type="button"
-            className="rm-ms"
-            aria-pressed={selected === m.id}
-            style={{ left: `${left}%`, top: 26 + lane.get(m.id)! * 46, ["--c" as string]: STATUS[m.status].colour, transform: flip ? "translateX(-100%)" : undefined, flexDirection: flip ? "row-reverse" : undefined, textAlign: flip ? "right" : undefined }}
-            onClick={() => onSelect(m.id)}
-          >
-            <span className="rm-dot" aria-hidden="true" />
-            <span>
-              <b>{m.title}</b>
-              <small>
-                {short(m.targetDate!)} · {m.total ? `${m.done}/${m.total}` : "no tasks"} · {STATUS[m.status].label}
-              </small>
-            </span>
-          </button>
-        );
-      })}
-    </div>
-    <Forecasts ms={o.milestones} />
-    </>
-  );
-}
+export { STATUS };
 
 function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () => void }) {
   const list = usePoll((signal) => api<Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }>>(`/api/milestones/${m.id}/tickets`, { signal }), 30_000, m.id);
@@ -200,7 +37,7 @@ function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () 
         <button
           className="btn"
           type="button"
-          onClick={() => window.confirm(`Delete "${m.title}"? Its tasks stay, without a milestone.`) && void api(`/api/milestones/${m.id}`, { method: "DELETE" }).then(onChanged, (err: Error) => setError(err.message))}
+          onClick={() => window.confirm(`Delete "${m.title}"? Its tickets stay, without a milestone.`) && void api(`/api/milestones/${m.id}`, { method: "DELETE" }).then(onChanged, (err: Error) => setError(err.message))}
         >
           Delete
         </button>
@@ -218,7 +55,7 @@ function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () 
           ))}
         </ul>
       ) : (
-        list.data && <p className="muted">No tasks yet. Pick this milestone on a task's page to add it.</p>
+        list.data && <p className="muted">No tickets yet. Pick this milestone on a ticket's page to add it.</p>
       )}
     </div>
   );
@@ -381,9 +218,8 @@ function KeyResultRow({ k, onChanged }: { k: RoadmapObjective["keyResults"][numb
   );
 }
 
-function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { start: number; end: number }; now: string; onChanged: () => void }) {
+function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: DateRange; now: string; onChanged: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
-  const sel = o.milestones.find((m) => m.id === selected) ?? null;
   const setStatus = (status: "done" | "dropped" | "active") => void api(`/api/objectives/${o.id}`, { method: "PATCH", body: { status } }).then(onChanged);
   // "Change": rename the objective or change its priority (BOS-2254). Only title and priority are sent; the reload
   // brings the objectives back in the server's priority order.
@@ -446,55 +282,37 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
             </ul>
           )}
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <AddMilestone objectiveId={o.id} onAdded={onChanged} />
-          {!editing && (
-            <button type="button" className="btn small" aria-label={`Change the objective ${o.title}`} onClick={open}>
-              Change
-            </button>
-          )}
-          {o.status === "active" ? (
-            <>
-              <button type="button" className="btn small" onClick={() => setStatus("done")}>
-                Mark done
-              </button>
-              <button type="button" className="btn small" onClick={() => window.confirm(`Remove "${o.title}" from the roadmap? It's kept: tick "Show done work" to see it again, and Reopen to bring it back.`) && setStatus("dropped")}>
-                Remove
-              </button>
-            </>
-          ) : (
-            <button type="button" className="btn small" onClick={() => setStatus("active")}>
-              Reopen
-            </button>
-          )}
-        </div>
       </div>
       {o.milestones.length === 0 ? (
         <p className="muted" style={{ fontSize: 14 }}>
-          No milestones yet.
+          No milestones yet. Add one to see whether it will be ready by its date.
         </p>
       ) : (
-        <>
-          <div className="rm-wide">
-            <Timeline o={o} win={win} now={now} selected={selected} onSelect={(id) => setSelected(selected === id ? null : id)} />
-          </div>
-          {/* On a phone, and for milestones without a date, a list instead of the timeline. */}
-          <ul className="rm-list">
-            {o.milestones.map((m) => (
-              <li key={m.id} className={m.targetDate ? "dated" : ""}>
-                <button type="button" aria-pressed={selected === m.id} onClick={() => setSelected(selected === m.id ? null : m.id)}>
-                  <span className="rm-dot" style={{ ["--c" as string]: STATUS[m.status].colour }} aria-hidden="true" />
-                  <b>{m.title}</b>
-                  <span className="muted">{m.targetDate ? short(m.targetDate) : "No date"}</span>
-                  <span className="muted">{m.total ? `${m.done}/${m.total} done` : "no tasks"}</span>
-                  <span className={`tag ${STATUS[m.status].tone}`}>{STATUS[m.status].label}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </>
+        <MilestoneRows ms={o.milestones} range={win} now={now} selected={selected} onSelect={setSelected} detail={(m) => <MilestoneDetail key={m.id} m={m} onChanged={onChanged} />} />
       )}
-      {sel && <MilestoneDetail key={sel.id} m={sel} onChanged={onChanged} />}
+      {/* Under the milestones, so the status is the first thing seen. */}
+      <div className="rm-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <AddMilestone objectiveId={o.id} onAdded={onChanged} />
+        {!editing && (
+          <button type="button" className="btn small" aria-label={`Change the objective ${o.title}`} onClick={open}>
+            Change
+          </button>
+        )}
+        {o.status === "active" ? (
+          <>
+            <button type="button" className="btn small" onClick={() => setStatus("done")}>
+              Mark done
+            </button>
+            <button type="button" className="btn small" onClick={() => window.confirm(`Remove "${o.title}" from the roadmap? It's kept: tick "Show done work" to see it again, and Reopen to bring it back.`) && setStatus("dropped")}>
+              Remove
+            </button>
+          </>
+        ) : (
+          <button type="button" className="btn small" onClick={() => setStatus("active")}>
+            Reopen
+          </button>
+        )}
+      </div>
     </article>
   );
 }
@@ -550,7 +368,7 @@ function AddObjective({ companies, onAdded }: { companies: Company[]; onAdded: (
 
 const TABS = [
   { id: "features", label: "Roadmap", help: "Features in Now, Next and Later, grouped by objective; unfold a feature to see its milestones." },
-  { id: "timeline", label: "Timeline", help: "Every milestone by its target date." },
+  { id: "timeline", label: "Timeline", help: "Your milestones and whether each will be ready by its date. Tap one to see its tickets and progress." },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
 const COLUMNS: Array<{ id: Horizon; label: string; help: string }> = [
@@ -755,7 +573,7 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
   const data = usePoll((signal) => api<RoadmapCompany[]>(`/api/roadmap?today=${now}${closed ? "&closed=1" : ""}`, { signal }), 60_000, `roadmap-${closed}`);
   const board = usePoll((signal) => api<FeatureRoadmapCompany[]>(`/api/roadmap/features`, { signal }), 60_000, "roadmap-features");
   const list = data.data ?? [];
-  const win = windowOf(list, now);
+  const win = rangeOf(list, now);
   const reload = () => {
     data.reload();
     board.reload();
@@ -798,9 +616,7 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
       </div>
       <div id="rm-panel" role="tabpanel" aria-labelledby={`rm-tab-${tab}`} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
         <p className="muted" style={{ fontSize: 13 }}>
-          {TABS.find((t) => t.id === tab)!.help}
-          {tab === "timeline" && " At risk means due within two weeks with blocked tasks or less than half done. Late means the date has passed with work left."}
-        </p>
+          {TABS.find((t) => t.id === tab)!.help}        </p>
         {tab === "timeline" && data.error && <LoadError what="the timeline" message={data.error.message} onRetry={data.reload} />}
         {tab === "features" && board.error && <LoadError what="the features" message={board.error.message} onRetry={board.reload} />}
         {tab === "timeline" && !data.data && !data.error && <Loader label="Loading the timeline" />}

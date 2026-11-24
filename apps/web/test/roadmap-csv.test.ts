@@ -55,7 +55,7 @@ describe("roadmap CSV rows", () => {
             title: "Launch",
             milestones: [
               { id: "m1", title: "Beta", targetDate: "2026-11-01", status: "late", done: 3, total: 8, forecast: { pointsLeft: 13, expectedFinish: "2026-12-02", daysLate: 31 } },
-              { id: "m2", title: "GA", targetDate: null, status: "unscheduled", done: 0, total: 0, forecast: { pointsLeft: 0, expectedFinish: null, daysLate: 0 } },
+              { id: "m2", title: "GA", targetDate: null, status: "no_date", done: 0, total: 0, forecast: { pointsLeft: 0, expectedFinish: null, daysLate: 0 } },
             ],
           },
         ],
