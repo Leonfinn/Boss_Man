@@ -22,6 +22,7 @@ describe("actionsToCsv", () => {
     const [head, a, , c] = actionsToCsv(data).split("\r\n");
     expect(head).toBe("time,kind,ticket,agent,target,reason,recorded_only,undone_at");
     expect(a).toBe('2026-10-27T10:00:00.000Z,nudge,t1,Scrum Master,,"Kept, one",no,');
+    expect(actionsToCsv([mk("4", { reason: 'said "hi", twice' })]).split("\r\n")[1]).toContain('"said ""hi"", twice"');
     expect(c).toBe("2026-10-27T10:00:00.000Z,nudge,t3,Scrum Master,Penfold,Undone and other,yes,2026-10-27T12:00:00.000Z");
   });
 });
@@ -40,6 +41,8 @@ describe("Undone only and Download CSV", () => {
       fireEvent.click(screen.getByLabelText("Undone only"));
       expect(screen.queryByText("Kept, one")).toBeNull();
       expect(screen.getByText("Was undone")).toBeTruthy();
+      fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "zzz" } });
+      expect(screen.getByText("Nothing in the loaded log matches.")).toBeTruthy();
       fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "other" } });
       expect(screen.queryByText("Was undone")).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
