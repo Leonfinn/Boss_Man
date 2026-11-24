@@ -46,7 +46,22 @@ export type SpendModelRow = {
   cacheWriteTokens: number;
 };
 
+/** One name's money in the previous period (BOS-2432); `key` is the agent, feature or project id, else `none:<name>`; the model split keys on the model name. */
+export type SpendPreviousItem = { key: string; name: string; micros: number };
+
+/** The same figures for the period of the same length just before this one. Money rows only, except `models` (plan use too, like the model split). */
+export type SpendPrevious = {
+  days: number;
+  totalMicros: number;
+  agents: SpendPreviousItem[];
+  features: SpendPreviousItem[];
+  projects: SpendPreviousItem[];
+  models: SpendPreviousItem[];
+};
+
 export type SpendReport = {
+  /** The previous period of the same length, in the same time zone (BOS-2432). */
+  previous: SpendPrevious;
   timeZone: string;
   days: string[];
   rows: SpendReportRow[];
@@ -79,8 +94,9 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
   const [y, m, d] = dateIn(now, timeZone).split("-").map(Number) as [number, number, number];
   const days = Array.from({ length: opts.days }, (_, i) => new Date(Date.UTC(y, m - 1, d - (opts.days - 1 - i))).toISOString().slice(0, 10));
   const first = days[0]!;
+  const prevDays = Array.from({ length: opts.days }, (_, i) => new Date(Date.parse(`${first}T00:00:00Z`) + (i - opts.days) * 86_400_000).toISOString().slice(0, 10));
   // A day of slack either side of the zone offset; rows outside the listed days are dropped below.
-  const since = new Date(Date.parse(`${first}T00:00:00Z`) - 86_400_000);
+  const since = new Date(Date.parse(`${prevDays[0]!}T00:00:00Z`) - 86_400_000);
   const events = await db
     .select({
       at: costEvents.occurredAt,
@@ -136,8 +152,29 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
   // not state: a local that lives for this one call
   const groups = new Map<string, SpendReportRow & { ids: Set<string> }>();
   let totalMicros = 0;
+  const prevSet = new Set(prevDays);
+  // not state: locals that live for this one call
+  const prev = { agents: new Map<string, SpendPreviousItem>(), features: new Map<string, SpendPreviousItem>(), projects: new Map<string, SpendPreviousItem>(), models: new Map<string, SpendPreviousItem>() };
+  let prevTotal = 0;
+  const addPrev = (m: Map<string, SpendPreviousItem>, id: string | null, name: string, micros: number) => {
+    const key = id ?? `none:${name}`;
+    const it = m.get(key) ?? { key, name, micros: 0 };
+    it.micros += micros;
+    m.set(key, it);
+  };
   for (const e of events) {
     const date = dateIn(e.at, timeZone);
+    if (prevSet.has(date)) {
+      const model = e.model?.trim() || UNKNOWN_MODEL;
+      addPrev(prev.models, model, model, e.micros);
+      if (e.kind !== "subscription") {
+        addPrev(prev.agents, e.agentId, e.agent ?? "No agent", e.micros);
+        addPrev(prev.features, e.featureId, e.feature ?? "No feature", e.micros);
+        addPrev(prev.projects, e.projectId, e.project ?? "No project", e.micros);
+        prevTotal += e.micros;
+      }
+      continue;
+    }
     if (!daySet.has(date)) continue;
     addModel(modelByDay, date, e);
     addModel(modelTotals, "", e);
@@ -201,5 +238,7 @@ export async function spendReport(db: Db, companyId: string, opts: { days: numbe
   };
   const models = [...modelTotals.values()].map(finish).sort((a, b) => b.micros - a.micros || a.model.localeCompare(b.model));
   const modelDays = [...modelByDay.values()].map(finish).sort((a, b) => a.date.localeCompare(b.date) || b.micros - a.micros || a.model.localeCompare(b.model));
-  return { timeZone, days, rows, totalMicros, topTickets, models, modelDays };
+  const list = (m: Map<string, SpendPreviousItem>) => [...m.values()].sort((a, b) => b.micros - a.micros || a.name.localeCompare(b.name));
+  const previous: SpendPrevious = { days: opts.days, totalMicros: prevTotal, agents: list(prev.agents), features: list(prev.features), projects: list(prev.projects), models: list(prev.models) };
+  return { previous, timeZone, days, rows, totalMicros, topTickets, models, modelDays };
 }

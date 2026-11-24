@@ -44,6 +44,24 @@ describe("spendReport", () => {
     expect(r.totalMicros).toBe(2_000_000);
   });
 
+  it("works out the previous period of the same length (BOS-2432), money only except the model split", async () => {
+    const s = await setup();
+    await s.cost(s.api.id, 2_000_000, "2026-11-20T10:00:00Z"); // current
+    await s.cost(s.api.id, 1_000_000, "2026-11-14T10:00:00Z"); // previous: last day
+    await s.cost(s.api.id, 500_000, "2026-11-08T10:00:00Z"); // previous: first day
+    await s.cost(s.api.id, 9_000_000, "2026-11-07T10:00:00Z"); // before both
+    await s.cost(s.sub.id, 4_000_000, "2026-11-10T10:00:00Z"); // plan use: not money
+    const r = await spendReport(db(), s.company.id, { days: 7, timeZone: "UTC", now: NOW });
+    expect(r.totalMicros).toBe(2_000_000);
+    expect(r.previous.days).toBe(7);
+    expect(r.previous.totalMicros).toBe(1_500_000);
+    expect(r.previous.agents).toEqual([expect.objectContaining({ name: "Bungle", micros: 1_500_000 })]);
+    expect(r.previous.projects).toEqual([expect.objectContaining({ name: "Site", micros: 1_500_000 })]);
+    expect(r.previous.models).toEqual([expect.objectContaining({ micros: 5_500_000 })]);
+    const none = await spendReport(db(), s.company.id, { days: 7, timeZone: "UTC", now: new Date("2026-12-10T12:00:00Z") });
+    expect(none.previous.totalMicros).toBe(0);
+  });
+
   it("shows spend with no ticket as No feature, and keeps it in the total", async () => {
     const s = await setup();
     await s.cost(s.api.id, 250_000, "2026-11-21T08:00:00Z", { runId: null, agentId: null });
