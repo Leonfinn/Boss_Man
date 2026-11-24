@@ -216,7 +216,6 @@ export const hoursText = (h: Hours) => `${h.days.map((d) => DAY_NAMES[d]).join("
 const show = (v: unknown, sources: FundingSource[]) =>
   isHours(v) ? hoursText(v) : v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
 
-/** The listed agents as a spreadsheet: funding source by name only, working hours as days, times and zone. */
 /** "N runs · M failed (P%)" for the record line (BOS-2465). "M failed" links to the Runs page's failed filter. */
 export function RecordRuns({ runs, failedRuns }: { runs: number; failedRuns: number }) {
   const pct = runs > 0 ? Math.round((failedRuns / runs) * 100) : 0;
@@ -228,6 +227,7 @@ export function RecordRuns({ runs, failedRuns }: { runs: number; failedRuns: num
   );
 }
 
+/** The listed agents as a spreadsheet: funding source by name only, working hours as days, times and zone. */
 export function agentsToCsv(rows: AgentRow[]): string {
   return buildCsv(
     ["name", "role", "job_title", "model", "thinking", "funding_source", "state", "working_days", "working_from", "working_to", "working_time_zone"],
