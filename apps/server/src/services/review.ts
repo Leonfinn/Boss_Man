@@ -13,6 +13,7 @@ import { reviewContext, type ReviewDeps, type Rest } from "./review-ctx.js";
 import { cancelHold, holdActorCheck, markLive, moveAfterMerge, releaseGoLiveWaiters, releaseHold } from "./review-hold-actions.js";
 import { landOnce, mergePullRequest } from "./merge-attempt.js";
 import { approve, diff, keptRound, landApproved, migrations, needsChanges, noteRead, overrule, passedHead, passedThisHead, readFile, reAskChangesRequested, requireSignoff, reviewStall, sendBack, sendBackRound, sequence, settle, signoffCovers, signoffStale, submit, withdrawRepeatRounds, withdrawStaleSignoff } from "./review-rounds.js";
+import { registerBoardBuilds } from "./board-build.js";
 import { afterLandingSweep, claimLanding, land, landVisible, recordLanded, releaseHolds, retryHeldBy, retryMerge, startLanding } from "./merge-land.js";
 import { branchChecks, branchChecksLine, branchChecksOrThrow, branchClash, followUpFailedChecks, gitAction, landing, landingActive, landingMergeIds, landingMergesByCompany, landingTurnStatus, landingWaitFacts, mergeLineClashes, mergeState, notifyChecks, recordMissedMerge, recordMissedMerges, runningMerges, setCheckMergedResult, setMergeCarry, setMergeRetarget, setMergeTurnMinutes, setTemplates, setWaitForCi, sweepCiBranches, syncPullRequests } from "./merge-status.js";
 
@@ -33,7 +34,7 @@ export function reviewService(
   // `reviewState`, not `state`: settle and others have a local `state` (the review verdict) that would hide it.
   const { state: reviewState, gate, checkMergedResult, waitForCi, mergeCarry, mergeRetarget, mergeTurnMinutes, templates, ownerSignoffOpen } = ctx;
 
-  return {
+  const service = {
     setWakeHook(hook: NotifyHook) {
       reviewState.wake = hook;
     },
@@ -141,4 +142,7 @@ export function reviewService(
     setTemplates(...a: Rest<typeof setTemplates>) { return setTemplates.call(this, ctx, ...a); },
     gitAction(...a: Rest<typeof gitAction>) { return gitAction.call(this, ctx, ...a); },
   };
+  // BOS-2435: the board's build tags for Review cards ask the git host through this service.
+  registerBoardBuilds(db, (id) => service.branchChecksOrThrow(id));
+  return service;
 }

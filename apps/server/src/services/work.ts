@@ -5,6 +5,7 @@ import { and, asc, desc, eq, exists, inArray, isNull, or, ne, sql, type SQL } fr
 export const BOARD_DONE_LIMIT = 50;
 import { addsUsabilityCriterion, watchEndsAt, withUsabilityCriterion,columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { boardBuildsFor, type BoardBuild } from "./board-build.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
 import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
@@ -447,6 +448,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const v = await holdView(db, id);
         if (v) holds.set(id, v);
       }
+      const builds = await boardBuildsFor(db)(rows.filter((r) => r.t.systemState === "review" && r.t.branch && !r.t.mergeCommit).map((r) => ({ id: r.t.id, activityKey: r.t.lastActivityAt.toISOString() }))).catch(() => new Map<string, BoardBuild>());
       const merging = new Map((hooks.runningMerges?.() ?? []).map((m) => [m.ticketId, m.phase ?? "checking"] as const));
       const mergeNote = (t: typeof tickets.$inferSelect) => {
         const phase = merging.get(t.id);
@@ -492,6 +494,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // The agent re-checking a card this ticket waits on (BOS-1193): the board says so instead of asking the owner to answer it.
         recheckingBy: [...rechecking].find(([cardId]) => deps.some((d) => d.blockedTicketId === t.id && d.blockerDecisionId === cardId))?.[1] ?? null,
         noReviewer: unreviewed.has(t.id),
+        build: t.systemState === "review" ? (builds.get(t.id) ?? null) : null,
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,
         approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : (signoffWaiting.get(t.id) ?? null),
