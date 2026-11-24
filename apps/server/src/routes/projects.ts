@@ -128,7 +128,7 @@ export function projectRoutes(
     return db.select().from(projects).where(eq(projects.companyId, id)).orderBy(projects.name);
   });
 
-  // One summary per project for Settings → Projects (BOS-2421): open work, points left, finished in 30 days, this month's spend
+  // One summary per project for the Projects list in settings (BOS-2421): open work, points left, finished in 30 days, this month's spend
   // (the same projectSpendMicros the budget page uses), and the last merge. One request for the whole company.
   owner.get("/api/companies/:id/projects-summary", async (req) => {
     const { id } = IdParam.parse(req.params);
