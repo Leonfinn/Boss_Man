@@ -5,12 +5,19 @@
 // - prober: tries to reach the holder's temp folder, MCP config file and agent home through the file system, and
 //   scans every process's command line for the holder's token. It writes what worked to probe.json.
 // It only opens files and lists folders: no other process's memory is read.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
 const env = process.env;
 const cwd = process.cwd();
+// The test starts polling the moment a file exists, so a plain write would let it read one that is created but still
+// empty or half-written on a slow CPU (the check-worker flake). A temp file renamed into place appears complete.
+const writeAtomic = (file, text) => {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, text);
+  renameSync(tmp, file);
+};
 const attempt = (fn) => {
   try {
     fn();
@@ -46,7 +53,7 @@ if (env.PEER_ROLE === "prober") {
     cmdlineHits,
     tmp: env.TMPDIR ?? null,
   };
-  writeFileSync(path.join(cwd, "probe.json"), JSON.stringify(probe));
+  writeAtomic(path.join(cwd, "probe.json"), JSON.stringify(probe));
 }
 
 const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
@@ -60,7 +67,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   else if (msg.method === "session/new") {
     const file = msg.params?._meta?.claudeCode?.options?.extraArgs?.["mcp-config"] ?? null;
     if (env.PEER_ROLE === "holder") {
-      writeFileSync(path.join(cwd, "holder.json"), JSON.stringify({ tmp: env.TMPDIR, mcpConfig: file, mcpConfigExists: !!file && existsSync(file) }));
+      writeAtomic(path.join(cwd, "holder.json"), JSON.stringify({ tmp: env.TMPDIR, mcpConfig: file, mcpConfigExists: !!file && existsSync(file) }));
       holdUntilReleased(() => send({ id: msg.id, result: { sessionId: "s1" } }));
     } else send({ id: msg.id, result: { sessionId: "s1" } });
   } else if (msg.method === "session/prompt") send({ id: msg.id, result: { stopReason: "end_turn" } });

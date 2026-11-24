@@ -55,9 +55,19 @@ async function crossRun(sameAgent: boolean) {
   const runTmpA = path.join(fence.runTmpRoot, shortTmpName(runA));
   const mcpA = path.join(runTmpA, "mcp", "mcp.json");
   const homeA = path.join(fence.agentsRoot, agentA);
-  // B aims at wherever A's files really are (what A's adapter saw), not where this test expects them.
+  // B aims at wherever A's files really are (what A's adapter saw), not where this test expects them. A missing or
+  // half-written file is not an answer (the peer renames one into place), so it is waited for rather than parsed.
   type Holder = { tmp: string; mcpConfig: string; mcpConfigExists: boolean };
-  const readHolder = () => JSON.parse(readFileSync(path.join(cwdA, "holder.json"), "utf8")) as Holder;
+  const holderJson = path.join(cwdA, "holder.json");
+  const readHolder = () => JSON.parse(readFileSync(holderJson, "utf8")) as Holder;
+  const holderReady = () => {
+    try {
+      readHolder();
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   const events: RunnerEvent[] = [];
   const manager = new SessionManager({
@@ -78,13 +88,14 @@ async function crossRun(sameAgent: boolean) {
 
   try {
     start(runA, agentA, cwdA, token);
-    await waitFor(() => existsSync(path.join(cwdA, "holder.json")) || !!ended(runA), "the holder's session/new");
+    await waitFor(() => holderReady() || !!ended(runA), "the holder's session/new");
     if (ended(runA)) throw new Error(`the holder ended early: ${ended(runA)!.error}`);
     const holder = readHolder();
     // While A's session opens, its token is in one file, in A's own temp folder: not /tmp, /dev/shm or A's home.
     const atStart = { holder, homeHits: filesHolding(homeA, token), homeSecretHits: filesHolding(homeA, secret) };
 
     start(runB, agentB, cwdB, `bm_run_other-${randomUUID()}`);
+    // The prober's write is renamed into place (fake-peer), so the file it leaves is always whole.
     await waitFor(() => !!ended(runB), "the prober");
     expect(ended(runB)).toMatchObject({ error: null });
     const probe = JSON.parse(readFileSync(path.join(cwdB, "probe.json"), "utf8")) as Probe;
