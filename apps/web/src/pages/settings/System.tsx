@@ -505,6 +505,9 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           >
             Deploy to staging
           </button>
+          <p className="muted" data-testid="staging-help" style={{ margin: "6px 0 0", fontSize: 14 }}>
+            Optional: agents deploy to staging themselves. Press this to put the newest merged code on staging and re-run the checks, for example before you allow a deploy to your real server.
+          </p>
         </div>
       )}
     </Section>
