@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { MergeHistory, duration } from "../src/pages/MergeHistory";
+import { MergeHistory, duration, toCsv } from "../src/pages/MergeHistory";
 
 afterEach(() => {
   cleanup();
@@ -40,6 +40,32 @@ describe("Merge history page (BOS-2379)", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Result" }), { target: { value: "all" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /bounced more than once/ }));
     expect(shown()).toEqual([2, 3, 4]);
+  });
+
+  it("searches by ref or title with the other filters, asks the server for the chosen period, and builds the CSV of the rows shown (BOS-2473)", async () => {
+    const f = vi.fn(async (_url: string) => new Response(JSON.stringify(data), { status: 200 }));
+    vi.stubGlobal("fetch", f);
+    render(<MergeHistory companies={[company]} companyId="c-mh" />);
+    await screen.findByRole("link", { name: /Ticket 1$/ });
+    fireEvent.change(screen.getByRole("searchbox", { name: /Search by ticket ref or title/ }), { target: { value: "app-4 TICKET" } });
+    expect(shown()).toEqual([4]);
+    fireEvent.change(screen.getByRole("searchbox", { name: /Search/ }), { target: { value: "ticket" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Result" }), { target: { value: "bounced" } });
+    expect(shown()).toEqual([3, 4]);
+    expect(window.location.hash).toContain("q=ticket");
+    fireEvent.click(screen.getByRole("button", { name: "30 days" }));
+    await vi.waitFor(() => expect(f.mock.calls.some((c) => String(c[0]).endsWith("merge-history?days=30"))).toBe(true));
+    expect(window.location.hash).toContain("days=30");
+    window.history.replaceState(null, "", "#/");
+  });
+
+  it("CSV has one line per row, durations in minutes", () => {
+    const csv = toCsv([row(3, "bounced", 2, { firstFailingLine: "a, b" }) as never, row(1, "landed", 0) as never]);
+    const lines = csv.trim().split("\r\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toBe('APP-3,Ticket 3,Bounced,2026-11-20T10:00:00.000Z,2026-11-20T10:30:00.000Z,,5,10,worker-a,,"a, b"');
+    expect(lines[2]).toContain(",Landed,");
+    expect(lines[2]).toContain(",30,5,10,");
   });
 
   it("formats durations", () => {

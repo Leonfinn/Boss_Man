@@ -112,15 +112,18 @@ export function perDay(rows: Array<Pick<MergeHistoryRow, "result" | "endedAt" | 
 
 const diff = (a: Date | null, b: Date | null) => (a && b ? Math.max(0, b.getTime() - a.getTime()) : null);
 
-export async function mergeHistory(db: Db, companyId: string, now = new Date()): Promise<MergeHistory> {
-  const since = new Date(now.getTime() - MERGE_HISTORY_DAYS * 86_400_000);
+/** The periods the page offers (BOS-2473). */
+export const MERGE_HISTORY_PERIODS = [7, 14, 30];
+
+export async function mergeHistory(db: Db, companyId: string, now = new Date(), days = MERGE_HISTORY_DAYS): Promise<MergeHistory> {
+  const since = new Date(now.getTime() - days * 86_400_000);
   const evs = await db
     .select({ ticketId: activity.ticketId, at: activity.at, detail: activity.detail })
     .from(activity)
     .where(and(eq(activity.companyId, companyId), eq(activity.kind, MERGE_LINE_KIND), gte(activity.at, since), inArray(sql`${activity.detail}->>'event'`, EVENTS)))
     .orderBy(asc(activity.at));
   const attempts = attemptsOf(evs as Ev[]);
-  if (!attempts.length) return { days: MERGE_HISTORY_DAYS, rows: [], perDay: [] };
+  if (!attempts.length) return { days, rows: [], perDay: [] };
 
   const ids = [...new Set(attempts.map((a) => a.ticketId))];
   const info = await db.select({ id: tickets.id, number: tickets.number, title: tickets.title }).from(tickets).where(and(eq(tickets.companyId, companyId), inArray(tickets.id, ids)));
@@ -157,5 +160,5 @@ export async function mergeHistory(db: Db, companyId: string, now = new Date()):
       };
     })
     .sort((x, y) => (x.queuedAt < y.queuedAt ? 1 : -1));
-  return { days: MERGE_HISTORY_DAYS, rows, perDay: perDay(rows) };
+  return { days, rows, perDay: perDay(rows) };
 }
