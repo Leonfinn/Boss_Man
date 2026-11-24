@@ -8,7 +8,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, companies, decisions, projects, reviewRequests, tickets } from "../src/db/schema.js";
 import { alertClearing, clearWhenOf } from "../src/services/alert-clearing.js";
 import { kindCeiling } from "../src/services/alert-kinds.js";
-import { landingEtas, landingTurnAlertKey, landingTurnAlertSweep, median, turnOverdue, usualCiWait } from "../src/services/landing-turn-eta.js";
+import { landingEtas, landingTurnAlertKey, landingTurnAlertSweep, lineClearAt, median, turnOverdue, usualCiWait } from "../src/services/landing-turn-eta.js";
 import { lineEvent } from "../src/services/merge-line.js";
 import { mergeQueueService } from "../src/services/merge-queue.js";
 
@@ -131,6 +131,41 @@ describe("the Merges tab", () => {
     const turn = (await svc.get(companyId)).landingTurns![0]!;
     expect(turn.holder).toMatchObject({ landsAt: null, overdue: false });
     expect(turn.usualWaitMin).toBeNull();
+  });
+});
+
+// BOS-2505: when the last ticket of the merge line lands (the banner's figure).
+describe("lineClearAt", () => {
+  const MIN = 60_000;
+  const NOW0 = Date.UTC(2026, 10, 24, 13, 25);
+  const base = { nowMs: NOW0, usualCheckMs: 20 * MIN, usualCiMs: 20 * MIN, slots: 3 };
+
+  it("says nothing without a usual check time and a usual GitHub wait", () => {
+    expect(lineClearAt({ ...base, usualCheckMs: null, running: [], queued: 1 })).toBeNull();
+    expect(lineClearAt({ ...base, usualCiMs: null, running: [], queued: 1 })).toBeNull();
+  });
+
+  it("the 24 Nov case: checks 23, 12 and 3 min in, two queued: far later than 23 minutes", () => {
+    const running = [23, 12, 3].map((m) => ({ startedMs: NOW0 - m * MIN, ciSinceMs: null }));
+    const at = lineClearAt({ ...base, running, queued: 2 })!;
+    // The queued checks start as slots free and end 20 min later, and each landing then waits for GitHub: well over an hour.
+    expect(Math.round((at - NOW0) / MIN)).toBeGreaterThan(60);
+  });
+
+  it("a ticket already in its GitHub wait lands one usual wait after the run began", () => {
+    expect(lineClearAt({ ...base, running: [{ startedMs: NOW0 - 40 * MIN, ciSinceMs: NOW0 - 5 * MIN }], queued: 0 })).toBe(NOW0 + 15 * MIN);
+  });
+
+  it("checks that end before a landing's GitHub run starts ride that landing once", () => {
+    const inCi = { startedMs: NOW0 - 40 * MIN, ciSinceMs: NOW0 - 10 * MIN }; // lands at +10
+    const one = lineClearAt({ ...base, running: [inCi, { startedMs: NOW0 - 17 * MIN, ciSinceMs: null }], queued: 0 })!;
+    const two = lineClearAt({ ...base, running: [inCi, { startedMs: NOW0 - 17 * MIN, ciSinceMs: null }, { startedMs: NOW0 - 15 * MIN, ciSinceMs: null }], queued: 0 })!;
+    expect(one).toBe(NOW0 + 30 * MIN);
+    expect(two).toBe(one);
+  });
+
+  it("a check past the usual time counts one more minute, not zero or negative", () => {
+    expect(lineClearAt({ ...base, running: [{ startedMs: NOW0 - 90 * MIN, ciSinceMs: null }], queued: 0 })).toBe(NOW0 + MIN + 20 * MIN);
   });
 });
 

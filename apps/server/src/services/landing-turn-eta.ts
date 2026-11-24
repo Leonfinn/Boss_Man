@@ -5,7 +5,7 @@
 // The alert closes itself (DR-016, clearWhen landingTurnEnded) once the turn it names has ended.
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { activity } from "../db/schema.js";
+import { activity, checkJobs } from "../db/schema.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
 
 /** Looked at: passed GitHub waits in the last 14 days, newest 30. */
@@ -43,6 +43,64 @@ export async function usualCiWait(db: Db, companyId: string, now: Date): Promise
   const waits = rows.map((r) => Number(r.waited)).filter((n) => Number.isFinite(n) && n > 0);
   if (waits.length < CI_WAIT_MIN_SAMPLES) return null;
   return { ms: median(waits)!, samples: waits.length };
+}
+
+/** The usual length of a passed merge check: the median of recent passed merge jobs' run time; null with too few. */
+export async function usualMergeCheck(db: Db, companyId: string, now: Date): Promise<{ ms: number; samples: number } | null> {
+  const rows = await db
+    .select({ started: checkJobs.startedAt, ended: checkJobs.endedAt })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "passed"), gte(checkJobs.endedAt, new Date(now.getTime() - CI_WAIT_WINDOW_MS))))
+    .orderBy(desc(checkJobs.endedAt))
+    .limit(CI_WAIT_SAMPLES);
+  const runs = rows.flatMap((r) => (r.started && r.ended ? [r.ended.getTime() - r.started.getTime()] : [])).filter((n) => n > 0);
+  if (runs.length < CI_WAIT_MIN_SAMPLES) return null;
+  return { ms: median(runs)!, samples: runs.length };
+}
+
+/** A check never counts as finishing sooner than this from now, even when it has run past the usual time. */
+const MIN_LEFT_MS = 60_000;
+
+/**
+ * BOS-2505: when the last ticket of the merge line is expected to land (epoch ms), the one estimate the banner uses. Pure.
+ * A running check has the usual check time less what it has run; a queued one starts when a slot frees and then takes the
+ * usual time. Each landing then needs one usual GitHub wait, one landing at a time; tickets whose checks end before a landing's
+ * GitHub run starts ride that run (one wait for all, as the train does). A ticket already in its GitHub wait lands one usual
+ * wait after the run began. Null without a usual check time and a usual wait (nothing is guessed) or with an empty line.
+ */
+export function lineClearAt(p: {
+  nowMs: number;
+  usualCheckMs: number | null;
+  usualCiMs: number | null;
+  slots: number;
+  running: Array<{ startedMs: number; ciSinceMs: number | null }>;
+  queued: number;
+}): number | null {
+  if (p.usualCheckMs === null || p.usualCiMs === null) return null;
+  const check = p.usualCheckMs;
+  const ci = p.usualCiMs;
+  const inCi = p.running.filter((r) => r.ciSinceMs !== null).map((r) => Math.max(p.nowMs + MIN_LEFT_MS, r.ciSinceMs! + ci));
+  const checking = p.running.filter((r) => r.ciSinceMs === null).map((r) => Math.max(p.nowMs + MIN_LEFT_MS, r.startedMs + check));
+  // Queued checks take the slots as they free (slots held by a check or a GitHub wait: the check runs only while checking).
+  const free = [...checking, ...Array<number>(Math.max(0, p.slots - p.running.length)).fill(p.nowMs)].sort((a, b) => a - b);
+  const ready = [...checking];
+  for (let i = 0; i < p.queued; i++) {
+    const at = free.length ? free.shift()! : p.nowMs;
+    const end = at + check;
+    ready.push(end);
+    free.push(end);
+    free.sort((a, b) => a - b);
+  }
+  ready.sort((a, b) => a - b);
+  let last = inCi.length ? Math.max(...inCi) : null;
+  let cursor = last ?? p.nowMs;
+  for (let i = 0; i < ready.length; ) {
+    const start = Math.max(cursor, ready[i]!);
+    cursor = start + ci;
+    last = cursor;
+    while (i < ready.length && ready[i]! <= start) i++; // the ones ready by then ride this run
+  }
+  return last;
 }
 
 /**

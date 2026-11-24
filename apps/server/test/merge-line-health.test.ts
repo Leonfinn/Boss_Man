@@ -46,7 +46,7 @@ describe("mergeLineHealth: banner and sidebar badge agree (BOS-1715)", () => {
     // R43: each figure under its own label; neither says "waiting".
     expect(text).toContain("21 for Boss Man to merge (31 in the merge line; the rest are merging now or with an agent or you)");
     expect(text).not.toMatch(/\bwaiting\b/);
-    expect(text).toContain("estimating the time to clear…");
+    expect(text).toContain(", no estimate yet");
   });
 
   it("R43: the merge-line figure counts running merges too, as the badge and Merges tab do", () => {
@@ -63,9 +63,18 @@ describe("mergeLineHealth: banner and sidebar badge agree (BOS-1715)", () => {
 
 describe("mergeLineHealth", () => {
   it("17 tickets behind 3 slots, landing every 20 minutes: over capacity, not stuck (the 15 Nov case)", () => {
-    const line = mergeLineHealth(input({ waiting: queue(17), recent: [merged(7, 1), merged(27, 2), merged(47, 3), merged(67, 4)] }), { now: NOW });
-    expect(line).toEqual({ state: "over_capacity", waiting: 17, etaMinutes: 340, lastLandedAt: ago(7), advice: null });
-    expect(slowText(line as never, () => "19:03")).toBe("Merging, but slowly: 17 for Boss Man to merge, about 5 h 40 min to clear at the current rate, last landed 19:03.");
+    const clearAt = NOW.getTime() + 340 * 60_000;
+    const line = mergeLineHealth(input({ waiting: queue(17), recent: [merged(7, 1), merged(27, 2), merged(47, 3), merged(67, 4)] }), { now: NOW, clearAt });
+    expect(line).toEqual({ state: "over_capacity", waiting: 17, etaMinutes: 340, etaAt: new Date(clearAt).toISOString(), lastLandedAt: ago(7), advice: null });
+    expect(slowText(line as never, (iso) => (iso === ago(7) ? "19:03" : "00:50"))).toBe("Merging, but slowly: 17 for Boss Man to merge, the last one expected by about 00:50, last landed 19:03.");
+  });
+
+  it("BOS-2505: a burst of landings no longer sets the figure: with no usual times the line says no estimate yet", () => {
+    // Seven merges within half a minute, then three more: the old rate (span / landings) said a few minutes per ticket.
+    const burst = [merged(300, 1), merged(300, 2), merged(300, 3), merged(299, 4), merged(299, 5), merged(120, 6), merged(7, 7)];
+    const line = mergeLineHealth(input({ waiting: queue(3), recent: burst }), { now: NOW });
+    expect(line).toMatchObject({ state: "over_capacity", etaMinutes: null, etaAt: null });
+    expect(slowText(line as never, () => "19:03")).toBe("Merging, but slowly: 3 for Boss Man to merge, no estimate yet, last landed 19:03.");
   });
 
   it("names a check worker only when none is connected", () => {
@@ -142,7 +151,7 @@ describe("the jam alert reads the same verdict", () => {
   }
 
   it("over capacity sends one calm feed note a day, never a flag or page", async () => {
-    const slow = { state: "over_capacity", waiting: 17, etaMinutes: 255, lastLandedAt: ago(7), advice: null };
+    const slow = { state: "over_capacity", waiting: 17, etaMinutes: 255, etaAt: "2026-11-15T23:25:00.000Z", lastLandedAt: ago(7), advice: null };
     const c = await setup({ line: slow });
     expect(await c.service.run()).toEqual({ alerted: 0, reminded: 0, cleared: 0 });
     await c.service.run();
@@ -150,7 +159,7 @@ describe("the jam alert reads the same verdict", () => {
     await c.service.run();
     expect(c.sent).toHaveLength(1);
     expect(c.sent[0]).toMatchObject({ level: "note", title: "Merging, but slowly" });
-    expect(c.sent[0]!.body).toContain("Merging, but slowly: 17 for Boss Man to merge, about 4 h 15 min to clear at the current rate, last landed 19:03 UTC.");
+    expect(c.sent[0]!.body).toContain("Merging, but slowly: 17 for Boss Man to merge, the last one expected by about 23:25 UTC, last landed 19:03 UTC.");
     c.advance(2 * 3_600_000);
     await c.service.run();
     expect(c.sent).toHaveLength(2);

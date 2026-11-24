@@ -16,7 +16,7 @@ import { clashWords } from "./merge-line.js";
 import { mergeLineHealth, startBrakeOff, type StartBrakeOff, type HeldBehindFix, type HeldFix, type MergeLineHealth } from "./merge-line-health.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { goLiveWaitWords } from "@boss-man/shared";
-import { landingEtas, turnOverdue } from "./landing-turn-eta.js";
+import { landingEtas, lineClearAt, turnOverdue } from "./landing-turn-eta.js";
 
 /** BOS-1942: the place a check job's record names: a check worker by its name, or the company runner (the server's own machine). */
 const placeOf = (workerId: string | null, worker: string | null) => (workerId ? (worker ?? "a check worker") : "company runner");
@@ -491,6 +491,8 @@ export function mergeQueueService(
     landingTurns?: (companyId: string) => Promise<Array<{ projectId: string; holder: { ticketId: string; ref: string | null; title: string | null; since: string } | null; line: Array<{ ticketId: string; ref: string | null; title: string | null }> }>>;
     /** BOS-2359: the usual GitHub wait of a landing (landing-turn-eta.ts usualCiWait); null with too few recent landings. */
     usualCiWait?: (companyId: string) => Promise<{ ms: number; samples: number } | null>;
+    /** BOS-2505: the usual length of a passed merge check (landing-turn-eta.ts usualMergeCheck); null with too few. */
+    usualMergeCheck?: (companyId: string) => Promise<{ ms: number; samples: number } | null>;
     now?: () => Date;
   },
 ) {
@@ -1018,7 +1020,19 @@ export function mergeQueueService(
       const heldBehindFix = await heldBehindFixOf(db, prefix, heldWaits, { running, waiting });
       // R44: a server update holding new checks is a deliberate pause: its own verdict, with the reason and the latest end.
       const pause = soft.on ? { reason: "a server update", since: softHoldReason(soft).since, until: softHoldReason(soft).until } : null;
-      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix, pause });
+      // BOS-2505: when the last one lands, from the same usual times as the landing estimates above (check time, GitHub wait).
+      const mergeRunning = running.filter((r) => r.what === "merge_check");
+      const queuedForCheck = waiting.filter((w) => w.actor === "system" && !w.decisionId && (w.state === "waiting_for_check_capacity" || w.state === "waiting_for_seat" || w.state === "waiting_for_slot")).length;
+      const [usualCheckT, usualCiT] = mergeRunning.length + queuedForCheck > 0 && deps.usualMergeCheck && deps.usualCiWait ? await Promise.all([deps.usualMergeCheck(companyId).catch(() => null), deps.usualCiWait(companyId).catch(() => null)]) : [null, null];
+      const clearAt = lineClearAt({
+        nowMs: t.getTime(),
+        usualCheckMs: usualCheckT?.ms ?? null,
+        usualCiMs: usualCiT?.ms ?? null,
+        slots: Math.max(1, slots),
+        running: mergeRunning.map((r) => ({ startedMs: Date.parse(r.startedAt), ciSinceMs: ciWait.get(r.ticketId) ? Date.parse(ciWait.get(r.ticketId)!.since) : null })),
+        queued: queuedForCheck,
+      });
+      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady, heldBehindFix, pause, clearAt });
       // R47: only read the landings when there is no limit, so a company with the brake on pays nothing.
       const landed = company?.brakeLimit == null ? (await mergeQueueQueries.landedSince(db, companyId, new Date(t.getTime() - 24 * 3_600_000))).map((r) => r.at.getTime()) : [];
       const brakeOff = startBrakeOff({ brakeLimit: company?.brakeLimit ?? null, waiting, landed, now: t });
