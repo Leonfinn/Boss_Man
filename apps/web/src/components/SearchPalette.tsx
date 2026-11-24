@@ -7,7 +7,7 @@ import { Search } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../api";
 
-export type SearchHit = { id: string; title: string; snippet: string; link: string; ref?: string | null; exact?: boolean; who?: string; at?: string };
+export type SearchHit = { id: string; title: string; snippet: string; link: string; ref?: string | null; exact?: boolean; who?: string; at?: string; state?: string; outcome?: string | null };
 export type SearchResults = { q: string; tickets: SearchHit[]; wiki: SearchHit[]; chats: SearchHit[]; features?: SearchHit[]; decisions?: SearchHit[]; runs?: SearchHit[]; agents?: SearchHit[]; skills?: SearchHit[]; feedback?: SearchHit[]; counts?: Partial<Record<SearchKind, number>> };
 export type SearchKind = (typeof GROUPS)[number]["key"];
 /** The box's name, on the sidebar button and the input alike. */
@@ -80,6 +80,18 @@ export function clearRecent(): void {
   }
 }
 const hitsOf = (r: SearchResults, key: (typeof GROUPS)[number]["key"]) => r[key] ?? [];
+
+// (BOS-2477) A ticket hit's state, in the ticket page's words and colours (Ticket.tsx STATE_LABEL / STATE_TONE).
+const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
+const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
+/** The tag's word: a done ticket that was cancelled reads "Cancelled". */
+export const ticketStateWord = (state: string, outcome?: string | null) => (state === "done" && outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[state] ?? state));
+/** The small state tag at the start of a ticket hit's title line (first, as a long title is cut with "…" at the end); nothing for other kinds, or from a server that sends no state. */
+export function HitState({ hit }: { hit: SearchHit }) {
+  if (!hit.state) return null;
+  const cancelled = hit.state === "done" && hit.outcome === "cancelled";
+  return <span className={`tag search-state ${cancelled ? "" : (STATE_TONE[hit.state] ?? "")}`}>{ticketStateWord(hit.state, hit.outcome)}</span>;
+}
 /** When a decision was raised or a run started, short and in the owner's own time. */
 export const when = (iso: string) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 export const TIMED = new Set(["decisions", "runs", "feedback"]);
@@ -87,10 +99,11 @@ export const TIMED = new Set(["decisions", "runs", "feedback"]);
 /** The Search page's date filter (BOS-2378): empty is any time. */
 export type SearchSince = "" | "7d" | "30d";
 /** The Search page's address for these words (BOS-2378), without the "#/". */
-export function searchAddress(p: { q: string; kind?: SearchKind | ""; since?: SearchSince; n?: number }): string {
+export function searchAddress(p: { q: string; kind?: SearchKind | ""; since?: SearchSince; open?: boolean; n?: number }): string {
   const qs = new URLSearchParams({ q: p.q });
   if (p.kind) qs.set("kind", p.kind);
   if (p.since) qs.set("since", p.since);
+  if (p.open) qs.set("open", "1");
   if (p.n) qs.set("n", String(p.n));
   return `search?${qs}`;
 }
@@ -274,6 +287,7 @@ export function SearchPalette({ companyId, go }: { companyId: string | undefined
                       return (
                         <li key={hit.link} id={`search-hit-${i}`} role="option" aria-selected={i === active} className={i === active ? "active" : undefined} onMouseMove={() => setActive(i)} onClick={() => pick(hit)}>
                           <span className="search-title">
+                            <HitState hit={hit} />
                             {hit.ref && <span className="mono">{hit.ref} </span>}
                             {hit.title}
                           </span>
