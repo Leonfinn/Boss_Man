@@ -48,6 +48,7 @@ hostbinds="$(echo "$cfg" | jq -r '.services[].volumes[]? | select(.type == "bind
 sock="$(BOSSMAN_DOCKER_SOCK=/run/user/1000/docker.sock docker compose --env-file "$T/images.env" -f docker-compose.images.yml config --format json | jq -r '.services.updater.volumes[] | select(.target == "/var/run/docker.sock") | .source')"
 [ "$sock" = "/run/user/1000/docker.sock" ] && ok "BOSSMAN_DOCKER_SOCK picks the socket" || bad "socket setting: $sock"
 echo "$cfg" | jq -e '.services.setup.network_mode == "none" and (.services.setup.cap_add == ["CHOWN"])' >/dev/null && ok "setup has no network and one capability" || bad "setup is not locked down"
+echo "$cfg" | jq -e '[.services.setup.volumes[] | select(.target == "/updater-key")] | length == 1' >/dev/null && ok "setup makes the updater's key" || bad "setup does not mount the updater key volume"
 echo "$cfg" | jq -e '.services.updater.cap_add == ["SETGID","SETUID"] or .services.updater.cap_add == ["SETUID","SETGID"]' >/dev/null && ok "the updater keeps only SETUID and SETGID" || bad "updater capabilities"
 # BOS-1227 (941c): compose owns the database, the proxy, the updater and setup, and nothing else. A server or launcher service here
 # would let `docker compose up` bring an old one back beside the updater's, which is the fight the design rules out.

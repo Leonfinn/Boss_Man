@@ -44,6 +44,8 @@ services:
       - db-secret:/db-secret
       # Only to give the folder to the launcher's user before the server's read-only mount makes it root-owned.
       - launcher-key:/launcher-key
+      # The updater's key: nothing else makes it, and the updater will not start without it.
+      - updater-key:/updater-key
 
   db:
     # Third-party image from Docker Hub (not published by Boss Man). Pinned by tag, like docker-compose.yml.
