@@ -2345,3 +2345,17 @@ export const serverSizeReadings = pgTable("server_size_readings", {
   dbBytes: bigint("db_bytes", { mode: "number" }).notNull(),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** BOS-2459: each time a runner's socket was up. droppedAt is null while it is up; endedHow says why it ended. Pruned after 30 days. */
+export const runnerConnections = pgTable(
+  "runner_connections",
+  {
+    id: id(),
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
+    droppedAt: timestamp("dropped_at", { withTimezone: true }),
+    /** "dropped" | "stopped" (the owner stopped it) | "server restart"; null while connected. */
+    endedHow: text("ended_how"),
+  },
+  (t) => [index("runner_connections_runner_connected").on(t.runnerId, t.connectedAt)],
+);
