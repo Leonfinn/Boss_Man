@@ -1796,6 +1796,27 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
     expect(await c.open()).toHaveLength(0);
   });
 
+  // BOS-2561: "Try again" must not raise a second Deploy card for a version already approved and waiting or running.
+  it("deployLatest refuses while an approved server update for the offered commit waits or runs, and raises a card otherwise", async () => {
+    const c = (ctx = await setup());
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    // Approved, request waiting in the inbox: no open card, and the button says why instead of raising one.
+    const waiting = await c.selfDeploy.deployLatest();
+    expect(waiting).toMatchObject({ error: expect.stringContaining("already approved and waiting") });
+    expect(await c.open()).toHaveLength(0);
+    // Running on the host.
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "running", to_commit: B, started: new Date().toISOString(), ended: "" });
+    expect(await c.selfDeploy.deployLatest()).toMatchObject({ error: expect.stringContaining("already approved and running") });
+    expect(await c.open()).toHaveLength(0);
+    // Nothing approved or running: a card is raised as before.
+    await c.status({ id: d!.id, result: "failed", to_commit: B });
+    expect(await c.selfDeploy.deployLatest()).toMatchObject({ decisionId: expect.any(String) });
+  });
+
   describe("the host deployer's report line", () => {
     const host = (c: Awaited<ReturnType<typeof setup>>, writtenAt: string) =>
       writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt, ownership: [] }));

@@ -1625,6 +1625,22 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         const asked = await askHostToLook();
         return { error: `Already up to date (${short(a.deployed)}), checked ${a.checkedAt}.${asked ? " Looking at main again now: if something has just merged, the deploy question appears in Decisions within a minute or two." : ""}` } as const;
       }
+      // BOS-2561: an approved server update for this commit (or a newer one) that is waiting for the host or running has no open
+      // card, so "Try again" would raise a second Deploy card for it. Say so plainly instead. A request for a commit inside the
+      // offered range (older than the tip) does not count: the tip is a newer update.
+      let approved = "";
+      let phase = "";
+      if (inboxFile && (await pending())) {
+        const req = await readJson(inboxFile, z.object({ target: z.string().optional(), commit: z.string().optional() }));
+        if (req && (req.target === "server" || req.target === undefined)) [approved, phase] = [req.commit ?? a.tip, "waiting"];
+      }
+      if (!approved) {
+        const s = await status();
+        if (s?.result === "running" && s.target === "server") [approved, phase] = [s.to_commit || a.tip, "running"];
+      }
+      if (approved && (approved === a.tip || !a.commits.some((c) => c.sha === approved))) {
+        return { error: `An update to ${short(approved)} is already approved and ${phase}. You don't need to press again.` } as const;
+      }
       const open = (await openFor("server")).find((d) => (d.context as SelfDeployContext).commit === a.tip);
       const d = open ?? (await raise("server", a.tip, a.deployed, a, true));
       return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
