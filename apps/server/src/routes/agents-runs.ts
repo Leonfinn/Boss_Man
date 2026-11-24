@@ -171,10 +171,14 @@ export function agentRunsRoutes(
         before: z.coerce.date().optional(),
         // A ticket ref ("BOS-2250", any case) or words from the ticket's title.
         q: z.string().trim().max(100).optional(),
+        // The wake reason that started the run (BOS-2437).
+        reason: z.string().trim().min(1).max(100).optional(),
       })
       .parse(req.query);
-    return runsSvc.recent(q.limit, q.companyId, { agentId: q.agentId, result: q.result, before: q.before, q: q.q });
+    return runsSvc.recent(q.limit, q.companyId, { agentId: q.agentId, result: q.result, before: q.before, q: q.q, reason: q.reason });
   });
+  // Why runs that ended in the last 7 days started: runs, cost and share per wake reason (BOS-2437).
+  owner.get("/api/runs/reasons", async (req) => runsSvc.reasonSummary(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
   owner.get("/api/runs/:id/transcript", async (req, reply) => {
     const { id } = IdParam.parse(req.params);
     const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);

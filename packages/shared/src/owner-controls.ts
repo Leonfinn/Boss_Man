@@ -65,7 +65,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark this day read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host", "Save", "Send a test message", "Switch off", "Switch on", "Change", "Remove", "Save changes", "Add", "Cancel", "Send one now"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now", "Load older messages", "Loading", "Download", "Preparing", "Previous", "Next", "Search older messages", "Searching", "Remember this", "Add to standing rules", "Undo", "Cancel", "Copy link", "Link copied", "Jump to newest", "Clear"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -96,6 +96,8 @@ export const OWNER_CONTROLS = {
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // Past the newest 500 messages, the conversation's older pages (BOS-2168).
     "Load older messages", "Loading older messages",
+    // "Copy link" under each message, "Link copied" for a moment after a copy (BOS-2456).
+    "Link copied",
     // The Scrum Master's log of this ticket.
     "Undo", "Undoing", "Scrum Master", "Show all …",
     // The header's "Copy link", "Copied" for a moment after a copy (BOS-2233).
@@ -219,7 +221,7 @@ export const OWNER_CONTROLS = {
   // The permission rules page, its advice mode, the second opinion and the fence.
   Permissions: ["Delete", "Edit", "Save", "Cancel", "Ask the CEO to draft it", "Add rule", "Make a rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
-  Watchdog: ["Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
+  Watchdog: ["Switch off", "Switch back on", "Switch on", "Run the test"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // The owner's password and other logins (BOS-2159).
   Account: ["Change password", "Sign out other devices"],
@@ -246,7 +248,7 @@ export const OWNER_FIELDS = {
   // The Engagements list's status filter (BOS-2260).
   Engagements: ["Show", "Search engagements"],
   // The Runs page's search box (BOS-2317).
-  Runs: ["Search by ticket"],
+  Runs: ["Search by ticket", "Reason"],
   // The Plan page's filters (BOS-2430).
   Plan: ["Project", "Assignee", "Kind", "Show finished"],
   // The Settings page's search box (BOS-2348).
@@ -290,6 +292,8 @@ export const OWNER_FIELDS = {
     "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
     // Shown by "Copy link" when copying fails, so the address can be copied by hand (BOS-2233).
     "Page address",
+    // Under a message's "Copy link" when copying fails here (BOS-2456).
+    "Couldn't copy here. Copy the link by hand",
   ],
   Run: ["Page address"],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
@@ -304,6 +308,8 @@ export const OWNER_FIELDS = {
     "Watch this repo", "GitHub repo (owner/name)", "Check every (minutes, at least 15)", "Issues", "Discussions",
     "Skip posts by these GitHub logins (yours, Boss Man's account)",
     "Security alerts (this project owns the repo's alerts)",
+    // The order of the project list (BOS-2463).
+    "Sort by",
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work", "Key result", "Current", "Target", "Unit", "Objective"],
   Wiki: [
@@ -315,7 +321,7 @@ export const OWNER_FIELDS = {
   ],
   Features: [
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
-    "New feature", "Area", "Search features", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
+    "New feature", "Area", "Search features", "Sort by", "Show released and declined", "Stalled only", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Not shown yet",
@@ -395,7 +401,7 @@ export const OWNER_FIELDS = {
     "Prefix", "Minutes the CEO has", "Nudges per hour", "Most minutes per run", "Who runs it", "What waits for you from the CEO",
   ],
   // The Scrum Master's watchdog.
-  Watchdog: ["Record only (rehearse)", "Scrum Master"],
+  Watchdog: ["Record only (rehearse)", "Scrum Master", "Test the rules against", "Hide ones that cleared by themselves"],
   // The permission rules page, the advice mode, the second opinion and the fence's mode (BOS-325).
   Permissions: [
     "Rules for", "Filter rules", "Show rules that", "What should this rule do", "New rule", "Rule name", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of",

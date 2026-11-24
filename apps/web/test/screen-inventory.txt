@@ -187,6 +187,7 @@ reads:
   - /api/runs
   - /api/runs/:id/permissions
   - /api/runs/:id/transcript
+  - /api/runs/reasons
   - /api/runs/recent
 
 ## #/scrum-master
@@ -394,6 +395,7 @@ reads:
   - /api/data-health
   - /api/kill-switch
   - /api/maintenance
+  - /api/maintenance/history
   - /api/runner-report
   - /api/self-deploy
   - /api/self-deploy/history

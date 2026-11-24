@@ -6,6 +6,18 @@ import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
 import { LoadError } from "../components/LoadError";
 import { ProjectMonthlyTrend, type ProjectMonth } from "../components/ProjectMonthlyTrend";
+import { budgetForecast } from "../budget-forecast";
+
+function BudgetForecastLine({ monthMicros, monthStart, capMicros }: { monthMicros: number; monthStart: string; capMicros: number | null }) {
+  const f = budgetForecast(monthMicros, monthStart, capMicros, new Date());
+  if (f.kind === "too-early") return <p className="muted" style={{ fontSize: 13, margin: "8px 0 0" }}>Too early in the month for a forecast.</p>;
+  return (
+    <p style={{ fontSize: 14, margin: "8px 0 0" }}>
+      At this pace: about <strong>{usd(f.projectedMicros)}</strong> by the end of the month.
+      {f.capMicros !== null && <> <span className="muted">(limit {usd(f.capMicros)})</span> {f.status === "over" ? <strong>Already over the limit.</strong> : f.status === "under" ? "Stays under the limit." : `Reaches the limit around ${f.reachDate!.toLocaleDateString(undefined, { day: "numeric", month: "short" })}.`}</>}
+    </p>
+  );
+}
 
 type Tokens = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 type Spend = { months?: ProjectMonth[]; costCheck?: { outOfBand: number; checked: number; skipped: { model: string; reason: string; runs: number }[] }; tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
@@ -61,6 +73,7 @@ export function ProjectBudget({ project }: { project: Project }) {
             <div><dt className="muted">This month</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.monthMicros)}</dd></div>
             <div><dt className="muted">All time</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.totalMicros)}</dd></div>
           </dl>
+          <BudgetForecastLine monthMicros={s.monthMicros} monthStart={s.monthStart} capMicros={s.monthlyCapMicros} />
           <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>Estimates at list prices, from the accounts you pay per use (such as OpenRouter or Ollama credit). <a href={`#/spend/${project.companyId}`}>See spend by day, agent and feature</a>.</p>
         </section>
         <section aria-label="On your subscriptions" style={{ flex: "1 1 280px" }}>

@@ -97,6 +97,13 @@ describe("flattenHostRecord: check lists", () => {
     expect(flat["check.other_check.items.names"]).toBeUndefined();
   });
 
+  it("carries the unhealthy container names, and leaves an empty list out so it never reads as missing (BOS-2481)", () => {
+    const some = flattenHostRecord({ ...base(), checks: { container_status: { unhealthy: 1, unhealthyNames: "runner" } } });
+    expect(some["check.container_status.unhealthyNames"]).toBe("runner");
+    const none = flattenHostRecord({ ...base(), checks: { container_status: { unhealthy: 0, unhealthyNames: "" } } });
+    expect("check.container_status.unhealthyNames" in none).toBe(false);
+  });
+
   it("reports an empty stopped list as 0 and adds no names key", () => {
     const flat = flattenHostRecord({ ...base(), checks: { container_status: { stopped: [] } } });
     expect(flat["check.container_status.stopped"]).toBe("0");

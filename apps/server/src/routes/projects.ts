@@ -12,6 +12,7 @@ import type { gitHostService } from "../services/git-hosts.js";
 import { DEFAULT_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, WATCH_TOKEN_ENV, type githubWatchService } from "../services/github-watch.js";
 import type { launcherService } from "../services/launcher.js";
 import { record } from "../services/activity.js";
+import { liveCheckWaitSql } from "../services/go-live-note.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
 import { summarizeCostChecks } from "../services/cost-check.js";
 import { monthStartUtc, projectMonthlyTrend, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
@@ -142,6 +143,8 @@ export function projectRoutes(
         monthlyCap: projects.monthlyCapMicros,
         open: sql<string>`count(${tickets.id}) filter (where ${open})`,
         inReview: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'review')`,
+        // BOS-2463: really blocked, leaving out merged work only waiting for a live check (the Dashboard's split).
+        blocked: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'blocked' and not ${liveCheckWaitSql})`,
         points: sql<string>`coalesce(sum(${tickets.size}) filter (where ${open}), 0)`,
         unsized: sql<string>`count(${tickets.id}) filter (where ${open} and ${tickets.size} is null)`,
         finished: sql<string>`count(${tickets.id}) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled' and ${tickets.stateChangedAt} >= ${since})`,
@@ -157,6 +160,7 @@ export function projectRoutes(
         projectId: r.projectId,
         open: Number(r.open),
         inReview: Number(r.inReview),
+        blocked: Number(r.blocked),
         pointsLeft: Number(r.points),
         unsized: Number(r.unsized),
         finishedLast30Days: Number(r.finished),

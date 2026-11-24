@@ -44,6 +44,25 @@ describe("notifications", () => {
     expect(screen.queryByRole("button", { name: "Show older" })).toBeNull();
   });
 
+  it("groups by day and 'Mark this day read' sends only that day's unread ids (BOS-2441)", async () => {
+    const today = new Date();
+    const old = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 5, 12);
+    const items = [
+      { ...notice("a"), id: "t1", title: "T1" },
+      { ...notice("b"), id: "t2", title: "T2", readAt: today.toISOString() },
+      { ...notice("c"), id: "o1", title: "O1", createdAt: old.toISOString() },
+    ];
+    const f = vi.fn(() => Promise.resolve(new Response("{}", { status: 200, headers: { "content-type": "application/json" } })));
+    vi.stubGlobal("fetch", f);
+    render(<Notifications feed={{ items, unread: 2 }} onChanged={() => {}} />);
+    expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
+    expect(screen.getAllByText("1 new").length).toBe(2);
+    fireEvent.click(screen.getAllByRole("button", { name: "Mark this day read" })[0]!);
+    await waitFor(() => expect(f).toHaveBeenCalled());
+    const call = (f.mock.calls as unknown as [string, RequestInit][]).find((c) => c[0] === "/api/notifications/read")!;
+    expect(JSON.parse(call[1].body as string)).toEqual({ ids: ["t1"] });
+  });
+
   it("keeps the rows and shows the error when an older load fails", async () => {
     const first = Array.from({ length: 50 }, (_, i) => ({ ...notice("x"), id: `n${i}`, title: `Notice ${i}` }));
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } }))));

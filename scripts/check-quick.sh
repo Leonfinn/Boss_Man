@@ -406,6 +406,80 @@ broad() { # broad <files>: too many files, or one that most of the suite imports
   [ "$(grep -c . <<<"$1")" -gt "${CHECK_QUICK_BROAD_FILES:-15}" ] || grep -Eq '(^|/)(app|main|mcp)\.ts$' <<<"$1"
 }
 
+# BOS-2386: tests in any package that still name a string the branch removed or renamed. BOS-2326 renamed the Ctrl+K box
+# (aria-label "Search tickets, wiki and chats") and apps/web/test/keyboard-shortcuts.test.tsx, which imports neither changed
+# file, still looked for the old name: only the merge found it. So:
+#   1. the string literals ("...", '...', `...` with no ${}) and one-line JSX text (>...<) on the lines the diff removes,
+#      of JS/TS source (not tests: shell and YAML quoting is mostly code), minus the ones the diff adds back (a line edited
+#      around a kept string); at least CHECK_QUICK_REMOVED_MIN (default 8) characters with a letter, and a space, / or → in
+#      it unless it has 12 or more (a label or path, not a key like "typecheck"); no import paths, no code (&&, ||, =>);
+#   2. one grep -F of those over every tracked test file of every package (an untouched package too);
+#   3. a string found in more than CHECK_QUICK_REMOVED_COMMON (default 10) test files is too common to mean anything: left out,
+#      and the log says so; a test already in its package's related list is left out (it runs anyway);
+#   4. at most CHECK_QUICK_REMOVED_MAX (default 15) files, the ones naming the most removed strings first; the log says when
+#      the cap cut some. They run in the slot, one named vitest run per package, on a hand run and at the gate alike.
+# Known limits: a string the test builds from pieces, a regex in the test (/Search tickets/), and an added label a test says
+# must not exist (BOS-2327 added Notifications to the Settings tabs: BOS-2334's shared-name pick covers that one).
+removed_test_pkgs="apps/launcher apps/runner apps/server apps/web apps/site packages/shared"
+removed_lits() { # removed_lits: the string literals and JSX text in the code lines on stdin, one per line
+  local min="${CHECK_QUICK_REMOVED_MIN:-8}"
+  [[ "$min" =~ ^[1-9][0-9]?$ ]] || min=8
+  { grep -oE "\"[^\"\\\\]{$min,200}\"|'[^'\\\\]{$min,200}'|\`[^\`\\\\\$]{$min,200}\`|>[^<>{}\"'\`]{$min,200}<" || true; } \
+    | sed -E 's/^.(.*).$/\1/; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+    | { grep -E '[A-Za-z]' || true; } | { grep -vE '^(\.\.?/|@|node:|#!)|&&|\|\||=>' || true; } \
+    | awk -v n="$min" 'length($0) >= n && (/[[:space:]\/→]/ || length($0) >= 12)' | sort -u
+}
+removed_pick() { # sets removed_tests ("<file>\t<string>" per line, repo paths) and removed_notes (lines for the log)
+  local diff gone kept tests hits common grouped skip d rel total
+  removed_tests="" removed_notes=""
+  diff="$(git diff -U0 --no-color --no-ext-diff "$base"...HEAD -- . ':(exclude)pnpm-lock.yaml' ':(exclude)apps/server/drizzle' 2>/dev/null \
+    | awk '/^diff --git /{ f = $3; sub(/^a\//, "", f); hunk = 0; skip = (f ~ /(^|\/)test\// || f ~ /\.(test|spec)\.[a-z]+$/ || f !~ /\.(ts|tsx|mts|js|jsx|mjs)$/); next }
+      /^@@/ { hunk = 1; next }
+      !hunk || skip { next }
+      /^[-+]/ { print }')" || diff=""
+  [ -n "$diff" ] || return 0
+  gone="$(grep '^-' <<<"$diff" | cut -c2- | removed_lits)"
+  [ -n "$gone" ] || return 0
+  kept="$(grep '^+' <<<"$diff" | cut -c2- | removed_lits)"
+  gone="$(comm -23 <(printf '%s\n' "$gone") <(printf '%s\n' "$kept") | { grep . || true; })"
+  [ -n "$gone" ] || return 0
+  # shellcheck disable=SC2086  # one argument per package dir
+  tests="$(git ls-files -- $removed_test_pkgs 2>/dev/null | { grep -E "$test_file_re" || true; })"
+  [ -n "$tests" ] || return 0
+  # shellcheck disable=SC2086  # one argument per file; tracked test paths have no spaces
+  hits="$({ grep -oHF -f <(printf '%s\n' "$gone") $tests 2>/dev/null || true; } | sort -u)"
+  [ -n "$hits" ] || return 0
+  common="$(cut -d: -f2- <<<"$hits" | sort | uniq -c | awk -v n="${CHECK_QUICK_REMOVED_COMMON:-10}" '$1 > n { c = $1; sub(/^ *[0-9]+ /, ""); print c "\t" $0 }')"
+  if [ -n "$common" ]; then
+    removed_notes="$removed_notes$(while IFS=$'\t' read -r n s; do printf 'left out as too common: "%s" (in %s test files)\n' "$s" "$n"; done <<<"$common")"$'\n'
+    hits="$(awk -F'\t' 'NR == FNR { drop[$2] = 1; next } { s = substr($0, index($0, ":") + 1) } !(s in drop)' <(printf '%s\n' "$common") - <<<"$hits")"
+  fi
+  # The tests each package's related run already names.
+  skip=""
+  for d in $removed_test_pkgs; do
+    rel="$(related_list "$d")"
+    [ -n "$rel" ] || continue
+    ! broad "$rel" || continue
+    skip="$skip$d/${rel//$'\n'/$'\n'$d/}"$'\n'
+  done
+  # One line per file: how many removed strings it names, the file, the first of them; most first, then by path.
+  grouped="$({ grep . <<<"$hits" || true; } | awk -F'\t' 'NR == FNR { if ($0 != "") have[$0] = 1; next }
+      { f = substr($0, 1, index($0, ":") - 1); s = substr($0, index($0, ":") + 1); if (f in have) next
+        n[f]++; if (!(f in first)) first[f] = s }
+      END { for (f in n) printf "%d\t%s\t%s\n", n[f], f, first[f] }' <(printf '#\n%s' "$skip") - | sort -t$'\t' -k1,1nr -k2,2)"
+  [ -n "$grouped" ] || return 0
+  total="$(grep -c . <<<"$grouped")"
+  removed_tests="$(head -n "${CHECK_QUICK_REMOVED_MAX:-15}" <<<"$grouped" | cut -f2-)"
+  [ "$total" -le "${CHECK_QUICK_REMOVED_MAX:-15}" ] \
+    || removed_notes="${removed_notes}cap hit: $total test files name a removed string, running the first ${CHECK_QUICK_REMOVED_MAX:-15} (CHECK_QUICK_REMOVED_MAX)"$'\n'
+  return 0
+}
+removed_tests_in() { # removed_tests_in <package dir>: its picked files, relative to it
+  { grep "^$1/" <<<"$removed_tests" || true; } | cut -f1 | sed "s#^$1/##"
+}
+removed_tests="" removed_notes=""
+[ -n "${BOSSMAN_FULL_CHECK_NEXT:-}" ] || removed_pick
+
 if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
   # Runs inside the check slot (started by check-all.sh below): exits non-zero when a step failed, with no summary line.
   export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}"
@@ -420,6 +494,14 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     name="$(node -p "require('./$d/package.json').name")"
     # shellcheck disable=SC2086  # one argument per file; paths have no spaces
     step "tests related to $name changes" pnpm --filter "$name" exec vitest related --run $files
+  done
+  # BOS-2386: the tests that name a string the branch removed (listed with their strings before the slot wait).
+  for d in $removed_test_pkgs; do
+    files="$(removed_tests_in "$d")"
+    [ -n "$files" ] || continue
+    name="$(node -p "require('./$d/package.json').name")"
+    # shellcheck disable=SC2086  # one argument per file; paths have no spaces
+    step "tests naming a string the branch removed ($d, $(grep -c . <<<"$files") files)" pnpm --filter "$name" exec vitest run $files
   done
   # Whole-repo tests (BOS-1732) the related list can't reach: one vitest run per package, from its package folder (same slot,
   # its setup files apply). Named files, so vitest-guard accepts it inside the slot.
@@ -460,6 +542,13 @@ for d in "${pkgs[@]}" apps/site; do
   if broad "$files"; then echo "SKIP related tests: too broad for a hand run, the merge gate runs them ($d; CHECK_QUICK_FORCE_RELATED=1 runs them anyway)"; partial=1
   else need_slot=1; fi
 done
+# BOS-2386: name each test picked for a removed string, and the string that picked it; they run in the slot.
+if [ -n "$removed_tests" ] || [ -n "$removed_notes" ]; then
+  echo "INFO  tests that name a string the branch removed or renamed: $(grep -c . <<<"$removed_tests") to run"
+  [ -z "$removed_tests" ] || while IFS=$'\t' read -r f s; do printf '      %s  ("%s")\n' "$f" "$s"; done <<<"$removed_tests"
+  [ -z "$removed_notes" ] || { grep . <<<"$removed_notes" | sed 's/^/      /'; }
+  [ -z "$removed_tests" ] || need_slot=1
+fi
 # BOS-2286: a change outside the packages only (a compose or deploy file) touches no package, but a whole-repo test that names
 # the changed file must still run, in the slot like the others.
 if [ "$need_slot" -eq 0 ] && [ -n "$wr_outside" ] && whole_repo_on; then

@@ -2,7 +2,7 @@ import { Fragment, useState } from "react";
 import { api } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
-import { isFailingCheck, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
+import { isFailingCheck, NORMALLY_EMPTY_FACTS, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
 import { Section, useAction } from "./shared";
 
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
@@ -44,7 +44,7 @@ function reportedProblems(d: HostFactsView): { missing: string[]; failing: strin
   const addonsDown: string[] = [];
   for (const [k, f] of Object.entries(d.facts)) {
     const v = f.value.trim();
-    if (!v) { if (!missing.includes(k)) missing.push(k); }
+    if (!v) { if (!NORMALLY_EMPTY_FACTS.has(k) && !missing.includes(k)) missing.push(k); }
     else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
     else if (isFailingCheck(k, v)) failing.push(k);
   }

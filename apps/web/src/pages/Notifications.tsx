@@ -5,6 +5,7 @@ import { ShowOlder } from "../components/ShowOlder";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
+import { READ_IDS_MAX, groupByDay } from "../notice-days";
 import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
@@ -302,11 +303,26 @@ export function Notifications({ feed, onChanged, companies = null, browserPermis
         </div>
       )}
       {items.length > 0 && (
-        <ul aria-busy={updating} style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
-          {items.map((n) => (
-            <Item key={n.id} n={n} onRead={(id) => read({ ids: [id] })} />
+        <div aria-busy={updating} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {groupByDay(items).map((g) => (
+            <section key={g.key} aria-label={g.label}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", margin: "0 0 8px" }}>
+                <h2 style={{ margin: 0, fontSize: 16 }}>{g.label}</h2>
+                {g.unreadIds.length > 0 && <span className="muted">{g.unreadIds.length} new</span>}
+                {g.unreadIds.length > 0 && (
+                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => read({ ids: g.unreadIds.slice(0, READ_IDS_MAX) })}>
+                    Mark this day read
+                  </button>
+                )}
+              </div>
+              <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+                {g.items.map((n) => (
+                  <Item key={n.id} n={n} onRead={(id) => read({ ids: [id] })} />
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
       )}
       {!updating && <ShowOlder older={older} />}
     </>
