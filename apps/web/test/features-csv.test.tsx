@@ -29,9 +29,9 @@ describe("featuresToCsv", () => {
     const sub = feature({ id: "f2", parentId: "f1", title: "Sub", driverScores: {}, effort: null, portalVisible: false });
     const csv = featuresToCsv([{ f: parent, area: "Billing" }, { f: sub, area: "Billing" }], [driver], [parent, sub]);
     const [head, a, b] = csv.split("\r\n");
-    expect(head).toBe("area,feature,parent,portal,status,demand,Reach,effort,value,priority,tasks_done,tasks");
-    expect(a).toBe('Billing,"Cards, all kinds",,yes,Planned,2,4,3,3.5,7.5,1,3');
-    expect(b).toBe('Billing,Sub,"Cards, all kinds",no,Planned,2,,,3.5,7.5,1,3');
+    expect(head).toBe("area,feature,parent,portal,status,last_moved,demand,Reach,effort,value,priority,tasks_done,tasks");
+    expect(a).toBe('Billing,"Cards, all kinds",,yes,Planned,,2,4,3,3.5,7.5,1,3');
+    expect(b).toBe('Billing,Sub,"Cards, all kinds",no,Planned,,2,,,3.5,7.5,1,3');
   });
 });
 
@@ -61,6 +61,6 @@ describe("Download CSV button", () => {
     render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
     await screen.findByRole("combobox", { name: "Status of Gift cards" });
     fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
-    expect(await (saved as unknown as Blob).text()).toContain(",Gift cards,,yes,Planned,2,4,3,");
+    expect(await (saved as unknown as Blob).text()).toContain(",Gift cards,,yes,Planned,,2,4,3,");
   });
 });
