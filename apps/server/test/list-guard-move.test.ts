@@ -71,7 +71,7 @@ const toReview = async (id: string, extra: Record<string, unknown> = {}) => text
 const stateOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
 
 describe("BOS-2522: the list guards at the move to review", () => {
-  it("refuses a new wake reason with no class, naming the line to add, and asks the runner for the diff once", async () => {
+  it("refuses a new wake reason with no class, naming the line to add", async () => {
     const t = await ctx.ticket();
     const out = await toReview(t.id);
     for (const s of ["list guard wake-classes", '"plan due": "<class>",', WAKE_CLASSES_FILE, "NOT_WAKE_REASONS", "scripts/check-guards.sh wake-classes", "listGuardWrong"]) expect(out).toContain(s);

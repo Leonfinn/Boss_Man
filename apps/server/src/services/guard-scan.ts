@@ -33,7 +33,11 @@ export function shown(expr: string): string[] {
     const c = expr[i];
     if (c !== '"' && c !== "'" && c !== "`") continue;
     const e = skipString(expr, i);
-    const before = expr.slice(0, i).trimEnd();
+    // Only the few characters before the string matter; testing the whole prefix with `…$` would rescan it for
+    // every string, which is quadratic on a long expression (BOS-2522 security review).
+    let j = i;
+    while (j > 0 && /\s/.test(expr[j - 1]!)) j--;
+    const before = expr.slice(Math.max(0, j - 24), j);
     const after = expr.slice(e).trimStart();
     const compared = /[=!]=$/.test(before) || /^[=!]==?/.test(after) || /\b(?:includes|has|startsWith|endsWith)\($/.test(before);
     if (!compared && !/[\w-]=$/.test(before)) out.push(c === "`" ? expr.slice(i + 1, e - 1).split("${")[0]! : expr.slice(i + 1, e - 1));
@@ -51,14 +55,26 @@ export function buttonLabels(src: string): string[] {
   return clean(elementTexts(src, "button").flatMap((chunks) => chunks.flat()));
 }
 
-/** The inside of every `<tag …>…</tag>` in a file, as its runs of text: each JSX text run or {…} is one chunk. */
+/**
+ * The inside of every `<tag …>…</tag>` in a file, as its runs of text: each JSX text run or {…} is one chunk.
+ *
+ * Each element is read only up to the next `<tag` (buttons and labels never nest), and one with no end to its opening
+ * tag or no closing tag in that span is skipped. So every character belongs to one element's span and the scan stays
+ * linear on any text: the move to review runs this on the server's event loop over an agent's branch files, and
+ * searching to the end of the file from every unclosed `<label>` took 12.5 s and 2.4 GB at 64 KB (BOS-2522 security
+ * review). Real files read the same as before: every web page gives the same labels.
+ */
 function elementTexts(src: string, tag: string): string[][][] {
   const out: string[][][] = [];
-  for (const m of src.matchAll(new RegExp(`<${tag}\\b`, "g"))) {
-    let i = m.index + tag.length + 1;
-    while (i < src.length && src[i] !== ">") i = src[i] === "{" ? skipBraces(src, i) : src[i] === '"' || src[i] === "'" ? skipString(src, i) : i + 1;
-    if (src[i - 1] === "/") continue;
-    const inner = src.slice(i + 1, src.indexOf(`</${tag}>`, i));
+  const starts = [...src.matchAll(new RegExp(`<${tag}\\b`, "g"))].map((m) => m.index);
+  for (let n = 0; n < starts.length; n++) {
+    const span = src.slice(starts[n], starts[n + 1] ?? src.length);
+    let i = tag.length + 1;
+    while (i < span.length && span[i] !== ">") i = span[i] === "{" ? skipBraces(span, i) : span[i] === '"' || span[i] === "'" ? skipString(span, i) : i + 1;
+    if (i >= span.length || span[i - 1] === "/") continue;
+    const end = span.indexOf(`</${tag}>`, i);
+    if (end < 0) continue;
+    const inner = span.slice(i + 1, end);
     const chunks: string[][] = [];
     for (let k = 0; k < inner.length; ) {
       if (inner[k] === "{") {
@@ -82,7 +98,20 @@ function elementTexts(src: string, tag: string): string[][][] {
   return out;
 }
 // Leading and trailing marks aren't part of the name: "▸ Show all", "Saved ✓", "Attaching…", "History (".
-const clean = (pieces: string[]) => pieces.map((p) => p.replace(/\s+/g, " ").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N})]+$/gu, "")).filter((p) => /^\p{Lu}/u.test(p));
+const clean = (pieces: string[]) => pieces.map((p) => trimEndMarks(p.replace(/\s+/g, " ").replace(/^[^\p{L}\p{N}]+/u, ""))).filter((p) => /^\p{Lu}/u.test(p));
+/**
+ * Drops trailing marks (anything but a letter, digit or ")"), one code point at a time from the end. A `[…]+$` regex
+ * would retry from every mark in a long run of them, which is quadratic (BOS-2522 security review).
+ */
+function trimEndMarks(p: string): string {
+  let b = p.length;
+  while (b > 0) {
+    const w = b >= 2 && /[\uDC00-\uDFFF]/.test(p[b - 1]!) && /[\uD800-\uDBFF]/.test(p[b - 2]!) ? 2 : 1;
+    if (/[\p{L}\p{N})]/u.test(p.slice(b - w, b))) break;
+    b -= w;
+  }
+  return p.slice(0, b);
+}
 
 /**
  * The label of every form field in a file (BOS-442): the first text of each <label> (the words before its input;
@@ -90,7 +119,13 @@ const clean = (pieces: string[]) => pieces.map((p) => p.replace(/\s+/g, " ").rep
  */
 export function fieldLabels(src: string): string[] {
   const out = elementTexts(src, "label").flatMap((chunks) => chunks[0] ?? []);
-  for (const m of src.matchAll(/<(\w+)\b[^>]*?\blabel="([^"]+)"/g)) if (FIELD_COMPONENTS.has(m[1]!)) out.push(m[2]!);
+  // As in elementTexts, each component's props are searched only up to its next `<Component`, so text with no `>` is
+  // not rescanned from every opening (BOS-2522 security review).
+  const starts = [...src.matchAll(new RegExp(`<(?:${[...FIELD_COMPONENTS].join("|")})\\b`, "g"))].map((m) => m.index);
+  for (let n = 0; n < starts.length; n++) {
+    const m = /^<\w+\b[^>]*?\blabel="([^"]+)"/.exec(src.slice(starts[n], starts[n + 1] ?? src.length));
+    if (m) out.push(m[1]!);
+  }
   return clean(out);
 }
 

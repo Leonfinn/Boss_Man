@@ -5,7 +5,7 @@
 //
 // Design choices:
 // - Refuse only on a sure miss. Each rule asks "does the name appear anywhere in the list file?", a looser question
-//   than the guard's own, so it can't refuse what the guard passes (test/list-guard-gate-repo.test.ts runs it over
+//   than the guard's own, so it can't refuse what the guard passes (test/list-guard-gate.test.ts runs it over
 //   every source file on main and expects silence). What it lets through (a label under the wrong screen, a component
 //   shown on a screen its file doesn't say) the quick check still catches.
 // - The scanners are the guards' own (guard-scan.ts), so the two read a file the same way.
