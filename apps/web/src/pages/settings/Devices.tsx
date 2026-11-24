@@ -2,7 +2,8 @@ import { useState } from "react";
 import { tallestReading } from "@boss-man/shared";
 import { api, type DeviceProfile } from "../../api";
 import { usePoll } from "../../hooks";
-import { collect } from "../../devices";
+import { collect, fingerprint, measure } from "../../devices";
+import { recordedAgo, screenChanged } from "../../devices-match";
 import { Loader } from "../../components/Loader";
 import { LoadError } from "../../components/LoadError";
 import { Section, useAction } from "./shared";
@@ -33,7 +34,16 @@ export function Devices() {
       list.reload();
       return `Forgot ${p.label}.`;
     });
-  const rows = list.data ?? [];
+  const here = (() => {
+    try {
+      return fingerprint(localStorage);
+    } catch {
+      return null;
+    }
+  })();
+  const all = list.data ?? [];
+  const rows = [...all.filter((p) => p.fingerprint === here), ...all.filter((p) => p.fingerprint !== here)];
+  const recorded = here !== null && all.some((p) => p.fingerprint === here);
   return (
     <Section id="devices-h" title="Your devices">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -51,18 +61,23 @@ export function Devices() {
         <p className="muted" style={{ fontSize: 14 }}>No devices recorded yet. Record this one, then the others you use.</p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {!recorded && <p className="muted" style={{ fontSize: 14, margin: 0 }}>This browser isn't recorded yet.</p>}
           {rows.map((p) => {
             const t = tallestReading(p);
+            const mine = p.fingerprint === here;
+            const changed = mine && screenChanged(measure(window, document, false), t);
             return (
               <div key={p.id} style={{ border: "1px solid var(--line, #333)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  {mine && <span className="muted" style={{ fontSize: 12, fontWeight: 600, border: "1px solid var(--line, #333)", borderRadius: 999, padding: "2px 8px" }}>This browser</span>}
                   <input value={names[p.id] ?? p.label} onChange={(e) => setNames((n) => ({ ...n, [p.id]: e.target.value }))} style={{ flex: "1 1 220px" }} aria-label={`Name for ${p.label}`} />
                   <button type="button" className="btn" onClick={() => rename(p)} disabled={act.busy}>Rename</button>
                   <button type="button" className="btn" onClick={() => remove(p)} disabled={act.busy}>Forget</button>
                 </div>
                 <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-                  {p.browser} · {t.width}×{t.height} CSS px · pixel ratio {t.pixelRatio} · {t.coarsePointer ? "touch" : "mouse"} · {t.displayMode}. 100vh {t.units.vh}, 100dvh {t.units.dvh}, 100svh {t.units.svh}, 100lvh {t.units.lvh}, visual viewport {t.units.visual} px. Reported {new Date(p.reportedAt).toLocaleString()}.
+                  {p.browser} · {t.width}×{t.height} CSS px · pixel ratio {t.pixelRatio} · {t.coarsePointer ? "touch" : "mouse"} · {t.displayMode}. 100vh {t.units.vh}, 100dvh {t.units.dvh}, 100svh {t.units.svh}, 100lvh {t.units.lvh}, visual viewport {t.units.visual} px. <span title={new Date(p.reportedAt).toLocaleString()}>{recordedAgo(p.reportedAt)}</span>.
                 </p>
+                {changed && <p style={{ fontSize: 13, margin: 0 }}>This screen has changed since it was recorded: press Record this device to update it.</p>}
               </div>
             );
           })}
