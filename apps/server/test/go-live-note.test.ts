@@ -1,5 +1,6 @@
 // BOS-1546: a merged ticket that only waits to go live says so in plain words, and a ticket that waits for nothing says nothing.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { isLiveCheckWait } from "@boss-man/shared";
 import { companies, decisions, projects, tickets } from "../src/db/schema.js";
@@ -26,7 +27,18 @@ describe("blocked split", () => {
       { ...base, title: "merged waiting", mergeCommit: "a".repeat(40) },
       { ...base, title: "merged done", systemState: "done" as const, mergeCommit: "b".repeat(40) },
     ]);
-    expect(await blockedSplit(db, COMPANY)).toEqual({ blocked: 1, liveCheck: 1 });
+    const split = await blockedSplit(db, COMPANY);
+    expect(split).toMatchObject({ blocked: 1, liveCheck: 1 });
+    // BOS-2467: the oldest real block is the stuck ticket, never the live-check wait (even if that one is older).
+    const [stuck] = await db.select({ id: tickets.id }).from(tickets).where(eq(tickets.title, "stuck"));
+    expect(split.oldest?.ticketId).toBe(stuck!.id);
+    await db.update(tickets).set({ stateChangedAt: new Date("2020-01-01T00:00:00Z") }).where(eq(tickets.title, "merged waiting"));
+    expect((await blockedSplit(db, COMPANY)).oldest?.ticketId).toBe(stuck!.id);
+    await db.update(tickets).set({ stateChangedAt: new Date("2020-01-01T00:00:00Z") }).where(eq(tickets.title, "stuck"));
+    expect((await blockedSplit(db, COMPANY)).oldest?.at.toISOString()).toBe("2020-01-01T00:00:00.000Z");
+    // No real block: nothing.
+    await db.update(tickets).set({ systemState: "ready" }).where(eq(tickets.title, "stuck"));
+    expect((await blockedSplit(db, COMPANY)).oldest).toBeNull();
     expect(isLiveCheckWait({ systemState: "blocked", mergeCommit: "a" })).toBe(true);
     expect(isLiveCheckWait({ systemState: "blocked", mergeCommit: null })).toBe(false);
     expect(isLiveCheckWait({ systemState: "done", mergeCommit: "a" })).toBe(false);

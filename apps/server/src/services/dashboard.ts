@@ -238,6 +238,8 @@ export function dashboardService(
           // BOS-1636: only real blocks; merged work waiting for its live check is counted apart.
           blocked: blockedCounts.blocked,
           waitingLiveCheck: blockedCounts.liveCheck,
+          // BOS-2467: how long the longest real block has lasted, and which ticket it is.
+          oldestBlocked: blockedCounts.oldest ? { at: blockedCounts.oldest.at.toISOString(), ticketId: blockedCounts.oldest.ticketId, ref: blockedCounts.oldest.ref } : null,
           decisionsWaiting,
           monthCostMicros: Number(spent?.micros ?? 0),
           monthSubscriptionTokens: { input: Number(tokens?.input ?? 0), output: Number(tokens?.output ?? 0) },
