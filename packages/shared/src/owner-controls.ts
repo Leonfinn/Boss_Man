@@ -119,7 +119,8 @@ export const OWNER_CONTROLS = {
   Runs: ["End all running runs", "Ending", "Loading", "Show more", "Retry", "Download CSV", "Start now", "Cancel", "Starting", "Cancelling"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
-  "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front"],
+  // BOS-2473: Merge history's CSV of the rows shown.
+  "Merge queue": ["Merges", "Quick checks", "Show …", "Move to front", "Download CSV"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones", "Change"],
   Plan: [
     "Refresh",

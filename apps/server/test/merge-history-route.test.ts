@@ -90,6 +90,16 @@ describe("merge history route", () => {
     expect(body.perDay[0]).toMatchObject({ landed: 4, bounced: 2, medianMs: 20 * 60_000 });
   });
 
+  it("days=7, 14 and 30 keep merges 3, 10 and 25 days old: 1, 2 and 3 rows; no days is 14 (BOS-2473)", async () => {
+    for (const [i, age] of [3, 10, 25].entries()) {
+      const t = (await ctx.db.insert(tickets).values({ companyId: ctx.companyId, projectId: ctx.projectId, title: `Aged ${i}`, systemState: "ready" }).returning())[0]!;
+      const at = Date.now() - age * DAY;
+      for (const [m, event] of [[0, "attempt"], [5, "merged"]] as const) await ctx.db.insert(activity).values({ companyId: ctx.companyId, ticketId: t.id, at: new Date(at + m * 60_000), kind: "merge_line", summary: "x", detail: { event } });
+    }
+    const rows = async (q: string) => ((await ctx.app.inject({ method: "GET", url: `/api/companies/${ctx.companyId}/merge-history${q}`, headers: { cookie: ctx.cookie } })).json() as MergeHistory).rows.length;
+    expect([await rows("?days=7"), await rows("?days=14"), await rows("?days=30"), await rows("")]).toEqual([1, 2, 3, 2]);
+  });
+
   it("takes days=7, 14 or 30 and refuses anything else with a 422 (BOS-2473)", async () => {
     const get = (q: string) => ctx.app.inject({ method: "GET", url: `/api/companies/${ctx.companyId}/merge-history${q}`, headers: { cookie: ctx.cookie } });
     for (const d of [7, 14, 30]) expect((await get(`?days=${d}`)).json()).toMatchObject({ days: d });
