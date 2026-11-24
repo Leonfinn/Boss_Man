@@ -57,6 +57,10 @@ describe("engagements list summary (BOS-2427)", () => {
     expect(s.finishedCount).toBe(2);
     expect(s.medianDaysToFinish).toBeCloseTo(4, 1);
     expect(rows.slice(1).every((r) => r.summary === undefined)).toBe(true);
+    // The figures cover every engagement, not just the rows on the page.
+    const onePage = (await ctx.req("GET", "/api/engagements?limit=1")).json() as Row[];
+    expect(onePage).toHaveLength(1);
+    expect(onePage[0]!.summary).toEqual(s);
   });
 
   it("dates a row from its newest step, ignores plain messages, and leaves the summary off an agent's company list", async () => {

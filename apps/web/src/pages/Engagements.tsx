@@ -62,7 +62,7 @@ export function EngagementSummaryStrip({ s }: { s: EngagementSummary }) {
       </div>
       <div>
         <p className="label">Median time to finish, last 90 days</p>
-        <p>{s.medianDaysToFinish == null ? <span className="muted">None finished yet</span> : <strong>{s.medianDaysToFinish.toFixed(1)} days</strong>}</p>
+        <p>{s.medianDaysToFinish == null ? <span className="muted">No finished engagements yet</span> : <strong>{s.medianDaysToFinish.toFixed(1)} days</strong>}</p>
       </div>
     </section>
   );

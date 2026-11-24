@@ -35,6 +35,6 @@ describe("EngagementSummaryStrip", () => {
   it("says so when a state counts as other, and when nothing has finished", () => {
     const { container } = render(<EngagementSummaryStrip s={{ ...base, waitingOnOther: 1, medianDaysToFinish: null, finishedCount: 0 }} />);
     expect(container.textContent).toContain("1 counted as other");
-    expect(container.textContent).toContain("None finished yet");
+    expect(container.textContent).toContain("No finished engagements yet");
   });
 });
