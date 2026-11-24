@@ -68,6 +68,8 @@ export function serverAdminRoutes(
 
   // The runner update hold (docs/09-self-deploy.md, phase 2): the banner's numbers, a manual start, and cancel.
   owner.get("/api/maintenance", async () => maintenance.status());
+  // BOS-2408: each past update wait, kept in the database (start, swap tries, notable moments, how it ended).
+  owner.get("/api/maintenance/history", async (req) => ({ holds: await maintenance.history(z.coerce.number().int().min(1).max(100).catch(20).parse((req.query as { limit?: string }).limit)) }));
   // The Settings → Runner update panel: the live state first, then the last update as history (BOS-465).
   owner.get("/api/runner-report", async () => runnerReport.updatePanel());
   owner.post("/api/maintenance/start", async (req, reply) => {
