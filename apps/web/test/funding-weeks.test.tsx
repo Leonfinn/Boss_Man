@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FundingCards } from "../src/pages/Funding";
 
@@ -85,5 +85,19 @@ describe("Last 8 weeks fold on a funding card", () => {
     stub([week(0), week(1)]);
     render(<FundingCards />);
     expect(await screen.findByText(/Nothing recorded yet/)).toBeTruthy();
+    expect(screen.queryByText("Download CSV")).toBeNull();
+  });
+
+  it("downloads a header and 8 rows, oldest first", async () => {
+    stub(Array.from({ length: 8 }, (_, i) => week(i, { spendMicros: i === 0 ? 1_000_000 : 0 })));
+    let blob: Blob | undefined;
+    URL.createObjectURL = ((b: Blob) => ((blob = b), "blob:x")) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = () => {};
+    render(<FundingCards />);
+    fireEvent.click(await screen.findByText("Download CSV"));
+    const lines = (await blob!.text()).trim().split("\r\n");
+    expect(lines[0]).toBe("week_start,plan_use_percent,resets,spend_usd,holds,held_minutes");
+    expect(lines).toHaveLength(9);
+    expect(lines[1] < lines[8]).toBe(true);
   });
 });
